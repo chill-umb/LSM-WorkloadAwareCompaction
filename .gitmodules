@@ -1,8 +1,8 @@
 [submodule "RocksDb"]
 	path = lib/rocksdb
 	url = https://github.com/chill-umb/rocksdb
-	branch = 11.1.fb
+	branch = rl-compaction-policy
 [submodule "Tectonic"]
 	path = lib/tectonic
-	url = https://github.com/SSD-Brandeis/Tectonic.git
+	url = https://github.com/SSD-Brandeis/Tectonic
 	branch = main

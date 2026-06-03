@@ -44,9 +44,10 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
       {'c', "compaction_pri"});
   args::ValueFlag<int> compaction_style_cmd(
       group1, "compaction_style",
-      "[Compaction priority: 1 for kCompactionStyleLevel, 2 for "
+      "[Compaction style: 1 for kCompactionStyleLevel, 2 for "
       "kCompactionStyleUniversal, 3 for kCompactionStyleFIFO, 4 for "
-      "kCompactionStyleNone; def: 1]",
+      "kCompactionStyleNone, 5 for kCompactionStyleRL (RL-governed L0, "
+      "requires Python RL server at $RL_COMPACTION_SOCKET_PATH); def: 1]",
       {'C', "compaction_style"});
   args::ValueFlag<int> bits_per_key_cmd(
       group1, "bits_per_key",

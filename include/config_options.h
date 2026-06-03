@@ -103,6 +103,9 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
   case 4:
     options->compaction_style = CompactionStyle::kCompactionStyleNone;
     break;
+  case 5:
+    options->compaction_style = CompactionStyle::kCompactionStyleRL;
+    break;
   default:
     std::cerr << "Error[" << __FILE__ << " : " << __LINE__
               << "]: Invalid compaction eagerness!" << std::endl;

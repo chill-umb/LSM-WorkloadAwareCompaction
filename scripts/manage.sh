@@ -52,7 +52,7 @@ case "$COMMAND" in
     C_FLAG="$2"
 
     ./bin/tectonic-cli generate -w "workloads/${SPEC}.spec.json" -o workload.txt
-    ./bin/db_runner -C "$C_FLAG" -T 4 -E 64 --peroptime 1
+    ./bin/db_runner -C "$C_FLAG" -T 4 -E 64 --peroptime 1 --totaltime 1 --progress 1; echo
     ;;
 
   clear)
