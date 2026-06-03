@@ -197,7 +197,7 @@ public:
    * 2 for kCompactionStyleUniversal
    * 3 for kCompactionStyleFIFO
    * 4 for kCompactionStyleNone
-   * 5 for kCompactionStyleiLevel
+   * 5 for kCompactionStyleRL  (RL-governed L0; requires Python RL server)
    */
   uint64_t compaction_style = 1; // [C] upper case
 
