@@ -31,12 +31,16 @@
 *.out
 *.app
 
-# files
+# working files
+logs
 **.log
 workload.txt
 
 # db_working_home
 **/db/**
 
-**/bin**
+# bin
+**/bin/**
+
+# build
 **/build/**

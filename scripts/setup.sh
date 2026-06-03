@@ -30,9 +30,7 @@ fi
 source "$HOME/.cargo/env"
 rustup default nightly
 
-git submodule update --init --recursive
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_ROOT"
 
-mkdir -p build
-cd build
-cmake ..
-make -j$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+git submodule update --init --recursive

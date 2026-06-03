@@ -8,8 +8,9 @@
 #define STATS_H_
 
 
+#include <cstdint>
 #include <iostream>
-#include <vector> 
+#include <vector>
 
 using namespace std;
 

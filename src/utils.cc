@@ -98,18 +98,18 @@ void UpdateProgressBar(std::unique_ptr<DBEnv> &env, size_t current,
     double progress = static_cast<double>(current) / total;
     size_t pos = static_cast<size_t>(bar_width * progress);
 
-    std::cerr << "[";
+    std::cout << "[";
     for (size_t i = 0; i < bar_width; ++i) {
       if (i < pos)
-        std::cerr << "=";
+        std::cout << "=";
       else if (i == pos)
-        std::cerr << ">";
+        std::cout << ">";
       else
-        std::cerr << " ";
+        std::cout << " ";
     }
-    std::cerr << "] " << std::fixed << std::setprecision(2)
+    std::cout << "] " << std::fixed << std::setprecision(2)
               << (progress * 100.0) << "%\r";
-    std::cerr.flush();
+    std::cout.flush();
   }
 }
 

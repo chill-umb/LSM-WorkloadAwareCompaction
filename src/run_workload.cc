@@ -13,7 +13,7 @@ std::string buffer_file = "workload.log";
 std::string stats_file = "stats.log";
 
 int runWorkload(std::unique_ptr<DBEnv> &env) {
-  DB *db;
+  std::unique_ptr<DB> db;
   Options options;
   WriteOptions write_options;
   ReadOptions read_options;
@@ -23,12 +23,8 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
   configOptions(env, &options, &table_options, &write_options, &read_options,
                 &flush_options);
 
-  if (env->is_per_op_timer) {
-#define PER_OP_TIMER
-  }
-  if (env->is_total_timer) {
-#define TOTAL_TIMER
-  }
+  const bool per_op_timer = env->is_per_op_timer;
+  const bool total_timer = env->is_total_timer;
 
   std::shared_ptr<Buffer> buffer = std::make_unique<Buffer>(buffer_file);
   std::unique_ptr<Buffer> stats = std::make_unique<Buffer>(stats_file);
@@ -69,14 +65,9 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
   workload_file.clear();
   workload_file.seekg(0, std::ios::beg);
 
-#ifdef PER_OP_TIMER
   unsigned long inserts_exec_time = 0, updates_exec_time = 0, pq_exec_time = 0,
                 pdelete_exec_time = 0, rq_exec_time = 0;
-#endif // PER_OP_TIMER
-
-#ifdef TOTAL_TIMER
   auto exec_start = std::chrono::high_resolution_clock::now();
-#endif // TOTAL_TIMER
 
   if (env->IsPerfStatEnabled())
     rocksdb::get_perf_context()->Reset();
@@ -100,17 +91,14 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
       std::string key, value;
       stream >> key >> value;
 
-#ifdef PER_OP_TIMER
-      auto start = std::chrono::high_resolution_clock::now();
-#endif // PER_OP_TIMER
+      auto t0 = per_op_timer ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
       s = db->Put(write_options, key, value);
-#ifdef PER_OP_TIMER
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-      (*stats) << "InsertTime: " << duration.count() << std::endl;
-      inserts_exec_time += duration.count();
-#endif // PER_OP_TIMER
+      if (per_op_timer) {
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now() - t0);
+        (*stats) << "InsertTime: " << duration.count() << std::endl;
+        inserts_exec_time += duration.count();
+      }
       break;
     }
       // [Update]
@@ -118,17 +106,14 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
       std::string key, value;
       stream >> key >> value;
 
-#ifdef PER_OP_TIMER
-      auto start = std::chrono::high_resolution_clock::now();
-#endif // PER_OP_TIMER
+      auto t0 = per_op_timer ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
       s = db->Put(write_options, key, value);
-#ifdef PER_OP_TIMER
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-      (*stats) << "UpdateTime: " << duration.count() << std::endl;
-      updates_exec_time += duration.count();
-#endif // PER_OP_TIMER
+      if (per_op_timer) {
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now() - t0);
+        (*stats) << "UpdateTime: " << duration.count() << std::endl;
+        updates_exec_time += duration.count();
+      }
       break;
     }
       // [PointDelete]
@@ -136,17 +121,14 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
       std::string key;
       stream >> key;
 
-#ifdef PER_OP_TIMER
-      auto start = std::chrono::high_resolution_clock::now();
-#endif // PER_OP_TIMER
+      auto t0 = per_op_timer ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
       s = db->Delete(write_options, key);
-#ifdef PER_OP_TIMER
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-      (*stats) << "DeleteTime: " << duration.count() << std::endl;
-      pdelete_exec_time += duration.count();
-#endif // PER_OP_TIMER
+      if (per_op_timer) {
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now() - t0);
+        (*stats) << "DeleteTime: " << duration.count() << std::endl;
+        pdelete_exec_time += duration.count();
+      }
       break;
     }
       // [ProbePointQuery]
@@ -156,17 +138,14 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
       std::string key, value;
       stream >> key;
 
-#ifdef PER_OP_TIMER
-      auto start = std::chrono::high_resolution_clock::now();
-#endif // PER_OP_TIMER
+      auto t0 = per_op_timer ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
       s = db->Get(read_options, key, &value);
-#ifdef PER_OP_TIMER
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-      (*stats) << "GetTime: " << duration.count() << std::endl;
-      pq_exec_time += duration.count();
-#endif // PER_OP_TIMER
+      if (per_op_timer) {
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now() - t0);
+        (*stats) << "GetTime: " << duration.count() << std::endl;
+        pq_exec_time += duration.count();
+      }
       break;
     }
       // [ScanRangeQuery]
@@ -178,9 +157,7 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
       scan_read_options.total_order_seek = true;
       Iterator *it = db->NewIterator(scan_read_options);
       assert(it->status().ok());
-#ifdef PER_OP_TIMER
-      auto start = std::chrono::high_resolution_clock::now();
-#endif // PER_OP_TIMER
+      auto t0 = per_op_timer ? std::chrono::high_resolution_clock::now() : std::chrono::high_resolution_clock::time_point{};
 
       for (it->Seek(start_key); it->Valid(); it->Next()) {
         if (it->key().ToString() >= end_key) {
@@ -190,13 +167,12 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
       if (!it->status().ok()) {
         (*buffer) << it->status().ToString() << std::endl << std::flush;
       }
-#ifdef PER_OP_TIMER
-      auto stop = std::chrono::high_resolution_clock::now();
-      auto duration =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-      (*stats) << "ScanTime: " << duration.count() << std::endl;
-      rq_exec_time += duration.count();
-#endif // PER_OP_TIMER
+      if (per_op_timer) {
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::high_resolution_clock::now() - t0);
+        (*stats) << "ScanTime: " << duration.count() << std::endl;
+        rq_exec_time += duration.count();
+      }
       delete it;
       break;
     }
@@ -222,30 +198,26 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
 #ifdef PROFILE
   if (env->verbosity > Verbosity::NO_PRINTS)
     (*buffer) << "=====================" << std::endl;
-  LogTreeState(db, buffer, env);
+  LogTreeState(db.get(), buffer, env);
   // LogRocksDBStatistics(db, options, buffer);
 #endif // PROFILE
 
-#ifdef TOTAL_TIMER
   auto total_exec_time =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::high_resolution_clock::now() - exec_start)
           .count();
-#endif // TOTAL_TIMER
 
-#ifdef PER_OP_TIMER
-  (*buffer) << "=====================" << std::endl;
-#endif // PER_OP_TIMER
-#ifdef TOTAL_TIMER
-  (*buffer) << "Workload Execution Time: " << total_exec_time << std::endl;
-#endif // TOTAL_TIMER
-#ifdef PER_OP_TIMER
-  (*buffer) << "Inserts Execution Time: " << inserts_exec_time << std::endl;
-  (*buffer) << "Updates Execution Time: " << updates_exec_time << std::endl;
-  (*buffer) << "PointQuery Execution Time: " << pq_exec_time << std::endl;
-  (*buffer) << "PointDelete Execution Time: " << pdelete_exec_time << std::endl;
-  (*buffer) << "RangeQuery Execution Time: " << rq_exec_time << std::endl;
-#endif // PER_OP_TIMER
+  if (per_op_timer || total_timer)
+    (*buffer) << "=====================" << std::endl;
+  if (total_timer)
+    (*buffer) << "Workload Execution Time: " << total_exec_time << std::endl;
+  if (per_op_timer) {
+    (*buffer) << "Inserts Execution Time: " << inserts_exec_time << std::endl;
+    (*buffer) << "Updates Execution Time: " << updates_exec_time << std::endl;
+    (*buffer) << "PointQuery Execution Time: " << pq_exec_time << std::endl;
+    (*buffer) << "PointDelete Execution Time: " << pdelete_exec_time << std::endl;
+    (*buffer) << "RangeQuery Execution Time: " << rq_exec_time << std::endl;
+  }
 
   if (!s.ok())
     std::cerr << s.ToString() << std::endl;
@@ -262,11 +234,11 @@ int runWorkload(std::unique_ptr<DBEnv> &env) {
   // flush final stats and delete ptr
   buffer->flush();
   stats->flush();
-#ifdef TOTAL_TIMER
-  long long total_seconds = total_exec_time / 1e9;
-  std::cerr << "\nExperiment completed in " << total_seconds / 3600 << "h "
-            << (total_seconds % 3600) / 60 << "m " << total_seconds % 60 << "s "
-            << std::endl;
-#endif // TOTAL_TIMER
+  if (total_timer) {
+    long long total_seconds = total_exec_time / 1e9;
+    std::cerr << "\nExperiment completed in " << total_seconds / 3600 << "h "
+              << (total_seconds % 3600) / 60 << "m " << total_seconds % 60 << "s "
+              << std::endl;
+  }
   return 0;
 }
