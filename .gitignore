@@ -47,3 +47,15 @@ workload.txt
 
 # venv
 .venv
+
+# metrics
+*.json
+*.jsonl
+scripts/*
+
+# results
+results/*
+
+# workloads
+
+*.txt
