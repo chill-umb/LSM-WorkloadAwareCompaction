@@ -16,7 +16,6 @@ import socket
 import sys
 import threading
 import time
-from typing import Optional
 
 import numpy as np
 
@@ -75,6 +74,9 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
 
                 action = agent.observe(state, reward, done)
 
+                response = json.dumps({"action": action}) + "\n"
+                conn.sendall(response.encode("utf-8"))
+
                 _write_io_log(io_log, agent.step, msg, action)
 
                 q_vals = agent.last_q_values.tolist() if agent.last_q_values is not None else None
@@ -86,11 +88,12 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                     epsilon=agent.epsilon,
                     loss=agent.last_loss,
                     q_values=q_vals,
+                    done=done,
                 )
 
+                agent.request_training()
+
                 print(f"[server] step={agent.step} action={_ACTION_NAMES.get(action, action)}")
-                response = json.dumps({"action": action}) + "\n"
-                conn.sendall(response.encode("utf-8"))
     except Exception as exc:
         print(f"[server] client error: {exc}", file=sys.stderr)
     finally:
@@ -102,7 +105,6 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
         os.unlink(socket_path)
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(socket_path)
     srv.listen(4)
     os.chmod(socket_path, 0o600)
@@ -112,6 +114,7 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
 
     def _shutdown(sig, frame):
         print("[server] shutting down …")
+        agent.close()
         agent.save(config.MODEL_SAVE_PATH)
         tracker.close()
         io_log.close()

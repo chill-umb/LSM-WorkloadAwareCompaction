@@ -25,6 +25,10 @@ EPSILON_DECAY_STEPS = 5_000
 # Model persistence
 SAVE_INTERVAL = 500  # save model every N steps
 
+# Runtime behavior
+ASYNC_TRAINING = True
+TRAIN_STEPS_PER_OBSERVATION = 1
+
 # Reward weights (matching equation 2 in the spec)
 W1 = 0.30   # penalty for L0 file count increase
 W2 = 0.30   # penalty for PCB increase

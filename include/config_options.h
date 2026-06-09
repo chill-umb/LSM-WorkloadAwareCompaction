@@ -97,7 +97,7 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
   case 2:
     options->compaction_style = CompactionStyle::kCompactionStyleUniversal;
     break;
-  case 3: 
+  case 3:
     options->compaction_style = CompactionStyle::kCompactionStyleFIFO;
     break;
   case 4:
@@ -339,4 +339,6 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
   } else {
     rocksdb::get_iostats_context()->disable_iostats = true;
   }
+
+  options->listeners.emplace_back(std::make_shared<CompactionsListner>(env));
 }

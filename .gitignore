@@ -44,3 +44,6 @@ workload.txt
 
 # build
 **/build/**
+
+# venv
+.venv

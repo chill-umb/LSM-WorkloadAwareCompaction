@@ -2,6 +2,7 @@
 #define EVENT_LISTNER_H_
 
 #include <condition_variable>
+#include <cstdint>
 
 #include <rocksdb/db.h>
 
@@ -13,6 +14,19 @@ using namespace rocksdb;
 extern std::mutex mtx;
 extern std::condition_variable cv;
 extern bool compaction_complete;
+
+struct ExperimentTelemetrySnapshot {
+  uint64_t flushed_bytes = 0;
+  uint64_t compaction_bytes_read = 0;
+  uint64_t compaction_bytes_written = 0;
+  uint64_t compactions_completed = 0;
+  uint64_t l0_compactions_completed = 0;
+  uint64_t stall_events = 0;
+  uint64_t stop_events = 0;
+};
+
+void ResetExperimentTelemetry();
+ExperimentTelemetrySnapshot GetExperimentTelemetrySnapshot();
 
 /*
  * Wait for compactions that are running (or will run) to make the
@@ -34,6 +48,10 @@ public:
   void OnCompactionBegin(DB *db, const CompactionJobInfo &ci) override;
 
   void OnCompactionCompleted(DB *db, const CompactionJobInfo &ci) override;
+
+  void OnFlushCompleted(DB *db, const FlushJobInfo &fji) override;
+
+  void OnStallConditionsChanged(const WriteStallInfo &info) override;
 
 private:
   std::unique_ptr<DBEnv> &db_env;
