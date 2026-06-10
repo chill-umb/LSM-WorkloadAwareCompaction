@@ -48,10 +48,18 @@ workload.txt
 # venv
 .venv
 
+# python
+__pycache__/
+*.pyc
+
 # metrics
 *.json
+!workloads/*.spec.json
 *.jsonl
 scripts/*
+!scripts/
+!scripts/*.sh
+!scripts/compare_experiment_metrics.py
 
 # results
 results/*

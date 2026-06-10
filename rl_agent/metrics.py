@@ -16,8 +16,6 @@ class MetricsTracker:
         self._rewards: deque = deque(maxlen=self.WINDOW)
         self._losses: deque = deque(maxlen=self.WINDOW)
         self._actions: deque = deque(maxlen=self.WINDOW)
-        self._l0_files: deque = deque(maxlen=self.WINDOW)
-        self._pcb: deque = deque(maxlen=self.WINDOW)
         self._start = time.time()
         self._lock = threading.Lock()
 
@@ -30,6 +28,8 @@ class MetricsTracker:
         epsilon: float,
         loss: Optional[float],
         q_values: Optional[list],
+        raw_state: Optional[dict] = None,
+        reward_components: Optional[dict] = None,
         done: bool = False,
     ) -> None:
         with self._lock:
@@ -37,11 +37,12 @@ class MetricsTracker:
             self._actions.append(action)
             if loss is not None:
                 self._losses.append(loss)
-            # state layout: [f0, delta_f0, score0, pcb, stall, bw] (all normalized)
-            self._l0_files.append(state[0])
-            self._pcb.append(state[3])
 
-            action_name = {0: "do_nothing", 1: "compact_now", 2: "delay"}.get(action, "?")
+            action_name = config.ACTION_NAMES.get(action, "?")
+            state_features = {
+                name: round(float(value), 6)
+                for name, value in zip(config.STATE_FIELDS, state)
+            }
             record = {
                 "t": round(time.time() - self._start, 3),
                 "step": step,
@@ -53,12 +54,9 @@ class MetricsTracker:
                 "avg_reward_100": round(sum(self._rewards) / len(self._rewards), 4),
                 "avg_loss_100": round(sum(self._losses) / len(self._losses), 6) if self._losses else None,
                 "q_values": [round(q, 4) for q in q_values] if q_values is not None else None,
-                "f0_norm": round(state[0], 4),
-                "delta_f0_norm": round(state[1], 4),
-                "score0_norm": round(state[2], 4),
-                "pcb_norm": round(state[3], 4),
-                "stall_norm": round(state[4], 4),
-                "bw_norm": round(state[5], 4),
+                "state_features": state_features,
+                "raw_state": raw_state or {},
+                "reward_components": reward_components or {},
                 "done": done,
             }
             self._log_file.write(json.dumps(record) + "\n")

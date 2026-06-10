@@ -3,10 +3,10 @@ Unix domain socket server — receives compaction state from RocksDB C++ client,
 returns RL action, and trains the DQN agent online.
 
 Protocol (newline-delimited JSON):
-  Request  (C++ → Python): {"f0":0.25,"df0":0.1,"s0":0.6,"pcb":0.15,"stall":0.0,"bw":0.05,"reward":0.0,"done":false}
+  Request  (C++ → Python): raw L0 state + telemetry deltas.
   Response (Python → C++): {"action":1}
 
-Actions: 0=do_nothing  1=compact_now  2=delay_one_turn
+Actions: 0=do_nothing  1=compact_now
 """
 
 import json
@@ -17,29 +17,30 @@ import sys
 import threading
 import time
 
-import numpy as np
-
 import config
 from agent import DQNAgent
 from metrics import MetricsTracker
+from reward import StateRewardProcessor
 
 
-def _parse_state(msg: dict) -> np.ndarray:
-    return np.array(
-        [msg["f0"], msg["df0"], msg["s0"], msg["pcb"], msg["stall"], msg["bw"]],
-        dtype=np.float32,
-    )
-
-
-_ACTION_NAMES = {0: "do_nothing", 1: "compact_now", 2: "delay"}
+_ACTION_NAMES = config.ACTION_NAMES
 _io_log_lock = threading.Lock()
 
 
-def _write_io_log(io_log, step: int, msg: dict, action: int) -> None:
+def _write_io_log(
+    io_log,
+    step: int,
+    raw_state: dict,
+    reward: float,
+    reward_components: dict,
+    action: int,
+) -> None:
     entry = {
         "ts": time.time(),
         "step": step,
-        "input": {k: msg[k] for k in ("f0", "df0", "s0", "pcb", "stall", "bw", "reward", "done")},
+        "input": raw_state,
+        "reward": reward,
+        "reward_components": reward_components,
         "output": {"action": action, "action_name": _ACTION_NAMES.get(action, "unknown")},
     }
     line = json.dumps(entry) + "\n"
@@ -51,6 +52,7 @@ def _write_io_log(io_log, step: int, msg: dict, action: int) -> None:
 def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker, io_log) -> None:
     """Handle one persistent C++ client connection."""
     buf = ""
+    processor = StateRewardProcessor()
     try:
         while True:
             chunk = conn.recv(4096)
@@ -68,16 +70,16 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 except json.JSONDecodeError:
                     continue
 
-                state = _parse_state(msg)
-                reward: float = float(msg.get("reward", 0.0))
+                raw_state, state, reward, reward_components = processor.process(msg)
                 done: bool = bool(msg.get("done", False))
 
                 action = agent.observe(state, reward, done)
+                processor.advance(raw_state, action)
 
                 response = json.dumps({"action": action}) + "\n"
                 conn.sendall(response.encode("utf-8"))
 
-                _write_io_log(io_log, agent.step, msg, action)
+                _write_io_log(io_log, agent.step, raw_state, reward, reward_components, action)
 
                 q_vals = agent.last_q_values.tolist() if agent.last_q_values is not None else None
                 tracker.record(
@@ -88,6 +90,8 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                     epsilon=agent.epsilon,
                     loss=agent.last_loss,
                     q_values=q_vals,
+                    raw_state=raw_state,
+                    reward_components=reward_components,
                     done=done,
                 )
 

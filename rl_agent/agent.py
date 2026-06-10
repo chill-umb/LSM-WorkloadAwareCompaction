@@ -12,7 +12,7 @@ from replay_buffer import ReplayBuffer
 
 
 class DQNAgent:
-    ACTION_NAMES = {0: "do_nothing", 1: "compact_now", 2: "delay"}
+    ACTION_NAMES = config.ACTION_NAMES
 
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
