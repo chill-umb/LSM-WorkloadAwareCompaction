@@ -60,10 +60,14 @@ scripts/*
 !scripts/
 !scripts/*.sh
 !scripts/compare_experiment_metrics.py
+!scripts/plot_dqn_parameter_sweep.py
 
 # results
 results/*
 
 # workloads
-
 *.txt
+*.json
+
+# Documentations
+*.md
