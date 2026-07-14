@@ -53,8 +53,6 @@ __pycache__/
 *.pyc
 
 # metrics
-*.json
-!workloads/*.spec.json
 *.jsonl
 scripts/*
 !scripts/
@@ -71,3 +69,6 @@ results/*
 
 # Documentations
 *.md
+
+# Some sketchy executable file
+linux-x64

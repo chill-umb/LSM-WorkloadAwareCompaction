@@ -22,6 +22,7 @@ set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "Build with benchmark tools" FORCE)
 set(WITH_CORE_TOOLS OFF CACHE BOOL "Build with core tools" FORCE)
 set(WITH_TRACE_TOOLS OFF CACHE BOOL "Build with trace tools" FORCE)
 set(FAIL_ON_WARNINGS OFF CACHE BOOL "Fail on warnings" FORCE)
+set(USE_RTTI ON CACHE STRING "Enable RTTI in RocksDB builds" FORCE)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc")
 
