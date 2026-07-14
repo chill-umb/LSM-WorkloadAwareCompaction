@@ -68,7 +68,7 @@ results/*
 *.json
 
 # Documentations
-*.md
+/docs/
 
 # Some sketchy executable file
 linux-x64
