@@ -34,6 +34,7 @@ def _write_io_log(
     reward: float,
     reward_components: dict,
     action: int,
+    diagnostics: dict = None,
 ) -> None:
     entry = {
         "ts": time.time(),
@@ -42,6 +43,7 @@ def _write_io_log(
         "reward": reward,
         "reward_components": reward_components,
         "output": {"action": action, "action_name": _ACTION_NAMES.get(action, "unknown")},
+        "diagnostics": diagnostics or {},
     }
     line = json.dumps(entry) + "\n"
     with _io_log_lock:
@@ -53,6 +55,10 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
     """Handle one persistent C++ client connection."""
     buf = ""
     processor = StateRewardProcessor()
+    # Diagnostic: how many decisions elapse between a compact_now and the L0
+    # compaction completion it triggers. The distribution of this lag tells us
+    # how large N_STEP must be for the reward window to actually capture relief.
+    last_compact_now_step: int = None
     try:
         while True:
             chunk = conn.recv(4096)
@@ -79,7 +85,21 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 response = json.dumps({"action": action}) + "\n"
                 conn.sendall(response.encode("utf-8"))
 
-                _write_io_log(io_log, agent.step, raw_state, reward, reward_components, action)
+                # Track compact_now -> completion lag for the N_STEP diagnostic.
+                completion_lag = None
+                if raw_state.get("l0_compactions_completed", 0) > 0 and last_compact_now_step is not None:
+                    completion_lag = agent.step - last_compact_now_step
+                if action == 1:
+                    last_compact_now_step = agent.step
+                diagnostics = {
+                    "n_step": config.N_STEP,
+                    "finalized_returns": agent.last_returns,
+                    "completion_lag": completion_lag,
+                }
+
+                _write_io_log(
+                    io_log, agent.step, raw_state, reward, reward_components, action, diagnostics
+                )
 
                 q_vals = agent.last_q_values.tolist() if agent.last_q_values is not None else None
                 tracker.record(

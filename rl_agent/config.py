@@ -66,6 +66,17 @@ SAVE_INTERVAL = _env_int("RL_SAVE_INTERVAL", 500)
 ASYNC_TRAINING = os.environ.get("RL_ASYNC_TRAINING", "1") != "0"
 TRAIN_STEPS_PER_OBSERVATION = _env_int("RL_TRAIN_STEPS_PER_OBSERVATION", 1)
 
+# Credit assignment. A compaction triggered by `compact_now` completes
+# asynchronously, so its I/O cost and its L0/pending relief land several
+# decisions later. N_STEP aggregates the discounted per-step rewards over the
+# next N_STEP decisions before finalizing a transition, so delayed relief
+# propagates back to the action that caused it.
+#   N_STEP = 1 reproduces the original one-step DQN (use for the ablation baseline).
+N_STEP = _env_int("RL_N_STEP", 5)
+# Double DQN decouples next-action selection (policy net) from its evaluation
+# (target net), reducing Q-value overestimation on the noisy aggregated reward.
+DOUBLE_DQN = os.environ.get("RL_DOUBLE_DQN", "1") != "0"
+
 # Adaptive normalization. Scales track observed maxima with a small decay so
 # the agent can adapt when the workload regime changes.
 NORMALIZER_DECAY = _env_float("RL_NORMALIZER_DECAY", 0.995)

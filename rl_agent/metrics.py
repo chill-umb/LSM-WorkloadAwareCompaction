@@ -46,6 +46,7 @@ class MetricsTracker:
             record = {
                 "t": round(time.time() - self._start, 3),
                 "step": step,
+                "n_step": config.N_STEP,
                 "action": action,
                 "action_name": action_name,
                 "reward": round(reward, 4),

@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import threading
+from collections import deque
 from typing import Optional
 
 import config
@@ -29,9 +30,13 @@ class DQNAgent:
         self.epsilon: float = config.EPSILON_START
         self.last_loss: Optional[float] = None
         self.last_q_values: Optional[np.ndarray] = None
+        # Diagnostics: n-step return(s) finalized on the most recent observe().
+        self.last_returns: list = []
 
-        self._prev_state: Optional[np.ndarray] = None
-        self._prev_action: Optional[int] = None
+        # Pending decisions awaiting their n-step reward window. Each entry is
+        # {"state": s, "action": a, "rewards": [r_0, r_1, ...]} in FIFO order,
+        # so the oldest decision always fills its window first.
+        self._pending: deque = deque()
         self._lock = threading.RLock()
         self._train_event = threading.Event()
         self._stop_event = threading.Event()
@@ -60,24 +65,62 @@ class DQNAgent:
             self.last_q_values = q_vals.cpu().numpy()
             return int(q_vals.argmax().item())
 
+    def _nstep_return(self, rewards: list) -> float:
+        """Discounted sum of a decision's collected per-step rewards."""
+        g = 0.0
+        for k, r in enumerate(rewards):
+            g += (config.GAMMA ** k) * r
+        return g
+
     def observe(self, state: np.ndarray, reward: float, done: bool) -> int:
         """
-        Store the transition (prev_state, prev_action, reward, state) and
-        return the next action for `state`.
+        Assemble n-step transitions and return the next action for `state`.
+
+        `reward` is the immediate reward for the interval that just elapsed
+        (the outcome of the previous decision's first step). It is added to the
+        window of every pending decision; once a decision has collected N_STEP
+        rewards, its transition (state, action, n-step-return, bootstrap-state)
+        is pushed to the replay buffer. With N_STEP = 1 this reduces exactly to
+        the original one-step behavior.
 
         This method intentionally does not train synchronously. Call
         request_training() after the action response has been sent to RocksDB
         to keep minibatch backpropagation out of the socket response path.
         """
         with self._lock:
-            if self._prev_state is not None and self._prev_action is not None:
-                self.buffer.push(self._prev_state, self._prev_action, reward, state, done)
+            self.last_returns = []
 
+            # 1. This interval's reward extends the window of every pending
+            #    decision that has not yet collected N_STEP rewards.
+            for d in self._pending:
+                if len(d["rewards"]) < config.N_STEP:
+                    d["rewards"].append(reward)
+
+            # 2. Finalize decisions whose window is full. `state` is the
+            #    bootstrap state x_{t+n} for a decision made at time t.
+            while self._pending and len(self._pending[0]["rewards"]) >= config.N_STEP:
+                d = self._pending.popleft()
+                g = self._nstep_return(d["rewards"])
+                self.buffer.push(d["state"], d["action"], g, state, False)
+                self.last_returns.append(g)
+
+            # 3. On episode end, `state` is terminal: finalize every pending
+            #    decision as a Monte-Carlo return with the bootstrap masked off.
+            if done:
+                while self._pending:
+                    d = self._pending.popleft()
+                    g = self._nstep_return(d["rewards"])
+                    self.buffer.push(d["state"], d["action"], g, state, True)
+                    self.last_returns.append(g)
+
+            # 4. Choose this step's action. Open a reward window for it only if
+            #    the episode continues; on a terminal step there is no future to
+            #    accumulate, and a dangling decision would otherwise bleed into
+            #    the next episode.
             action = self.select_action(state)
             self._decay_epsilon()
-
-            self._prev_state = state.copy()
-            self._prev_action = action
+            if not done:
+                self._pending.append({"state": state.copy(), "action": action, "rewards": []})
             self.step += 1
 
             if self.step % config.TARGET_UPDATE_INTERVAL == 0:
@@ -124,10 +167,19 @@ class DQNAgent:
         # Q(s, a)
         q_pred = self.policy_net(s).gather(1, a.unsqueeze(1)).squeeze(1)
 
-        # TD target: r + gamma * max_a' Q_target(s', a') * (1 - done)
+        # n-step TD target: R^(n) + gamma^n * Q_target(s', a'*) * (1 - done),
+        # where s' is the bootstrap state N_STEP decisions later and R^(n) is the
+        # discounted reward already accumulated in the stored transition.
+        # Double DQN: select a'* with the policy net, evaluate it with the target
+        # net to curb overestimation. (Early-terminated transitions carry done=1,
+        # which zeroes the bootstrap regardless of the gamma^n factor.)
         with torch.no_grad():
-            q_next = self.target_net(s2).max(dim=1).values
-            q_target = r + config.GAMMA * q_next * (1.0 - d)
+            if config.DOUBLE_DQN:
+                next_actions = self.policy_net(s2).argmax(dim=1, keepdim=True)
+                q_next = self.target_net(s2).gather(1, next_actions).squeeze(1)
+            else:
+                q_next = self.target_net(s2).max(dim=1).values
+            q_target = r + (config.GAMMA ** config.N_STEP) * q_next * (1.0 - d)
 
         loss = nn.functional.mse_loss(q_pred, q_target)
         self.optimizer.zero_grad()
