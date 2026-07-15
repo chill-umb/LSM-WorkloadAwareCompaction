@@ -82,6 +82,10 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
       "prioritized) [def: 1]",
       {"lowpri"});
 
+  args::ValueFlag<std::string> db_path_cmd(
+      group1, "db",
+      "Path to the RocksDB data directory [def: ./db]", {"db"});
+
   try {
     parser.ParseCLI(argc, argv);
   } catch (args::Help &) {
@@ -145,5 +149,8 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
   env->SetShowProgress(show_progress_cmd ? args::get(show_progress_cmd)
                                          : env->IsShowProgressEnabled());
   env->low_pri = low_pri_cmd ? args::get(low_pri_cmd) : env->low_pri;
+  if (db_path_cmd) {
+    DBEnv::kDBPath = args::get(db_path_cmd);
+  }
   return 0;
 }

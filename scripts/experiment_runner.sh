@@ -25,6 +25,8 @@ Options:
   --warmup-ops N                     Number of warmup operations ignored by metrics.
   --lsm-sample-interval N            LSM metrics sampling interval.
   --db-runner-bin PATH               RocksDB runner binary.
+  --db-path PATH                     RocksDB data directory (passed as --db to db_runner;
+                                     created if missing). E.g. /mnt/nvme/rocksdb-data.
   --python-bin PATH                  Python interpreter for RL server/analysis.
   --db-runner-common-args "ARGS"     Common db_runner args used by leveled and RL runs.
   --rl-socket-timeout-ms N           RL socket request timeout for db_runner.
@@ -51,6 +53,7 @@ Environment overrides:
   LSM_SAMPLE_INTERVAL        default: 10000
   WORKLOAD_LABEL             default: derived from WORKLOAD_PATH
   DB_RUNNER_BIN              default: ./bin/db_runner
+  DB_PATH                    default: unset (db_runner uses its built-in ./db)
   PYTHON_BIN                 default: .venv/bin/python3 if present, else python3
   RL_SOCKET_TIMEOUT_MS       default: 100
   DB_RUNNER_COMMON_ARGS      default: -T 4 -E 64 -d 1 --cc 0 --stat 1 --progress 1 --totaltime 1 --peroptime 0
@@ -75,6 +78,7 @@ USAGE
 timestamp="$(date +%Y%m%d_%H%M%S)"
 WORKLOAD_PATH="${WORKLOAD_PATH:-workloads/workload_1M_mixed.txt}"
 DB_RUNNER_BIN="${DB_RUNNER_BIN:-./bin/db_runner}"
+DB_PATH="${DB_PATH:-}"
 LSM_SAMPLE_INTERVAL="${LSM_SAMPLE_INTERVAL:-10000}"
 RL_SOCKET_TIMEOUT_MS="${RL_SOCKET_TIMEOUT_MS:-100}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
@@ -148,6 +152,11 @@ while [[ $# -gt 0 ]]; do
     --db-runner-bin)
       require_option_value "$1" "${2:-}"
       DB_RUNNER_BIN="$2"
+      shift 2
+      ;;
+    --db-path)
+      require_option_value "$1" "${2:-}"
+      DB_PATH="$2"
       shift 2
       ;;
     --python-bin)
@@ -273,6 +282,14 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 DB_RUNNER_COMMON_ARGS="${DB_RUNNER_COMMON_ARGS:--T 4 -E 64 -d 1 --cc 0 --stat 1 --progress 1 --totaltime 1 --peroptime 0}"
 
+# Optional explicit RocksDB data directory (e.g. an NVMe mount). When set it is
+# passed to db_runner as --db and created up front.
+DB_PATH_ARGS=""
+if [[ -n "$DB_PATH" ]]; then
+  mkdir -p "$DB_PATH"
+  DB_PATH_ARGS="--db $DB_PATH"
+fi
+
 server_pid=""
 
 cleanup() {
@@ -344,6 +361,7 @@ run_db_runner() {
   LSM_METRICS_WARMUP_OPS="$WARMUP_OPS" \
   "$DB_RUNNER_BIN" \
     -C "$compaction_style" \
+    $DB_PATH_ARGS \
     $DB_RUNNER_COMMON_ARGS
 }
 
@@ -357,6 +375,7 @@ run_rl_db_runner() {
   LSM_METRICS_WARMUP_OPS="$WARMUP_OPS" \
   "$DB_RUNNER_BIN" \
     -C 5 \
+    $DB_PATH_ARGS \
     $DB_RUNNER_COMMON_ARGS
 }
 
@@ -371,6 +390,7 @@ echo "[setup] results root: $RESULTS_ROOT"
 echo "[setup] result group: $RESULT_GROUP"
 echo "[setup] workload: $WORKLOAD_PATH"
 echo "[setup] warmup ops: $WARMUP_OPS"
+echo "[setup] db path: ${DB_PATH:-<db_runner default ./db>}"
 for rl_name in \
   RL_LEARNING_RATE \
   RL_GAMMA \
