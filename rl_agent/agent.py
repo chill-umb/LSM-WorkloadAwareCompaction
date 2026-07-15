@@ -15,11 +15,20 @@ from replay_buffer import ReplayBuffer
 class DQNAgent:
     ACTION_NAMES = config.ACTION_NAMES
 
-    def __init__(self):
+    def __init__(self, state_dim: int = None, action_dim: int = None,
+                 save_path: str = None, name: str = "dqn"):
+        """
+        state_dim/action_dim default to the legacy single-level (L0) shapes.
+        save_path is where periodic checkpoints go; pass a per-level path when
+        the agent belongs to a multi-level pool. name labels the trainer thread.
+        """
+        self.state_dim = state_dim if state_dim is not None else config.STATE_DIM
+        self.action_dim = action_dim if action_dim is not None else config.ACTION_DIM
+        self.save_path = save_path if save_path is not None else config.MODEL_SAVE_PATH
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.policy_net = DQN(config.STATE_DIM, config.HIDDEN_DIM, config.ACTION_DIM).to(self.device)
-        self.target_net = DQN(config.STATE_DIM, config.HIDDEN_DIM, config.ACTION_DIM).to(self.device)
+        self.policy_net = DQN(self.state_dim, config.HIDDEN_DIM, self.action_dim).to(self.device)
+        self.target_net = DQN(self.state_dim, config.HIDDEN_DIM, self.action_dim).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -46,7 +55,7 @@ class DQNAgent:
             self._trainer_thread = threading.Thread(
                 target=self._training_loop,
                 daemon=True,
-                name="dqn-trainer",
+                name=f"{name}-trainer",
             )
             self._trainer_thread.start()
 
@@ -57,7 +66,7 @@ class DQNAgent:
     def select_action(self, state: np.ndarray) -> int:
         if random.random() < self.epsilon:
             self.last_q_values = None
-            return random.randint(0, config.ACTION_DIM - 1)
+            return random.randint(0, self.action_dim - 1)
         self.policy_net.eval()
         with torch.no_grad():
             t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -127,7 +136,7 @@ class DQNAgent:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
             if self.step % config.SAVE_INTERVAL == 0:
-                self.save(config.MODEL_SAVE_PATH)
+                self.save(self.save_path)
 
             return action
 

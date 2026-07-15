@@ -45,6 +45,33 @@ STATE_DIM = len(STATE_FIELDS)
 ACTION_DIM = 2  # 0=do_nothing, 1=compact_now
 ACTION_NAMES = {0: "do_nothing", 1: "compact_now"}
 
+# Multi-level (protocol v2): one DQN agent per LSM level. Each level's state
+# combines its own observables, the next level's observables (zeros for the
+# last level), and global pressure signals. See rl_agent/multilevel.py.
+ML_MAX_LEVELS = _env_int("RL_ML_MAX_LEVELS", 16)
+ML_STATE_FIELDS = (
+    "score_half",              # own RocksDB compaction score / 2
+    "fullness",                # L0: files/trigger; L>=1: bytes/target
+    "files_norm",
+    "bytes_norm",
+    "bytes_in_norm",           # bytes arriving in level (window)
+    "bytes_out_norm",          # compaction I/O from level (window)
+    "compaction_events_norm",  # completed+scheduled from level (window)
+    "steps_since_compaction",
+    "next_fullness",
+    "next_score_half",
+    "next_files_norm",
+    "overlap_ratio",           # next-level overlap bytes / own bytes
+    "overlap_norm",
+    "stall_flag",
+    "stop_flag",
+    "pending_norm",
+    "default_needed",
+    "l0_slowdown_pressure",    # 0 for levels >= 1
+    "l0_stop_pressure",        # 0 for levels >= 1
+)
+ML_STATE_DIM = len(ML_STATE_FIELDS)
+
 # DQN hyperparameters
 HIDDEN_DIM = _env_int("RL_HIDDEN_DIM", 64)
 LEARNING_RATE = _env_float("RL_LEARNING_RATE", 1e-3)
