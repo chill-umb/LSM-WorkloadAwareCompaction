@@ -61,6 +61,11 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/lsm-matplotlib-cache}"
 export MPLCONFIGDIR
 
+# The leveled (-C 1) baseline does not depend on any RL_* knob, so it is
+# computed once and reused across every config. The first run that executes
+# populates this cache; the rest copy from it. Delete it to force a refresh.
+SHARED_LEVELED="${SHARED_LEVELED:-${RESULTS_ROOT}/_leveled_baseline}"
+
 require_file() {
   local path="$1"
   if [[ ! -e "$path" ]]; then
@@ -91,6 +96,7 @@ run_one_config() {
   ./scripts/experiment_runner.sh \
     --workload "$WORKLOAD_PATH" \
     --results-dir "$run_dir" \
+    --reuse-leveled "$SHARED_LEVELED" \
     "$@"
 }
 
@@ -224,6 +230,20 @@ run_single_flag_sweep \
   "normdecay" \
   "--rl-param" \
   "RL_NORMALIZER_DECAY=0.90 RL_NORMALIZER_DECAY=0.95 RL_NORMALIZER_DECAY=0.99 RL_NORMALIZER_DECAY=0.995 RL_NORMALIZER_DECAY=0.999"
+
+run_single_flag_sweep \
+  "n_step" \
+  "RL_N_STEP" \
+  "nstep" \
+  "--rl-param" \
+  "RL_N_STEP=1 RL_N_STEP=2 RL_N_STEP=3 RL_N_STEP=5 RL_N_STEP=8 RL_N_STEP=10"
+
+run_single_flag_sweep \
+  "double_dqn" \
+  "RL_DOUBLE_DQN" \
+  "doubledqn" \
+  "--rl-param" \
+  "RL_DOUBLE_DQN=0 RL_DOUBLE_DQN=1"
 
 # Run epsilon decay last, as requested.
 run_single_flag_sweep \

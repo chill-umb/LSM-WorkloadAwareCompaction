@@ -27,6 +27,10 @@ Options:
   --db-runner-bin PATH               RocksDB runner binary.
   --db-path PATH                     RocksDB data directory (passed as --db to db_runner;
                                      created if missing). E.g. /mnt/nvme/rocksdb-data.
+  --reuse-leveled DIR                Reuse a cached leveled baseline instead of re-running it.
+                                     If DIR holds a baseline it is copied in; otherwise the
+                                     leveled run executes and its output is cached to DIR.
+                                     Lets a sweep compute the (RL-independent) baseline once.
   --python-bin PATH                  Python interpreter for RL server/analysis.
   --db-runner-common-args "ARGS"     Common db_runner args used by leveled and RL runs.
   --rl-socket-timeout-ms N           RL socket request timeout for db_runner.
@@ -79,6 +83,7 @@ timestamp="$(date +%Y%m%d_%H%M%S)"
 WORKLOAD_PATH="${WORKLOAD_PATH:-workloads/workload_1M_mixed.txt}"
 DB_RUNNER_BIN="${DB_RUNNER_BIN:-./bin/db_runner}"
 DB_PATH="${DB_PATH:-}"
+REUSE_LEVELED="${REUSE_LEVELED:-}"
 LSM_SAMPLE_INTERVAL="${LSM_SAMPLE_INTERVAL:-10000}"
 RL_SOCKET_TIMEOUT_MS="${RL_SOCKET_TIMEOUT_MS:-100}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
@@ -157,6 +162,11 @@ while [[ $# -gt 0 ]]; do
     --db-path)
       require_option_value "$1" "${2:-}"
       DB_PATH="$2"
+      shift 2
+      ;;
+    --reuse-leveled)
+      require_option_value "$1" "${2:-}"
+      REUSE_LEVELED="$2"
       shift 2
       ;;
     --python-bin)
@@ -415,10 +425,26 @@ echo "[workload] using existing workload $WORKLOAD_PATH"
 cp "$WORKLOAD_PATH" "$RESULT_WORKLOAD_PATH"
 echo "[workload] archived workload: $RESULT_WORKLOAD_PATH"
 
-echo "[leveled] starting vanilla leveled run"
-run_db_runner 1 "leveled"
-copy_run_outputs "$LEVELED_DIR"
-echo "[leveled] outputs copied to $LEVELED_DIR"
+if [[ -n "$REUSE_LEVELED" && -s "${REUSE_LEVELED}/experiment_metrics.json" ]]; then
+  # The leveled (-C 1) baseline is independent of every RL_* knob, so a sweep
+  # can run it once and reuse it. Copy the cached outputs into this run_dir so
+  # the comparison, plots, and resume-detection all behave as if it ran here.
+  echo "[leveled] reusing cached baseline from $REUSE_LEVELED"
+  mkdir -p "$LEVELED_DIR"
+  cp "${REUSE_LEVELED}/experiment_metrics.json" "$LEVELED_DIR/"
+  cp "${REUSE_LEVELED}/lsm_metrics.jsonl" "$LEVELED_DIR/"
+  cp "${REUSE_LEVELED}/workload.log" "$LEVELED_DIR/" 2>/dev/null || true
+  cp "${REUSE_LEVELED}/stats.log" "$LEVELED_DIR/" 2>/dev/null || true
+else
+  echo "[leveled] starting vanilla leveled run"
+  run_db_runner 1 "leveled"
+  copy_run_outputs "$LEVELED_DIR"
+  echo "[leveled] outputs copied to $LEVELED_DIR"
+  if [[ -n "$REUSE_LEVELED" ]]; then
+    echo "[leveled] caching baseline to $REUSE_LEVELED"
+    copy_run_outputs "$REUSE_LEVELED"
+  fi
+fi
 
 echo "[rl-server] starting Python RL server"
 rm -f "$SOCKET_PATH"
