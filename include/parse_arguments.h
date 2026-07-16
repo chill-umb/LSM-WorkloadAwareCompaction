@@ -86,6 +86,11 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
       group1, "db",
       "Path to the RocksDB data directory [def: ./db]", {"db"});
 
+  args::ValueFlag<int> max_background_jobs_cmd(
+      group1, "max_background_jobs",
+      "Max concurrent background compaction/flush jobs [def: 1]",
+      {"max_background_jobs"});
+
   try {
     parser.ParseCLI(argc, argv);
   } catch (args::Help &) {
@@ -149,6 +154,9 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
   env->SetShowProgress(show_progress_cmd ? args::get(show_progress_cmd)
                                          : env->IsShowProgressEnabled());
   env->low_pri = low_pri_cmd ? args::get(low_pri_cmd) : env->low_pri;
+  env->max_background_jobs = max_background_jobs_cmd
+                                ? args::get(max_background_jobs_cmd)
+                                : env->max_background_jobs;
   if (db_path_cmd) {
     DBEnv::kDBPath = args::get(db_path_cmd);
   }

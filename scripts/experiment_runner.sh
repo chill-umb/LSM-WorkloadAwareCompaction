@@ -293,12 +293,21 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 DB_RUNNER_COMMON_ARGS="${DB_RUNNER_COMMON_ARGS:--T 4 -E 64 -d 1 --cc 0 --stat 1 --progress 1 --totaltime 1 --peroptime 0}"
 
 # Optional explicit RocksDB data directory (e.g. an NVMe mount). When set it is
-# passed to db_runner as --db and created up front.
+# passed to db_runner as --db and created up front. Absolutized because
+# db_runner is launched from a per-run working directory (see RUN_WORKDIR).
 DB_PATH_ARGS=""
 if [[ -n "$DB_PATH" ]]; then
   mkdir -p "$DB_PATH"
-  DB_PATH_ARGS="--db $DB_PATH"
+  DB_PATH_ARGS="--db $(cd "$DB_PATH" && pwd)"
 fi
+
+# db_runner reads a hardcoded "workload.txt" and writes hardcoded output files
+# (experiment_metrics.json, lsm_metrics.jsonl, workload.log, stats.log) into its
+# current directory. To make parallel runs safe, each invocation gets its own
+# working directory holding its own workload copy; outputs land there and are
+# then collected into the results dirs. Absolute binary path so the cd works.
+DB_RUNNER_ABS="$(cd "$(dirname "$DB_RUNNER_BIN")" && pwd)/$(basename "$DB_RUNNER_BIN")"
+RUN_WORKDIR="${RESULTS_ROOT}/.workdir"
 
 server_pid=""
 
@@ -313,6 +322,10 @@ cleanup() {
     wait "$server_pid" 2>/dev/null || true
   fi
   rm -f "$SOCKET_PATH"
+  # Remove the transient per-run working directory (workload copy + raw output
+  # files). The workload is also archived under results/.../workloads/ and the
+  # collected metrics live in leveled/ and rl/, so nothing needed is lost.
+  [[ -n "${RUN_WORKDIR:-}" ]] && rm -rf "$RUN_WORKDIR"
 }
 trap cleanup EXIT
 
@@ -324,22 +337,19 @@ require_file() {
   fi
 }
 
-refresh_runtime_workload() {
-  if [[ "$WORKLOAD_PATH" == "workload.txt" || "$WORKLOAD_PATH" == "./workload.txt" ]]; then
-    echo "[workload] runtime input already uses workload.txt"
-  else
-    cp "$WORKLOAD_PATH" workload.txt
-    echo "[workload] runtime input refreshed: workload.txt"
-  fi
+prepare_run_workdir() {
+  mkdir -p "$RUN_WORKDIR"
+  cp "$WORKLOAD_PATH" "$RUN_WORKDIR/workload.txt"
+  echo "[workload] private runtime copy: $RUN_WORKDIR/workload.txt"
 }
 
 copy_run_outputs() {
   local dest="$1"
   mkdir -p "$dest"
-  cp experiment_metrics.json "$dest/"
-  cp lsm_metrics.jsonl "$dest/"
-  cp workload.log "$dest/" 2>/dev/null || true
-  cp stats.log "$dest/" 2>/dev/null || true
+  cp "$RUN_WORKDIR/experiment_metrics.json" "$dest/"
+  cp "$RUN_WORKDIR/lsm_metrics.jsonl" "$dest/"
+  cp "$RUN_WORKDIR/workload.log" "$dest/" 2>/dev/null || true
+  cp "$RUN_WORKDIR/stats.log" "$dest/" 2>/dev/null || true
 }
 
 wait_for_socket() {
@@ -364,29 +374,31 @@ run_db_runner() {
   local compaction_style="$1"
   local label="$2"
 
-  refresh_runtime_workload
   echo "[$label] running db_runner with compaction style ${compaction_style}"
+  # Run inside the private workdir so it reads its own workload.txt and writes
+  # its own output files, isolated from any concurrent run.
   # shellcheck disable=SC2086
-  LSM_METRICS_SAMPLE_INTERVAL="$LSM_SAMPLE_INTERVAL" \
-  LSM_METRICS_WARMUP_OPS="$WARMUP_OPS" \
-  "$DB_RUNNER_BIN" \
-    -C "$compaction_style" \
-    $DB_PATH_ARGS \
-    $DB_RUNNER_COMMON_ARGS
+  ( cd "$RUN_WORKDIR" && \
+    LSM_METRICS_SAMPLE_INTERVAL="$LSM_SAMPLE_INTERVAL" \
+    LSM_METRICS_WARMUP_OPS="$WARMUP_OPS" \
+    "$DB_RUNNER_ABS" \
+      -C "$compaction_style" \
+      $DB_PATH_ARGS \
+      $DB_RUNNER_COMMON_ARGS )
 }
 
 run_rl_db_runner() {
-  refresh_runtime_workload
   echo "[rl] running db_runner with RL compaction"
   # shellcheck disable=SC2086
-  RL_COMPACTION_SOCKET_PATH="$SOCKET_PATH" \
-  RL_COMPACTION_SOCKET_TIMEOUT_MS="$RL_SOCKET_TIMEOUT_MS" \
-  LSM_METRICS_SAMPLE_INTERVAL="$LSM_SAMPLE_INTERVAL" \
-  LSM_METRICS_WARMUP_OPS="$WARMUP_OPS" \
-  "$DB_RUNNER_BIN" \
-    -C 5 \
-    $DB_PATH_ARGS \
-    $DB_RUNNER_COMMON_ARGS
+  ( cd "$RUN_WORKDIR" && \
+    RL_COMPACTION_SOCKET_PATH="$SOCKET_PATH" \
+    RL_COMPACTION_SOCKET_TIMEOUT_MS="$RL_SOCKET_TIMEOUT_MS" \
+    LSM_METRICS_SAMPLE_INTERVAL="$LSM_SAMPLE_INTERVAL" \
+    LSM_METRICS_WARMUP_OPS="$WARMUP_OPS" \
+    "$DB_RUNNER_ABS" \
+      -C 5 \
+      $DB_PATH_ARGS \
+      $DB_RUNNER_COMMON_ARGS )
 }
 
 print_rl_override() {
@@ -425,6 +437,10 @@ echo "[workload] using existing workload $WORKLOAD_PATH"
 cp "$WORKLOAD_PATH" "$RESULT_WORKLOAD_PATH"
 echo "[workload] archived workload: $RESULT_WORKLOAD_PATH"
 
+# Stage a private runtime copy for this invocation (used by both the leveled
+# and RL db_runner runs below).
+prepare_run_workdir
+
 if [[ -n "$REUSE_LEVELED" && -s "${REUSE_LEVELED}/experiment_metrics.json" ]]; then
   # The leveled (-C 1) baseline is independent of every RL_* knob, so a sweep
   # can run it once and reuse it. Copy the cached outputs into this run_dir so
@@ -453,6 +469,10 @@ rm -f "${AGENT_DIR}/rl_compaction_metrics.jsonl"
 rm -f "${AGENT_DIR}/rl_compaction_io.jsonl"
 rm -f "${AGENT_DIR}/server.log"
 
+# The RL net is a tiny MLP: CPU inference is faster than GPU (no transfer
+# overhead) and avoids many parallel runs contending for the same GPU. Default
+# to CPU; set RL_CUDA_VISIBLE_DEVICES to opt back into a GPU.
+CUDA_VISIBLE_DEVICES="${RL_CUDA_VISIBLE_DEVICES:-}" \
 RL_COMPACTION_SOCKET_PATH="$SOCKET_PATH" \
 RL_MODEL_SAVE_PATH="${AGENT_DIR}/rl_compaction_model.pt" \
 RL_METRICS_LOG_PATH="${AGENT_DIR}/rl_compaction_metrics.jsonl" \
