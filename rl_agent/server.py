@@ -30,6 +30,9 @@ from reward import StateRewardProcessor
 
 _ACTION_NAMES = config.ACTION_NAMES
 _io_log_lock = threading.Lock()
+# Serializes multi-level message handling across client reconnects/connections
+# so the shared processor's prev-state bookkeeping stays consistent.
+_ml_lock = threading.Lock()
 
 
 def _write_io_log(
@@ -66,7 +69,6 @@ def handle_multilevel_message(
 ) -> None:
     """Process one v2 (multi-level) message: route each level's slice to its
     agent, reply with per-level actions in request order, then log and train."""
-    decisions = ml_processor.process(msg)
     done = bool(msg.get("done", False))
     try:
         g_pending = float(msg.get("pending_compaction_bytes", 0) or 0)
@@ -75,14 +77,22 @@ def handle_multilevel_message(
 
     actions = []
     handled = []
-    for d in decisions:
-        agent = pool.get(d.level)
-        action = agent.observe(d.state, d.reward, done)
-        actions.append(action)
-        ml_processor.advance(d, action, g_pending)
-        handled.append((d, action, agent))
+    # The processor is shared across connections (so reconnects don't reset
+    # normalizer scales / prev-state); the lock keeps each message's
+    # process -> observe -> advance sequence atomic.
+    with _ml_lock:
+        decisions = ml_processor.process(msg)
+        for d in decisions:
+            agent = pool.get(d.level)
+            action = agent.observe(d.state, d.reward, done, d.valid_actions)
+            actions.append(action)
+            ml_processor.advance(d, action, g_pending)
+            handled.append((d, action, agent))
 
-    response = json.dumps({"actions": actions}) + "\n"
+    # Compact separators are load-bearing: the C++ ParseIntArrayField needle
+    # requires "actions":[ with no whitespace. json.dumps' default ": " made
+    # every response unparseable -> silent fallback to leveled (2026-07-19 bug).
+    response = json.dumps({"actions": actions}, separators=(",", ":")) + "\n"
     conn.sendall(response.encode("utf-8"))
 
     # Everything below is off the response path.
@@ -114,11 +124,13 @@ def handle_multilevel_message(
 
 
 def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker, io_log,
-                  pool: "multilevel.AgentPool" = None) -> None:
+                  pool: "multilevel.AgentPool" = None,
+                  ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
     """Handle one persistent C++ client connection."""
     buf = ""
     processor = StateRewardProcessor()
-    ml_processor = multilevel.MultiLevelProcessor()
+    if ml_processor is None:
+        ml_processor = multilevel.MultiLevelProcessor()
     # Diagnostic: how many decisions elapse between a compact_now and the L0
     # compaction completion it triggers. The distribution of this lag tells us
     # how large N_STEP must be for the reward window to actually capture relief.
@@ -152,7 +164,7 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 action = agent.observe(state, reward, done)
                 processor.advance(raw_state, action)
 
-                response = json.dumps({"action": action}) + "\n"
+                response = json.dumps({"action": action}, separators=(",", ":")) + "\n"
                 conn.sendall(response.encode("utf-8"))
 
                 # Track compact_now -> completion lag for the N_STEP diagnostic.
@@ -195,7 +207,8 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
 
 
 def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_log,
-               pool: "multilevel.AgentPool" = None) -> None:
+               pool: "multilevel.AgentPool" = None,
+               ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
@@ -233,7 +246,7 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
             break
         t = threading.Thread(
             target=handle_client,
-            args=(conn, agent, tracker, io_log, pool),
+            args=(conn, agent, tracker, io_log, pool, ml_processor),
             daemon=True,
             name="rl-client",
         )
@@ -241,6 +254,15 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
 
 
 def main() -> None:
+    if config.SEED:
+        import random as _random
+        import numpy as _np
+        import torch as _torch
+        _random.seed(config.SEED)
+        _np.random.seed(config.SEED)
+        _torch.manual_seed(config.SEED)
+        print(f"[server] seeded with RL_SEED={config.SEED}")
+
     agent = DQNAgent()
 
     if os.path.exists(config.MODEL_SAVE_PATH):
@@ -251,9 +273,12 @@ def main() -> None:
             print(f"[server] could not load checkpoint: {exc}", file=sys.stderr)
 
     pool = multilevel.AgentPool()
+    # One processor for the whole server lifetime: client reconnects must not
+    # reset adaptive normalizer scales or per-level prev-state bookkeeping.
+    ml_processor = multilevel.MultiLevelProcessor()
     tracker = MetricsTracker()
     io_log = open(config.IO_LOG_PATH, "a")
-    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool)
+    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool, ml_processor)
 
 
 if __name__ == "__main__":

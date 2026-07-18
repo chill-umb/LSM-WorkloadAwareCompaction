@@ -464,7 +464,10 @@ fi
 
 echo "[rl-server] starting Python RL server"
 rm -f "$SOCKET_PATH"
-rm -f "${AGENT_DIR}/rl_compaction_model.pt"
+# Glob covers the legacy checkpoint AND the per-level multi-level checkpoints
+# (rl_compaction_model.l<i>.pt); a stale per-level file would otherwise be
+# silently loaded into a "fresh" run.
+rm -f "${AGENT_DIR}"/rl_compaction_model*.pt
 rm -f "${AGENT_DIR}/rl_compaction_metrics.jsonl"
 rm -f "${AGENT_DIR}/rl_compaction_io.jsonl"
 rm -f "${AGENT_DIR}/server.log"
@@ -472,7 +475,12 @@ rm -f "${AGENT_DIR}/server.log"
 # The RL net is a tiny MLP: CPU inference is faster than GPU (no transfer
 # overhead) and avoids many parallel runs contending for the same GPU. Default
 # to CPU; set RL_CUDA_VISIBLE_DEVICES to opt back into a GPU.
+# Thread caps: without them torch spawns one OpenMP team per process sized to
+# the whole machine; with several servers in parallel that oversubscribes the
+# cores and pushes response latency past the C++ socket timeout (broken pipes).
 CUDA_VISIBLE_DEVICES="${RL_CUDA_VISIBLE_DEVICES:-}" \
+OMP_NUM_THREADS="${RL_OMP_NUM_THREADS:-1}" \
+MKL_NUM_THREADS="${RL_OMP_NUM_THREADS:-1}" \
 RL_COMPACTION_SOCKET_PATH="$SOCKET_PATH" \
 RL_MODEL_SAVE_PATH="${AGENT_DIR}/rl_compaction_model.pt" \
 RL_METRICS_LOG_PATH="${AGENT_DIR}/rl_compaction_metrics.jsonl" \

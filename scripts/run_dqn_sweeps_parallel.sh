@@ -62,13 +62,35 @@ MAX_BG="${MAX_BG:-8}"
 BLOCK_CACHE_MB="${BLOCK_CACHE_MB:-8192}"
 DB_PATH_BASE="${DB_PATH_BASE:-/mnt/nvme/rl_sweep_dbs}"
 EXTRA_COMMON="${EXTRA_COMMON:-}"
+# STREAM=1  -> each config's full output also goes to the terminal (still logged
+#              to <run_dir>.log). At high JOBS these interleave; use a low JOBS
+#              for clean reading. The one-time baseline is always streamed.
+# PROGRESS=1 -> enable the db_runner progress bar (readable at low JOBS).
+STREAM="${STREAM:-0}"
+PROGRESS="${PROGRESS:-0}"
+export STREAM
+
+# Under parallelism, give the Python server more headroom before the C++ side
+# gives up and falls back to leveled (default is 100 ms).
+export RL_SOCKET_TIMEOUT_MS="${RL_SOCKET_TIMEOUT_MS:-250}"
+
+# Same seed for every config = paired comparison: all configs draw the same
+# exploration RNG stream, so ranking differences reflect the hyperparameter,
+# not exploration luck. Set RL_SEED=0 to disable seeding.
+export RL_SEED="${RL_SEED:-1}"
+
+# This workload yields only a few hundred decision points per agent per run, so
+# the stock 2000-step epsilon decay would leave agents exploring (near-random)
+# for the entire run and the sweep would rank noise. Default the decay to fit
+# the run; the epsilon_decay sweep still overrides this with its own flag, as
+# does any explicit RL_EPSILON_DECAY_STEPS in the environment.
+export RL_EPSILON_DECAY_STEPS="${RL_EPSILON_DECAY_STEPS:-200}"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/lsm-matplotlib-cache}"
 export MPLCONFIGDIR
 
 SHARED_LEVELED="${SHARED_LEVELED:-${RESULTS_ROOT}/_leveled_baseline}"
-# Progress bars are noise when interleaved across parallel jobs.
-COMMON_ARGS="-T 4 -E 64 -d 1 --cc 0 --stat 1 --progress 0 --totaltime 1 --peroptime 0 --bb ${BLOCK_CACHE_MB} --max_background_jobs ${MAX_BG} ${EXTRA_COMMON}"
+COMMON_ARGS="-T 4 -E 64 -d 1 --cc 0 --stat 1 --progress ${PROGRESS} --totaltime 1 --peroptime 0 --bb ${BLOCK_CACHE_MB} --max_background_jobs ${MAX_BG} ${EXTRA_COMMON}"
 
 require_file() {
   if [[ ! -e "$1" ]]; then echo "Required path missing: $1" >&2; exit 1; fi
@@ -106,20 +128,22 @@ echo "[setup] results root:  $RESULTS_ROOT"
 echo "[setup] parallelism:   JOBS=$JOBS  MAX_BG=$MAX_BG  (~$((JOBS * MAX_BG)) compaction threads in flight)"
 echo "[setup] block cache:   ${BLOCK_CACHE_MB} MB per run"
 echo "[setup] db base:       $DB_PATH_BASE"
+echo "[setup] stream/prog:   STREAM=$STREAM  PROGRESS=$PROGRESS"
 
 # ---- 1. Baseline once (populates the shared leveled cache serially) ----
 if [[ -s "${SHARED_LEVELED}/experiment_metrics.json" ]]; then
   echo "[baseline] reusing existing shared baseline at $SHARED_LEVELED"
 else
-  echo "[baseline] computing shared leveled baseline (once)"
+  echo "[baseline] computing shared leveled baseline (once) — streaming below"
   baseline_db="$(mktemp -d "${DB_PATH_BASE}/baseline.XXXXXX")"
+  # Baseline runs alone, so always stream it to the terminal (and log it).
   DB_RUNNER_COMMON_ARGS="$COMMON_ARGS" \
   ./scripts/experiment_runner.sh \
     --workload "$WORKLOAD_PATH" \
     --db-path "$baseline_db" \
     --reuse-leveled "$SHARED_LEVELED" \
     --results-dir "${RESULTS_ROOT}/_baseline_seed" \
-    --rl-param "RL_EPSILON_DECAY_STEPS=100" >"${RESULTS_ROOT}/_baseline_seed.log" 2>&1
+    --rl-param "RL_EPSILON_DECAY_STEPS=100" 2>&1 | tee "${RESULTS_ROOT}/_baseline_seed.log"
   rm -rf "$baseline_db"
   echo "[baseline] done -> $SHARED_LEVELED"
 fi
@@ -151,13 +175,24 @@ run_one() {
   dbdir="$(mktemp -d "${DB_PATH_BASE}/db.XXXXXX")"
   mkdir -p "$rd"
   echo "[start] ${rd}  (${flag} ${val})"
-  if DB_RUNNER_COMMON_ARGS="$COMMON_ARGS" \
-     ./scripts/experiment_runner.sh \
-       --workload "$WORKLOAD_PATH" \
-       --results-dir "$rd" \
-       --db-path "$dbdir" \
-       --reuse-leveled "$SHARED_LEVELED" \
-       "$flag" "$val" >"${rd%/}.log" 2>&1; then
+  local rc=0
+  if [[ "${STREAM:-0}" == "1" ]]; then
+    # Stream to terminal AND log. Tagged with the config so interleaved lines
+    # from concurrent jobs stay attributable.
+    DB_RUNNER_COMMON_ARGS="$COMMON_ARGS" \
+    ./scripts/experiment_runner.sh \
+      --workload "$WORKLOAD_PATH" --results-dir "$rd" --db-path "$dbdir" \
+      --reuse-leveled "$SHARED_LEVELED" "$flag" "$val" 2>&1 \
+      | tee "${rd%/}.log" | sed "s#^#[$(basename "$rd")] #"
+    rc=${PIPESTATUS[0]}
+  else
+    DB_RUNNER_COMMON_ARGS="$COMMON_ARGS" \
+    ./scripts/experiment_runner.sh \
+      --workload "$WORKLOAD_PATH" --results-dir "$rd" --db-path "$dbdir" \
+      --reuse-leveled "$SHARED_LEVELED" "$flag" "$val" >"${rd%/}.log" 2>&1
+    rc=$?
+  fi
+  if [[ $rc -eq 0 ]]; then
     echo "[done]  ${rd}"
   else
     echo "[FAIL]  ${rd} (see ${rd%/}.log)"

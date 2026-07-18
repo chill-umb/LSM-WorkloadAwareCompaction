@@ -27,8 +27,10 @@ class DQNAgent:
         self.save_path = save_path if save_path is not None else config.MODEL_SAVE_PATH
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.policy_net = DQN(self.state_dim, config.HIDDEN_DIM, self.action_dim).to(self.device)
-        self.target_net = DQN(self.state_dim, config.HIDDEN_DIM, self.action_dim).to(self.device)
+        self.policy_net = DQN(self.state_dim, config.HIDDEN_DIM, self.action_dim,
+                              dueling=config.DUELING).to(self.device)
+        self.target_net = DQN(self.state_dim, config.HIDDEN_DIM, self.action_dim,
+                              dueling=config.DUELING).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -63,16 +65,25 @@ class DQNAgent:
         frac = min(1.0, self.step / config.EPSILON_DECAY_STEPS)
         self.epsilon = config.EPSILON_START + frac * (config.EPSILON_END - config.EPSILON_START)
 
-    def select_action(self, state: np.ndarray) -> int:
+    def select_action(self, state: np.ndarray, valid_actions=None) -> int:
+        """Epsilon-greedy over the valid action set.
+
+        valid_actions: optional sequence of permitted action indices (action
+        masking). Exploration samples uniformly from it; exploitation takes the
+        argmax over it. None means all actions are valid.
+        """
+        if valid_actions is None:
+            valid_actions = range(self.action_dim)
+        valid_actions = list(valid_actions)
         if random.random() < self.epsilon:
             self.last_q_values = None
-            return random.randint(0, self.action_dim - 1)
+            return random.choice(valid_actions)
         self.policy_net.eval()
         with torch.no_grad():
             t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_vals = self.policy_net(t).squeeze(0)
             self.last_q_values = q_vals.cpu().numpy()
-            return int(q_vals.argmax().item())
+            return max(valid_actions, key=lambda a: float(q_vals[a]))
 
     def _nstep_return(self, rewards: list) -> float:
         """Discounted sum of a decision's collected per-step rewards."""
@@ -81,7 +92,8 @@ class DQNAgent:
             g += (config.GAMMA ** k) * r
         return g
 
-    def observe(self, state: np.ndarray, reward: float, done: bool) -> int:
+    def observe(self, state: np.ndarray, reward: float, done: bool,
+                valid_actions=None) -> int:
         """
         Assemble n-step transitions and return the next action for `state`.
 
@@ -126,7 +138,7 @@ class DQNAgent:
             #    the episode continues; on a terminal step there is no future to
             #    accumulate, and a dangling decision would otherwise bleed into
             #    the next episode.
-            action = self.select_action(state)
+            action = self.select_action(state, valid_actions)
             self._decay_epsilon()
             if not done:
                 self._pending.append({"state": state.copy(), "action": action, "rewards": []})

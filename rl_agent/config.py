@@ -93,6 +93,26 @@ SAVE_INTERVAL = _env_int("RL_SAVE_INTERVAL", 500)
 ASYNC_TRAINING = os.environ.get("RL_ASYNC_TRAINING", "1") != "0"
 TRAIN_STEPS_PER_OBSERVATION = _env_int("RL_TRAIN_STEPS_PER_OBSERVATION", 1)
 
+# Reproducibility. 0 = unseeded (legacy behavior). Any other value seeds
+# python/numpy/torch at server startup so a run's decision trajectory is
+# repeatable; sweeps should set distinct seeds per repeat.
+SEED = _env_int("RL_SEED", 0)
+
+# Model architecture. DUELING enables a value/advantage decomposition head
+# (opt-in so existing results remain comparable).
+DUELING = os.environ.get("RL_DUELING", "0") != "0"
+
+# Multi-level exploration guardrail: mask `compact_now` for a level whose
+# RocksDB score is below this floor (or that has no files). Prevents fresh
+# high-epsilon deep-level agents from randomly compacting near-empty levels,
+# which is never sensible and dominates early-run cost. 0 disables masking.
+ML_MIN_COMPACT_SCORE = _env_float("RL_ML_MIN_COMPACT_SCORE", 0.10)
+
+# Multi-level stall attribution: when enabled, the global stall/stop penalty is
+# scaled by the level's own fullness, so a near-empty deep level is not charged
+# for an L0-caused stall (lightweight version of per-level stall attribution).
+ML_STALL_SCALE_BY_PRESSURE = os.environ.get("RL_ML_STALL_SCALE_BY_PRESSURE", "1") != "0"
+
 # Credit assignment. A compaction triggered by `compact_now` completes
 # asynchronously, so its I/O cost and its L0/pending relief land several
 # decisions later. N_STEP aggregates the discounted per-step rewards over the

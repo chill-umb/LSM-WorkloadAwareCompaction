@@ -104,15 +104,20 @@ class _AdaptiveScales:
 class LevelDecision:
     """One level's processed slice of a v2 message."""
 
-    __slots__ = ("level", "raw", "state", "reward", "components")
+    __slots__ = ("level", "raw", "state", "reward", "components", "valid_actions")
 
     def __init__(self, level: int, raw: dict, state: np.ndarray,
-                 reward: float, components: dict):
+                 reward: float, components: dict, valid_actions):
         self.level = level
         self.raw = raw
         self.state = state
         self.reward = reward
         self.components = components
+        # Action mask: compact_now is withheld from a level with nothing worth
+        # compacting (no files, or score below the configured floor). A fresh
+        # high-epsilon agent would otherwise randomly force pointless deep
+        # compactions, whose I/O dominates early-run cost.
+        self.valid_actions = valid_actions
 
 
 class MultiLevelProcessor:
@@ -229,6 +234,12 @@ class MultiLevelProcessor:
                         or raw["compactions_scheduled"] > 0) else 0.0
         stall = 1.0 if g["stall_count"] > 0 else 0.0
         stop = 1.0 if g["stop_count"] > 0 else 0.0
+        # Per-level stall attribution: scale the global stall/stop penalty by
+        # this level's fullness so a near-empty deep level is not blamed for an
+        # L0-caused stall. Disable via RL_ML_STALL_SCALE_BY_PRESSURE=0.
+        if config.ML_STALL_SCALE_BY_PRESSURE:
+            stall *= fullness
+            stop *= fullness
 
         unnecessary = 0.0
         if (prev_action == 1 and prev["score"] < _UNNECESSARY_SCORE_THRESHOLD
@@ -289,7 +300,15 @@ class MultiLevelProcessor:
                 self._steps_since_compaction[level] = (
                     self._steps_since_compaction.get(level, 0) + 1)
 
-            decisions.append(LevelDecision(level, raw, state, reward, components))
+            compact_allowed = (
+                raw["files"] > 0
+                and raw["score"] >= config.ML_MIN_COMPACT_SCORE
+            )
+            valid_actions = (0, 1) if compact_allowed else (0,)
+
+            decisions.append(
+                LevelDecision(level, raw, state, reward, components, valid_actions)
+            )
         return decisions
 
     def advance(self, decision: LevelDecision, action: int,
