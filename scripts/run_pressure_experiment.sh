@@ -27,8 +27,10 @@ Environment overrides:
                      (generated automatically if WORKLOAD_PATH is missing)
   RESULTS_ROOT       default: results/1M/pressure_experiment  (or $1)
   DB_PATH            default: unset (db_runner default ./db); e.g. /mnt/nvme/rocksdb-data
-  MAX_BG             default: 1     (the pressure knob: single compaction thread)
+  MAX_BG             default: 1     (pressure knob: single compaction thread)
+  BUFFER_PAGES       default: 128   (pressure knob: -P; 16 => 64KB buffer, 8x flushes)
   BLOCK_CACHE_MB     default: 1024
+  EXTRA_COMMON       default: unset (extra db_runner args appended to common args)
   EPS_DECAY          default: 100   (RL exploration matched to ~300-400 decisions)
   TRAIN_STEPS        default: 4     (SGD steps per observation)
   SEED               default: 1
@@ -52,6 +54,10 @@ RESULTS_ROOT="${1:-${RESULTS_ROOT:-results/1M/pressure_experiment}}"
 DB_PATH="${DB_PATH:-}"
 MAX_BG="${MAX_BG:-1}"
 BLOCK_CACHE_MB="${BLOCK_CACHE_MB:-1024}"
+# Buffer pages (-P): smaller buffer => proportionally more flushes => more L0
+# inflow. The default 128 gives a 512 KB buffer; 16 gives 64 KB (8x flush rate).
+BUFFER_PAGES="${BUFFER_PAGES:-128}"
+EXTRA_COMMON="${EXTRA_COMMON:-}"
 EPS_DECAY="${EPS_DECAY:-100}"
 TRAIN_STEPS="${TRAIN_STEPS:-4}"
 SEED="${SEED:-1}"
@@ -67,7 +73,7 @@ fi
 # Pressure config: single background compaction thread is the lever that
 # recreates L0 backlog; modest block cache keeps memory realistic. Size ratio
 # -T 4 fixes trigger=4, slowdown=3, stop=4 (see parse_arguments.h).
-COMMON_ARGS="-T 4 -E 64 -d 1 --cc 0 --stat 1 --progress 1 --totaltime 1 --peroptime 0 --bb ${BLOCK_CACHE_MB} --max_background_jobs ${MAX_BG}"
+COMMON_ARGS="-T 4 -E 64 -P ${BUFFER_PAGES} -d 1 --cc 0 --stat 1 --progress 1 --totaltime 1 --peroptime 0 --bb ${BLOCK_CACHE_MB} --max_background_jobs ${MAX_BG} ${EXTRA_COMMON}"
 
 BASELINE_CACHE="${RESULTS_ROOT}/_leveled_baseline"
 
