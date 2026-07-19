@@ -27,6 +27,9 @@ Options:
   --db-runner-bin PATH               RocksDB runner binary.
   --db-path PATH                     RocksDB data directory (passed as --db to db_runner;
                                      created if missing). E.g. /mnt/nvme/rocksdb-data.
+  --leveled-only                     Run (or reuse) only the leveled baseline, then exit —
+                                     no RL server, no RL run, no comparison. Use to validate
+                                     the baseline (e.g. L0-pressure precondition) cheaply.
   --reuse-leveled DIR                Reuse a cached leveled baseline instead of re-running it.
                                      If DIR holds a baseline it is copied in; otherwise the
                                      leveled run executes and its output is cached to DIR.
@@ -84,6 +87,7 @@ WORKLOAD_PATH="${WORKLOAD_PATH:-workloads/workload_1M_mixed.txt}"
 DB_RUNNER_BIN="${DB_RUNNER_BIN:-./bin/db_runner}"
 DB_PATH="${DB_PATH:-}"
 REUSE_LEVELED="${REUSE_LEVELED:-}"
+LEVELED_ONLY="${LEVELED_ONLY:-0}"
 LSM_SAMPLE_INTERVAL="${LSM_SAMPLE_INTERVAL:-10000}"
 RL_SOCKET_TIMEOUT_MS="${RL_SOCKET_TIMEOUT_MS:-100}"
 RESULTS_ROOT="${RESULTS_ROOT:-}"
@@ -168,6 +172,10 @@ while [[ $# -gt 0 ]]; do
       require_option_value "$1" "${2:-}"
       REUSE_LEVELED="$2"
       shift 2
+      ;;
+    --leveled-only)
+      LEVELED_ONLY=1
+      shift
       ;;
     --python-bin)
       require_option_value "$1" "${2:-}"
@@ -460,6 +468,16 @@ else
     echo "[leveled] caching baseline to $REUSE_LEVELED"
     copy_run_outputs "$REUSE_LEVELED"
   fi
+fi
+
+if [[ "$LEVELED_ONLY" == "1" ]]; then
+  # Baseline-only mode: lets a caller validate the baseline (e.g. a pressure
+  # precondition) before spending the RL arm. Combine with --reuse-leveled so
+  # the subsequent full invocation skips the leveled re-run.
+  echo
+  echo "Leveled-only run complete."
+  echo "Leveled metrics: $LEVELED_DIR"
+  exit 0
 fi
 
 echo "[rl-server] starting Python RL server"
