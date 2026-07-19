@@ -101,13 +101,79 @@ class _AdaptiveScales:
         return _clamp(value / max(1.0, self.scales.get(key, 1.0)))
 
 
+def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
+    """A_analytic(s): the physics-informed advantage of compact_now over
+    do_nothing for one level, from raw observables. Each term maps to a named
+    piece of LSM cost theory:
+
+      stall_urgency     queueing: projected proximity to the write-slowdown
+                        threshold given current inflow (L0); superlinear
+                        fullness for deeper levels (they trigger via score).
+      readamp_relief    probe count: compacting L0 removes `files` sorted runs
+                        from every lookup; a deeper level removes one run
+                        (partial credit, weighted by fullness).
+      work_now          merge I/O: (bytes + next-level overlap) normalized by
+                        the two levels' capacities.
+      premature_penalty Bentley-Saxe amortization: overlap is re-paid per
+                        compaction, so merging an underfull level with large
+                        overlap wastes I/O vs waiting for it to fill
+                        (overlap/bytes scaled by emptiness).
+
+    Returns (advantage, term_breakdown). Weights are the tunable "physics
+    constants" (RL_PRIOR_W_*); the learned residual corrects what they miss.
+    """
+    level = int(raw["level"])
+    bytes_i = max(raw["bytes"], 1.0)
+    overlap = raw["overlap_bytes"]
+    trigger = max(g["l0_compaction_trigger"], 1.0)
+    slowdown = max(g["l0_slowdown_trigger"], 1.0)
+
+    # Natural capacity units. A flush file is ~one write-buffer, which equals
+    # L1's target (= max_bytes_for_level_base) — available as L0's
+    # next_level_target_bytes.
+    if level == 0:
+        flush_size = max(raw["next_level_target_bytes"],
+                         bytes_i / max(raw["files"], 1.0), 1.0)
+        cap_i = trigger * flush_size
+        fullness = _clamp(raw["files"] / trigger)
+        inflow_files = raw["bytes_in"] / flush_size
+        stall_urgency = _clamp((raw["files"] + inflow_files) / slowdown)
+        readamp_relief = _clamp(raw["files"] / trigger)
+    else:
+        cap_i = max(raw["target_bytes"], 1.0)
+        fullness = _clamp(bytes_i / cap_i)
+        stall_urgency = fullness * fullness
+        readamp_relief = 0.25 * fullness
+
+    cap_next = max(raw["next_level_target_bytes"], cap_i)
+    work_now = _clamp((bytes_i + overlap) / (cap_i + cap_next))
+    premature_penalty = _clamp(overlap / bytes_i / 4.0) * (1.0 - fullness)
+
+    adv = (
+        config.PRIOR_W_STALL * stall_urgency
+        + config.PRIOR_W_READ * readamp_relief
+        - config.PRIOR_W_WORK * work_now
+        - config.PRIOR_W_PREMATURE * premature_penalty
+    )
+    adv = _clamp(adv, -config.PRIOR_CLAMP, config.PRIOR_CLAMP)
+    terms = {
+        "prior_stall_urgency": stall_urgency,
+        "prior_readamp_relief": readamp_relief,
+        "prior_work_now": work_now,
+        "prior_premature_penalty": premature_penalty,
+        "analytic_advantage": adv,
+    }
+    return adv, terms
+
+
 class LevelDecision:
     """One level's processed slice of a v2 message."""
 
-    __slots__ = ("level", "raw", "state", "reward", "components", "valid_actions")
+    __slots__ = ("level", "raw", "state", "reward", "components",
+                 "valid_actions", "prior")
 
     def __init__(self, level: int, raw: dict, state: np.ndarray,
-                 reward: float, components: dict, valid_actions):
+                 reward: float, components: dict, valid_actions, prior):
         self.level = level
         self.raw = raw
         self.state = state
@@ -118,6 +184,9 @@ class LevelDecision:
         # high-epsilon agent would otherwise randomly force pointless deep
         # compactions, whose I/O dominates early-run cost.
         self.valid_actions = valid_actions
+        # Analytic prior over actions: b(s, do_nothing)=0,
+        # b(s, compact_now)=A_analytic(s). Zeros when the prior is disabled.
+        self.prior = prior
 
 
 class MultiLevelProcessor:
@@ -306,8 +375,15 @@ class MultiLevelProcessor:
             )
             valid_actions = (0, 1) if compact_allowed else (0,)
 
+            prior = np.zeros(config.ACTION_DIM, dtype=np.float32)
+            if config.ANALYTIC_PRIOR:
+                adv, terms = analytic_advantage(raw, g)
+                prior[1] = adv
+                components.update(terms)
+
             decisions.append(
-                LevelDecision(level, raw, state, reward, components, valid_actions)
+                LevelDecision(level, raw, state, reward, components,
+                              valid_actions, prior)
             )
         return decisions
 

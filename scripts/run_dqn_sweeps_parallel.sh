@@ -115,6 +115,7 @@ SWEEPS=(
   "normalizer_decay|normdecay|RL_NORMALIZER_DECAY|--rl-param|RL_NORMALIZER_DECAY=0.90 RL_NORMALIZER_DECAY=0.95 RL_NORMALIZER_DECAY=0.99 RL_NORMALIZER_DECAY=0.995 RL_NORMALIZER_DECAY=0.999"
   "n_step|nstep|RL_N_STEP|--rl-param|RL_N_STEP=1 RL_N_STEP=2 RL_N_STEP=3 RL_N_STEP=5 RL_N_STEP=8 RL_N_STEP=10"
   "double_dqn|doubledqn|RL_DOUBLE_DQN|--rl-param|RL_DOUBLE_DQN=0 RL_DOUBLE_DQN=1"
+  "analytic_prior|prior|RL_ANALYTIC_PRIOR|--rl-param|RL_ANALYTIC_PRIOR=0 RL_ANALYTIC_PRIOR=1"
   "batch_size|batch|RL_BATCH_SIZE|--rl-batch-size|16 32 64 128 256"
   "epsilon_decay|eps|RL_EPSILON_DECAY_STEPS|--rl-epsilon-decay-steps|$(seq 100 100 3000 | tr '\n' ' ')"
 )

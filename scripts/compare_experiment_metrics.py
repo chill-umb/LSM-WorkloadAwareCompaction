@@ -236,13 +236,23 @@ def write_csv(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def load_action_counts(candidate_dir: Path) -> Dict[str, int]:
+def load_action_counts(candidate_dir: Path) -> Dict[str, Any]:
+    """Action counts, total and per level. Multi-level runs log one io entry
+    per level per decision; totals alone would conflate six agents' behavior."""
     rows = load_jsonl(candidate_dir / "agent" / "rl_compaction_io.jsonl")
-    counts: Counter[str] = Counter()
+    total: Counter[str] = Counter()
+    by_level: Dict[str, Counter] = {}
     for row in rows:
         action = row.get("output", {}).get("action_name", "unknown")
-        counts[action] += 1
-    return dict(counts)
+        total[action] += 1
+        level = row.get("input", {}).get("level")
+        if level is None:
+            level = row.get("diagnostics", {}).get("level")
+        key = "L0" if level is None else f"L{int(level)}"
+        by_level.setdefault(key, Counter())[action] += 1
+    result: Dict[str, Any] = dict(total)
+    result["by_level"] = {k: dict(v) for k, v in sorted(by_level.items())}
+    return result
 
 
 def import_matplotlib():

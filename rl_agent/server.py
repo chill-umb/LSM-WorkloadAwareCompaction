@@ -84,8 +84,11 @@ def handle_multilevel_message(
         decisions = ml_processor.process(msg)
         for d in decisions:
             agent = pool.get(d.level)
-            action = agent.observe(d.state, d.reward, done, d.valid_actions)
+            action = agent.observe(d.state, d.reward, done, d.valid_actions,
+                                   d.prior)
             actions.append(action)
+            if agent.last_residual_advantage is not None:
+                d.components["residual_advantage"] = agent.last_residual_advantage
             ml_processor.advance(d, action, g_pending)
             handled.append((d, action, agent))
 

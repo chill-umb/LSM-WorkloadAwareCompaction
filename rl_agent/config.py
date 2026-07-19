@@ -113,6 +113,24 @@ ML_MIN_COMPACT_SCORE = _env_float("RL_ML_MIN_COMPACT_SCORE", 0.10)
 # for an L0-caused stall (lightweight version of per-level stall attribution).
 ML_STALL_SCALE_BY_PRESSURE = os.environ.get("RL_ML_STALL_SCALE_BY_PRESSURE", "1") != "0"
 
+# Physics-informed analytic prior (research direction 6.1 in
+# docs/research_overview_and_roadmap.md). When enabled, the agent's Q-values
+# are composed as Q(s,a) = b(s,a) + f_theta(s,a), where b(s,compact_now) is an
+# analytic advantage computed from LSM cost theory (merge work, Bentley-Saxe
+# amortization, stall urgency, probe relief) and f_theta is the DQN acting as a
+# learned residual. The residual's final layer is zero-initialized so the
+# initial policy IS the analytic policy; RESIDUAL_WEIGHT_DECAY pulls it back
+# toward the prior when data is scarce. Default off for comparability.
+ANALYTIC_PRIOR = os.environ.get("RL_ANALYTIC_PRIOR", "0") != "0"
+PRIOR_W_STALL = _env_float("RL_PRIOR_W_STALL", 0.8)      # stall-urgency benefit
+PRIOR_W_READ = _env_float("RL_PRIOR_W_READ", 0.4)        # probe-relief benefit
+PRIOR_W_WORK = _env_float("RL_PRIOR_W_WORK", 0.5)        # merge I/O cost
+PRIOR_W_PREMATURE = _env_float("RL_PRIOR_W_PREMATURE", 0.5)  # amortization loss
+PRIOR_CLAMP = _env_float("RL_PRIOR_CLAMP", 2.0)          # |A_analytic| bound
+# L2 weight decay on the residual net (0 preserves legacy optimizer exactly;
+# ~1e-4 recommended when the prior is enabled).
+RESIDUAL_WEIGHT_DECAY = _env_float("RL_RESIDUAL_WEIGHT_DECAY", 0.0)
+
 # Credit assignment. A compaction triggered by `compact_now` completes
 # asynchronously, so its I/O cost and its L0/pending relief land several
 # decisions later. N_STEP aggregates the discounted per-step rewards over the

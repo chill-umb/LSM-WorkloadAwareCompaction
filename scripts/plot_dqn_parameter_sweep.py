@@ -86,39 +86,80 @@ def parameter_from_dir(path: Path) -> Optional[float]:
     return int(value) if value.is_integer() else value
 
 
-def action_counts(run_dir: Path) -> Dict[str, int]:
-    rows = load_jsonl(run_dir / "rl" / "agent" / "rl_compaction_io.jsonl")
-    counts: Counter[str] = Counter()
+def _rows_by_level(rows: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+    """Group metrics rows per agent. Multi-level runs tag each row with its
+    level; legacy single-level rows carry level=None and ARE the L0 agent, so
+    they merge into level 0."""
+    by_level: Dict[int, List[Dict[str, Any]]] = {}
     for row in rows:
-        action = row.get("output", {}).get("action_name", "unknown")
-        counts[action] += 1
-    return dict(counts)
+        level = row.get("level")
+        key = 0 if level is None else int(level)
+        by_level.setdefault(key, []).append(row)
+    return by_level
 
 
-def rl_training_summary(run_dir: Path) -> Dict[str, float]:
+def rl_agent_summary(run_dir: Path) -> Dict[str, float]:
+    """Per-agent training/behavior summary.
+
+    Multi-level runs interleave one metrics row per level per decision; naive
+    whole-file aggregates mix six agents' streams (e.g. `epsilon_last` becomes
+    whichever level logged last — typically the rarest deep level). The primary
+    series here is the L0 agent — present at every decision point and the agent
+    that drives stall behavior — with per-level columns alongside.
+    """
     rows = load_jsonl(run_dir / "rl" / "agent" / "rl_compaction_metrics.jsonl")
-    if not rows:
-        return {
-            "rl_decision_steps": 0.0,
-            "epsilon_first": 0.0,
-            "epsilon_last": 0.0,
-            "epsilon_avg": 0.0,
-            "reward_avg": 0.0,
-            "reward_last": 0.0,
-            "loss_last": 0.0,
-        }
-    eps = [float(row.get("epsilon", 0.0)) for row in rows]
-    rewards = [float(row.get("reward", 0.0)) for row in rows]
-    losses = [float(row.get("loss", 0.0)) for row in rows if row.get("loss") is not None]
-    return {
-        "rl_decision_steps": float(len(rows)),
-        "epsilon_first": eps[0],
-        "epsilon_last": eps[-1],
-        "epsilon_avg": sum(eps) / len(eps),
-        "reward_avg": sum(rewards) / len(rewards),
-        "reward_last": rewards[-1],
-        "loss_last": losses[-1] if losses else 0.0,
+    out: Dict[str, float] = {
+        "rl_decision_steps": 0.0,   # L0 stream length ≈ number of decisions
+        "rl_level_rows_total": float(len(rows)),
+        "rl_levels_observed": 0.0,
+        "epsilon_first": 0.0,
+        "epsilon_last": 0.0,
+        "epsilon_avg": 0.0,
+        "reward_avg": 0.0,
+        "reward_last": 0.0,
+        "loss_last": 0.0,
+        "rl_action_compact_now": 0.0,        # L0 agent only
+        "rl_action_do_nothing": 0.0,         # L0 agent only
+        "rl_action_compact_now_total": 0.0,  # all levels
+        "rl_action_do_nothing_total": 0.0,   # all levels
     }
+    if not rows:
+        return out
+
+    by_level = _rows_by_level(rows)
+    out["rl_levels_observed"] = float(len(by_level))
+    primary = by_level.get(0) or by_level[sorted(by_level)[0]]
+
+    eps = [float(r.get("epsilon", 0.0)) for r in primary]
+    rewards = [float(r.get("reward", 0.0)) for r in primary]
+    losses = [float(r.get("loss", 0.0)) for r in primary if r.get("loss") is not None]
+    out.update(
+        rl_decision_steps=float(len(primary)),
+        epsilon_first=eps[0],
+        epsilon_last=eps[-1],
+        epsilon_avg=sum(eps) / len(eps),
+        reward_avg=sum(rewards) / len(rewards),
+        reward_last=rewards[-1],
+        loss_last=losses[-1] if losses else 0.0,
+    )
+
+    for level, level_rows in sorted(by_level.items()):
+        counts: Counter[str] = Counter(
+            r.get("action_name", "unknown") for r in level_rows
+        )
+        level_eps = [float(r.get("epsilon", 0.0)) for r in level_rows]
+        level_rewards = [float(r.get("reward", 0.0)) for r in level_rows]
+        out[f"l{level}_steps"] = float(len(level_rows))
+        out[f"l{level}_epsilon_last"] = level_eps[-1]
+        out[f"l{level}_reward_avg"] = sum(level_rewards) / len(level_rewards)
+        out[f"l{level}_compact_now"] = float(counts.get("compact_now", 0))
+        out[f"l{level}_do_nothing"] = float(counts.get("do_nothing", 0))
+        out["rl_action_compact_now_total"] += counts.get("compact_now", 0)
+        out["rl_action_do_nothing_total"] += counts.get("do_nothing", 0)
+        if level == 0 or (0 not in by_level and level == sorted(by_level)[0]):
+            out["rl_action_compact_now"] = float(counts.get("compact_now", 0))
+            out["rl_action_do_nothing"] = float(counts.get("do_nothing", 0))
+    return out
 
 
 def collect_run(
@@ -153,11 +194,7 @@ def collect_run(
         improvement = pct_improvement(base, candidate, mode)
         row[f"rl_{name}_improvement_pct"] = improvement
 
-    counts = action_counts(run_dir)
-    row["rl_action_compact_now"] = counts.get("compact_now", 0)
-    row["rl_action_do_nothing"] = counts.get("do_nothing", 0)
-    row["rl_action_unknown"] = counts.get("unknown", 0)
-    row.update(rl_training_summary(run_dir))
+    row.update(rl_agent_summary(run_dir))
     return row
 
 
@@ -180,9 +217,17 @@ def write_csv(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     rows = list(rows)
     if not rows:
         return
+    # Union of keys across rows: per-level columns (l0_*, l1_*, ...) can vary
+    # per run when trees reach different depths.
     fieldnames = list(rows[0].keys())
+    seen = set(fieldnames)
+    for row in rows[1:]:
+        for key in row:
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, restval=0)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -311,10 +356,11 @@ def plot_all(plt: Any, out_dir: Path, rows: List[Dict[str, Any]]) -> None:
         "RL Behavior vs DQN Exploration Decay",
         "Count / epsilon",
         (
-            ("rl_action_compact_now", "compact_now actions"),
-            ("rl_action_do_nothing", "do_nothing actions"),
-            ("epsilon_last", "final epsilon"),
-            ("reward_avg", "average reward"),
+            ("rl_action_compact_now", "L0 compact_now actions"),
+            ("rl_action_do_nothing", "L0 do_nothing actions"),
+            ("rl_action_compact_now_total", "compact_now (all levels)"),
+            ("epsilon_last", "L0 final epsilon"),
+            ("reward_avg", "L0 average reward"),
         ),
     )
 
