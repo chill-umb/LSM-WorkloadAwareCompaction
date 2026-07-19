@@ -103,7 +103,15 @@ scripts/experiment_runner.sh \
 # ---- 2. Pressure precondition ----
 echo
 echo "== Step 2/3: pressure precondition =="
-if ! "$PYTHON_BIN" scripts/check_pressure.py --leveled "$BASELINE_CACHE"; then
+if [[ ! -f scripts/check_pressure.py ]]; then
+  echo "error: scripts/check_pressure.py is missing on this machine — sync it" >&2
+  echo "before running (the pressure gate cannot be evaluated without it)." >&2
+  exit 2
+fi
+check_rc=0
+"$PYTHON_BIN" scripts/check_pressure.py --leveled "$BASELINE_CACHE" || check_rc=$?
+if [[ "$check_rc" -eq 1 ]]; then
+  # Genuine verdict: NONE.
   if [[ "$PRESSURE_FORCE" == "1" ]]; then
     echo "[pressure] verdict NONE but PRESSURE_FORCE=1 — continuing anyway."
   else
@@ -114,6 +122,12 @@ if ! "$PYTHON_BIN" scripts/check_pressure.py --leveled "$BASELINE_CACHE"; then
     echo "PRESSURE_FORCE=1 to override."
     exit 1
   fi
+elif [[ "$check_rc" -ne 0 ]]; then
+  # The check itself failed (bad paths, malformed data) — this is NOT a
+  # pressure verdict; do not proceed on unvalidated ground.
+  echo "Aborting: pressure check errored (exit $check_rc) — fix the check" >&2
+  echo "environment before running the RL arm." >&2
+  exit 2
 fi
 
 # ---- 3. Full paired run (leveled reused) ----
