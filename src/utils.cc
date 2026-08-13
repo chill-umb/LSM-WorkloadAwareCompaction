@@ -26,6 +26,9 @@ void PrintExperimentalSetup(std::unique_ptr<DBEnv> &env,
     PrintColumn("cmpt_sty", colWidth, buffer);  // Compaction style
     PrintColumn("cmpt_pri", colWidth, buffer);  // Compaction priority
     PrintColumn("T", smallColWidth, buffer);    // Size ratio
+    PrintColumn("L0_cmp", colWidth, buffer);    // L0 compaction trigger
+    PrintColumn("L0_slow", colWidth, buffer);   // L0 slowdown trigger
+    PrintColumn("L0_stop", colWidth, buffer);   // L0 stop trigger
     PrintColumn("P", colWidth, buffer);         // Buffer size in pages
     PrintColumn("B", colWidth, buffer);         // Entries per page
     PrintColumn("E", colWidth, buffer);         // Entry size
@@ -39,6 +42,9 @@ void PrintExperimentalSetup(std::unique_ptr<DBEnv> &env,
     PrintColumn(env->compaction_style, colWidth, buffer);
     PrintColumn(env->compaction_pri, colWidth, buffer);
     PrintColumn(env->size_ratio, smallColWidth, buffer);
+    PrintColumn(env->level0_file_num_compaction_trigger, colWidth, buffer);
+    PrintColumn(env->level0_slowdown_writes_trigger, colWidth, buffer);
+    PrintColumn(env->level0_stop_writes_trigger, colWidth, buffer);
     PrintColumn(env->buffer_size_in_pages, colWidth, buffer);
     PrintColumn(env->entries_per_page, colWidth, buffer);
     PrintColumn(env->entry_size, colWidth, buffer);

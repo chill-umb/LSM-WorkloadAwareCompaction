@@ -23,6 +23,7 @@ import time
 
 import config
 import multilevel
+from candidate import CandidateController
 from agent import DQNAgent
 from metrics import MetricsTracker
 from reward import StateRewardProcessor
@@ -33,6 +34,7 @@ _io_log_lock = threading.Lock()
 # Serializes multi-level message handling across client reconnects/connections
 # so the shared processor's prev-state bookkeeping stays consistent.
 _ml_lock = threading.Lock()
+_candidate_lock = threading.Lock()
 
 
 def _write_io_log(
@@ -78,16 +80,26 @@ def handle_multilevel_message(
     actions = []
     handled = []
     # The processor is shared across connections (so reconnects don't reset
-    # normalizer scales / prev-state); the lock keeps each message's
-    # process -> observe -> advance sequence atomic.
+    # normalizer scales / prev-state), and _ml_lock keeps its prev-state
+    # bookkeeping consistent. It is held only around the processor calls, not
+    # around action selection: the forward passes are per-agent work and
+    # holding one global lock across all of them made the response latency
+    # scale with the number of populated levels.
     with _ml_lock:
         decisions = ml_processor.process(msg)
-        for d in decisions:
-            agent = pool.get(d.level)
-            action = agent.observe(d.state, d.reward, done, d.valid_actions)
-            actions.append(action)
+
+    for d in decisions:
+        agent = pool.get(d.level)
+        # dt_discount, not dt_seconds: a level that emptied and came back spans
+        # the whole gap, which is what the SMDP discount has to see.
+        action = agent.observe(d.state, d.reward, done, d.valid_actions,
+                               d.prior, d.dt_discount, d.executed_action)
+        actions.append(action)
+        handled.append((d, action, agent))
+
+    with _ml_lock:
+        for d, action, _agent in handled:
             ml_processor.advance(d, action, g_pending)
-            handled.append((d, action, agent))
 
     # Compact separators are load-bearing: the C++ ParseIntArrayField needle
     # requires "actions":[ with no whitespace. json.dumps' default ": " made
@@ -100,7 +112,20 @@ def handle_multilevel_message(
         diagnostics = {
             "level": d.level,
             "n_step": config.N_STEP,
+            "credit_horizon_ms": config.CREDIT_HORIZON_MS,
+            "credit_lag_s": agent.last_credit_lag,
             "finalized_returns": agent.last_returns,
+            "dt_seconds": d.dt_seconds,
+            "dt_discount": d.dt_discount,
+            "chosen_action": action,
+            # executed_action is the outcome of the PREVIOUS decision, so it
+            # pairs with prev_chosen_action, not with chosen_action.
+            "executed_action": d.executed_action,
+            "prev_chosen_action": d.prev_chosen_action,
+            "prev_action_overridden": d.raw.get("prev_action_overridden"),
+            "defer_count": d.raw.get("defer_count"),
+            "analytic_advantage": agent.last_prior_advantage,
+            "residual_advantage": agent.last_residual_advantage,
         }
         _write_io_log(
             io_log, agent.step, {"level": d.level, **d.raw}, d.reward,
@@ -119,13 +144,15 @@ def handle_multilevel_message(
             reward_components=d.components,
             done=done,
             level=d.level,
+            diagnostics=diagnostics,
         )
         agent.request_training()
 
 
 def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker, io_log,
                   pool: "multilevel.AgentPool" = None,
-                  ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
+                  ml_processor: "multilevel.MultiLevelProcessor" = None,
+                  candidate_controller: CandidateController = None) -> None:
     """Handle one persistent C++ client connection."""
     buf = ""
     processor = StateRewardProcessor()
@@ -150,6 +177,21 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+
+                if (int(msg.get("version", 2) or 2) >= 3 and
+                        candidate_controller is not None):
+                    with _candidate_lock:
+                        response_obj = candidate_controller.handle(msg)
+                        diagnostics = dict(candidate_controller.last_diagnostics)
+                    conn.sendall((json.dumps(response_obj, separators=(",", ":")) +
+                                  "\n").encode("utf-8"))
+                    _write_io_log(
+                        io_log, candidate_controller.step, msg,
+                        candidate_controller.last_reward,
+                        diagnostics.get("reward_components", {}),
+                        diagnostics.get("selected_action", 0), diagnostics,
+                    )
                     continue
 
                 if "levels" in msg and pool is not None:
@@ -203,12 +245,20 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
     except Exception as exc:
         print(f"[server] client error: {exc}", file=sys.stderr)
     finally:
+        # A disconnect ends the episode. Without this, every agent's open
+        # credit windows are dropped, which on a run this short is a
+        # meaningful slice of the collected experience.
+        if pool is not None:
+            for level in pool.levels():
+                pool.get(level).flush_pending()
+        agent.flush_pending()
         conn.close()
 
 
 def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_log,
                pool: "multilevel.AgentPool" = None,
-               ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
+               ml_processor: "multilevel.MultiLevelProcessor" = None,
+               candidate_controller: CandidateController = None) -> None:
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
@@ -227,6 +277,8 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
         if pool is not None:
             pool.close_all()
             pool.save_all()
+        if candidate_controller is not None:
+            candidate_controller.save(config.MODEL_SAVE_PATH + ".candidate.pt")
         tracker.close()
         io_log.close()
         srv.close()
@@ -246,7 +298,8 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
             break
         t = threading.Thread(
             target=handle_client,
-            args=(conn, agent, tracker, io_log, pool, ml_processor),
+            args=(conn, agent, tracker, io_log, pool, ml_processor,
+                  candidate_controller),
             daemon=True,
             name="rl-client",
         )
@@ -265,20 +318,32 @@ def main() -> None:
 
     agent = DQNAgent()
 
-    if os.path.exists(config.MODEL_SAVE_PATH):
+    # Resuming is opt-in. The headline experiment is a cold online run: the
+    # research claim is adaptation with no prior workload knowledge, so loading
+    # weights trained on the same workload would answer a different question.
+    if (config.RESUME or config.EVAL_MODE) and os.path.exists(config.MODEL_SAVE_PATH):
         try:
             agent.load(config.MODEL_SAVE_PATH)
             print(f"[server] loaded checkpoint from {config.MODEL_SAVE_PATH} (step={agent.step})")
         except Exception as exc:
             print(f"[server] could not load checkpoint: {exc}", file=sys.stderr)
 
+    print(f"[server] exploration={config.EXPLORATION} "
+          f"decay_steps={config.EXPLORATION_DECAY_STEPS} "
+          f"prior={'on' if config.ANALYTIC_PRIOR else 'off'} "
+          f"credit_horizon_ms={config.CREDIT_HORIZON_MS} "
+          f"gamma_per_sec={config.GAMMA_PER_SEC} "
+          f"eval_mode={config.EVAL_MODE}")
+
     pool = multilevel.AgentPool()
     # One processor for the whole server lifetime: client reconnects must not
     # reset adaptive normalizer scales or per-level prev-state bookkeeping.
     ml_processor = multilevel.MultiLevelProcessor()
+    candidate_controller = CandidateController()
     tracker = MetricsTracker()
     io_log = open(config.IO_LOG_PATH, "a")
-    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool, ml_processor)
+    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool, ml_processor,
+               candidate_controller)
 
 
 if __name__ == "__main__":

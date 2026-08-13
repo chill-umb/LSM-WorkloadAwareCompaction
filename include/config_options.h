@@ -313,7 +313,12 @@ void configOptions(std::unique_ptr<DBEnv> &env, Options *options,
   if (env->IsRocksDBStatEnabled()) {
     options->statistics->set_stats_level(rocksdb::StatsLevel::kAll);
   } else {
-    options->statistics->set_stats_level(rocksdb::StatsLevel::kDisableAll);
+    // The experiment's amplification definitions use logical ticker counts
+    // (SST probes, iterator skips, and per-run seeks). Keep tickers enabled
+    // even when the verbose RocksDB statistics dump is disabled; timers and
+    // histograms remain off to retain the lightweight default.
+    options->statistics->set_stats_level(
+        rocksdb::StatsLevel::kExceptHistogramOrTimers);
   }
 
   rocksdb::PerfLevel perf_level = rocksdb::PerfLevel::kDisable;

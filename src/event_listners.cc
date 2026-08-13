@@ -1,4 +1,5 @@
 #include <atomic>
+#include <chrono>
 #include <iostream>
 
 #include "event_listners.h"
@@ -17,9 +18,18 @@ struct ExperimentTelemetry {
   std::atomic<uint64_t> l0_compactions_completed{0};
   std::atomic<uint64_t> stall_events{0};
   std::atomic<uint64_t> stop_events{0};
+  std::atomic<uint64_t> stall_duration_micros{0};
+  std::atomic<uint64_t> stall_started_micros{0};
 };
 
 ExperimentTelemetry telemetry;
+
+uint64_t SteadyMicros() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 uint64_t ApproximateFlushBytes(const FlushJobInfo &fji) {
   const auto &props = fji.table_properties;
@@ -40,6 +50,8 @@ void ResetExperimentTelemetry() {
   telemetry.l0_compactions_completed = 0;
   telemetry.stall_events = 0;
   telemetry.stop_events = 0;
+  telemetry.stall_duration_micros = 0;
+  telemetry.stall_started_micros = 0;
   compaction_complete = false;
 }
 
@@ -52,6 +64,12 @@ ExperimentTelemetrySnapshot GetExperimentTelemetrySnapshot() {
   snapshot.l0_compactions_completed = telemetry.l0_compactions_completed.load();
   snapshot.stall_events = telemetry.stall_events.load();
   snapshot.stop_events = telemetry.stop_events.load();
+  snapshot.stall_duration_micros = telemetry.stall_duration_micros.load();
+  const uint64_t started = telemetry.stall_started_micros.load();
+  if (started != 0) {
+    const uint64_t now = SteadyMicros();
+    if (now >= started) snapshot.stall_duration_micros += now - started;
+  }
   return snapshot;
 }
 
@@ -134,5 +152,18 @@ void CompactionsListner::OnStallConditionsChanged(const WriteStallInfo &info) {
   }
   if (info.condition.cur == WriteStallCondition::kStopped) {
     telemetry.stop_events.fetch_add(1);
+  }
+  if (info.condition.prev == WriteStallCondition::kNormal &&
+      info.condition.cur != WriteStallCondition::kNormal) {
+    uint64_t expected = 0;
+    telemetry.stall_started_micros.compare_exchange_strong(expected,
+                                                            SteadyMicros());
+  } else if (info.condition.prev != WriteStallCondition::kNormal &&
+             info.condition.cur == WriteStallCondition::kNormal) {
+    const uint64_t started = telemetry.stall_started_micros.exchange(0);
+    const uint64_t now = SteadyMicros();
+    if (started != 0 && now >= started) {
+      telemetry.stall_duration_micros.fetch_add(now - started);
+    }
   }
 }

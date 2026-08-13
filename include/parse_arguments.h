@@ -17,6 +17,21 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
   args::ValueFlag<int> size_ratio_cmd(
       group1, "T", "The size ratio of the LSM-tree [def: 10]",
       {'T', "size_ratio"});
+  args::ValueFlag<int> num_levels_cmd(
+      group1, "num_levels", "Number of LSM levels [def: 10]",
+      {"num_levels"});
+  args::ValueFlag<int> l0_compaction_trigger_cmd(
+      group1, "l0_compaction_trigger",
+      "Number of L0 files that makes compaction due [def: size_ratio]",
+      {"l0_compaction_trigger"});
+  args::ValueFlag<int> l0_slowdown_trigger_cmd(
+      group1, "l0_slowdown_trigger",
+      "Number of L0 files that slows writes [def: size_ratio - 1]",
+      {"l0_slowdown_trigger"});
+  args::ValueFlag<int> l0_stop_trigger_cmd(
+      group1, "l0_stop_trigger",
+      "Number of L0 files that stops writes [def: size_ratio]",
+      {"l0_stop_trigger"});
   args::ValueFlag<int> buffer_size_in_pages_cmd(
       group1, "P", "Number of pages in memory buffer [def: 512]",
       {'P', "buffer_size_in_pages"});
@@ -33,9 +48,14 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
       group1, "file_to_memtable_size_ratio",
       "Ratio between files and memtable [def: 1]",
       {'f', "file_to_memtable_size_ratio"});
-  args::ValueFlag<long> file_size_cmd(group1, "file_size",
-                                      "Size of one SST file [def: 256 KB]",
-                                      {'F', "file_size"});
+  args::ValueFlag<uint64_t> file_size_cmd(
+      group1, "file_size",
+      "Target size of one SST file in bytes [def: memory buffer size]",
+      {'F', "file_size"});
+  args::ValueFlag<uint64_t> level_base_cmd(
+      group1, "level_base",
+      "Maximum bytes for the first leveled level [def: target file size]",
+      {"level_base"});
   args::ValueFlag<int> compaction_pri_cmd(
       group1, "compaction_pri",
       "[Compaction priority: 1 for kMinOverlappingRatio, 2 for "
@@ -91,6 +111,17 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
       "Max concurrent background compaction/flush jobs [def: 1]",
       {"max_background_jobs"});
 
+  args::ValueFlag<uint64_t> soft_pending_limit_mb_cmd(
+      group1, "soft_pending_limit_mb",
+      "Slow writes once pending compaction bytes exceed this many MB "
+      "[def: 0 = disabled]",
+      {"soft_pending_limit_mb"});
+  args::ValueFlag<uint64_t> hard_pending_limit_mb_cmd(
+      group1, "hard_pending_limit_mb",
+      "Stop writes once pending compaction bytes exceed this many MB "
+      "[def: 0 = disabled]",
+      {"hard_pending_limit_mb"});
+
   try {
     parser.ParseCLI(argc, argv);
   } catch (args::Help &) {
@@ -114,9 +145,33 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
                                 : env->clear_system_cache;
   env->size_ratio =
       size_ratio_cmd ? args::get(size_ratio_cmd) : env->size_ratio;
+  env->num_levels = num_levels_cmd ? args::get(num_levels_cmd) : env->num_levels;
   env->level0_slowdown_writes_trigger = env->size_ratio - 1;
   env->level0_stop_writes_trigger = env->size_ratio;
   env->level0_file_num_compaction_trigger = env->size_ratio;
+  // Compatibility is intentionally ordered this way: -T continues to imply
+  // the historical coupled values, while any explicit L0 option overrides
+  // only its own threshold. Baseline sweeps can therefore vary all four knobs
+  // independently without changing old command lines.
+  if (l0_compaction_trigger_cmd) {
+    env->level0_file_num_compaction_trigger =
+        args::get(l0_compaction_trigger_cmd);
+  }
+  if (l0_slowdown_trigger_cmd) {
+    env->level0_slowdown_writes_trigger = args::get(l0_slowdown_trigger_cmd);
+  }
+  if (l0_stop_trigger_cmd) {
+    env->level0_stop_writes_trigger = args::get(l0_stop_trigger_cmd);
+  }
+  if (env->size_ratio <= 1 || env->num_levels < 2 ||
+      env->level0_file_num_compaction_trigger == 0 ||
+      env->level0_slowdown_writes_trigger == 0 ||
+      env->level0_stop_writes_trigger == 0) {
+    std::cerr << "size ratio must be > 1, num_levels must be >= 2, and L0 thresholds must be positive "
+                 "(or negative where RocksDB supports disabling a threshold)"
+              << std::endl;
+    return 1;
+  }
 
   env->buffer_size_in_pages = buffer_size_in_pages_cmd
                                   ? args::get(buffer_size_in_pages_cmd)
@@ -132,6 +187,8 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
   env->is_total_timer = enable_total_time_cmd ? args::get(enable_total_time_cmd)
                                               : env->is_total_timer;
   env->SetBufferSize(buffer_size_cmd ? args::get(buffer_size_cmd) : 0);
+  env->SetTargetFileSizeBase(file_size_cmd ? args::get(file_size_cmd) : 0);
+  env->SetMaxBytesForLevelBase(level_base_cmd ? args::get(level_base_cmd) : 0);
   env->file_to_memtable_size_ratio =
       file_to_memtable_size_ratio_cmd
           ? args::get(file_to_memtable_size_ratio_cmd)
@@ -157,6 +214,15 @@ int parse_arguments(int argc, char *argv[], std::unique_ptr<DBEnv> &env) {
   env->max_background_jobs = max_background_jobs_cmd
                                 ? args::get(max_background_jobs_cmd)
                                 : env->max_background_jobs;
+  constexpr uint64_t kMiB = 1024ULL * 1024ULL;
+  env->soft_pending_compaction_bytes_limit =
+      soft_pending_limit_mb_cmd
+          ? args::get(soft_pending_limit_mb_cmd) * kMiB
+          : env->soft_pending_compaction_bytes_limit;
+  env->hard_pending_compaction_bytes_limit =
+      hard_pending_limit_mb_cmd
+          ? args::get(hard_pending_limit_mb_cmd) * kMiB
+          : env->hard_pending_compaction_bytes_limit;
   if (db_path_cmd) {
     DBEnv::kDBPath = args::get(db_path_cmd);
   }

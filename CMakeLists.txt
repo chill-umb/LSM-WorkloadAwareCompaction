@@ -30,7 +30,14 @@ add_subdirectory(lib/rocksdb)
 
 add_executable(db_runner ${SOURCES})
 
-target_include_directories(db_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
+# The RocksDB source root is on the path so the runner can reach the RL
+# compaction hooks (db/compaction/rl_compaction_telemetry.h) — specifically
+# SetRLDrainMode, which the end-of-run drain needs in order to settle both arms
+# through the same leveled invariant.
+target_include_directories(db_runner PRIVATE
+	${CMAKE_SOURCE_DIR}/include
+	${CMAKE_SOURCE_DIR}/lib/rocksdb
+)
 
 target_link_libraries(db_runner
 	PRIVATE

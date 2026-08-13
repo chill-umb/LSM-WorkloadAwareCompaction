@@ -2,6 +2,11 @@
 
 This project develops a **workload-aware compaction trigger policy** for LSM-tree based storage engines (RocksDB). Rather than relying on static, threshold-based compaction triggers, we use a **reinforcement learning agent** that observes the current workload pattern and LSM-tree state to decide when and how to trigger compaction — with the goal of reducing write amplification, read amplification, and space amplification across diverse workloads.
 
+For the complete project description, implementation history, corrected and
+invalidated results, current protocol-v3 architecture, and remaining validation
+work, see
+[`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`](PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md).
+
 ## Usage
 
 All common tasks are handled by `scripts/manage.sh`:
@@ -70,7 +75,11 @@ RocksDB_parser.
                                           [def: 1]
         
         -F[file_size],
-        --file_size=[file_size]           Size of one SST file [def: 256 KB]
+        --file_size=[file_size]           Target SST file size in bytes
+                                          [def: memory buffer size]
+
+        --level_base=[level_base]         Maximum bytes for the first leveled
+                                          level [def: target file size]
         
         -c[compaction_pri],
         --compaction_pri=[compaction_pri] [Compaction priority: 
@@ -125,11 +134,39 @@ RocksDB_parser.
 ### Example
 
 ```bash
-./bin/db_runner --file_size 512 --size_ratio 20 --peroptime 1
+./bin/db_runner --file_size 524288 --level_base 16777216 \
+  --size_ratio 20 --peroptime 1
 ```
 
 This example runs the experiment with:
 
-* SST file size = 512 KB
+* SST file target size = 512 KiB
+* First-level size target = 16 MiB
 * Size ratio = 20
 * Per-operation timing enabled
+
+### Candidate-aware protocol v3
+
+The current controller selects an exact SST candidate under measured space and
+latency envelopes. The reproducible workflow is:
+
+```bash
+scripts/run_baseline_grid.sh
+RL_BASELINE_SLO_PATH=results/baseline_grid/<run>/baseline_slo.json \
+  scripts/run_repeated_experiment.sh
+scripts/evaluate_paired.py --results results/repeated/<workload>
+```
+
+The independent L0 options are `--l0_compaction_trigger`,
+`--l0_slowdown_trigger`, and `--l0_stop_trigger`; `-T` retains the historical
+coupled defaults for old commands. See
+[`docs/candidate_aware_protocol_v3.md`](docs/candidate_aware_protocol_v3.md) for
+the protocol, attribution, reward, safety mask, and acceptance criteria.
+
+### Scaled db_bench and RL sweep
+
+The clean, db_bench-only 10M–50M workflow is under
+[`scripts/dbbench_pipeline/`](scripts/dbbench_pipeline/README.md). It contains
+separate numbered scripts for dependencies, the RocksDB build, the db_bench
+build, experiments, and graphs. Both regular and RL arms use db_bench's
+internal seeded generator; no workload files are needed.

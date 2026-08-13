@@ -21,6 +21,7 @@ class MetricsTracker:
         self._rewards = defaultdict(lambda: deque(maxlen=self.WINDOW))
         self._losses = defaultdict(lambda: deque(maxlen=self.WINDOW))
         self._actions = defaultdict(lambda: deque(maxlen=self.WINDOW))
+        self._overrides = defaultdict(lambda: deque(maxlen=self.WINDOW))
         self._start = time.time()
         self._lock = threading.Lock()
 
@@ -37,6 +38,7 @@ class MetricsTracker:
         reward_components: Optional[dict] = None,
         done: bool = False,
         level: Optional[int] = None,
+        diagnostics: Optional[dict] = None,
     ) -> None:
         with self._lock:
             rewards = self._rewards[level]
@@ -45,6 +47,22 @@ class MetricsTracker:
             self._actions[level].append(action)
             if loss is not None:
                 losses.append(loss)
+
+            diagnostics = diagnostics or {}
+            # Disagreement between what the agent chose and what RocksDB
+            # executed is the headline health metric: a high rate means the
+            # policy is not actually in control, which is the condition that
+            # made every previous result uninterpretable.
+            #
+            # executed_action reports the outcome of the PREVIOUS decision, so
+            # it must be compared with prev_chosen_action. Comparing it against
+            # the action chosen in this message is off by one decision and
+            # inflates the rate.
+            executed = diagnostics.get("executed_action")
+            previous = diagnostics.get("prev_chosen_action")
+            if executed is not None and previous is not None:
+                self._overrides[level].append(
+                    1 if int(executed) != int(previous) else 0)
 
             action_name = config.ACTION_NAMES.get(action, "?")
             field_names = (
@@ -71,15 +89,29 @@ class MetricsTracker:
                 "raw_state": raw_state or {},
                 "reward_components": reward_components or {},
                 "done": done,
+                "executed_action": diagnostics.get("executed_action"),
+                "override_rate_100": (
+                    round(sum(self._overrides[level]) / len(self._overrides[level]), 4)
+                    if self._overrides[level] else None),
+                "compact_rate_100": round(
+                    sum(self._actions[level]) / len(self._actions[level]), 4),
+                "dt_seconds": diagnostics.get("dt_seconds"),
+                "defer_count": diagnostics.get("defer_count"),
+                "credit_lag_s": diagnostics.get("credit_lag_s"),
+                "analytic_advantage": diagnostics.get("analytic_advantage"),
+                "residual_advantage": diagnostics.get("residual_advantage"),
             }
             self._log_file.write(json.dumps(record) + "\n")
             self._log_file.flush()
 
             if step % 50 == 0:
                 tag = f"L{level}" if level is not None else "L0*"
+                override = record["override_rate_100"]
                 print(
                     f"[step={step:6d}|{tag:<4}] act={action_name:<12} "
                     f"r={reward:+.3f} avg_r={record['avg_reward_100']:+.3f} "
+                    f"compact={record['compact_rate_100']:.2f} "
+                    f"override={'n/a' if override is None else f'{override:.2f}'} "
                     f"eps={epsilon:.3f} loss={record['avg_loss_100'] or 'N/A'}"
                 )
 

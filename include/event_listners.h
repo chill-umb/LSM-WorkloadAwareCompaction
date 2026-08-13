@@ -23,6 +23,9 @@ struct ExperimentTelemetrySnapshot {
   uint64_t l0_compactions_completed = 0;
   uint64_t stall_events = 0;
   uint64_t stop_events = 0;
+  // Wall-clock time spent in either delayed or stopped write-stall state.
+  // Includes an in-progress stall at snapshot time.
+  uint64_t stall_duration_micros = 0;
 };
 
 void ResetExperimentTelemetry();

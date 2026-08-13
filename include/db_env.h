@@ -1,6 +1,7 @@
 #ifndef DB_ENV_H_
 #define DB_ENV_H_
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -55,6 +56,8 @@ private:
 
   // buffer size in bytes
   size_t buffer_size_ = 0;         // [M]
+  uint64_t target_file_size_base_ = 0;  // [F], 0 follows buffer size
+  uint64_t max_bytes_for_level_base_ = 0;  // [level_base], 0 follows file size
   bool rocksdb_stats_ = false;     // [stat]
   bool perf_stats_ = false;        // [perf]
   bool iostat_stats_ = false;      // [iostat]
@@ -77,6 +80,12 @@ public:
   uint64_t GetBlockSize() const { return entries_per_page * entry_size; }
 
   void SetBufferSize(size_t buffer_size) { buffer_size_ = buffer_size; }
+  void SetTargetFileSizeBase(uint64_t bytes) {
+    target_file_size_base_ = bytes;
+  }
+  void SetMaxBytesForLevelBase(uint64_t bytes) {
+    max_bytes_for_level_base_ = bytes;
+  }
   void SetRocksDBStat(bool value) { rocksdb_stats_ = value; }
   void SetPerfStat(bool value) { perf_stats_ = value; }
   void SetIOStat(bool value) { iostat_stats_ = value; }
@@ -95,10 +104,16 @@ public:
   bool IsDestroyDatabaseEnabled() const { return destroy_database_; }
   bool IsShowProgressEnabled() const { return show_progress_bar_; }
 
-  long GetTargetFileSizeBase() const { return GetBufferSize(); }
+  uint64_t GetTargetFileSizeBase() const {
+    return target_file_size_base_ != 0 ? target_file_size_base_
+                                       : GetBufferSize();
+  }
 
   // control maximum total data size for level base (i.e. level 1)
-  uint64_t GetMaxBytesForLevelBase() const { return GetTargetFileSizeBase(); }
+  uint64_t GetMaxBytesForLevelBase() const {
+    return max_bytes_for_level_base_ != 0 ? max_bytes_for_level_base_
+                                          : GetTargetFileSizeBase();
+  }
 
 #pragma region[DBOptions]
   bool create_if_missing = true;
@@ -222,9 +237,14 @@ public:
   // another for flush
   int max_background_jobs = 1;
 
-  // No pending compaction anytime, try and see
-  int soft_pending_compaction_bytes_limit = 0;
-  int hard_pending_compaction_bytes_limit = 0;
+  // Write-stall thresholds on outstanding compaction debt. RocksDB treats 0 as
+  // DISABLED (its own defaults are 64 GB soft / 256 GB hard), so with these at
+  // zero accumulated debt never slows writes down and the only stall path left
+  // is L0 file count. That makes deferring compaction free, which is precisely
+  // the thing a compaction-trigger experiment must not do. Settable in MB via
+  // --soft_pending_limit_mb / --hard_pending_limit_mb.
+  uint64_t soft_pending_compaction_bytes_limit = 0;
+  uint64_t hard_pending_compaction_bytes_limit = 0;
 
   // turn off periodic compactions
   uint64_t periodic_compaction_seconds = 0;

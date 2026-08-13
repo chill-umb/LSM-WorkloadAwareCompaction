@@ -57,18 +57,38 @@ __pycache__/
 scripts/*
 !scripts/
 !scripts/*.sh
-!scripts/compare_experiment_metrics.py
-!scripts/plot_dqn_parameter_sweep.py
+# Everything in scripts/ is source, not output. Listing individual .py files
+# here meant new analysis scripts were silently ignored and never reached
+# another machine — which is why run_pressure_experiment.sh carries a check for
+# a missing check_pressure.py. Generated artefacts are covered by the
+# __pycache__ and *.jsonl rules above.
+!scripts/*.py
+!scripts/dbbench_pipeline/
+!scripts/dbbench_pipeline/*.sh
+!scripts/dbbench_pipeline/*.py
+!scripts/dbbench_pipeline/*.md
 
 # results
 results/*
 
 # workloads
+# Generated workload files are large and reproducible from their specs, so they
+# stay out of the repo. The SPECS are source and must travel with it, otherwise
+# a fresh machine cannot regenerate the workloads at all.
 *.txt
 *.json
+!workload_specs/**/*.json
+!workload_specs/**/*.md
 
 # Documentations
 /docs/
 
 # Some sketchy executable file
 linux-x64
+
+build-bench/
+
+# Databases created by scripts/run_vanilla_sweep.sh. Kept on the project
+# partition rather than /tmp, which is tmpfs here — a multi-GB db_bench run
+# there would sit in RAM and measure page-cache speed instead of disk.
+.dbbench/

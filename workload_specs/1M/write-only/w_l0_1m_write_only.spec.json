@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../lib/tectonic/workload_schema.json",
+  "character_set": "alphanumeric",
+  "sections": [
+    {
+      "groups": [
+        {
+          "inserts": {
+            "op_count": 150000,
+            "key": { "uniform": { "len": 16 } },
+            "val": { "uniform": { "len": 48 } }
+          }
+        }
+      ]
+    },
+    {
+      "groups": [
+        {
+          "inserts": {
+            "op_count": 850000,
+            "key": { "uniform": { "len": 16 } },
+            "val": { "uniform": { "len": 48 } }
+          }
+        }
+      ]
+    }
+  ]
+}
