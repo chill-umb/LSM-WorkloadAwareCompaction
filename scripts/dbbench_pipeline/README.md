@@ -30,7 +30,8 @@ Scans return exactly 32 records. Each measured process ends with
 `waitforcompaction`, then a separate manual-compaction process supplies the
 garbage-free space reference without contaminating measured write
 amplification. Regular-first and RL-first ordering alternates across the
-matrix to reduce systematic warm-machine bias.
+matrix to reduce systematic warm-machine bias. WAL is explicitly disabled in
+both arms (`DISABLE_WAL=1`) so WAL I/O does not enter the storage comparison.
 
 Important limitations:
 

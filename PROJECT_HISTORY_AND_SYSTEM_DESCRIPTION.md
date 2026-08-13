@@ -965,6 +965,7 @@ The pipeline defaults are:
 | Background jobs | 2 |
 | Block cache | 8 MiB |
 | Bloom bits/key | 10 |
+| Write-ahead log | Disabled in both arms |
 | L0 compact/slow/stop | 4 / 20 / 36 |
 | Compaction priority | direct RocksDB enum 3, `kMinOverlappingRatio` |
 | Soft/hard pending-byte limits | 64 / 128 GiB |

@@ -66,6 +66,10 @@ done
 for ratio in $SIZE_RATIOS; do
   (( ratio > 1 )) || { echo "T must be greater than one: $ratio" >&2; exit 1; }
 done
+[[ "$DISABLE_WAL" =~ ^[01]$ ]] || {
+  echo "DISABLE_WAL must be 0 or 1; got: $DISABLE_WAL" >&2
+  exit 1
+}
 (( LOAD_PERCENT > 0 && LOAD_PERCENT < 100 )) || {
   echo "LOAD_PERCENT must be between 1 and 99." >&2
   exit 1
@@ -127,6 +131,7 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'MAX_BACKGROUND_JOBS=%q\n' "$MAX_BACKGROUND_JOBS"
   printf 'BLOCK_CACHE_SIZE=%q\n' "$BLOCK_CACHE_SIZE"
   printf 'BLOOM_BITS=%q\n' "$BLOOM_BITS"
+  printf 'DISABLE_WAL=%q\n' "$DISABLE_WAL"
   printf 'L0_COMPACTION_TRIGGER=%q\n' "$L0_COMPACTION_TRIGGER"
   printf 'L0_SLOWDOWN_TRIGGER=%q\n' "$L0_SLOWDOWN_TRIGGER"
   printf 'L0_STOP_TRIGGER=%q\n' "$L0_STOP_TRIGGER"
@@ -157,6 +162,7 @@ COMMON=(
   --threads="$THREADS"
   --key_size="$KEY_SIZE"
   --value_size="$VALUE_SIZE"
+  --disable_wal="$DISABLE_WAL"
   --compression_type=none
   --write_buffer_size="$WRITE_BUFFER_SIZE"
   --target_file_size_base="$TARGET_FILE_SIZE"
