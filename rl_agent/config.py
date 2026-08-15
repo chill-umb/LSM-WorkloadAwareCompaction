@@ -227,21 +227,6 @@ SHARED_TRUNK = _env_bool("RL_SHARED_TRUNK", True)
 # which is never sensible and dominates early-run cost. 0 disables masking.
 ML_MIN_COMPACT_SCORE = _env_float("RL_ML_MIN_COMPACT_SCORE", 0.10)
 
-# Protocol v3 candidate-aware controller. These dimensions are protocol
-# constants: every observation is padded and masked, so changing the number of
-# pickable candidates does not change the network shape.
-CANDIDATE_MAX_PER_LEVEL = _env_int("RL_CANDIDATE_MAX_PER_LEVEL", 8)
-CANDIDATE_STATE_DIM = 24
-CANDIDATE_FEATURE_DIM = 18
-CANDIDATE_HIDDEN_DIM = _env_int("RL_CANDIDATE_HIDDEN_DIM", HIDDEN_DIM)
-CANDIDATE_MIN_REPLAY_SIZE = _env_int(
-    "RL_CANDIDATE_MIN_REPLAY_SIZE", MIN_REPLAY_SIZE)
-CANDIDATE_IO_CAP_FRACTION = _env_float("RL_CANDIDATE_IO_CAP_FRACTION", 0.10)
-BASELINE_SLO_PATH = os.environ.get("RL_BASELINE_SLO_PATH", "baseline_slo.json")
-SLO_MIN_SAMPLES = _env_int("RL_SLO_MIN_SAMPLES", 30)
-SLO_HYSTERESIS_WINDOWS = _env_int("RL_SLO_HYSTERESIS_WINDOWS", 3)
-SAFETY_MASK = _env_bool("RL_SAFETY_MASK", True)
-
 # Multi-level stall attribution: when enabled, the global stall/stop penalty is
 # scaled by the level's own fullness, so a near-empty deep level is not charged
 # for an L0-caused stall (lightweight version of per-level stall attribution).

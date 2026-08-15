@@ -1,10 +1,15 @@
 # LSM Workload Aware Compaction
 
-This project develops a **workload-aware compaction trigger policy** for LSM-tree based storage engines (RocksDB). Rather than relying on static, threshold-based compaction triggers, we use a **reinforcement learning agent** that observes the current workload pattern and LSM-tree state to decide when and how to trigger compaction — with the goal of reducing write amplification, read amplification, and space amplification across diverse workloads.
+This project develops a **workload-aware compaction trigger policy** for
+LSM-tree based storage engines (RocksDB). Rather than relying only on static
+thresholds, a **reinforcement learning agent** observes workload and tree state
+and decides whether and which level should trigger compaction. RocksDB's native
+compaction picker continues to choose the SST files. The goal is to reduce
+write, read, and space amplification across diverse workloads.
 
 For the complete project description, implementation history, corrected and
-invalidated results, current protocol-v3 architecture, and remaining validation
-work, see
+invalidated results, current trigger-only architecture, and remaining
+validation work, see
 [`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`](PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md).
 
 ## Usage
@@ -145,23 +150,19 @@ This example runs the experiment with:
 * Size ratio = 20
 * Per-operation timing enabled
 
-### Candidate-aware protocol v3
+### Trigger-only RL compaction
 
-The current controller selects an exact SST candidate under measured space and
-latency envelopes. The reproducible workflow is:
+The RL controller changes only the compaction trigger. For every observed
+level it returns `defer` or `compact`; when it authorizes `compact`, RocksDB's
+native leveled picker selects the input SSTs using the configured
+`CompactionPri`, then performs its normal overlap expansion, correctness checks,
+merge, output formation, and background execution.
 
-```bash
-scripts/run_baseline_grid.sh
-RL_BASELINE_SLO_PATH=results/baseline_grid/<run>/baseline_slo.json \
-  scripts/run_repeated_experiment.sh
-scripts/evaluate_paired.py --results results/repeated/<workload>
-```
-
-The independent L0 options are `--l0_compaction_trigger`,
-`--l0_slowdown_trigger`, and `--l0_stop_trigger`; `-T` retains the historical
-coupled defaults for old commands. See
-[`docs/candidate_aware_protocol_v3.md`](docs/candidate_aware_protocol_v3.md) for
-the protocol, attribution, reward, safety mask, and acceptance criteria.
+The experiment path is deliberately pinned to protocol v2. Protocol v3's
+exact-SST candidate selection was a rejected prototype and has been removed
+from both the Python controller and the RocksDB picker. The protocol-v2 contract
+and the archived protocol-v3 decision are recorded in
+[`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`](PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md).
 
 ### Scaled db_bench and RL sweep
 

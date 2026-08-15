@@ -60,37 +60,6 @@ def v2_message(levels, done=False, interval_micros=50_000):
     }
 
 
-def v3_message(done=False, epoch=7):
-    candidate = {
-        "snapshot_epoch": epoch, "source_file_number": 101,
-        "source_level": 0, "output_level": 1, "source_bytes": 1 << 20,
-        "expanded_source_bytes": 2 << 20, "expanded_source_files": [101, 102],
-        "overlap_files": [201], "overlap_bytes": 3 << 20,
-        "estimated_read_bytes": 5 << 20, "estimated_write_bytes": 5 << 20,
-        "overlap_ratio": 1.5, "num_entries": 1000, "num_deletions": 100,
-        "compensated_size": 2 << 20, "projected_source_fullness": 0.0,
-        "projected_output_fullness": 0.8, "empties_source_level": True,
-        "priority_rank": 0, "conflict": False,
-    }
-    msg = v2_message([level_entry(0, files=5, default_needed=True)], done=done)
-    msg.update({"version": 3, "snapshot_epoch": epoch,
-                "physical_sst_bytes": 20 << 20,
-                "live_logical_bytes": 18 << 20,
-                "user_logical_write_bytes": 1 << 20,
-                "point_sst_probes": 1000,
-                "scan_returned_entries": 1000,
-                "scan_internal_skipped": 50,
-                "scan_sorted_run_seeks": 10,
-                "stall_duration_micros": 0,
-                "get_latency_count": 1000, "get_latency_avg_ns": 1000,
-                "get_latency_p95_ns": 2000, "scan_latency_count": 100,
-                "scan_latency_avg_ns": 3000, "scan_latency_p95_ns": 5000,
-                "write_latency_count": 100, "write_latency_avg_ns": 4000,
-                "write_latency_p95_ns": 6000})
-    msg["levels"][0]["candidates"] = [candidate]
-    return msg
-
-
 class ServerHarness:
     """Runs server.py as a subprocess against a temporary socket and log set."""
 
@@ -183,29 +152,6 @@ def send_and_receive(client, message):
 
 class TestSocketEndToEnd(unittest.TestCase):
 
-    def test_v3_candidate_response_is_epoch_bound_and_single_action(self):
-        with ServerHarness(RL_EVAL_MODE=1) as server:
-            client = server.connect()
-            epoch = (1 << 63) + 91
-            response = json.loads(send_and_receive(client, v3_message(epoch=epoch)))
-            self.assertGreater(response["decision_id"], 0)
-            self.assertEqual(response["snapshot_epoch"], epoch)
-            self.assertEqual(len(response["actions"]), 1)
-            self.assertLessEqual(sum(response["actions"]), 1)
-            if response["actions"][0]:
-                self.assertEqual(response["candidate_file_numbers"][0], 101)
-            client.close()
-
-    def test_v3_reconnect_preserves_decision_ids(self):
-        with ServerHarness(RL_EVAL_MODE=1) as server:
-            first = server.connect()
-            first_id = json.loads(send_and_receive(first, v3_message()))["decision_id"]
-            first.close()
-            second = server.connect()
-            second_id = json.loads(send_and_receive(second, v3_message()))["decision_id"]
-            second.close()
-            self.assertGreater(second_id, first_id)
-
     def test_response_is_parseable_by_the_cpp_parser(self):
         """The C++ ParseIntArrayField scans for the literal `"actions"` then
         skips whitespace to ':' and '['. Assert on raw bytes: a silent
@@ -221,6 +167,8 @@ class TestSocketEndToEnd(unittest.TestCase):
             actions = [int(x) for x in match.group(1).split(",") if x.strip()]
             self.assertEqual(len(actions), 2, "one action per requested level")
             self.assertTrue(all(a in (0, 1) for a in actions))
+            self.assertNotIn("candidate_file_numbers", json.loads(raw),
+                             "the trigger policy must never select SST files")
             client.close()
 
     def test_action_order_matches_request_order(self):

@@ -49,14 +49,6 @@ fi
   exit 1
 }
 
-if [[ "$RL_SAFETY_MASK" == "1" ]]; then
-  [[ -n "$RL_BASELINE_SLO_PATH" && -f "$RL_BASELINE_SLO_PATH" ]] || {
-    echo "RL_SAFETY_MASK=1 requires an existing RL_BASELINE_SLO_PATH." >&2
-    exit 1
-  }
-  RL_BASELINE_SLO_PATH="$(cd "$(dirname "$RL_BASELINE_SLO_PATH")" && pwd)/$(basename "$RL_BASELINE_SLO_PATH")"
-fi
-
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS; do
   [[ "$integer" =~ ^[0-9]+$ ]] || {
     echo "Workload sizes and T values must be positive integers: $integer" >&2
@@ -140,8 +132,6 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'THREADS=%q\n' "$THREADS"
   printf 'ALTERNATE_ARM_ORDER=%q\n' "$ALTERNATE_ARM_ORDER"
   printf 'RL_PROTOCOL_VERSION=%q\n' "$RL_PROTOCOL_VERSION"
-  printf 'RL_SAFETY_MASK=%q\n' "$RL_SAFETY_MASK"
-  printf 'RL_BASELINE_SLO_PATH=%q\n' "$RL_BASELINE_SLO_PATH"
   printf 'RL_ALLOW_DEFER=%q\n' "$RL_ALLOW_DEFER"
   printf 'RL_MAX_DEFER_STEPS=%q\n' "$RL_MAX_DEFER_STEPS"
   printf 'RL_MAX_DEFER_STEPS_L0=%q\n' "$RL_MAX_DEFER_STEPS_L0"
@@ -226,9 +216,6 @@ start_server() {  # $1=result dir, $2=policy seed, $3=decay steps
     RL_METRICS_LOG_PATH="$result_dir/metrics.jsonl" \
     RL_IO_LOG_PATH="$result_dir/io.jsonl" \
     RL_SEED="$policy_seed" \
-    RL_PROTOCOL_VERSION="$RL_PROTOCOL_VERSION" \
-    RL_SAFETY_MASK="$RL_SAFETY_MASK" \
-    RL_BASELINE_SLO_PATH="$RL_BASELINE_SLO_PATH" \
     RL_ALLOW_DEFER="$RL_ALLOW_DEFER" \
     RL_MAX_DEFER_STEPS="$RL_MAX_DEFER_STEPS" \
     RL_MAX_DEFER_STEPS_L0="$RL_MAX_DEFER_STEPS_L0" \
@@ -315,7 +302,8 @@ run_arm() {  # $1=size in millions, $2=T, $3=regular|rl
     printf 'arm=%s\n' "$arm"
     printf 'dbbench_seed=%s\n' "$DBBENCH_SEED"
     printf 'policy_seed=%s\n' "$policy_seed"
-    printf 'rl_safety_mask=%s\n' "$RL_SAFETY_MASK"
+    printf 'rl_protocol_version=%s\n' "$RL_PROTOCOL_VERSION"
+    printf 'rl_file_picker=rocksdb_native\n'
     printf 'rl_exploration_decay_steps=%s\n' "$decay_steps"
   } > "$result_dir/metadata.env"
   git rev-parse HEAD > "$result_dir/git_revision.txt" 2>/dev/null || true
@@ -328,7 +316,6 @@ run_arm() {  # $1=size in millions, $2=T, $3=regular|rl
   if [[ "$arm" == "rl" ]]; then
     env RL_COMPACTION_SOCKET_PATH="$SERVER_SOCKET" \
       RL_COMPACTION_SOCKET_TIMEOUT_MS="$RL_SOCKET_TIMEOUT_MS" \
-      RL_PROTOCOL_VERSION="$RL_PROTOCOL_VERSION" \
       "${command[@]}" > "$result_dir/run.log" 2>&1
     status=$?
   else

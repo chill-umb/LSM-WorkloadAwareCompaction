@@ -23,7 +23,6 @@ import time
 
 import config
 import multilevel
-from candidate import CandidateController
 from agent import DQNAgent
 from metrics import MetricsTracker
 from reward import StateRewardProcessor
@@ -34,7 +33,6 @@ _io_log_lock = threading.Lock()
 # Serializes multi-level message handling across client reconnects/connections
 # so the shared processor's prev-state bookkeeping stays consistent.
 _ml_lock = threading.Lock()
-_candidate_lock = threading.Lock()
 
 
 def _write_io_log(
@@ -151,8 +149,7 @@ def handle_multilevel_message(
 
 def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker, io_log,
                   pool: "multilevel.AgentPool" = None,
-                  ml_processor: "multilevel.MultiLevelProcessor" = None,
-                  candidate_controller: CandidateController = None) -> None:
+                  ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
     """Handle one persistent C++ client connection."""
     buf = ""
     processor = StateRewardProcessor()
@@ -177,21 +174,6 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
-
-                if (int(msg.get("version", 2) or 2) >= 3 and
-                        candidate_controller is not None):
-                    with _candidate_lock:
-                        response_obj = candidate_controller.handle(msg)
-                        diagnostics = dict(candidate_controller.last_diagnostics)
-                    conn.sendall((json.dumps(response_obj, separators=(",", ":")) +
-                                  "\n").encode("utf-8"))
-                    _write_io_log(
-                        io_log, candidate_controller.step, msg,
-                        candidate_controller.last_reward,
-                        diagnostics.get("reward_components", {}),
-                        diagnostics.get("selected_action", 0), diagnostics,
-                    )
                     continue
 
                 if "levels" in msg and pool is not None:
@@ -257,8 +239,7 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
 
 def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_log,
                pool: "multilevel.AgentPool" = None,
-               ml_processor: "multilevel.MultiLevelProcessor" = None,
-               candidate_controller: CandidateController = None) -> None:
+               ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
@@ -277,8 +258,6 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
         if pool is not None:
             pool.close_all()
             pool.save_all()
-        if candidate_controller is not None:
-            candidate_controller.save(config.MODEL_SAVE_PATH + ".candidate.pt")
         tracker.close()
         io_log.close()
         srv.close()
@@ -298,8 +277,7 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
             break
         t = threading.Thread(
             target=handle_client,
-            args=(conn, agent, tracker, io_log, pool, ml_processor,
-                  candidate_controller),
+            args=(conn, agent, tracker, io_log, pool, ml_processor),
             daemon=True,
             name="rl-client",
         )
@@ -339,11 +317,9 @@ def main() -> None:
     # One processor for the whole server lifetime: client reconnects must not
     # reset adaptive normalizer scales or per-level prev-state bookkeeping.
     ml_processor = multilevel.MultiLevelProcessor()
-    candidate_controller = CandidateController()
     tracker = MetricsTracker()
     io_log = open(config.IO_LOG_PATH, "a")
-    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool, ml_processor,
-               candidate_controller)
+    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool, ml_processor)
 
 
 if __name__ == "__main__":

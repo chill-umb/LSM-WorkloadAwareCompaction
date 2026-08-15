@@ -1,11 +1,25 @@
 # LSM Workload-Aware Compaction: Complete Project Description, History, and Status
 
-**Document status:** consolidated project record  
-**Repository state inspected:** 2026-08-13 (Asia/Dhaka)  
+**Document status:** consolidated project record
+
+**Repository state inspected:** 2026-08-15 (Asia/Dhaka)
+
 **Scope:** root repository, modified RocksDB submodule, Python RL controller,
 workload tooling, experiment pipelines, project-authored Markdown documents,
 the two bundled research papers, and the relevant upstream RocksDB and Tectonic
 documentation
+
+> **2026-08-15 scope correction (authoritative):** the project implements an
+> RL compaction **trigger**, not an RL file-picking policy. Protocol v3's
+> candidate-aware/exact-SST controller was an experimental scope deviation. It
+> produced a poor 1M/T=2 smoke result and was then rejected and removed. The
+> active protocol is trigger-only v2: the learner returns compact/defer per
+> level, and RocksDB's native `LevelCompactionPicker` selects all files. Any
+> later statement in this document calling protocol v3, candidate selection,
+> exact-file leases, a parametric candidate DQN, or its SLO mask "current"
+> should be read as a historical description of the 2026-08-12 prototype. This
+> correction supersedes those labels while preserving the details as project
+> history.
 
 This document explains what the project is, why it exists, how the current
 system works, how the implementation evolved, what was fixed, what was added,
@@ -15,11 +29,12 @@ to interpret the older documents in `docs/`.
 
 The repository contains several generations of design documentation. Those
 documents accurately describe the system at the time they were written, but a
-statement such as "the RL controller only controls L0" is no longer true of the
-current protocol-v3 implementation. This record therefore uses the following
+statement such as "the RL controller selects an SST" describes only the retired
+protocol-v3 prototype, not the current implementation. This record therefore
+uses the following
 labels:
 
-- **Current:** implemented in the working tree inspected on 2026-08-13.
+- **Current:** implemented in the working tree inspected on 2026-08-15.
 - **Historical:** true of an earlier implementation or experiment.
 - **Superseded:** deliberately replaced by a later design.
 - **Proposed:** a research direction or implementation plan, not current code.
@@ -52,16 +67,14 @@ unacceptable regression in another:
 - Get, scan, and aggregate-write average and p95 latency;
 - write-stall duration.
 
-The present design is a **candidate-aware, physics-informed, parametric-action
-DQN**. It starts cold, with no pretrained weights or checkpoint. RocksDB exposes
-up to eight real, pickable SST candidates per level, including the exact
-clean-cut expansion and next-level overlap RocksDB would use. The controller may
-defer or select one exact candidate. A zero-initialized learned residual begins
-on top of an analytic LSM cost prior, so the first decision is useful without
-claiming any offline training. A versioned, single-use action lease binds the
-decision to the tree snapshot and file number. If that candidate is stale or
-blocked, RocksDB fails the action closed rather than silently compacting a
-different file or level.
+The present design is a **trigger-only, physics-informed, two-action DQN**. It
+starts cold, with no pretrained weights or checkpoint. The controller observes
+global and per-level tree/workload metrics and returns `defer` or `compact` for
+each reported level. At most one level authorization is actuated at a time. The
+authorization contains no SST identity. RocksDB's configured native compaction
+priority selects the source SSTs and its ordinary leveled-compaction machinery
+performs clean-cut expansion, overlap discovery, conflict checks, merge
+semantics, output formation, and background execution.
 
 The system retains RocksDB's compaction correctness machinery. The RL policy
 does **not** implement merge semantics, key-version dropping, output file
@@ -76,13 +89,12 @@ The project currently has two experiment surfaces:
    operation workloads at size ratios `T=2`, `T=6`, and `T=10`, for both regular
    RocksDB and the RL compaction style.
 
-The candidate-aware code and targeted tests exist. The final preregistered
-candidate-aware evaluation does **not** yet exist: there is no current script
-that performs the full tuned leveled grid, produces a workload-specific
-`baseline_slo.json`, and runs at least ten paired repeats with confidence
-interval acceptance checks. Consequently, the current controller is an
-implemented research prototype, not yet an experimentally accepted final
-policy.
+The exact-candidate code was removed after the failed smoke result. The current
+scaled pipeline sweeps regular RocksDB and the trigger-only RL controller, but
+the formal repeated evaluation still does **not** exist: there is no current
+script that runs at least ten paired repeats with confidence-interval acceptance
+checks. Consequently, the current trigger controller remains an implemented
+research prototype, not yet an experimentally accepted final policy.
 
 ## 2. The underlying LSM-tree problem
 
@@ -114,7 +126,7 @@ The scaled `db_bench` pipeline uses RocksDB's direct flag names and deliberately
 sets the L0 trigger, slowdown, and stop thresholds to `4`, `20`, and `36` for
 every value of `T`.
 
-### 2.2 Why timing and file choice matter
+### 2.2 Why trigger timing and native file choice matter
 
 Compacting early can reduce the run count and remove obsolete data, improving
 reads and space. It can also rewrite data before enough garbage or useful
@@ -124,8 +136,10 @@ increase lookup/scan work, and eventually stall writes. File choice matters
 because two files at the same level can have very different overlap, deletion
 density, compensated size, and projected effect on the output level.
 
-This is why the current project no longer treats compaction as a level-only
-binary decision. The candidate is part of the action.
+The project intentionally learns only the timing/level decision. File choice
+still matters, but the experiment holds that mechanism to RocksDB's mature,
+configured `CompactionPri` heuristic. This isolates the research variable: the
+RL action is level-scoped `defer`/`compact`, never an SST identity.
 
 ### 2.3 The four amplification metrics
 
@@ -150,7 +164,7 @@ physical I/O without changing the number of logical runs exposed by the tree.
 The formal comparator is a **preregistered, workload-specific tuned leveled
 baseline**, not the historical `T=10` configuration and not whichever regular
 arm happens to look best after seeing RL results. Baseline selection is supposed
-to occur before inspecting candidate-aware results:
+to occur before inspecting trigger-policy results:
 
 1. sweep independently controlled size ratio, L0 thresholds, and compaction
    priority;
@@ -195,7 +209,8 @@ offline-RL pretraining. Those are not part of the current formal experiment.
 
 ### 3.3 What remains RocksDB's responsibility
 
-The current controller can select a source SST and timing. It does not replace:
+The current controller can select compaction timing and a source level. It
+cannot select a source SST. It does not replace:
 
 - RocksDB's snapshot/sequence-number correctness;
 - clean-cut expansion across files sharing user-key boundaries;
@@ -203,7 +218,8 @@ The current controller can select a source SST and timing. It does not replace:
 - conflict detection with running compactions;
 - compaction input iteration and merge semantics;
 - tombstone/version elision rules;
-- output level choice for the selected leveled candidate;
+- RocksDB's source-file priority and selection;
+- output level choice for the native leveled compaction;
 - output SST creation and background scheduling;
 - explicit maintenance such as manual, marked, periodic, TTL, or drain work.
 
@@ -232,8 +248,8 @@ with white-box analysis to reduce the sample requirement.
 
 This project adopts the online-adaptation motivation but takes a different
 engineering path. Instead of first replacing RocksDB's level structure with
-FLSM, it incrementally gives an external learner authority over RocksDB's real
-leveled candidate picker. The physics-informed prior similarly combines known
+FLSM, it gives an external learner authority only over the leveled trigger.
+The physics-informed prior similarly combines known
 LSM structure with learned residual behavior, but it is not a reimplementation
 of RusKey's full system.
 
@@ -255,8 +271,8 @@ The regular comparator uses RocksDB's leveled compaction. The current scaled
 pipeline sets direct `db_bench --compaction_pri=3`, which is RocksDB enum
 `kMinOverlappingRatio`. RocksDB's own documentation describes this priority as
 friendly to write amplification; compensated size also makes files containing
-many tombstones more attractive. Candidate-aware protocol v3 exposes the
-regular RocksDB priority rank rather than discarding this mature heuristic.
+many tombstones more attractive. The trigger-only controller reuses this
+heuristic unchanged rather than learning a second file-selection policy.
 
 ## 5. Repository and runtime architecture
 
@@ -274,20 +290,18 @@ root wrapper (db_runner) or modified db_bench
              |
              v
 modified RocksDB / RLCompactionPicker
-  ├── telemetry and candidate preview
-  ├── versioned action lease and exact-file validation
-  └── normal RocksDB compaction execution
+  ├── telemetry and per-level trigger state
+  ├── single-use, level-scoped authorization
+  └── native RocksDB file selection and compaction execution
              |
         Unix socket, newline-delimited JSON
              |
              v
 Python server
-  ├── protocol-v2 compatibility processor
-  └── protocol-v3 CandidateController
-       ├── analytic prior
-       ├── parametric residual DQN
-       ├── replay/training
-       └── optional SLO safety mask
+  └── protocol-v2 multi-level processor
+       ├── analytic trigger prior
+       ├── two-action residual DQN
+       └── replay/training
              |
              v
 metrics, raw logs, policy logs, summaries, and graphs
@@ -297,9 +311,9 @@ The important directories are:
 
 - `include/` and `src/`: the C++ workload wrapper, option parsing, listeners,
   measurement, and experiment JSON;
-- `lib/rocksdb/`: the modified RocksDB checkout containing the picker, client,
-  telemetry, candidate preview, statistics, `db_bench`, and C++ tests;
-- `rl_agent/`: v2 and v3 Python state, reward, model, replay, server, logging,
+- `lib/rocksdb/`: the modified RocksDB checkout containing the trigger picker,
+  client, telemetry, statistics, `db_bench`, and C++ tests;
+- `rl_agent/`: protocol-v2 Python state, reward, model, replay, server, logging,
   and tests;
 - `lib/tectonic/`: the Rust workload generator and its upstream usage docs;
 - `workload_specs/`: current Tectonic specifications and the recorded workload
@@ -322,7 +336,30 @@ Observation cadence and actuation cadence are explicit. Protocol messages carry
 `interval_micros`, allowing rates and SMDP discounting to use real elapsed time
 instead of assuming every decision is separated by a nominal fixed interval.
 
-### 5.3 Current protocol-v3 observation
+### 5.3 Current trigger-only protocol-v2 contract
+
+One request contains global tree/foreground measurements and aggregate
+per-level state. The response is only an ordered array of binary actions:
+
+```text
+0 = defer / do nothing
+1 = authorize a compaction from this level
+```
+
+No request contains pickable SST candidates and no response contains file
+numbers. An authorization is consumed once and passed to
+`PickCompactionFromLevel`; RocksDB then evaluates its current
+`FilesByCompactionPri` ordering and constructs the compaction normally. The
+pipeline pins protocol v2 and the C++ producer is hard-coded to v2, so setting a
+protocol-v3 environment variable cannot restore exact-file selection.
+
+### 5.4–5.8 Historical protocol-v3 prototype (retired)
+
+The subsections below preserve the exact-candidate prototype implemented on
+2026-08-12. They are not descriptions of active code after the 2026-08-15 scope
+correction.
+
+### 5.4 Historical protocol-v3 observation
 
 One request contains global tree/foreground measurements, per-level state, and
 up to eight previewed candidates for each pickable level. The candidate fields
@@ -351,7 +388,7 @@ and conflict state. Protocol-v3 parsing preserves it as an integer. This matters
 because an earlier Python conversion through a floating-point value could round
 large 64-bit epochs, making every otherwise valid action appear stale.
 
-### 5.4 Non-mutating candidate preview
+### 5.5 Historical non-mutating candidate preview
 
 `LevelCompactionPicker::PreviewCompactionCandidates` evaluates real candidate
 files without registering or scheduling a compaction. It uses the same clean-cut
@@ -365,7 +402,7 @@ bytes match. This verifies picker construction, although a full experimental
 comparison of estimated bytes with bytes reported by completed background
 compactions is still required.
 
-### 5.5 Response and action lease
+### 5.6 Historical response and exact-file action lease
 
 The response contains `decision_id`, the unchanged `snapshot_epoch`, and arrays
 of per-level actions and candidate file numbers in request order. Protocol v3
@@ -385,7 +422,7 @@ RocksDB recomputes the epoch and validates the file identity and conflicts. A
 stale or missing candidate returns no compaction and never retargets another
 file.
 
-### 5.6 Authority and bypass reasons
+### 5.7 Authority and bypass reasons
 
 The superseded picker used global booleans such as `parent_pick_allowed_` and a
 global `DeferralExhausted()` answer. That allowed permission granted for one
@@ -408,7 +445,7 @@ ordinary parent picker. Cumulative fallback counters remain visible, and any
 transition affected by fallback, a stale action, a scheduling failure, or
 unattributable execution is excluded from replay.
 
-### 5.7 Completion attribution
+### 5.8 Historical exact-file completion attribution
 
 RocksDB stores decision ID, snapshot epoch, source file, and override reason on
 the `Compaction` object. Per-level state in the next observation reports the
@@ -420,7 +457,11 @@ decision/file identity. This separates four facts that older code conflated:
 3. whether scheduling succeeded;
 4. what compaction actually completed.
 
-## 6. The current learning system
+## 6. Historical protocol-v3 learning system (retired)
+
+Everything in section 6 describes the removed candidate-aware experiment. The
+active learner is the protocol-v2 multi-level binary trigger model documented
+in `docs/multilevel_rl_design.md` and `docs/system_guide.md`.
 
 ### 6.1 Parametric action space
 
@@ -761,9 +802,9 @@ The revised v2 system removed the earlier bimodal failure and saved compaction
 work in 9 of 10 measured pairs. It still did not satisfy the research objective
 because read amplification, scan latency, space, and/or runtime regressed.
 
-### 2026-08-12: candidate-aware protocol v3
+### 2026-08-12: candidate-aware protocol-v3 prototype
 
-The current working tree introduced the major candidate-aware redesign:
+The working tree temporarily introduced a candidate-aware redesign:
 
 - protocol-v3 candidate observations and epoch-bound responses;
 - non-mutating clean-cut candidate preview;
@@ -781,8 +822,8 @@ The current working tree introduced the major candidate-aware redesign:
 - metric-formula, model, mask, reward-conservation, socket, and C++ picker
   tests.
 
-This work is present in the inspected working tree but is newer than the root
-repository's current committed `HEAD`.
+This work was present before the 2026-08-15 correction. It is retained here as
+history and is no longer present in the active implementation.
 
 ### 2026-08-13: clean scaled db_bench workflow
 
@@ -799,6 +840,43 @@ the working tree and replaced for the current scaled use case by:
 This workflow uses `db_bench`'s internal generators, so it has no separate
 workload-generation script.
 
+### 2026-08-15: exact-file policy rejected; trigger-only scope restored
+
+A completed 1M/T=2 smoke pair showed that both arms ran, but protocol v3 was
+clearly harmful:
+
+| Metric | Regular | Candidate v3 | Change |
+| --- | ---: | ---: | ---: |
+| Runtime | 29.97 s | 39.23 s | +31% |
+| Write amplification | 4.55 | 12.46 | +174% |
+| Compaction bytes written | 1.48 GB | 4.77 GB | +223% |
+| Point probes/read | 5.57 | 9.17 | +65% |
+| Sorted-run seeks/scan | 6.50 | 9.29 | +43% |
+| Stall duration | 5.06 s | 9.95 s | +97% |
+
+The server reported no fallback and small socket overhead, while the RocksDB
+log reported 11 epoch validation failures among 58 actuations. This isolated
+the result from a silent-fallback explanation and exposed problems inherent to
+the exact-candidate formulation: action multiplicity favored compaction,
+candidate I/O was insufficiently priced, and a whole-tree epoch made file
+decisions stale.
+
+The more important conclusion was one of project scope: this repository was
+intended to improve RocksDB's compaction **trigger**, not replace its file
+picker. The response was therefore architectural, not a retuning attempt:
+
+- remove the candidate controller, parametric candidate model/configuration,
+  candidate tests, and protocol-v3 server path;
+- remove candidate fields and exact-file parsing from the C++ wire protocol;
+- remove non-mutating candidate-preview and exact-file picker APIs from the
+  modified RocksDB checkout;
+- make every authorization level-scoped and route it through
+  `PickCompactionFromLevel`, which uses RocksDB's configured native priority;
+- hard-pin the experiment pipeline and C++ producer to protocol v2;
+- replace exact-file tests with tests proving native file-priority selection,
+  level isolation, current-state selection, fallback scope, maintenance
+  attribution, budget exhaustion, and exactly-once level actuation.
+
 ## 9. Defect and fix catalogue
 
 The following table consolidates the failure modes documented across the
@@ -807,17 +885,17 @@ context, system guide, workload notes, and current code.
 
 | Area | Failure or risk | Correction | Current status |
 | --- | --- | --- | --- |
-| L0 actuation | `compact_now` only woke the scheduler; the normal picker could still choose nothing. | Force a pick from the authorized level/file path. | Fixed; superseded by exact-file leases. |
+| L0 actuation | `compact_now` only woke the scheduler; the normal picker could still choose nothing. | Force a pick from the authorized level, then invoke RocksDB's native file picker. | Fixed in trigger-only v2. |
 | Fallback | Server failure could be silent, making a leveled run look like RL. | Explicit availability/fallback result, logging, cumulative counter, invalid replay transition. | Fixed. |
 | Protocol JSON | Whitespace in Python output broke the C++ parser and invalidated 81 runs. | Compact output plus tolerant parsing and compatibility socket tests. | Fixed; old runs invalidated. |
-| Epoch identity | Converting a 64-bit epoch through float rounded it and made responses stale. | Exact integer parsing and echoing. | Fixed in v3. |
+| Epoch identity | Converting a 64-bit exact-file epoch through float rounded it and made responses stale. | Exact integer parsing was implemented. | Historical v3-only defect; exact-file epochs are no longer action validators. |
 | DB mutex | Socket/inference under the mutex blocked RocksDB and confounded runtime. | Snapshot/worker architecture; socket work off mutex. | Fixed. |
 | Deferral authority | Due levels could compact through normal policy despite a defer action. | Explicit bounded consent/deferral authority. | Fixed. |
-| Cross-level authority | A global parent unlock for one level could schedule a different level. | Per-level reason and forced path; parent only for maintenance/drain. | Fixed in v3; targeted C++ test exists. |
+| Cross-level authority | A global parent unlock for one level could schedule a different level. | Per-level reason and forced-level path; parent only for maintenance/drain. | Fixed and tested in trigger-only v2. |
 | Exhaustion | Global `DeferralExhausted()` could authorize unrelated work. | Exhausted level receives its own budget lease/path. | Fixed and tested. |
 | Sticky actions | Boolean force state could survive too long, vanish too early, or be reused. | Versioned single-use lease consumed before validation. | Fixed and tested. |
-| Stale candidate | A missing/blocked file might be silently replaced by another pick. | Exact epoch/file validation and fail-closed result. | Fixed and tested. |
-| Decision attribution | Requested action was confused with executed/scheduled action. | Record request, scheduling result, completion result, decision, epoch, file, reason. | Fixed. |
+| Stale candidate | A missing/blocked exact-file action could not survive ordinary tree changes. | Exact-file action mechanism removed; RocksDB selects from current state at actuation. | Retired with protocol v3. |
+| Decision attribution | Requested action was confused with executed/scheduled action. | Record request, scheduling result, completion result, decision, epoch, and reason. | Fixed. |
 | Safety override replay | Samples were labeled with the selected action even when a guard executed another action. | Key transition to executed action; v3 excludes invalid overrides/fallbacks. | Fixed. |
 | Parent compactions | Maintenance work could be attributed to the learner. | Explicit bypass reasons and transition-valid bit. | Fixed. |
 | Interval semantics | Counter deltas covered variable time but were used as if fixed-rate samples. | Carry `interval_micros`; calculate rates and gamma from real elapsed time. | Fixed. |
@@ -889,8 +967,8 @@ corrected 5M balanced workload. The reported means/differences were:
 
 The proper conclusion is narrow: v2 reliably saved compaction work after the
 reward fixes, but purchased it with worse read behavior and other regressions.
-It failed the project objective and motivated candidate-aware control, global
-reward, and hard measured constraints.
+It failed the project objective. It motivated improved trigger rewards and
+constraints; it does not justify transferring RocksDB file selection to RL.
 
 ### 10.4 Corrections and retractions
 
@@ -913,11 +991,13 @@ The rework changelog explicitly retracts or narrows several earlier narratives:
 These corrections are part of the project record and should not be removed from
 future summaries.
 
-### 10.5 Candidate-aware results
+### 10.5 Rejected candidate-aware smoke result
 
-There are no accepted protocol-v3 amplification/latency results in the current
-documentation or working tree. Code completion and unit tests must not be
-reported as performance success.
+The 1M/T=2 result in the 2026-08-15 timeline is the only recorded protocol-v3
+run. It is a negative engineering result, not an accepted policy comparison.
+Protocol v3 was removed after it increased write amplification, logical read
+work, stalls, latency, and runtime. No future experiment in the current project
+should label exact-SST selection as the RL arm.
 
 ## 11. Current db_bench experiment pipeline
 
@@ -927,7 +1007,7 @@ The default matrix is:
 
 - total operations: `10M`, `20M`, `30M`, `40M`, `50M`;
 - size ratios: `T=2`, `T=6`, `T=10`;
-- arms: regular leveled RocksDB and RL protocol v3;
+- arms: regular leveled RocksDB and RL trigger-only protocol v2;
 - total arms: `5 × 3 × 2 = 30`.
 
 `db_bench` generates the database and workload internally. Each arm runs:
@@ -971,10 +1051,10 @@ The pipeline defaults are:
 | Soft/hard pending-byte limits | 64 / 128 GiB |
 | Threads | 1 |
 | Workload seed | 1 |
-| Protocol | 3 |
+| Protocol | 2 (fixed) |
 | L0/deep max deferral | 1 / 50 decisions |
 | Decision/observation interval | 50 / 50 ms |
-| Safety mask | off unless a valid SLO manifest is supplied |
+| File picker | RocksDB native `kMinOverlappingRatio` in both arms |
 
 Thirteen levels are used for every arm because `T=2` needs greater depth at the
 50M scale; varying `T` must not silently vary maximum tree depth.
@@ -1050,106 +1130,88 @@ Current Python tests cover:
 
 - synthetic metric formulas, including Bloom outcomes, scans, writes/deletes,
   and empty scans;
-- zero-initialized residuals and per-level head isolation;
-- variable candidate counts, conflict masks, and at-most-one selection;
-- stale/fallback replay exclusion;
-- global reward conservation and level-drain credit;
-- SLO minimum samples and three-window hysteresis;
 - v2 analytic-prior physics, read-path signals, reward scaling, lifecycle,
   executed-action credit, SMDP discount, shared trunks, exploration, target
   updates, checkpoints, and evaluation mode;
-- protocol v1/v2/v3 compatibility, response ordering, parser shape, reconnect,
-  terminal credit, decision IDs, epoch binding, and single v3 action.
+- protocol-v2 response ordering, parser shape, reconnect, and terminal credit;
+- a socket assertion that the response never contains candidate file numbers.
 
-The RocksDB compaction picker test file contains eight targeted current tests:
+The RocksDB compaction picker test file contains seven targeted current tests:
 
-1. candidate preview matches exact source/overlap files and bytes;
-2. exact-file picking does not retarget a missing candidate;
-3. cross-level lease failure grants no authority elsewhere;
-4. exhausted deferral uses the responsible level's forced path;
-5. a stale epoch fails closed and expires the lease;
-6. maintenance bypass is explicitly attributed;
-7. unavailable-server fallback is level-scoped;
-8. a policy lease actuates exactly once.
+1. an RL level trigger selects the same first source file as RocksDB's native
+   `FilesByCompactionPri` order;
+2. a level authorization grants no authority to another level;
+3. exhausted deferral uses the responsible level's forced path;
+4. actuation selects against current RocksDB state rather than an SST identity;
+5. maintenance bypass is explicitly attributed;
+6. unavailable-server fallback is level-scoped;
+7. a policy level authorization actuates exactly once.
 
-### 13.2 Verification performed while writing this document
-
-On 2026-08-13:
+### 13.2 Verification performed for the 2026-08-15 scope correction
 
 - all shell files in `scripts/dbbench_pipeline/` passed `bash -n`;
-- the graph script and `rl_agent/*.py` passed Python bytecode compilation;
-- 77 Python metric/model/reward/controller tests passed under the repository's
-  existing `.venv` with PyTorch 2.12.0;
-- the nine socket tests could not be executed in the restricted documentation
-  environment because binding a Unix socket returned `EPERM`;
-- the system Python lacked PyTorch, while the project virtual environment had
-  it;
-- the C++ picker tests were inspected but not rebuilt/executed during this
-  documentation task.
-
-These environment limitations do not convert unrun tests into passes. A normal
-development machine should run the socket suite and compiled picker tests after
-building the current RocksDB checkout.
+- the graph script, agent, and Python tests passed bytecode compilation;
+- 69 non-socket Python tests passed in the restricted environment;
+- all 7 Unix-socket end-to-end protocol-v2 tests passed when rerun with local
+  socket binding permitted, for 76 passing Python tests in total;
+- the modified RocksDB library and `db_bench` rebuilt successfully after the
+  exact-file APIs and candidate wire fields were removed;
+- all 7 focused C++ trigger/native-picker tests passed in a Debug test build;
+- the resulting production `librocksdb.so` exports the level-trigger picker
+  and no exact-file or candidate-preview picker symbol.
 
 ### 13.3 End-to-end proofs still required
 
-The plan also calls for deterministic short runs proving that:
+The current design also calls for deterministic short runs proving that:
 
-- one decision schedules no more than one candidate;
+- one decision schedules no more than one level compaction;
 - no deferred level compacts through another level's authorization;
 - every completed compaction maps to a decision or explicit bypass reason;
 - reconnect works under the real C++/Python process pair;
-- previewed I/O estimates match completed compaction files/bytes.
+- the files in every RL-triggered compaction match RocksDB's native picker,
+  with no file identity supplied by Python.
 
-Unit tests cover the core mechanics, but current documentation does not contain
-a fresh protocol-v3 end-to-end run report satisfying all five proofs.
+Unit tests cover the core mechanics, but a fresh trigger-only end-to-end report
+is still required.
 
-## 14. Implementation status against the candidate-aware plan
+## 14. Implementation status after restoring trigger-only scope
 
-| Planned deliverable | Status on 2026-08-13 | Notes |
+| Deliverable | Status on 2026-08-15 | Notes |
 | --- | --- | --- |
 | Independent size ratio and L0 thresholds | **Implemented** | Wrapper flags and direct `db_bench` flags exist. |
 | WAF, point RA, scan RA/seeks, space, latency avg/p95/p99, stall duration | **Implemented** | Exact wrapper JSON; scaled pipeline parses corresponding RocksDB statistics with the space caveat above. |
 | Distinct raw arm/repeat directories, commands, revisions, seeds | **Partially implemented** | Per-arm scaled output exists; there is no repeat loop in that pipeline. |
 | Tuned leveled grid and preregistered selection | **Not currently available** | README/protocol docs reference scripts removed during cleanup. |
-| `baseline_slo.json` generator | **Not currently available** | Safety consumer exists, producer script is absent from the current scripts directory. |
+| `baseline_slo.json` generator | **Not currently available** | The retired v3 safety consumer was removed with the candidate controller. |
 | Per-level authority and explicit reasons | **Implemented** | Picker reasons and forced paths exist. |
-| Versioned exactly-once action leases | **Implemented and unit-tested in C++ source** | Compiled test was not rerun for this document. |
-| Candidate preview and exact-file picker | **Implemented and unit-tested in C++ source** | Completion-byte experimental validation remains. |
-| Protocol v3 with v2 compatibility | **Implemented** | Server dispatches both generations. |
-| Parametric DQN, masks, candidate replay, separate level heads | **Implemented and Python-tested** | Cold zero residual is tested. |
-| Exact-candidate analytic prior | **Implemented** | Research calibration still requires experiments. |
-| One global tree reward with time shaping | **Implemented and Python-tested** | Fallback/stale transitions are excluded. |
-| SLO safety mask | **Implemented and Python-tested** | Inactive in default scaled runs because there is no generated SLO. |
-| C++ picker authority tests | **Implemented in source** | Eight focused tests present. |
-| Protocol/reconnect tests | **Implemented in source** | Nine current socket tests; not runnable in this restricted session. |
-| Ten paired balanced repeats and formal CIs | **Not run for v3** | Required for acceptance. |
-| Read-heavy/write-heavy safety suites | **Not run for v3** | Required for acceptance. |
-| Full frontier and all ablations | **Not run** | Trigger-only, prior-only, unconstrained candidate-aware, and constrained learner results remain to be produced. |
+| Single-use level authorizations | **Implemented and tested in C++ source** | One authorization can schedule at most once. |
+| Native RocksDB file selection | **Implemented and tested in C++ source** | Active picker always calls `PickCompactionFromLevel`; exact-file APIs were removed. |
+| Trigger-only protocol v2 | **Implemented and mandatory** | Python has no candidate controller; C++ emits v2; pipeline pins v2. |
+| Two-action trigger DQN and analytic prior | **Implemented and Python-tested** | Per-level compact/defer learning remains online and cold-start. |
+| C++ picker authority tests | **Implemented in source** | Seven focused trigger/native-picker tests are present. |
+| Protocol/reconnect tests | **Implemented in source** | Current socket tests cover v2 only. |
+| Ten paired balanced repeats and formal CIs | **Not run for current trigger code** | Required for acceptance. |
+| Read-heavy/write-heavy safety suites | **Not run for current trigger code** | Required for acceptance. |
+| Full tuned frontier and trigger ablations | **Not run** | The regular frontier, analytic-prior-only, and learned trigger results remain to be produced. |
 
 ## 15. Current limitations and next work
 
 The immediate research work is not another model redesign. It is completing the
 measurement gate around the implemented design:
 
-1. restore or rewrite a simple baseline-grid runner and SLO selector compatible
-   with the cleaned script layout;
-2. generate a workload-specific tuned leveled frontier without examining v3
-   outcomes;
-3. export and validate `baseline_slo.json`;
-4. add repeats, paired workload seeds, distinct policy seeds, alternating order,
+1. generate a workload-specific tuned leveled frontier without examining RL
+   trigger outcomes;
+2. add repeats, paired workload seeds, distinct policy seeds, alternating order,
    and bootstrap/paired confidence intervals to the current experiment path;
-5. run short control-path attribution tests before expensive sweeps;
-6. verify preview estimates against completed compactions in real logs;
-7. run the balanced acceptance matrix, then read-heavy/write-heavy safety
+3. run short trigger/native-picker control-path tests before expensive sweeps;
+4. audit completed compaction inputs to confirm they were selected by RocksDB;
+5. run the balanced acceptance matrix, then read-heavy/write-heavy safety
    suites;
-8. report the leveled frontier, corrected trigger-only v2, candidate prior-only,
-   unconstrained v3, and constrained v3—not only the best-looking arm.
+6. report the leveled frontier, trigger prior-only ablation, and learned
+   trigger—not only the best-looking arm.
 
 Other current caveats are:
 
-- the scaled pipeline's default run is unconstrained because its safety mask is
-  off;
 - its `space_amplification` is a before/after-full-compaction proxy, not the
   wrapper's exact live-logical formula;
 - it substitutes Put operations for explicit deletes;
@@ -1161,8 +1223,7 @@ Other current caveats are:
 - the repository and RocksDB submodule contain uncommitted working-tree changes,
   so every experiment must record both revisions and preferably a patch or clean
   commit identifying the exact code;
-- candidate-aware performance is unvalidated even though the mechanics are
-  implemented.
+- current trigger-only performance is unvalidated at the 10M–50M scale.
 
 ## 16. Guide to the existing documentation
 
@@ -1171,21 +1232,21 @@ as follows.
 
 | Document | What it contains | How to interpret it now |
 | --- | --- | --- |
-| `README.md` | Wrapper synopsis, option list, v3 and scaled-pipeline links. | Entry page, but some command references are stale after script cleanup. |
+| `README.md` | Wrapper synopsis, trigger-only scope, and scaled-pipeline link. | Current entry page, though some legacy wrapper command references predate script cleanup. |
 | `docs/rl_l0_compaction_technical_spec.md` | Original L0 acceptance/fix specification. | Historical requirements; most mechanics were implemented and later superseded. |
 | `docs/rl_l0_compaction_change_summary.md` | First working L0 implementation and early observations. | Historical v1 record. |
-| `docs/project_technical_overview.md` | Detailed June L0 architecture, files, parameters, artifacts, and early results. | Historical; its L0-only/non-file-selection scope is no longer current. |
+| `docs/project_technical_overview.md` | Detailed June L0 architecture, files, parameters, artifacts, and early results. | Historical L0-only implementation; its non-file-selection boundary remains current. |
 | `docs/rl_agent_structure.md` | Original 14-feature, two-action DQN and protocol. | Historical v1 internals. |
 | `docs/poc_validity_review.md` | Four major validity risks. | Historical audit whose concerns drove the rework. |
 | `docs/l0_reward_attribution_plan.md` | Proposed n-step/Double-DQN attribution correction. | Historical plan; wall-clock and executed-action attribution later went further. |
-| `docs/multilevel_rl_design.md` | Protocol v2, multi-level architecture, parser failure, and 2026-08-01 rework. | Authoritative for v2 mechanics, not current v3 actions. |
-| `docs/physics_informed_rl_architecture.md` | Analytic prior plus learned residual rationale and equations. | Current design lineage; exact v3 candidate prior is newer. |
-| `docs/research_overview_and_roadmap.md` | Research landscape, history through July, and six future directions. | Mix of history and proposals; candidate file selection is now partially implemented. |
+| `docs/multilevel_rl_design.md` | Protocol v2, multi-level architecture, parser failure, and 2026-08-01 rework. | Authoritative trigger-protocol reference. |
+| `docs/physics_informed_rl_architecture.md` | Analytic prior plus learned residual rationale and equations. | Current trigger-model lineage. |
+| `docs/research_overview_and_roadmap.md` | Research landscape, history through July, and six future directions. | Mix of history and proposals; file-selection proposals are outside current scope. |
 | `docs/Refined spec Claude.md` | FLSM/bounded horizontal expansion phased plan. | Proposed long-term structural program, not present code. |
 | `docs/REWORK_CHANGELOG.md` | Detailed Aug. 1–5 audit, fixes, measurements, and corrections. | Essential historical evidence; tick-latency and some conclusions are explicitly retracted/disabled. |
 | `docs/context.md` | Aug. 5 session handoff and then-current diagnosis. | Historical snapshot superseded in part by the Aug. 6 reward diagnosis. |
-| `docs/system_guide.md` | Most complete v2 system explanation, valid ten-pair result, and hard-won rules. | Primary v2 reference; protocol v3 supersedes its trigger-only scope. |
-| `docs/candidate_aware_protocol_v3.md` | Current v3 wire contract, lease, model, reward, mask, and intended gate. | Current design reference; its baseline/repeat script names are absent after cleanup. |
+| `docs/system_guide.md` | Most complete v2 system explanation, valid ten-pair result, and hard-won rules. | Primary trigger-only system reference. |
+| `docs/candidate_aware_protocol_v3.md` | Concise record of the rejected v3 exact-file prototype and its smoke result. | Historical only; explicitly not an experiment guide. |
 | `workload_specs/README.md` | Balanced-workload timing and generator/parser pitfalls. | Current workload-authoring evidence. |
 | `scripts/dbbench_pipeline/README.md` | Numbered 10M–50M workflow and caveats. | Current operational path for the scaled single-run sweep. |
 | `lib/tectonic/README.md`, `lib/tectonic/USAGE.md` | Upstream Tectonic build, commands, spec grammar, expressions, and operations. | Generator reference. |
@@ -1202,12 +1263,12 @@ timeline.
 
 ## 17. Glossary
 
-- **Action lease:** versioned, single-use authorization to actuate one exact
-  candidate for one decision.
+- **Action lease:** single-use authorization to actuate one source level for
+  one trigger decision; it contains no SST identity.
 - **Analytic prior:** hand-derived LSM cost/value estimate added to the learned
   Q residual.
-- **Candidate:** a source SST plus RocksDB's required clean-cut source expansion
-  and next-level overlap.
+- **Candidate:** historical v3 term for a source SST action; not part of the
+  active RL action space.
 - **Clean cut:** expansion needed so a compaction boundary does not split files
   sharing the same user-key boundary.
 - **Compaction debt:** pending background work that has not yet been paid.
@@ -1216,20 +1277,20 @@ timeline.
 - **Deferral:** explicit decision not to compact a due/available level yet.
 - **Drain:** end-of-run completion of outstanding background work so policies
   are compared at a settled state.
-- **Epoch:** hash identifying the structural RocksDB snapshot on which a
-  candidate decision was made.
+- **Epoch:** structural snapshot identifier retained for observation and
+  attribution; it does not bind an RL action to a file.
 - **FLSM:** flexible LSM design from RusKey allowing variable run arrangements
   for cheaper policy transitions; proposed, not implemented here.
 - **L0:** overlapping first disk level, whose run count directly affects point
   and scan search work and write stalls.
 - **Logical probe:** consideration of an SST/table by the read path, including a
   Bloom-filter rejection; independent of whether a physical disk read occurs.
-- **Parametric action DQN:** network scoring action feature vectors, allowing a
-  changing set of SST candidates rather than fixed action IDs.
+- **Parametric action DQN:** historical protocol-v3 model removed with
+  candidate file selection.
 - **Protocol v1:** historical L0-only state and binary action.
-- **Protocol v2:** historical/current-ablation batched per-level binary
-  compact/defer protocol, with RocksDB choosing the file.
-- **Protocol v3:** current exact-candidate, epoch-bound protocol.
+- **Protocol v2:** current batched per-level binary compact/defer protocol,
+  with RocksDB choosing the files.
+- **Protocol v3:** retired exact-candidate prototype; no longer executable.
 - **Residual:** learned correction `f_theta` added to prior `b`.
 - **SLO manifest:** measurements, options, and allowed latency/space envelopes
   from a preregistered tuned leveled baseline; contains no learned weights.
@@ -1248,17 +1309,18 @@ The project has progressed through four distinct technical systems:
 2. an L0-only binary DQN proof of concept;
 3. a multi-level trigger/defer controller with physics-informed residual
    learning;
-4. the current candidate-aware, exact-SST, constrained protocol-v3 controller.
+4. a short-lived candidate-aware protocol-v3 prototype, rejected after its
+   smoke test, followed by restoration of trigger-only protocol v2.
 
 The most important achievement is not a favorable benchmark number. It is that
 the project repaired the measurement and control path sufficiently to know what
 an RL decision actually did: the metrics now represent the intended
 amplifications, the workload parser produces the intended scans, the controller
 does not block under the DB mutex, authority is level-scoped, one response can
-actuate only one epoch-bound candidate, fallbacks and maintenance are explicit,
-and invalid transitions are not learned from.
+actuate only one level authorization, fallbacks and maintenance are explicit,
+and RocksDB retains sole file-selection authority.
 
-The most important remaining fact is equally clear: protocol v3 has not yet
-passed the formal repeated evaluation. The next credible milestone is a
-preregistered tuned baseline plus repeated, paired, constrained candidate-aware
+The most important remaining fact is equally clear: the restored trigger-only
+controller has not yet passed the formal repeated evaluation. The next credible
+milestone is a preregistered tuned baseline plus repeated, paired trigger-policy
 results satisfying the amplification, space, latency, and stall criteria above.

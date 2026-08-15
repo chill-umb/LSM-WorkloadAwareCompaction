@@ -22,7 +22,9 @@ scripts/dbbench_pipeline/04_generate_graphs.sh \
 
 Edit [config.sh](config.sh), or override its variables on the command line.
 The defaults run 10M, 20M, 30M, 40M, and 50M total operations at `T=2,6,10`
-for both regular leveled RocksDB and protocol-v3 RL: 30 experiment arms.
+for both regular leveled RocksDB and trigger-only RL: 30 experiment arms. RL
+decides whether and which level may compact; RocksDB's native leveled picker
+with `kMinOverlappingRatio` chooses the SST input files in both arms.
 
 Each total is divided into a 29% `filluniquerandom` load and a 71% `mixgraph`
 phase. The mixed phase is 52.1127% Gets, 15.4930% Puts, and 32.3944% scans.
@@ -39,8 +41,9 @@ Important limitations:
   `mixgraph` has no delete action.
 - This is one run per arm. It generates descriptive graphs, not confidence
   intervals. Use repeats before making statistical claims.
-- The RL safety mask defaults to off. Set `RL_SAFETY_MASK=1` only together with
-  a valid `RL_BASELINE_SLO_PATH`.
+- Protocol v3 candidate/SST selection is not part of this experiment. The
+  pipeline pins `RL_PROTOCOL_VERSION=2` and does not permit an environment
+  override.
 - Put `DB_ROOT` on the actual device being evaluated. Do not use `/tmp` when it
   is backed by RAM.
 

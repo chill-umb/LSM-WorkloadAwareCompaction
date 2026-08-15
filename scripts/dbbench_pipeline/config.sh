@@ -53,11 +53,10 @@ KEEP_DATABASES="${KEEP_DATABASES:-0}"
 RESUME="${RESUME:-0}"
 ALTERNATE_ARM_ORDER="${ALTERNATE_ARM_ORDER:-1}"
 
-# RL is cold-start protocol v3. The safety mask is disabled by default because
-# a constrained run requires a preregistered, workload-specific SLO manifest.
-RL_PROTOCOL_VERSION="${RL_PROTOCOL_VERSION:-3}"
-RL_SAFETY_MASK="${RL_SAFETY_MASK:-0}"
-RL_BASELINE_SLO_PATH="${RL_BASELINE_SLO_PATH:-}"
+# Trigger-only protocol. This is intentionally not environment-overridable:
+# the RL policy decides whether/which level may compact, while RocksDB's
+# configured leveled picker chooses the input SST files.
+readonly RL_PROTOCOL_VERSION=2
 RL_ALLOW_DEFER="${RL_ALLOW_DEFER:-1}"
 RL_MAX_DEFER_STEPS="${RL_MAX_DEFER_STEPS:-50}"
 RL_MAX_DEFER_STEPS_L0="${RL_MAX_DEFER_STEPS_L0:-1}"
