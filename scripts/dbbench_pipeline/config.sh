@@ -3,8 +3,11 @@
 # All sizes are bytes unless the variable name says otherwise.
 
 # Workload matrix.
+WORKLOAD_PROFILE="${WORKLOAD_PROFILE:-balanced-v1}"
 WORKLOAD_SIZES_M="${WORKLOAD_SIZES_M:-10 20 30 40 50}"
 SIZE_RATIOS="${SIZE_RATIOS:-2 6 10}"
+EXPERIMENT_ARMS="${EXPERIMENT_ARMS:-regular rl}"
+REPEATS="${REPEATS:-1}"
 
 # The 5M balanced workload expressed as db_bench phases:
 #   29% initial unique inserts, followed by 71% mixed operations.
@@ -27,6 +30,7 @@ MAX_BYTES_FOR_LEVEL_BASE="${MAX_BYTES_FOR_LEVEL_BASE:-16777216}"  # 16 MiB
 NUM_LEVELS="${NUM_LEVELS:-13}"
 MAX_BACKGROUND_JOBS="${MAX_BACKGROUND_JOBS:-2}"
 BLOCK_CACHE_SIZE="${BLOCK_CACHE_SIZE:-8388608}"          # 8 MiB
+BLOCK_SIZE="${BLOCK_SIZE:-4096}"                         # 4 KiB data blocks
 BLOOM_BITS="${BLOOM_BITS:-10}"
 DISABLE_WAL="${DISABLE_WAL:-1}"
 L0_COMPACTION_TRIGGER="${L0_COMPACTION_TRIGGER:-4}"
@@ -57,10 +61,22 @@ ALTERNATE_ARM_ORDER="${ALTERNATE_ARM_ORDER:-1}"
 # the RL policy decides whether/which level may compact, while RocksDB's
 # configured leveled picker chooses the input SST files.
 readonly RL_PROTOCOL_VERSION=2
-RL_ALLOW_DEFER="${RL_ALLOW_DEFER:-1}"
-RL_MAX_DEFER_STEPS="${RL_MAX_DEFER_STEPS:-50}"
-RL_MAX_DEFER_STEPS_L0="${RL_MAX_DEFER_STEPS_L0:-1}"
 RL_DECISION_INTERVAL_MS="${RL_DECISION_INTERVAL_MS:-50}"
 RL_OBSERVE_INTERVAL_MS="${RL_OBSERVE_INTERVAL_MS:-$RL_DECISION_INTERVAL_MS}"
 RL_SOCKET_TIMEOUT_MS="${RL_SOCKET_TIMEOUT_MS:-250}"
+RL_STRUCTURAL_DIRTY_DEADLINE_MS="${RL_STRUCTURAL_DIRTY_DEADLINE_MS:-250}"
+# Minimum score at which a below-threshold compact action is offered by the
+# Python mask and granted an optional token by the C++ bridge. One value feeds
+# both sides so the learner's action set matches what admission will honour.
+RL_OPTIONAL_MIN_SCORE="${RL_OPTIONAL_MIN_SCORE:-0.10}"
+# Review decision 6: L0 stays non-deferring during bridge validation, matching
+# native leveled behavior on the axis that drives stalls. Set to 1 only for a
+# deliberate learned-L0 experiment.
+RL_L0_ALLOW_DEFER="${RL_L0_ALLOW_DEFER:-0}"
+# Measured admission-latency budget (H_i + epsilon). Zero measures and reports
+# epsilon without failing on it; set a bound once a run has established the
+# distribution on the target machine.
+RL_EPSILON_BOUND_MS="${RL_EPSILON_BOUND_MS:-0}"
 POLICY_SEED_BASE="${POLICY_SEED_BASE:-10000}"
+BASELINE_SLO_DIR="${BASELINE_SLO_DIR:-baseline_slo}"
+RL_REQUIRE_BASELINE_SLO="${RL_REQUIRE_BASELINE_SLO:-1}"

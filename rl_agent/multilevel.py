@@ -51,6 +51,37 @@ GLOBAL_DEFAULTS = {
     "bloom_useful": 0.0,
     "non_last_level_read_count": 0.0,
     "last_level_read_count": 0.0,
+    "user_logical_write_bytes": 0.0,
+    "point_sst_probes": 0.0,
+    "scan_returned_entries": 0.0,
+    "scan_internal_skipped": 0.0,
+    "scan_sorted_run_seeks": 0.0,
+    "physical_sst_bytes": 0.0,
+    "live_logical_bytes": 0.0,
+    "output_only_level_files": 0.0,
+    "output_only_level_bytes": 0.0,
+    "output_only_level_target_bytes": 0.0,
+    "stall_duration_micros": 0.0,
+    "get_latency_count": 0.0,
+    "get_latency_avg_ns": 0.0,
+    "get_latency_p95_ns": 0.0,
+    "scan_latency_count": 0.0,
+    "scan_latency_avg_ns": 0.0,
+    "scan_latency_p95_ns": 0.0,
+    "write_latency_count": 0.0,
+    "write_latency_avg_ns": 0.0,
+    "write_latency_p95_ns": 0.0,
+    # Observation timing and generations. These are kept distinct on purpose:
+    # `observation_micros` stamps when the overlay was built, the snapshot age
+    # may legitimately be large on an idle tree, and only `dirty_age` bounds a
+    # known-unpublished structural change. Collapsing them would hide a stale
+    # view behind a healthy-looking number.
+    "observation_micros": 0.0,
+    "structural_snapshot_age_micros": 0.0,
+    "structural_dirty_age_micros": 0.0,
+    "structural_source_generation": 0.0,
+    "structural_built_generation": 0.0,
+    "score_event_generation": 0.0,
     "done": 0.0,
 }
 
@@ -74,14 +105,43 @@ LEVEL_DEFAULTS = {
     # parent leveled picker chose on its own.
     "compactions_forced": 0.0,
     # Outcome of the previous decision, reported by the picker. The chosen and
-    # executed actions differ whenever a safety guard or the deferral bound
-    # steps in, and training must key on what was executed.
+    # executed actions differ whenever a safety guard or native admission
+    # outcome changes what reached the plant, and training must key on that.
     "prev_action_executed": 0.0,
     "prev_action_overridden": 0.0,
     "prev_compaction_picked": 0.0,
+    "prev_decision_id": 0,
+    "prev_snapshot_epoch": 0,
+    "prev_scheduling_result": 0,
+    "prev_completion_result": 0,
+    "prev_completed_decision_id": 0,
+    "prev_completed_decision_generation": 0,
+    "prev_completed_eligibility_generation": 0,
+    "prev_completed_override_reason": 0,
+    "prev_override_reason": 0,
     "defer_count": 0.0,
     "default_needed": 0.0,
     "is_last": 0.0,
+    "due_age_micros": 0.0,
+    "pressure_score_micros": 0.0,
+    "gate_open": 0.0,
+    "gate_mode": 0.0,
+    "jobs_attempted": 0.0,
+    "jobs_blocked": 0.0,
+    "jobs_scheduled": 0.0,
+    "jobs_completed": 0.0,
+    # How long this eligibility interval waited before the plant admitted
+    # anything. A gate that opens and is never served looks identical to a
+    # closed gate in the aggregate counters; this separates them.
+    "decision_to_first_schedule_micros": 0.0,
+    # Trivial moves drain a level at near-zero write amplification, so a
+    # decision serviced by moves is not comparable to one serviced by
+    # rewrites.
+    "trivial_move_jobs": 0.0,
+    "trivial_move_bytes": 0.0,
+    "consecutive_blocked": 0.0,
+    "in_backoff": 0.0,
+    "prev_transition_valid": 1.0,
 }
 
 # Steps-since-compaction saturates at this many decisions.
@@ -367,14 +427,14 @@ class LevelDecision:
 
     __slots__ = ("level", "raw", "state", "reward", "components",
                  "valid_actions", "prior", "dt_seconds", "executed_action",
-                 "prev_chosen_action", "dt_discount")
+                 "prev_chosen_action", "dt_discount", "transition_valid")
 
     def __init__(self, level: int, raw: dict, state: np.ndarray,
                  reward: float, components: dict, valid_actions,
                  prior: Optional[np.ndarray], dt_seconds: float,
                  executed_action: Optional[int],
                  prev_chosen_action: Optional[int] = None,
-                 dt_discount: float = 0.0):
+                 dt_discount: float = 0.0, transition_valid: bool = True):
         self.level = level
         self.raw = raw
         self.state = state
@@ -402,6 +462,7 @@ class LevelDecision:
         # one decision and would misreport the override rate.
         self.executed_action = executed_action
         self.prev_chosen_action = prev_chosen_action
+        self.transition_valid = transition_valid
 
 
 class MultiLevelProcessor:
@@ -418,18 +479,46 @@ class MultiLevelProcessor:
         # of the message (because it emptied) and comes back is discounted over
         # the real elapsed time rather than over one telemetry window.
         self._last_seen: Dict[int, float] = {}
+        self._prev_tree_cost: Optional[float] = None
+        self._cumulative_physical_write_bytes = 0.0
+        self._cumulative_logical_write_bytes = 0.0
 
     # -- parsing --------------------------------------------------------
 
     def _parse_globals(self, msg: dict) -> dict:
         g = {k: _as_float(msg.get(k, d)) for k, d in GLOBAL_DEFAULTS.items()}
+        # Generation equality is a correctness check, not a model feature.
+        # Converting unrelated uint64 values through IEEE-754 can collapse
+        # them to the same float and hide a superseded structural snapshot.
+        for identifier in ("structural_source_generation",
+                           "structural_built_generation",
+                           "score_event_generation"):
+            try:
+                g[identifier] = int(msg.get(identifier, 0) or 0)
+            except (TypeError, ValueError):
+                g[identifier] = 0
         g["done"] = 1.0 if g["done"] else 0.0
         return g
 
     def _parse_level(self, entry: dict) -> dict:
         raw = {k: _as_float(entry.get(k, d)) for k, d in LEVEL_DEFAULTS.items()}
+        # Attribution identifiers are diagnostics, not floating-point model
+        # features. Preserve their exact JSON integer representation so a
+        # 64-bit decision/generation can be joined to RocksDB event logs.
+        for identifier in (
+                "prev_decision_id", "prev_snapshot_epoch",
+                "prev_scheduling_result", "prev_completion_result",
+                "prev_completed_decision_id",
+                "prev_completed_decision_generation",
+                "prev_completed_eligibility_generation",
+                "prev_completed_override_reason", "prev_override_reason"):
+            try:
+                raw[identifier] = int(entry.get(identifier, 0) or 0)
+            except (TypeError, ValueError):
+                raw[identifier] = 0
         for flag in ("default_needed", "is_last", "prev_action_overridden",
-                     "prev_compaction_picked"):
+                     "prev_compaction_picked", "gate_open", "in_backoff",
+                     "prev_transition_valid"):
             raw[flag] = 1.0 if raw[flag] else 0.0
         return raw
 
@@ -525,6 +614,22 @@ class MultiLevelProcessor:
         raw_fullness = self._raw_fullness(raw, g)
         l0_hit_fraction, file_reads_per_op = self._read_fractions(g)
         s.observe("global.file_reads_per_op", file_reads_per_op)
+        due_age_s = raw["due_age_micros"] / 1e6
+        pressure_s = raw["pressure_score_micros"] / 1e6
+        s.observe(f"{key}.due_age", due_age_s)
+        s.observe(f"{key}.pressure", pressure_s)
+        s.observe(f"{key}.blocked", raw["jobs_blocked"])
+
+        point_amp = (g["point_sst_probes"] / g["keys_read"]
+                     if g["keys_read"] > 0 else 0.0)
+        scan_amp = ((g["scan_returned_entries"] + g["scan_internal_skipped"])
+                    / g["scan_returned_entries"]
+                    if g["scan_returned_entries"] > 0 else 0.0)
+        space_amp = (g["physical_sst_bytes"] / g["live_logical_bytes"]
+                     if g["live_logical_bytes"] > 0 else 0.0)
+        s.observe("global.point_amp", point_amp)
+        s.observe("global.scan_amp", scan_amp)
+        s.observe("global.space_amp", space_amp)
 
         if level == 0:
             slowdown_pressure = _clamp(
@@ -545,7 +650,11 @@ class MultiLevelProcessor:
             s.normalize(f"{key}.io_rate", io_rate),
             s.normalize(f"{key}.event_rate", event_rate),
             _clamp(steps_since / _STEPS_SINCE_SCALE),
-            _clamp(raw["defer_count"] / max(1.0, config.max_defer_steps(level))),
+            s.normalize(f"{key}.due_age", due_age_s),
+            s.normalize(f"{key}.pressure", pressure_s),
+            raw["gate_open"],
+            s.normalize(f"{key}.blocked", raw["jobs_blocked"]),
+            raw["in_backoff"],
             self._next_fullness(raw),
             _clamp(raw["next_level_score"] / config.SCORE_CLAMP),
             s.normalize(f"{key}.next_files", raw["next_level_files"]),
@@ -560,8 +669,147 @@ class MultiLevelProcessor:
             s.normalize("global.read_rate", read_rate),
             l0_hit_fraction,
             s.normalize("global.file_reads_per_op", file_reads_per_op),
+            s.normalize("global.point_amp", point_amp),
+            s.normalize("global.scan_amp", scan_amp),
+            s.normalize("global.space_amp", space_amp),
+            1.0 if (g["structural_source_generation"]
+                    != g["structural_built_generation"]) else 0.0,
         ]
         return np.array(values, dtype=np.float32)
+
+    def _global_reward(self, g: dict, levels: List[dict],
+                       dt: float) -> Tuple[float, dict]:
+        """One cooperative reward for the physical tree.
+
+        Logical probes and iterator work are objectives. Physical cache-miss
+        reads remain observations only and do not enter this calculation.
+        """
+        if g["done"]:
+            # The shutdown message contains synthetic zero level states, not a
+            # newly empty physical tree. It finalizes pending credit only.
+            return 0.0, {"terminal": 1.0}
+        # Structural terms remain in the potential so emptying a level gets
+        # immediate run-removal credit even when the current telemetry window
+        # happened to contain no foreground read. They do not replace the
+        # measured amplification costs below.
+        l0_runs = sum(raw["files"] for raw in levels
+                      if int(raw["level"]) == 0)
+        deep_runs = sum(1.0 for raw in levels
+                        if int(raw["level"]) > 0 and raw["files"] > 0)
+        if g["output_only_level_files"] > 0:
+            deep_runs += 1.0
+        # L0 files are independent overlapping runs, but scale the diagnostic
+        # prior by the configured native trigger. Otherwise a legal L0 burst
+        # can dominate every measured whole-tree cost solely because the
+        # absolute file count is larger than one. Non-empty deeper levels each
+        # remain one run.
+        l0_trigger = max(1.0, float(g["l0_compaction_trigger"]))
+        structural_probe_cost = l0_runs / l0_trigger + deep_runs
+        # Structural shaping may credit removing a searchable run, but not
+        # merely moving unchanged bytes into a deeper level with a larger
+        # capacity denominator. Actual iterator work is charged by the
+        # measured scan terms and bytes-on-disk by physical/live space.
+        structural_scan_cost = structural_probe_cost
+        measured_point_amp = (g["point_sst_probes"] / g["keys_read"]
+                              if g["keys_read"] > 0 else 0.0)
+        point_amp = measured_point_amp + structural_probe_cost
+        measured_scan_amp = (
+            (g["scan_returned_entries"] + g["scan_internal_skipped"])
+            / g["scan_returned_entries"]
+            if g["scan_returned_entries"] > 0 else 0.0)
+        scan_amp = measured_scan_amp + structural_scan_cost
+        scan_seeks = (g["scan_sorted_run_seeks"] / g["seeks"]
+                      if g["seeks"] > 0 else 0.0)
+        space_amp = (g["physical_sst_bytes"] / g["live_logical_bytes"]
+                     if g["live_logical_bytes"] > 0 else 0.0)
+        debt_ratio = (g["pending_compaction_bytes"] / g["live_logical_bytes"]
+                      if g["live_logical_bytes"] > 0 else 0.0)
+        stall_fraction = (g["stall_duration_micros"] / g["interval_micros"]
+                          if g["interval_micros"] > 0 else 0.0)
+        tree_cost = (
+            config.GLOBAL_REWARD_TREE_POINT * point_amp
+            + config.GLOBAL_REWARD_TREE_SCAN * (scan_amp + scan_seeks)
+            + config.GLOBAL_REWARD_TREE_SPACE * space_amp
+            + config.GLOBAL_REWARD_TREE_DEBT * debt_ratio
+            + config.GLOBAL_REWARD_TREE_STALL * stall_fraction
+        )
+        gamma_dt = (config.GAMMA_PER_SEC ** dt
+                    if config.GAMMA_PER_SEC > 0.0 and dt > 0.0
+                    else config.GAMMA)
+        shaping = 0.0
+        if self._prev_tree_cost is not None:
+            # Phi(s) = -tree_cost(s): gamma(dt) Phi(next) - Phi(current).
+            shaping = self._prev_tree_cost - gamma_dt * tree_cost
+        self._prev_tree_cost = tree_cost
+
+        # Use the formal run-to-date byte ratio. An interval-only ratio makes
+        # compaction writes appear free whenever they finish in a telemetry
+        # window with no foreground Put, despite those bytes contributing to
+        # the experiment's WAF numerator.
+        self._cumulative_physical_write_bytes += (
+            g["flushed_bytes"] + g["compaction_bytes_written"])
+        self._cumulative_logical_write_bytes += g["user_logical_write_bytes"]
+        waf = (self._cumulative_physical_write_bytes
+               / self._cumulative_logical_write_bytes
+               if self._cumulative_logical_write_bytes > 0 else 0.0)
+        latency_budget_cost = 0.0
+        for operation in ("get", "scan", "write"):
+            if g[f"{operation}_latency_count"] <= 0:
+                continue
+            avg_limit = config.BASELINE_LATENCY_LIMITS.get(
+                f"{operation}_latency_avg_ns_limit", 0.0)
+            p95_limit = config.BASELINE_LATENCY_LIMITS.get(
+                f"{operation}_latency_p95_ns_limit", 0.0)
+            if avg_limit > 0.0:
+                latency_budget_cost += max(
+                    0.0, g[f"{operation}_latency_avg_ns"] / avg_limit - 1.0)
+            if p95_limit > 0.0:
+                latency_budget_cost += max(
+                    0.0, g[f"{operation}_latency_p95_ns"] / p95_limit - 1.0)
+        integrated_cost_rate = (
+            config.GLOBAL_REWARD_WAF * waf
+            + config.GLOBAL_REWARD_POINT * measured_point_amp
+            + config.GLOBAL_REWARD_SCAN * (measured_scan_amp + scan_seeks)
+            + config.GLOBAL_REWARD_LATENCY * latency_budget_cost
+        )
+        late = 1.0 if (g["stall_count"] > 0 or g["stop_count"] > 0) and any(
+            raw["due_age_micros"] > 0 and not raw["gate_open"]
+            for raw in levels) else 0.0
+        reward = shaping - integrated_cost_rate * dt
+        return reward, {
+            "global_tree_cost": tree_cost,
+            "global_shaping": shaping,
+            "global_gamma_dt": gamma_dt,
+            "write_amplification": waf,
+            "point_probe_amplification": measured_point_amp,
+            "scan_work_amplification": measured_scan_amp,
+            "structural_probe_cost": structural_probe_cost,
+            "structural_scan_cost": structural_scan_cost,
+            "sorted_run_seeks_per_scan": scan_seeks,
+            "space_amplification": space_amp,
+            "pending_debt_ratio": debt_ratio,
+            "stall_fraction": stall_fraction,
+            "latency_budget_cost": latency_budget_cost,
+            "latency_budget_calibrated": bool(config.BASELINE_LATENCY_LIMITS),
+            # Compatibility alias for historical diagnostic consumers. The
+            # value is now dimensionless excess over the baseline budgets.
+            "latency_cost_ms": latency_budget_cost,
+            "integrated_cost_rate": integrated_cost_rate,
+            # Compatibility aliases retained for historical diagnostic plots.
+            "shaping": shaping,
+            "cost_rate": integrated_cost_rate,
+            "cost_integrated": integrated_cost_rate * dt,
+            "read_amp_cost": (measured_point_amp + measured_scan_amp
+                              + structural_probe_cost + structural_scan_cost),
+            "late_no_compaction": late,
+            "read_gets": g["keys_read"],
+            "read_seeks": g["seeks"],
+            "read_l0_hit_fraction": self._read_fractions(g)[0],
+            "read_file_reads_per_op": self._read_fractions(g)[1],
+            "read_exposure_level": 1.0,
+            "reward_dt": dt,
+            "reward_raw": reward,
+        }
 
     # -- reward -----------------------------------------------------------
 
@@ -897,13 +1145,18 @@ class MultiLevelProcessor:
                 continue
             parsed.append(self._parse_level(entry))
         shares = self._stall_shares(parsed, g)
+        global_reward, global_components = self._global_reward(g, parsed, dt)
 
         decisions: List[LevelDecision] = []
         for raw in parsed:
             level = int(raw["level"])
             state = self._encode(raw, g)
-            reward, components = self._compute_reward(
-                raw, g, shares.get(level, 0.0))
+            if g["done"]:
+                reward, components = 0.0, {"terminal": 1.0}
+            elif config.REWARD_LEGACY:
+                reward, components = self._compute_reward_legacy(raw, g)
+            else:
+                reward, components = global_reward, dict(global_components)
 
             if raw["compactions_from"] > 0 or raw["compactions_scheduled"] > 0:
                 self._steps_since_compaction[level] = 0
@@ -940,7 +1193,8 @@ class MultiLevelProcessor:
             decisions.append(
                 LevelDecision(level, raw, state, reward, components,
                               valid_actions, prior, dt, executed, prev_chosen,
-                              dt_discount)
+                              dt_discount,
+                              bool(raw["prev_transition_valid"]))
             )
         return decisions
 

@@ -184,7 +184,7 @@ class TestSocketEndToEnd(unittest.TestCase):
             self.assertEqual(logged, [0, 2, 5])
 
     def test_new_protocol_fields_reach_the_agent(self):
-        """interval_micros, read tickers, defer_count and prev_action_executed
+        """interval, read tickers, pressure clocks and executed action
         must all survive the wire and land in the logged state."""
         with ServerHarness() as server:
             client = server.connect()
@@ -207,7 +207,8 @@ class TestSocketEndToEnd(unittest.TestCase):
             # the ratio between the non-last and last level classes and sat at
             # p50 = 1.00 for entire runs.
             for field in ("read_rate_norm", "l0_hit_fraction",
-                          "file_reads_per_op_norm", "defer_norm"):
+                          "file_reads_per_op_norm", "due_age_norm",
+                          "pressure_integral_norm", "gate_open"):
                 self.assertIn(field, features)
             self.assertGreater(features["l0_hit_fraction"], 0.0)
             # The read-path audit trail must survive the round trip: the

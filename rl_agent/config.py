@@ -1,3 +1,4 @@
+import json
 import os
 
 
@@ -51,6 +52,43 @@ MODEL_SAVE_PATH = os.environ.get("RL_MODEL_SAVE_PATH", os.path.expanduser("~/lsm
 METRICS_LOG_PATH = os.environ.get("RL_METRICS_LOG_PATH", os.path.expanduser("~/lsm_dqn/rl_compaction_metrics.jsonl"))
 IO_LOG_PATH = os.environ.get("RL_IO_LOG_PATH", os.path.expanduser("~/lsm_dqn/rl_compaction_io.jsonl"))
 
+
+def _load_latency_limits() -> dict[str, float]:
+    """Load reward budgets from the same manifest enforced by C++."""
+    path = os.environ.get("RL_BASELINE_SLO_PATH", "")
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot load RL baseline SLO manifest {path}: {exc}") from exc
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError(f"unsupported RL baseline SLO schema in {path}")
+    if manifest.get("metric_definitions_version") != "trigger-v2-logical-v1":
+        raise RuntimeError(
+            f"unsupported RL metric definitions in baseline SLO {path}")
+    expected = os.environ.get("RL_EXPERIMENT_FINGERPRINT", "")
+    actual = manifest.get("experiment_fingerprint", "")
+    if expected and actual != expected:
+        raise RuntimeError(
+            f"RL baseline SLO fingerprint mismatch: expected {expected}, got {actual}")
+    names = (
+        "get_latency_avg_ns_limit", "get_latency_p95_ns_limit",
+        "scan_latency_avg_ns_limit", "scan_latency_p95_ns_limit",
+        "write_latency_avg_ns_limit", "write_latency_p95_ns_limit",
+    )
+    try:
+        limits = {name: float(manifest[name]) for name in names}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"baseline SLO manifest lacks latency limits: {path}") from exc
+    if any(not value > 0.0 for value in limits.values()):
+        raise RuntimeError(f"baseline SLO manifest has non-positive latency limits: {path}")
+    return limits
+
+
+BASELINE_LATENCY_LIMITS = _load_latency_limits()
+
 STATE_FIELDS = (
     "l0_files_norm",
     "l0_size_norm",
@@ -85,7 +123,11 @@ ML_STATE_FIELDS = (
     "compaction_io_rate_norm",  # compaction I/O from level, per second
     "compaction_event_rate_norm",
     "steps_since_compaction",
-    "defer_norm",              # consumed share of this level's deferral budget
+    "due_age_norm",            # wall-clock age of the current due episode
+    "pressure_integral_norm",  # integral of max(score - 1, 0)
+    "gate_open",
+    "blocked_rate_norm",
+    "backoff_flag",
     # -- next level -----------------------------------------------------
     "next_fullness",
     "next_score_norm",
@@ -108,25 +150,31 @@ ML_STATE_FIELDS = (
     # across a whole 5M run: a constant input, and one that also fed the
     # deep-level read term of the reward.
     "file_reads_per_op_norm",
+    "point_probe_amp_norm",    # logical SST probes / point Get
+    "scan_work_amp_norm",      # (returned + internal skipped) / returned
+    "space_amp_norm",          # physical SST bytes / live logical bytes
+    "structural_dirty_flag",   # source generation is newer than built view
 )
 ML_STATE_DIM = len(ML_STATE_FIELDS)
+
+# Global cooperative reward. Every per-level action changes one tree, so every
+# head receives this same transition reward rather than an independently
+# manufactured per-level potential.
+GLOBAL_REWARD_TREE_POINT = _env_float("RL_GLOBAL_REWARD_TREE_POINT", 0.35)
+GLOBAL_REWARD_TREE_SCAN = _env_float("RL_GLOBAL_REWARD_TREE_SCAN", 0.25)
+GLOBAL_REWARD_TREE_SPACE = _env_float("RL_GLOBAL_REWARD_TREE_SPACE", 0.20)
+GLOBAL_REWARD_TREE_DEBT = _env_float("RL_GLOBAL_REWARD_TREE_DEBT", 0.15)
+GLOBAL_REWARD_TREE_STALL = _env_float("RL_GLOBAL_REWARD_TREE_STALL", 0.05)
+GLOBAL_REWARD_WAF = _env_float("RL_GLOBAL_REWARD_WAF", 0.20)
+GLOBAL_REWARD_POINT = _env_float("RL_GLOBAL_REWARD_POINT", 0.15)
+GLOBAL_REWARD_SCAN = _env_float("RL_GLOBAL_REWARD_SCAN", 0.10)
+GLOBAL_REWARD_LATENCY = _env_float("RL_GLOBAL_REWARD_LATENCY", 0.05)
 
 # Score headroom. With deferral enabled a level's score legitimately exceeds
 # 1.0, so the feature needs range above the trigger point; the previous /2.0
 # scaling only ever spanned [0, 0.5] because the agent was never consulted
 # above score 1.
 SCORE_CLAMP = _env_float("RL_SCORE_CLAMP", 3.0)
-
-# Mirror the C++ per-level deferral budgets so `defer_norm` is on a [0,1] scale
-# for each level. L0's budget is far smaller, so normalising it against the deep
-# level budget would make L0 look like it had barely used its allowance when it
-# had in fact exhausted it.
-MAX_DEFER_STEPS = _env_int("RL_MAX_DEFER_STEPS", 50)
-MAX_DEFER_STEPS_L0 = _env_int("RL_MAX_DEFER_STEPS_L0", 1)
-
-
-def max_defer_steps(level: int) -> int:
-    return MAX_DEFER_STEPS_L0 if level == 0 else MAX_DEFER_STEPS
 
 # DQN hyperparameters
 HIDDEN_DIM = _env_int("RL_HIDDEN_DIM", 64)
@@ -225,7 +273,16 @@ SHARED_TRUNK = _env_bool("RL_SHARED_TRUNK", True)
 # RocksDB score is below this floor (or that has no files). Prevents fresh
 # high-epsilon deep-level agents from randomly compacting near-empty levels,
 # which is never sensible and dominates early-run cost. 0 disables masking.
-ML_MIN_COMPACT_SCORE = _env_float("RL_ML_MIN_COMPACT_SCORE", 0.10)
+#
+# This must agree with the C++ bridge's `RL_OPTIONAL_MIN_SCORE`, which decides
+# whether a below-threshold compact action is granted an optional token at all.
+# If the mask were looser than the gate, every action in the gap between them
+# would be offered to the learner and then silently dropped at admission — the
+# transition is recorded as the executed defer, so nothing is corrupted, but a
+# whole band of the action space would be unreachable while appearing
+# available. One environment variable therefore feeds both sides.
+ML_MIN_COMPACT_SCORE = _env_float(
+    "RL_ML_MIN_COMPACT_SCORE", _env_float("RL_OPTIONAL_MIN_SCORE", 0.10))
 
 # Multi-level stall attribution: when enabled, the global stall/stop penalty is
 # scaled by the level's own fullness, so a near-empty deep level is not charged
@@ -359,9 +416,9 @@ PRIOR_W_READ = _env_float("RL_PRIOR_W_READ", 0.6)
 # file is probed by every lookup and flushes queue behind it; a deeper level is
 # one sorted run whatever its size. With a single shared weight the agent came
 # out inverted on the write-heavy 1M workload — compacting L1 88% of the time
-# while holding L0 back at 41%. The picker's per-level deferral budget
-# (RL_MAX_DEFER_STEPS_L0) enforces this structurally; this makes the policy
-# prefer it rather than be overridden into it.
+# while holding L0 back at 41%. The picker's wall-clock/pressure safety
+# envelope bounds L0 deferral structurally; this makes the policy prefer L0
+# progress before that safety mechanism has to override it.
 PRIOR_W_READ_L0 = _env_float("RL_PRIOR_W_READ_L0", 2.0)
 PRIOR_W_WORK = _env_float("RL_PRIOR_W_WORK", 0.8)
 PRIOR_W_PREMATURE = _env_float("RL_PRIOR_W_PREMATURE", 0.5)

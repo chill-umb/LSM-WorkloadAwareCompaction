@@ -43,6 +43,12 @@ def make_level(level=0, files=2, bytes_=None, score=None, target=1 << 26,
         "prev_action_overridden": False, "prev_compaction_picked": False,
         "defer_count": defer, "default_needed": default_needed,
         "is_last": is_last,
+        "due_age_micros": defer * 50_000,
+        "pressure_score_micros": max(0.0, score - 1.0) * defer * 50_000,
+        "gate_open": False, "gate_mode": 0,
+        "jobs_attempted": 0, "jobs_blocked": 0,
+        "consecutive_blocked": 0, "in_backoff": False,
+        "prev_transition_valid": True,
     }
 
 
@@ -59,6 +65,19 @@ def make_msg(levels, interval_micros=50_000, stall=0, stop=0, done=False,
         "keys_read": 1000, "seeks": 50, "get_hit_l0": 300, "get_hit_l1": 400,
         "get_hit_l2_and_up": 300, "bloom_useful": 900,
         "non_last_level_read_count": 700, "last_level_read_count": 300,
+        "user_logical_write_bytes": 1 << 22,
+        "point_sst_probes": 3000,
+        "scan_returned_entries": 1600,
+        "scan_internal_skipped": 20,
+        "scan_sorted_run_seeks": 100,
+        "physical_sst_bytes": 1 << 28, "live_logical_bytes": 1 << 27,
+        "stall_duration_micros": 0,
+        "get_latency_count": 1000, "get_latency_avg_ns": 10_000,
+        "get_latency_p95_ns": 20_000,
+        "scan_latency_count": 50, "scan_latency_avg_ns": 30_000,
+        "scan_latency_p95_ns": 60_000,
+        "write_latency_count": 100, "write_latency_avg_ns": 15_000,
+        "write_latency_p95_ns": 30_000,
         "done": done, "levels": levels,
     }
     msg.update(globals_)
@@ -268,25 +287,15 @@ class TestAnalyticPrior(unittest.TestCase):
         self.assertGreater(l0, l2,
                            "L0 must be valued above a deep level under read load")
 
-    def test_l0_deferral_budget_is_far_tighter_than_deep_levels(self):
-        """L0 should track leveled on the deferral axis; depth should be free."""
-        self.assertLess(config.max_defer_steps(0), config.max_defer_steps(1))
-        self.assertLessEqual(config.max_defer_steps(0), 2,
-                             "L0 must be near-leveled: at most a tick of slack")
-        self.assertGreaterEqual(config.max_defer_steps(3), 20,
-                                "deep levels should defer freely")
-
-    def test_defer_norm_uses_the_level_s_own_budget(self):
-        """Normalising L0's deferral against the deep-level budget would make an
-        exhausted L0 allowance look nearly untouched."""
+    def test_due_age_feature_uses_wall_clock_state(self):
+        """Decision-count deferral was removed; the feature must follow time."""
         proc = MultiLevelProcessor()
-        idx = config.ML_STATE_FIELDS.index("defer_norm")
+        idx = config.ML_STATE_FIELDS.index("due_age_norm")
         d0 = proc.process(make_msg([make_level(level=0, defer=1)]))[0]
-        self.assertAlmostEqual(float(d0.state[idx]), 1.0, places=5)
-        proc2 = MultiLevelProcessor()
-        d2 = proc2.process(make_msg([make_level(level=2, bytes_=1 << 25,
-                                                defer=1)]))[0]
-        self.assertLess(float(d2.state[idx]), 0.2)
+        self.assertGreater(float(d0.state[idx]), 0.0)
+        later = make_level(level=0, defer=10)
+        d1 = proc.process(make_msg([later]))[0]
+        self.assertGreaterEqual(float(d1.state[idx]), float(d0.state[idx]))
 
     def test_zero_init_residual_means_policy_equals_prior(self):
         with ConfigOverride(ANALYTIC_PRIOR=True, EVAL_MODE=True,
@@ -307,6 +316,17 @@ class TestPotentialReward(unittest.TestCase):
     """Finding: eleven always-on penalties clamped to [-1,1] made the reward a
     near-constant offset that saturated where it mattered."""
 
+    def test_all_levels_receive_one_tree_reward(self):
+        proc = MultiLevelProcessor()
+        decisions = proc.process(make_msg([
+            make_level(level=0, files=4),
+            make_level(level=1, files=2, bytes_=1 << 26),
+        ]))
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0].reward, decisions[1].reward)
+        self.assertEqual(decisions[0].components["global_tree_cost"],
+                         decisions[1].components["global_tree_cost"])
+
     def test_relief_is_rewarded_and_growth_penalised(self):
         with ConfigOverride(REWARD_STANDARDIZE=False, REWARD_LEGACY=False):
             proc = MultiLevelProcessor()
@@ -319,6 +339,26 @@ class TestPotentialReward(unittest.TestCase):
             proc2.process(make_msg([make_level(files=1)]))
             grown = proc2.process(make_msg([make_level(files=8)]))[0]
             self.assertLess(grown.reward, 0.0, "L0 growth must be penalised")
+
+    def test_moving_one_run_between_levels_does_not_manufacture_relief(self):
+        """Source relief and output growth belong to the same tree state."""
+        proc = MultiLevelProcessor()
+        target = 1 << 26
+        before = proc.process(make_msg([
+            make_level(level=1, files=1, bytes_=target, target=target),
+            make_level(level=2, files=0, bytes_=0, target=target,
+                       is_last=True),
+        ]))[0]
+        after = proc.process(make_msg([
+            make_level(level=1, files=0, bytes_=0, target=target),
+        ], output_only_level_files=1, output_only_level_bytes=target,
+            output_only_level_target_bytes=10 * target))[0]
+        self.assertEqual(before.components["structural_probe_cost"],
+                         after.components["structural_probe_cost"])
+        self.assertEqual(before.components["structural_scan_cost"],
+                         after.components["structural_scan_cost"])
+        self.assertAlmostEqual(before.components["global_tree_cost"],
+                               after.components["global_tree_cost"])
 
     def test_read_amp_is_priced_at_every_level_by_its_own_mechanism(self):
         """Finding (2026-08-06): deep levels were priced at read_amp = 0 on the
@@ -483,6 +523,33 @@ class TestPotentialReward(unittest.TestCase):
                 long.components["cost_integrated"]
                 / short.components["cost_integrated"], 8.0, places=4)
 
+    def test_latency_cost_is_excess_over_manifest_budget(self):
+        limits = {
+            "get_latency_avg_ns_limit": 10_000.0,
+            "get_latency_p95_ns_limit": 20_000.0,
+            "scan_latency_avg_ns_limit": 30_000.0,
+            "scan_latency_p95_ns_limit": 60_000.0,
+            "write_latency_avg_ns_limit": 15_000.0,
+            "write_latency_p95_ns_limit": 30_000.0,
+        }
+        with ConfigOverride(BASELINE_LATENCY_LIMITS=limits):
+            at_budget = MultiLevelProcessor().process(
+                make_msg([make_level(files=4)]))[0]
+            self.assertEqual(at_budget.components["latency_budget_cost"], 0.0)
+            breached = MultiLevelProcessor().process(make_msg(
+                [make_level(files=4)], get_latency_avg_ns=12_000))[0]
+            self.assertAlmostEqual(
+                breached.components["latency_budget_cost"], 0.2)
+
+    def test_compaction_only_window_is_not_free_in_waf_cost(self):
+        proc = MultiLevelProcessor()
+        proc.process(make_msg([make_level(files=4)]))
+        decision = proc.process(make_msg(
+            [make_level(files=4)], flushed_bytes=0,
+            compaction_bytes_written=1 << 22,
+            user_logical_write_bytes=0))[0]
+        self.assertGreater(decision.components["write_amplification"], 0.0)
+
     def test_return_is_invariant_to_decision_density(self):
         """The property the dt factor exists to provide, stated end to end.
 
@@ -629,6 +696,32 @@ class TestReadPathSignals(unittest.TestCase):
 
 class TestStateEncoding(unittest.TestCase):
 
+    def test_64_bit_attribution_identifiers_remain_exact_in_diagnostics(self):
+        identifier = (1 << 63) + 12345
+        level = make_level()
+        level.update({
+            "prev_decision_id": identifier,
+            "prev_snapshot_epoch": identifier + 1,
+            "prev_completed_decision_generation": identifier + 2,
+            "prev_completed_eligibility_generation": identifier + 3,
+        })
+        raw = MultiLevelProcessor().process(make_msg([level]))[0].raw
+        self.assertEqual(raw["prev_decision_id"], identifier)
+        self.assertEqual(raw["prev_snapshot_epoch"], identifier + 1)
+        self.assertEqual(raw["prev_completed_decision_generation"],
+                         identifier + 2)
+        self.assertEqual(raw["prev_completed_eligibility_generation"],
+                         identifier + 3)
+
+    def test_64_bit_structural_generations_remain_distinguishable(self):
+        identifier = (1 << 63) + 1024
+        msg = make_msg([make_level(level=1, files=1, score=1.0)])
+        msg["structural_source_generation"] = identifier
+        msg["structural_built_generation"] = identifier + 1
+        decision = MultiLevelProcessor().process(msg)[0]
+        dirty_index = config.ML_STATE_FIELDS.index("structural_dirty_flag")
+        self.assertEqual(decision.state[dirty_index], 1.0)
+
     def test_no_feature_is_dead_for_deep_levels(self):
         """Finding: two L0-only features were hardcoded to zero for L>=1."""
         proc = MultiLevelProcessor()
@@ -736,20 +829,21 @@ class TestLevelLifecycle(unittest.TestCase):
         every open credit window, so that fiction was paid to the last
         decisions of every agent.
 
-        Pinned to the current reward: the terminal guard lives in
-        _compute_reward, and the legacy path kept for ablation never had it, so
-        without this the test silently retargets under RL_REWARD_LEGACY=1."""
-        with ConfigOverride(REWARD_LEGACY=False):
-            proc = MultiLevelProcessor()
-            for _ in range(3):
-                d = proc.process(
-                    make_msg([make_level(level=1, bytes_=1 << 27)]))[0]
-                proc.advance(d, 1, 1 << 20)
-            terminal = proc.process(
-                make_msg([make_level(level=1, files=0, bytes_=0, score=0.0,
-                                     target=0)], done=True))[0]
-            self.assertEqual(terminal.reward, 0.0)
-            self.assertIn("terminal", terminal.components)
+        Pinned at the shared process/global-reward boundary so both current and
+        legacy ablations finalize without synthetic tree relief."""
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), ConfigOverride(
+                    REWARD_LEGACY=legacy):
+                proc = MultiLevelProcessor()
+                for _ in range(3):
+                    d = proc.process(
+                        make_msg([make_level(level=1, bytes_=1 << 27)]))[0]
+                    proc.advance(d, 1, 1 << 20)
+                terminal = proc.process(
+                    make_msg([make_level(level=1, files=0, bytes_=0,
+                                         score=0.0, target=0)], done=True))[0]
+                self.assertEqual(terminal.reward, 0.0)
+                self.assertIn("terminal", terminal.components)
 
     def test_reappearing_level_is_discounted_over_the_real_gap(self):
         """A level that empties drops out of the message entirely. When it
@@ -858,6 +952,19 @@ class TestCreditAssignment(unittest.TestCase):
         stored_action = agent.buffer._buf[0][1]
         self.assertEqual(stored_action, 1,
                          "must store what was executed, not what was chosen")
+        agent.close()
+
+    def test_invalid_interval_is_excluded_from_replay(self):
+        """Fallback/stale/masked global reward cannot enter an older window."""
+        agent = self._agent(CREDIT_HORIZON_MS=0, N_STEP=1)
+        state = np.zeros(4, dtype=np.float32)
+        agent.observe(state, 0.0, False, valid_actions=(0,))
+        agent.observe(state, -100.0, False, valid_actions=(0,),
+                      transition_valid=False)
+        self.assertEqual(len(agent.buffer), 0)
+        # A fresh valid decision after the invalid boundary can learn normally.
+        agent.observe(state, 1.0, False, valid_actions=(0,))
+        self.assertEqual(len(agent.buffer), 1)
         agent.close()
 
     def test_smdp_discount_is_per_second(self):

@@ -425,7 +425,8 @@ class DQNAgent:
     def observe(self, state: np.ndarray, reward: float, done: bool,
                 valid_actions=None, prior: Optional[np.ndarray] = None,
                 dt_seconds: float = 0.0,
-                executed_action: Optional[int] = None) -> int:
+                executed_action: Optional[int] = None,
+                transition_valid: bool = True) -> int:
         """
         Assemble transitions and return the next action for `state`.
 
@@ -436,8 +437,8 @@ class DQNAgent:
         pushed to the replay buffer.
 
         `executed_action` is what RocksDB actually did with the previous
-        decision. It can differ from what was chosen — a safety guard or the
-        deferral bound may have overridden it — and Q-learning is off-policy,
+        decision. It can differ from what was chosen — a safety guard or native
+        admission outcome may have overridden it — and Q-learning is off-policy,
         so the transition must be keyed on the action that was executed.
         Otherwise every override becomes a mislabelled sample, and overrides
         cluster in exactly the high-pressure states that matter most.
@@ -450,8 +451,15 @@ class DQNAgent:
         with self._data_lock:
             self.last_returns = []
 
+            # Fallback, stale-observation and safety-masked intervals have no
+            # attributable counterfactual. Drop every credit window they
+            # overlap; retaining even an older n-step window would leak the
+            # invalid interval's global reward into replay.
+            if not transition_valid:
+                self._pending.clear()
+
             # 0. Correct the previous decision's action to what was executed.
-            if executed_action is not None and self._pending:
+            if transition_valid and executed_action is not None and self._pending:
                 self._pending[-1]["action"] = int(executed_action)
 
             # 1. This interval's reward extends every open credit window, with

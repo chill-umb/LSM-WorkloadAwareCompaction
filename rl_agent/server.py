@@ -91,7 +91,8 @@ def handle_multilevel_message(
         # dt_discount, not dt_seconds: a level that emptied and came back spans
         # the whole gap, which is what the SMDP discount has to see.
         action = agent.observe(d.state, d.reward, done, d.valid_actions,
-                               d.prior, d.dt_discount, d.executed_action)
+                               d.prior, d.dt_discount, d.executed_action,
+                               d.transition_valid)
         actions.append(action)
         handled.append((d, action, agent))
 
@@ -121,6 +122,7 @@ def handle_multilevel_message(
             "executed_action": d.executed_action,
             "prev_chosen_action": d.prev_chosen_action,
             "prev_action_overridden": d.raw.get("prev_action_overridden"),
+            "prev_transition_valid": d.transition_valid,
             "defer_count": d.raw.get("defer_count"),
             "analytic_advantage": agent.last_prior_advantage,
             "residual_advantage": agent.last_residual_advantage,

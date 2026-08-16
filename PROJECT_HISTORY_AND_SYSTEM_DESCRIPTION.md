@@ -2,7 +2,7 @@
 
 **Document status:** consolidated project record
 
-**Repository state inspected:** 2026-08-15 (Asia/Dhaka)
+**Repository state inspected:** 2026-08-16 (Asia/Dhaka)
 
 **Scope:** root repository, modified RocksDB submodule, Python RL controller,
 workload tooling, experiment pipelines, project-authored Markdown documents,
@@ -34,7 +34,7 @@ protocol-v3 prototype, not the current implementation. This record therefore
 uses the following
 labels:
 
-- **Current:** implemented in the working tree inspected on 2026-08-15.
+- **Current:** implemented in the working tree inspected on 2026-08-16.
 - **Historical:** true of an earlier implementation or experiment.
 - **Superseded:** deliberately replaced by a later design.
 - **Proposed:** a research direction or implementation plan, not current code.
@@ -70,11 +70,14 @@ unacceptable regression in another:
 The present design is a **trigger-only, physics-informed, two-action DQN**. It
 starts cold, with no pretrained weights or checkpoint. The controller observes
 global and per-level tree/workload metrics and returns `defer` or `compact` for
-each reported level. At most one level authorization is actuated at a time. The
-authorization contains no SST identity. RocksDB's configured native compaction
-priority selects the source SSTs and its ordinary leveled-compaction machinery
-performs clean-cut expansion, overlap discovery, conflict checks, merge
-semantics, output formation, and background execution.
+each reported level. A due `compact` response opens a level-scoped gate for the
+control interval, allowing RocksDB to schedule zero, one, or several native
+compactions until that level becomes healthy. A proactive below-threshold
+response grants only one optional scheduling token. Neither form contains an
+SST identity. RocksDB's configured native compaction priority selects the
+source SSTs and its ordinary leveled-compaction machinery performs clean-cut
+expansion, overlap discovery, conflict checks, merge semantics, output
+formation, and background execution.
 
 The system retains RocksDB's compaction correctness machinery. The RL policy
 does **not** implement merge semantics, key-version dropping, output file
@@ -89,12 +92,15 @@ The project currently has two experiment surfaces:
    operation workloads at size ratios `T=2`, `T=6`, and `T=10`, for both regular
    RocksDB and the RL compaction style.
 
-The exact-candidate code was removed after the failed smoke result. The current
-scaled pipeline sweeps regular RocksDB and the trigger-only RL controller, but
-the formal repeated evaluation still does **not** exist: there is no current
-script that runs at least ten paired repeats with confidence-interval acceptance
-checks. Consequently, the current trigger controller remains an implemented
-research prototype, not yet an experimentally accepted final policy.
+The exact-candidate code was removed after the failed smoke result. The scaled
+pipeline now supports regular, deterministic trigger-oracle, analytic-prior-
+only, unconstrained learned, and constrained learned-trigger arms with paired
+repeats. It includes a tuned leveled grid, preregistered SLO-manifest selector,
+oracle-parity evaluator, paired confidence evaluator, and separately calibrated
+read-heavy/write-heavy stress runner. These source changes have not been built
+or executed in this workspace at the user's request. Consequently, the repaired
+trigger controller remains an implemented but unvalidated research prototype,
+not yet an experimentally accepted final policy.
 
 ## 2. The underlying LSM-tree problem
 
@@ -291,7 +297,7 @@ root wrapper (db_runner) or modified db_bench
              v
 modified RocksDB / RLCompactionPicker
   ├── telemetry and per-level trigger state
-  ├── single-use, level-scoped authorization
+  ├── held due gates and one-shot optional authorization
   └── native RocksDB file selection and compaction execution
              |
         Unix socket, newline-delimited JSON
@@ -347,11 +353,13 @@ per-level state. The response is only an ordered array of binary actions:
 ```
 
 No request contains pickable SST candidates and no response contains file
-numbers. An authorization is consumed once and passed to
-`PickCompactionFromLevel`; RocksDB then evaluates its current
-`FilesByCompactionPri` ordering and constructs the compaction normally. The
-pipeline pins protocol v2 and the C++ producer is hard-coded to v2, so setting a
-protocol-v3 environment variable cannot restore exact-file selection.
+numbers. Due authorizations are passed as an allowed-source-level mask into the
+native leveled builder, which preserves RocksDB's current score ordering,
+`FilesByCompactionPri`, clean-cut expansion, overlap checks, and conflict rules.
+A below-threshold optional authorization invokes the same native forced-level
+entry point once. The pipeline pins protocol v2 and the C++ producer is
+hard-coded to v2, so setting a protocol-v3 environment variable cannot restore
+exact-file selection.
 
 ### 5.4–5.8 Historical protocol-v3 prototype (retired)
 
@@ -457,120 +465,122 @@ decision/file identity. This separates four facts that older code conflated:
 3. whether scheduling succeeded;
 4. what compaction actually completed.
 
-## 6. Historical protocol-v3 learning system (retired)
+## 6. Current protocol-v2 learning and safety system
 
-Everything in section 6 describes the removed candidate-aware experiment. The
-active learner is the protocol-v2 multi-level binary trigger model documented
-in `docs/multilevel_rl_design.md` and `docs/system_guide.md`.
+### 6.1 Two-action residual model
 
-### 6.1 Parametric action space
-
-Protocol v1 used a fixed two-action L0 network. Protocol v2 used per-level
-`defer`/`compact` outputs but still let RocksDB choose the file. Protocol v3
-represents every real SST candidate as an action and represents deferral as a
-pseudo-candidate.
-
-The current v3 tensors use:
-
-- 24 global/state features;
-- 18 features per candidate;
-- up to 8 candidates per level, plus the defer slot;
-- validity masks for padding, missing levels, file conflicts, and safety rules.
-
-Replay entries store the chosen candidate feature vector and the next complete
-valid candidate set, not merely a fixed action index. This is necessary because
-file identities and the number of candidates change between observations.
-
-### 6.2 Network structure
-
-`ParametricCandidateDQN` has a shared state encoder, a shared candidate encoder,
-and separate scoring heads for each level. There is no globally shared action
-head. This allows levels to share statistical strength while retaining
-different L0 and deep-level semantics. Tests confirm that backpropagating
-through one level's head does not update another level's head.
-
-The final residual layers are initialized to zero. Therefore, at step zero:
+Each action-bearing source level has the same fixed action set:
 
 ```text
-Q(state, candidate) = analytic_prior(state, candidate)
-                    + learned_residual(state, candidate)
-                    = analytic_prior(state, candidate)
+0 = defer / keep the level's policy gate closed
+1 = compact / open the level's due gate or grant one optional token
 ```
 
-The v2 implementation also retains its shared-trunk/per-level-head model and
-independent-network ablation path for protocol compatibility.
+The active model uses a shared state-encoding trunk with a separate two-action
+output head for each level. The trunk pools scarce online samples without
+erasing L0/deep-level differences; each level retains its own credit window,
+exploration state, and output head. An independent-network ablation is retained.
+The final residual layers start at zero, so cold-start behavior is exactly the
+analytic prior:
 
-### 6.3 Physics-informed prior
+```text
+Q_i(state, action) = analytic_prior_i(state, action)
+                   + learned_residual_i(state, action)
+```
 
-The analytic prior estimates immediate candidate value from exact I/O and tree
-effects. Its current terms favor:
+No checkpoint is loaded in the formal experiment. Replay stores the selected
+binary trigger action, its analytic bias, actual elapsed-time discount, next
+state, and transition-valid flag. Fallback, maintenance, stale-structure,
+safety-masked, and otherwise unattributable intervals are excluded.
 
-- deletion/garbage reclamation;
-- removal of a sorted run, especially emptying the source level;
-- relief of source-level pressure;
-- RocksDB's established priority rank.
+### 6.2 Physics-informed trigger prior
 
-It penalizes:
+For each level, the prior estimates the advantage of opening its trigger over
+deferring it from aggregate state only. In simplified form:
 
-- estimated read and write bytes;
-- overlap ratio;
-- projected output-level overfullness or downstream tree growth.
+```text
+advantage =
+    w_stall * urgency
+  + w_read  * read_exposure * expected_run_relief
+  - w_work  * normalized_merge_work
+  - w_early * premature_overlap_penalty
+```
 
-This prior exists because an online storage run produces few expensive samples
-and LSM compaction is not a physics-free action space. The learned residual is
-responsible for correcting model mismatch, nonlinear interactions, cache/CPU
-effects, and workload-specific behavior.
+L0 urgency uses file count relative to the native compact/slow thresholds;
+deep-level urgency grows superlinearly with bytes divided by target bytes. Read
+exposure is derived from current Gets, scans, and per-level Get hits, so a
+write-only interval cannot claim read relief. L0 run relief grows with its
+overlapping file count; a deeper level is one sorted run, with relief weighted
+by fullness. Merge work uses source bytes plus next-level overlap for L0 and a
+marginal per-native-compaction overlap estimate for deeper levels. RocksDB—not
+the prior—chooses which concrete files realize that work.
 
-### 6.4 Global reward
+### 6.3 Cooperative whole-tree reward
 
 Older designs assigned an independent potential to each source level. That
 could reward moving bytes out of one level while ignoring the same bytes added
-to its output level, or lose the benefit when a drained level disappeared from
-the next message. Protocol v3 uses one global transition reward for the tree:
+to its output level, or lose the benefit when an emptied level disappeared.
+The active v2 learner therefore assigns the same global transition reward to
+every level decision in one response frame:
 
 ```text
 reward =
-  - delta(total_tree_cost)
-  - integrated_write_amp_cost
-  - integrated_point_probe_cost
-  - integrated_scan_work_cost
-  - latency_budget_cost
+  gamma(dt) * Phi(next_tree) - Phi(current_tree)
+  - dt * (write_amp_cost + point_probe_cost
+          + scan_work_cost + latency_budget_cost)
 ```
 
-Potential shaping uses the transition-specific elapsed time:
+`Phi` is the negative whole-tree cost built from measured logical point probes,
+scan internal work and sorted-run seeks, physical/live space, pending debt,
+stall duration, and level-invariant structural run terms. The final output-only bottom
+level is exported as global state even though it has no policy head. This keeps
+output growth in the cost and prevents a penultimate-to-bottom move from
+manufacturing relief. Empty action-bearing levels remain zero states so genuine
+run removal receives credit.
 
-```text
-gamma(dt) * Phi(next_tree) - Phi(current_tree)
-```
+Write amplification is accumulated as the formal run-to-date ratio. Thus a
+telemetry window containing compaction writes but no foreground Put is not
+mistaken for free I/O. Latency cost is dimensionless excess above the manifest's
+Get, scan, and aggregate-write average/p95 limits, not raw milliseconds.
 
-The tree cost includes measured logical point probes, scan internal work and
-sorted-run seeks, physical/live space, pending debt, and stall duration. Empty
-levels remain represented as zero state so removing the last run receives
-credit. Tests assert that merely moving the same bytes between levels cannot
-manufacture tree relief and that draining a source level receives run-removal
-credit.
+### 6.4 Deterministic trigger-only safety mask
 
-### 6.5 Deterministic SLO safety mask
+With a valid workload-specific `baseline_slo.json`, the controller tracks
+rolling latency/space windows with a minimum sample count and three-window
+hysteresis. Its actions remain trigger-only:
 
-If enabled with a valid workload-specific `baseline_slo.json`, the controller
-tracks rolling latency/space windows with a minimum sample count and
-three-window hysteresis. The 102% envelopes mean:
+- **Space breach:** force open due gates so deferral cannot retain additional
+  physical debt.
+- **Read average/p95 breach:** force open responsible due gates; if level
+  responsibility is ambiguous, conservatively open every due level.
+- **Write average/p95 breach:** revoke and prohibit optional below-threshold
+  compactions while retaining mandatory due/safety work.
+- **Simultaneous read/write breach, missing or mismatched manifest, or an
+  unattributable breach:** expose tuned native due eligibility for the known
+  responsible level, or all due levels when responsibility is unknown.
 
-- **Space breach:** due levels may not defer further; choose the valid candidate
-  with the highest garbage reclamation per projected write byte.
-- **Read average/p95 breach:** prohibit deferrals that retain an extra run and
-  favor the greatest measured read relief per byte.
-- **Write average/p95 breach:** prohibit optional below-threshold compactions
-  and cap projected candidate I/O.
-- **Simultaneous read and write breach, or no valid exact candidate:** run the
-  tuned leveled action for the specifically responsible level.
+Independent safeguards force a due level open when its wall-clock due age,
+zero-order-held excess pressure, instantaneous score, or normalized debt reaches
+the selected baseline envelope. A stale structural cache has a bounded dirty
+deadline; a miss opens all currently due levels, suppresses optional work, and
+invalidates affected transitions until the cache converges.
 
-The mask is an online risk reducer, not a mathematical latency guarantee. Final
-paired confidence intervals remain authoritative.
+The final pipeline requires a matching manifest for learned/prior-only arms by
+default, loads its selected L0 thresholds and compaction priority for all
+compared arms, and passes the full workload/geometry fingerprint to C++ and
+Python. `unconstrained_rl` disables the live SLO mask as an ablation; `oracle`
+also disables it so bridge parity is measured against native triggering. The
+mask reduces online violations but is not a mathematical latency guarantee;
+the paired acceptance test remains authoritative.
 
-The new scaled `db_bench` pipeline defaults `RL_SAFETY_MASK=0` because it does
-not generate an SLO manifest. Enabling the mask requires both
-`RL_SAFETY_MASK=1` and an existing `RL_BASELINE_SLO_PATH`.
+### 6.5 Retired candidate-model note
+
+The protocol-v3 prototype used 24 state features, 18 features per candidate,
+up to eight SST candidates plus a defer pseudo-candidate, validity masks, shared
+state/candidate encoders, and separate per-level scoring heads. Replay stored
+chosen and next candidate sets. Those details are retained in sections 5.4–5.8
+and `docs/candidate_aware_protocol_v3.md` solely as history. None of those
+tensors, candidate actions, exact-file validators, or model paths are active.
 
 ## 7. Measurement and observability added to the project
 
@@ -624,8 +634,10 @@ including:
 - policy decisions, Q/prior/residual values, losses, and fallback state;
 - final metrics and completion marker.
 
-The scaled pipeline implements most of this per-arm artifact separation. It does
-not currently run repeats.
+The scaled pipeline implements this per-arm artifact separation and supports
+paired repeats, distinct policy seeds, shared workload seeds, and alternating
+arm order. Its safe operational default remains one repeat, so final claims
+must explicitly request the preregistered repeat count.
 
 ## 8. Full project timeline
 
@@ -877,6 +889,166 @@ picker. The response was therefore architectural, not a retuning attempt:
   level isolation, current-state selection, fallback scope, maintenance
   attribution, budget exhaustion, and exactly-once level actuation.
 
+### 2026-08-16: trigger bridge repaired around held gates
+
+The first restored trigger-only 1M/T=2 result was still substantially worse
+than regular leveled RocksDB. Log analysis showed that a compact response was
+being treated as a one-use scheduling pulse while RocksDB could service many
+native jobs between observations. Deferral also suppressed
+`NeedsCompaction()`, which was the only observation publication site, creating
+a self-blinding control loop.
+
+The approved repair therefore changed the bridge, not RocksDB's file policy:
+
+- one atomic response frame now holds independent due gates per level;
+- due gates remain open for repeated native picks while the current score is
+  at least one; proactive below-threshold gates retain one token;
+- the native leveled builder accepts only an allowed-source-level mask and
+  keeps its score ordering, `FilesByCompactionPri`, clean-cut expansion,
+  overlap, and conflict logic;
+- a DB-owned asynchronous coordinator coalesces immutable snapshot refreshes
+  and eligibility/retry wakes without carrying its queue lock into the DB
+  mutex;
+- a shared per-column-family pressure observer captures score transitions for
+  both regular and RL runs and integrates `max(score - 1, 0)` with a
+  zero-order hold;
+- safety uses wall-clock due age, integrated pressure, score/debt caps, a
+  measured-response watchdog, and a fingerprinted latency/space manifest;
+- fallback, stale structural advice, safety overrides, and unattributable
+  intervals are excluded from replay;
+- compaction event logs now identify decision, eligibility interval, bypass
+  reason, and final-drain phase without naming an SST in the policy protocol;
+- the learner uses one cooperative whole-tree reward based on logical probes,
+  scan work, physical/live space, debt, stalls, latency, and write I/O.
+
+The numbered pipeline gained repeat-aware regular/oracle/prior-only/learned
+arms, baseline episode capture, an independently controlled tuned leveled grid,
+and preregistered `baseline_slo.json` selection. These changes are present in
+source but are deliberately unbuilt and unexecuted in this workspace; cloud
+build, deterministic oracle parity, safety smoke, and final repeated acceptance
+remain required.
+
+The completed source pass added the following concrete pieces:
+
+- a DB-owned asynchronous control coordinator with per-column-family
+  registration generations, deferred snapshot refresh, scheduling/retry wakes,
+  coalescing, queue-delay telemetry, and two-phase detach/worker stop;
+- an event-driven pressure observer shared by regular and RL column families,
+  using zero-order hold for due age, maximum score, integrated excess pressure,
+  and normalized debt episode export;
+- immutable structural snapshots with source/built generations, dirty-age
+  tracking, coalesced refresh, build-latency telemetry, and a 250 ms default
+  stale-structure deadline that conservatively opens due gates;
+- held per-level due gates, one-shot optional tokens, monotonic blocked-pick
+  backoff, current-score reclassification, generation-safe outcomes, and an
+  allowed-level adapter inside RocksDB's native leveled builder;
+- one-to-many decision/eligibility attribution on compaction start and
+  completion, explicit maintenance/fallback/drain reasons, and invalid replay
+  marking for overridden intervals;
+- generation-safe result attribution, so a native attempt admitted by an old
+  frame cannot mutate the outcome fields of a newer response; fallback and
+  synchronous forced-open paths now export their actual effective action and
+  reason rather than leaving stale policy outcomes behind;
+- removal of the last sticky parent-bypass handoff: maintenance, drain, and
+  server-unavailable fallback are classified from current state in the actual
+  picker invocation, so one scheduler call cannot consume another call's
+  authority or reason;
+- first-pass oracle gate installation before background scheduling, plus
+  protocol-v2 cadence enforcement at one observation per actuation so neither
+  selected actions nor physical-cost intervals are silently discarded;
+- per-episode (rather than process-lifetime) pressure exported to the live
+  safety mask, downstream due-level support at L0 slowdown/stop, and exact
+  integer preservation for 64-bit decision and structural generations;
+- output-only bottom-level state and a cooperative global reward that charges
+  both source relief and destination growth;
+- exact `db_bench` space-amplification inputs from pre-reference-compaction SST
+  bytes and `rocksdb.estimate-live-data-size`, plus explicit drain start/end,
+  pending-debt, compaction-byte, and compaction-time phase fields;
+- a full workload/geometry fingerprint, automatic application of selected
+  baseline options to every arm, Student-t repeat error bars, formal paired CI
+  evaluation, deterministic oracle-parity evaluation, the unconstrained learner
+  ablation, and read-heavy/write-heavy stress-suite orchestration.
+
+No RocksDB library, `db_bench` binary, C++ test, or experiment was built or run
+for this source pass. Those are cloud validation gates, not facts that should be
+inferred from the presence of the implementation.
+
+### 2026-08-16: closing the audited deviations from the repair plan
+
+A conformance review of the implementation against
+`TRIGGER_CONTROLLER_REPAIR_PLAN.md` found the design essentially complete but
+seven points where the code did not match the approved plan. All seven were
+closed in source:
+
+1. **Score-seam audit (plan §7.3, decision 18).** The plan asked for a named
+   `RecomputeActiveCompactionScoreAndObserve` seam plus a static audit of every
+   direct `ComputeCompactionScore()` call. The implementation instead places the
+   observer hook *inside* `ComputeCompactionScore` and attaches the observer only
+   to the active version (`ColumnFamilyData::SetCurrent`, cleared in
+   `VersionSet::AppendVersion`), which no call site can bypass. That is stronger
+   than the wrapper but produced no evidence. `NeedsCompaction()` now runs a
+   continuous audit: it compares each level's observer-held score with the score
+   admission is actually deciding against and exports
+   `pressure_checks`/`pressure_divergences`/`pressure_max_divergence_milli`. A
+   bypassing path shows up as a nonzero divergence count during any run rather
+   than requiring a manual call-site sweep.
+2. **L0 posture (decision 6).** L0 previously deferred like any other level.
+   `RL_L0_ALLOW_DEFER` now defaults to `0`, holding L0 non-deferring during
+   bridge validation as approved. An overridden L0 defer is attributed to the
+   new `kPosture` reason and marked overridden, but its transition stays valid
+   for replay: the posture is a fixed part of the environment rather than a
+   reactive safety intervention, and the learner already keys its sample on the
+   executed action.
+3. **Absolute debt cap (plan §7.5).** The fixed 10 GiB `kPcbHardCap` is removed.
+   Both the synchronous admission path and the worker safety evaluation now use
+   one normalized `pending_bytes / live_logical_bytes` guard against the
+   manifest limit, or the configured bootstrap cap when uncalibrated.
+4. **Two minimum-compact-score thresholds.** The C++ optional-token gate
+   defaulted to 0.5 while the Python action mask used 0.10, so a band of offered
+   actions could never be admitted. Both sides now read one
+   `RL_OPTIONAL_MIN_SCORE`, exported by the pipeline and recorded per arm.
+5. **Quantile policy (plan §7.4, decision 16).** The manifest generator used a
+   bare interpolated `Q99` above `N=299`. It now computes a distribution-free
+   upper tolerance bound from an order statistic, records the coverage,
+   confidence and rank actually achieved, falls back to 90% coverage when the
+   episode count cannot support 99%, and leaves the level on an explicitly
+   uncalibrated bootstrap cap when it can support neither. A level is marked
+   calibrated only when *all three* of its limits rest on a real bound.
+6. **Dropped observation fields (plan §11.2, §10.6).** `observation_micros`,
+   `structural_snapshot_age_micros` and `score_event_generation` reached the
+   wire but were discarded by the Python parser; they are now parsed, with
+   generations preserved as exact integers. Per-level `jobs_scheduled`,
+   `jobs_completed`, `decision_to_first_schedule_micros`, `trivial_move_jobs`
+   and `trivial_move_bytes` are new on both sides. Trivial moves are counted at
+   compaction completion, so a level drained cheaply by moves is no longer
+   indistinguishable from one drained by rewrites.
+7. **`epsilon` (plan §7.8.1 R2, test 28).** The admission-latency budget was
+   never measured, leaving `H_i + epsilon` untestable. All four terms are now
+   instrumented — score-event publication, worker tick, control-queue delay and
+   scheduler admission — exported individually and as a maximum, with
+   `RL_EPSILON_BOUND_MS` counting violations when a bound is configured.
+
+Verification performed for this pass: every modified translation unit passes a
+real-flags `-fsyntax-only` compile, all pipeline shell scripts pass `bash -n`,
+the tolerance-bound estimator reproduces the plan's own arithmetic (N=299 is
+exactly where the maximum becomes a 99%/95% bound), 73 of 75 Python unit tests
+pass, and all 7 Unix-socket protocol-v2 tests pass. Full compilation, linking
+and every experiment gate remain outstanding.
+
+**Two pre-existing Python test failures are unresolved and are not caused by
+this pass.** `test_cost_half_scales_with_the_interval_it_covers` and
+`test_deep_level_read_cost_scales_with_how_full_the_level_is` encode the
+superseded per-level potential reward. The cooperative whole-tree reward
+introduced earlier on 2026-08-16 deliberately changed both behaviours: shaping
+is now the standard SMDP form `Phi_prev - gamma(dt) Phi_next`, which does vary
+with the interval when the state is unchanged, and a non-empty deep level
+contributes a fixed structural run rather than a fullness-scaled read cost, with
+byte-proportional cost carried by the measured scan and space terms instead.
+Whether the tests or the reward should change is a research decision that has
+not been made; the tests were deliberately left failing rather than rewritten to
+match the code, because a suite edited to agree with its implementation stops
+being evidence about it. This must be resolved before Phase 4.
+
 ## 9. Defect and fix catalogue
 
 The following table consolidates the failure modes documented across the
@@ -890,28 +1062,28 @@ context, system guide, workload notes, and current code.
 | Protocol JSON | Whitespace in Python output broke the C++ parser and invalidated 81 runs. | Compact output plus tolerant parsing and compatibility socket tests. | Fixed; old runs invalidated. |
 | Epoch identity | Converting a 64-bit exact-file epoch through float rounded it and made responses stale. | Exact integer parsing was implemented. | Historical v3-only defect; exact-file epochs are no longer action validators. |
 | DB mutex | Socket/inference under the mutex blocked RocksDB and confounded runtime. | Snapshot/worker architecture; socket work off mutex. | Fixed. |
-| Deferral authority | Due levels could compact through normal policy despite a defer action. | Explicit bounded consent/deferral authority. | Fixed. |
+| Deferral authority | Due levels could compact through normal policy despite a defer action. | Held per-level closed/open gates with wall-clock/pressure safety overrides. | Fixed. |
 | Cross-level authority | A global parent unlock for one level could schedule a different level. | Per-level reason and forced-level path; parent only for maintenance/drain. | Fixed and tested in trigger-only v2. |
-| Exhaustion | Global `DeferralExhausted()` could authorize unrelated work. | Exhausted level receives its own budget lease/path. | Fixed and tested. |
-| Sticky actions | Boolean force state could survive too long, vanish too early, or be reused. | Versioned single-use lease consumed before validation. | Fixed and tested. |
+| Exhaustion | Global `DeferralExhausted()` could authorize unrelated work. | Per-level wall-clock/pressure safety opens only the responsible gate. | Replaced by the 2026-08-16 held-gate design. |
+| Sticky actions | Boolean force state could survive too long, vanish too early, or be reused. | Atomic response frames with decision and stable eligibility generations; due gates are deliberately held and optional tokens are one-shot. | Replaced by the 2026-08-16 held-gate design. |
 | Stale candidate | A missing/blocked exact-file action could not survive ordinary tree changes. | Exact-file action mechanism removed; RocksDB selects from current state at actuation. | Retired with protocol v3. |
 | Decision attribution | Requested action was confused with executed/scheduled action. | Record request, scheduling result, completion result, decision, epoch, and reason. | Fixed. |
-| Safety override replay | Samples were labeled with the selected action even when a guard executed another action. | Key transition to executed action; v3 excludes invalid overrides/fallbacks. | Fixed. |
+| Safety override replay | Samples were labeled with the selected action even when a guard executed another action. | Key transition to executed action and drop every credit window overlapping fallback, stale advice, or a safety-masked interval. | Fixed in current v2 source. |
 | Parent compactions | Maintenance work could be attributed to the learner. | Explicit bypass reasons and transition-valid bit. | Fixed. |
 | Interval semantics | Counter deltas covered variable time but were used as if fixed-rate samples. | Carry `interval_micros`; calculate rates and gamma from real elapsed time. | Fixed. |
 | Decision-density reward | Rate costs were summed per decision, so faster polling changed return. | Integrate over `dt`; test return invariance. | Fixed. |
 | Reward/prior scale | Reward dominated the analytic prior and destabilized TD learning. | Rescale/integrate reward; monitor return/prior/TD distributions. | Fixed for v2 and reflected in v3 design. |
-| Source-only reward | Moving bytes into the next level manufactured apparent relief. | One global tree cost charges source relief and output growth. | Fixed and tested in v3. |
+| Source-only reward | Moving bytes into the next level manufactured apparent relief. | One cooperative global tree cost charges source relief and output growth. | Implemented in current v2 learner; cloud tests pending. |
 | Empty level credit | A drained level disappeared and received no run-removal benefit. | Preserve zero states/global tree representation; explicit run-removal prior. | Fixed and tested. |
 | Terminal reward | A zero-filled terminal message produced a phantom reward near `+2.109`. | Terminal state finalizes pending credit without manufacturing state relief. | Fixed and tested. |
 | Reappearing level | A level that emptied and returned used the wrong time gap/discount. | Preserve real gap and SMDP discount. | Fixed and tested. |
-| End-of-run debt | A run could finish before its compactions, making delayed policy look cheap. | Drain pending work and account for drain bytes/time. | Fixed in wrapper; `db_bench` uses `waitforcompaction` and a separate post-measurement full-compaction reference. |
-| Credit horizon | Fixed n-step counts represented wildly different wall time. | Wall-clock credit horizon; terminal flush. | Fixed in v2; v3 uses direct candidate transition attribution. |
+| End-of-run debt | A run could finish before its compactions, making delayed policy look cheap. | Drain pending work and account for total and phase-separated drain bytes/time. | Fixed in source: `db_bench` marks drain start/end and debt before/after; compaction completion events identify workload/drain phase. |
+| Credit horizon | Fixed n-step counts represented wildly different wall time. | Wall-clock credit horizon; terminal flush. | Fixed in current v2; the later v3 variant is retired. |
 | Sample budget | Replay/training/exploration thresholds exceeded decisions available in short workloads. | Recalibrate warmup, batch, exploration, normalization, and training cadence. | Fixed for short v2 runs; each new workload scale still needs budget auditing. |
-| Shared learning | Independent deep agents saw too few samples. | Shared trunk with separate level heads; independent ablation retained. | Fixed in v2; v3 uses shared encoders/separate heads. |
-| Head isolation | A global action head could erase level-specific behavior. | Separate per-level scoring heads. | Fixed and tested in v3. |
+| Shared learning | Independent deep agents saw too few samples. | Shared trunk with separate level heads; independent ablation retained. | Fixed in current v2. |
+| Head isolation | A global action head could erase level-specific behavior. | Separate per-level heads in the current shared-trunk v2 learner. | Fixed in source; execution pending for this pass. |
 | Cold start | A random residual could override known LSM behavior before learning. | Zero-initialize residual so step-zero policy equals analytic prior. | Fixed and tested. |
-| Whole-level action cost | Prior priced one compaction as rewriting the complete level. | Use marginal overlap/I/O; v3 uses exact candidate estimates. | Fixed. |
+| Whole-level action cost | Prior priced one compaction as rewriting the complete level. | Trigger-only v2 prices marginal overlap and projected I/O without selecting a file. | Fixed. |
 | Dead read features | Several read terms were constant or zero for deep levels. | Logical probe/scan telemetry and depth/fullness gradients; feature-audit tests. | Fixed in code; final workload sensitivity remains to be evaluated. |
 | Physical read proxy | Cache misses were mistaken for logical read amplification. | Count logical probes and scan work; retain physical reads only as diagnostics. | Fixed. |
 | Scan parser | `SC` left `C` as start key and scanned a large fraction of the DB. | Parse full scan length/end bound correctly. | Fixed 2026-08-02; pre-fix scan results invalid. |
@@ -923,7 +1095,7 @@ context, system guide, workload notes, and current code.
 | DB path | Missing DB parent could reach release-mode assertion/segfault. | Validate/create parent and emit explicit error. | Fixed. |
 | Orphan processes | Five runs were contaminated by leftover workers/servers. | Preflight process check and deliberate concurrency override. | Fixed in current pipeline. |
 | Arm order | Thermal/cache/order effects could masquerade as policy effects. | Pair workload seeds and alternate arm order. | Implemented; repeated protocol still required. |
-| Single-run claims | One lucky seed was treated as a result. | At least ten paired repeats and confidence intervals. | Required but not implemented by current scaled pipeline. |
+| Single-run claims | One lucky seed was treated as a result. | Repeat-aware paired seeds and alternating order; final acceptance requires at least ten paired repeats and confidence intervals. | Runner implemented; final experiment not run. |
 | Build parity check | A grep-based parity check was incorrectly treated as proof of equivalent binaries/options. | Record commands/options/revisions and perform behavioral/control-path checks. | Methodology correction. |
 | Script sprawl | Multiple overlapping runners and plotters caused confusion and unsafe reuse. | Replace the current use case with a numbered `db_bench` pipeline. | Current working-tree cleanup. |
 
@@ -1003,12 +1175,16 @@ should label exact-SST selection as the RL arm.
 
 ### 11.1 Matrix and workload
 
-The default matrix is:
+The operational default matrix is:
 
 - total operations: `10M`, `20M`, `30M`, `40M`, `50M`;
 - size ratios: `T=2`, `T=6`, `T=10`;
-- arms: regular leveled RocksDB and RL trigger-only protocol v2;
+- arms: regular leveled RocksDB and constrained RL trigger-only protocol v2;
 - total arms: `5 × 3 × 2 = 30`.
+
+The same runner also accepts the deterministic oracle, prior-only trigger,
+and unconstrained learned ablation. Those arms are enabled explicitly for the
+gated evaluation sequence rather than added to the safe default 30-arm run.
 
 `db_bench` generates the database and workload internally. Each arm runs:
 
@@ -1027,8 +1203,10 @@ The operation allocation approximates the corrected 5M balanced workload:
 
 The scaled `db_bench` workload substitutes Put/update traffic for the Tectonic
 workload's explicit deletes. It is therefore comparable in broad pressure mix,
-not operation-identical. There is one run per arm by default, so the graphs are
-descriptive and provide no confidence interval.
+not operation-identical. There is one run per arm by default. With multiple
+repeats, the graph generator aggregates means and Student-t 95% error bars;
+formal conclusions use paired-seed differences from the evaluator rather than
+unpaired plot error bars.
 
 ### 11.2 Current storage configuration
 
@@ -1052,7 +1230,7 @@ The pipeline defaults are:
 | Threads | 1 |
 | Workload seed | 1 |
 | Protocol | 2 (fixed) |
-| L0/deep max deferral | 1 / 50 decisions |
+| Deferral safety | Manifest-calibrated due-age/pressure/score/debt limits; no production decision-count budget |
 | Decision/observation interval | 50 / 50 ms |
 | File picker | RocksDB native `kMinOverlappingRatio` in both arms |
 
@@ -1073,28 +1251,38 @@ revisions, raw run log, RocksDB logs, policy/server output for RL, and SST size
 measurements. Database directories are removed after completion unless
 `KEEP_DATABASES=1`.
 
-After the measured phase, the script runs an explicit full compaction outside
-the measurement window. The before/after SST sizes provide a garbage-free
-physical reference for the pipeline's approximate space ratio; that full
-compaction's I/O is not included in measured WAF. This ratio is useful for the
-scaled graphs but is not identical to the wrapper's exact
-`total SST bytes / live logical bytes` metric.
+`waitforcompaction` is inside the measured command sequence and settles trigger
+debt. Drain wall time, pending bytes before/after, and compaction bytes/time are
+reported separately, while authoritative WAF and runtime retain the drain so a
+deferring policy cannot hide unfinished work. After that measured sequence, the
+script runs an explicit full compaction only as a diagnostic garbage-free size
+reference; its I/O is not included in measured WAF.
+
+Formal space amplification is the pre-reference-compaction total SST bytes
+divided by `rocksdb.estimate-live-data-size` printed by the measured `stats`
+phase. The post-full-compaction size remains diagnostic and is not used as the
+live-logical denominator.
 
 ### 11.4 Graph output
 
-The graph script parses RocksDB tickers and histograms and writes a summary CSV
-plus figures covering:
+The graph script parses RocksDB tickers, properties, event logs, and histograms
+and writes a repeat-aware summary CSV plus figures covering:
 
 - write amplification;
 - point-read amplification;
 - scan amplification and sorted-run seeks;
-- approximate space amplification;
+- formal space amplification;
 - stall seconds;
 - Get, scan, and write average/p95 latency;
 - elapsed runtime.
 
-Because the default pipeline has no repeats, it must not be used to assert the
-final 95% confidence criteria.
+The CSV additionally retains diagnostic p99 latency, stall-event count, live
+logical bytes, workload/drain compaction bytes and time, drain duration and
+pending debt, seeds, workload profile, full experiment fingerprint, and result
+directory.
+
+The default remains one repeat for operational safety. Set `REPEATS` to the
+preregistered count before asserting final 95% confidence criteria.
 
 ## 12. Tectonic workload system and lessons
 
@@ -1136,16 +1324,26 @@ Current Python tests cover:
 - protocol-v2 response ordering, parser shape, reconnect, and terminal credit;
 - a socket assertion that the response never contains candidate file numbers.
 
-The RocksDB compaction picker test file contains seven targeted current tests:
+The RocksDB compaction picker test file contains targeted trigger tests for:
 
 1. an RL level trigger selects the same first source file as RocksDB's native
    `FilesByCompactionPri` order;
 2. a level authorization grants no authority to another level;
-3. exhausted deferral uses the responsible level's forced path;
+3. a held due permit can schedule repeated native compactions;
 4. actuation selects against current RocksDB state rather than an SST identity;
 5. maintenance bypass is explicitly attributed;
 6. unavailable-server fallback is level-scoped;
-7. a policy level authorization actuates exactly once.
+7. a below-threshold optional authorization actuates exactly once;
+8. pressure integration uses a zero-order hold; and
+9. worker ticks reuse the immutable structural snapshot;
+10. observations use the current independently tuned L0 trigger/slow/stop
+    options, including before the first pick;
+11. required/missing manifests fail conservatively;
+12. latency/space masks require three entry and three recovery windows;
+13. L0 slowdown opens independently due supporting levels;
+14. dirty structural deadlines are edge-counted; and
+15. stale eligibility and decision generations cannot mutate a superseding
+    response's gate, optional token, or outcome attribution.
 
 ### 13.2 Verification performed for the 2026-08-15 scope correction
 
@@ -1160,64 +1358,95 @@ The RocksDB compaction picker test file contains seven targeted current tests:
 - the resulting production `librocksdb.so` exports the level-trigger picker
   and no exact-file or candidate-preview picker symbol.
 
-### 13.3 End-to-end proofs still required
+### 13.3 Static verification for the 2026-08-16 repair pass
+
+At the user's request, this pass did not build RocksDB or `db_bench` and did
+not execute any C++, Python, socket, or experiment test. The non-executing
+checks performed after the final edits were:
+
+- AST parsing of all 11 changed/new Python source and test files;
+- `bash -n` parsing of all eight numbered/configured pipeline shell scripts;
+- root and RocksDB-submodule `git diff --check`;
+- declaration/call-site searches for the generation-aware scheduling and
+  completion signatures;
+- source-registration checks for every new C++ translation unit; and
+- absence checks for active protocol-v3, exact-file, candidate-picker, sticky
+  parent-bypass, and decision-count deferral symbols.
+
+These checks establish source consistency only. They are not evidence of C++
+compilation, runtime correctness, oracle parity, or research acceptance.
+
+### 13.4 End-to-end proofs still required
 
 The current design also calls for deterministic short runs proving that:
 
-- one decision schedules no more than one level compaction;
+- one held due decision can schedule multiple native compactions from its own
+  level, while an optional decision schedules at most one;
 - no deferred level compacts through another level's authorization;
 - every completed compaction maps to a decision or explicit bypass reason;
 - reconnect works under the real C++/Python process pair;
 - the files in every RL-triggered compaction match RocksDB's native picker,
   with no file identity supplied by Python.
 
-Unit tests cover the core mechanics, but a fresh trigger-only end-to-end report
-is still required.
+Source-level tests cover the core permit, native-priority, pressure-clock,
+snapshot-cache, safety-manifest, and reward mechanics. The plan's complete
+fake-clock, forced-interleaving, multi-CF lifecycle, TSan, and deterministic
+end-to-end matrix is not yet fully implemented or executed; a fresh
+trigger-only end-to-end report remains required.
 
 ## 14. Implementation status after restoring trigger-only scope
 
-| Deliverable | Status on 2026-08-15 | Notes |
+| Deliverable | Status on 2026-08-16 | Notes |
 | --- | --- | --- |
 | Independent size ratio and L0 thresholds | **Implemented** | Wrapper flags and direct `db_bench` flags exist. |
-| WAF, point RA, scan RA/seeks, space, latency avg/p95/p99, stall duration | **Implemented** | Exact wrapper JSON; scaled pipeline parses corresponding RocksDB statistics with the space caveat above. |
-| Distinct raw arm/repeat directories, commands, revisions, seeds | **Partially implemented** | Per-arm scaled output exists; there is no repeat loop in that pipeline. |
-| Tuned leveled grid and preregistered selection | **Not currently available** | README/protocol docs reference scripts removed during cleanup. |
-| `baseline_slo.json` generator | **Not currently available** | The retired v3 safety consumer was removed with the candidate controller. |
+| WAF, point RA, scan RA/seeks, space, latency avg/p95/p99, stall duration | **Implemented in source** | Scaled pipeline uses logical probes/skips/seeks, exact pre-reference SST/live-data space inputs, stall time/events, and foreground histograms. |
+| Distinct raw arm/repeat directories, commands, revisions, seeds | **Implemented in source** | The repeat loop pairs workload seeds and assigns distinct policy seeds; no new runs have been collected. |
+| Tuned leveled grid and preregistered selection | **Implemented in source, not run** | `05_run_baseline_sweep.sh` controls T, all three L0 thresholds, and priority independently; selection never inspects RL. |
+| `baseline_slo.json` generator | **Implemented in source, not calibrated** | `06_select_baseline_slo.py` consumes shared event-time pressure episodes and emits fingerprinted latency, space, debt, and per-level limits. |
 | Per-level authority and explicit reasons | **Implemented** | Picker reasons and forced paths exist. |
-| Single-use level authorizations | **Implemented and tested in C++ source** | One authorization can schedule at most once. |
-| Native RocksDB file selection | **Implemented and tested in C++ source** | Active picker always calls `PickCompactionFromLevel`; exact-file APIs were removed. |
+| Held per-level trigger gates | **Implemented in C++ source** | A due compact response permits repeated native jobs; a below-threshold optional response remains one-shot. |
+| Native RocksDB file selection | **Implemented in C++ source** | Due work uses an allowed-level adapter inside the native leveled builder; optional work uses native `PickCompactionFromLevel`. Exact-file APIs are absent. |
 | Trigger-only protocol v2 | **Implemented and mandatory** | Python has no candidate controller; C++ emits v2; pipeline pins v2. |
-| Two-action trigger DQN and analytic prior | **Implemented and Python-tested** | Per-level compact/defer learning remains online and cold-start. |
-| C++ picker authority tests | **Implemented in source** | Seven focused trigger/native-picker tests are present. |
+| Two-action trigger DQN and analytic prior | **Implemented; prior tests predate this pass** | Per-level compact/defer learning remains online and cold-start; current modifications still need cloud execution. |
+| C++ picker authority tests | **Implemented in source** | Native priority, cross-level isolation, held due gates, optional one-shot, pressure clocks, maintenance, fallback, and cached snapshots are covered; cloud execution is pending. |
 | Protocol/reconnect tests | **Implemented in source** | Current socket tests cover v2 only. |
+| Oracle parity evaluator | **Implemented in source, not run** | `09_evaluate_oracle_parity.py` checks workload identity, parity envelopes, held service, due authorization, and observation health. |
+| Paired CI evaluator and stress runner | **Implemented in source, not run** | `07_evaluate_paired.py` enforces balanced criteria; `08_run_stress_suites.sh` calibrates each stress profile and runs safety-only acceptance. |
 | Ten paired balanced repeats and formal CIs | **Not run for current trigger code** | Required for acceptance. |
 | Read-heavy/write-heavy safety suites | **Not run for current trigger code** | Required for acceptance. |
 | Full tuned frontier and trigger ablations | **Not run** | The regular frontier, analytic-prior-only, and learned trigger results remain to be produced. |
 
 ## 15. Current limitations and next work
 
-The immediate research work is not another model redesign. It is completing the
-measurement gate around the implemented design:
+The immediate research work is not another model redesign. It is validating the
+implemented source in the required order:
 
-1. generate a workload-specific tuned leveled frontier without examining RL
-   trigger outcomes;
-2. add repeats, paired workload seeds, distinct policy seeds, alternating order,
-   and bootstrap/paired confidence intervals to the current experiment path;
-3. run short trigger/native-picker control-path tests before expensive sweeps;
-4. audit completed compaction inputs to confirm they were selected by RocksDB;
-5. run the balanced acceptance matrix, then read-heavy/write-heavy safety
-   suites;
-6. report the leveled frontier, trigger prior-only ablation, and learned
-   trigger—not only the best-looking arm.
+1. build RocksDB and `db_bench` on the cloud machine and execute focused Python,
+   C++, socket, lifecycle, and forced-interleaving tests;
+2. run at least three paired 1M/T2 regular/oracle repeats and require the oracle
+   parity evaluator to pass;
+3. generate each workload-specific tuned leveled frontier without examining RL
+   trigger outcomes, then export and review its manifest;
+4. run the balanced ten-pair prior-only, unconstrained, and constrained matrix;
+5. audit compaction attribution and native inputs, then apply the formal paired
+   evaluator and metric-feasibility gate;
+6. only after balanced acceptance, run the separately calibrated read-heavy and
+   write-heavy safety suites and report the complete frontier and ablations.
 
 Other current caveats are:
 
-- its `space_amplification` is a before/after-full-compaction proxy, not the
-  wrapper's exact live-logical formula;
 - it substitutes Put operations for explicit deletes;
-- it has one workload seed and one run by default;
-- the root README still references `scripts/manage.sh` and baseline/repeated
-  scripts that are absent from the current cleaned working tree;
+- it has one workload seed/repeat by default for operational safety, although
+  the runner and evaluators support the required paired repeats;
+- baseline scan amplification was exactly its mathematical floor of 1.0 in the
+  motivating 1M/T2 evidence, so the preregistered scan-sensitivity decision in
+  the repair plan must be resolved before claiming strict scan improvement;
+- the shared foreground telemetry accumulator is process-wide; the supported
+  `db_bench` experiment uses one user column family, while a multi-RL-CF
+  experiment needs an additional attribution audit;
+- the full 33-case repair-plan concurrency/fake-clock suite is not yet present;
+  source-level coverage is not a substitute for the missing forced interleaving
+  and end-to-end tests;
 - the old deleted scripts remain visible only as Git history and compiled
   `__pycache__` remnants; bytecode files are not a supported experiment path;
 - the repository and RocksDB submodule contain uncommitted working-tree changes,
@@ -1232,7 +1461,7 @@ as follows.
 
 | Document | What it contains | How to interpret it now |
 | --- | --- | --- |
-| `README.md` | Wrapper synopsis, trigger-only scope, and scaled-pipeline link. | Current entry page, though some legacy wrapper command references predate script cleanup. |
+| `README.md` | Trigger-only synopsis, build entry points, geometry, and scaled-pipeline link. | Current entry page. |
 | `docs/rl_l0_compaction_technical_spec.md` | Original L0 acceptance/fix specification. | Historical requirements; most mechanics were implemented and later superseded. |
 | `docs/rl_l0_compaction_change_summary.md` | First working L0 implementation and early observations. | Historical v1 record. |
 | `docs/project_technical_overview.md` | Detailed June L0 architecture, files, parameters, artifacts, and early results. | Historical L0-only implementation; its non-file-selection boundary remains current. |
@@ -1248,7 +1477,7 @@ as follows.
 | `docs/system_guide.md` | Most complete v2 system explanation, valid ten-pair result, and hard-won rules. | Primary trigger-only system reference. |
 | `docs/candidate_aware_protocol_v3.md` | Concise record of the rejected v3 exact-file prototype and its smoke result. | Historical only; explicitly not an experiment guide. |
 | `workload_specs/README.md` | Balanced-workload timing and generator/parser pitfalls. | Current workload-authoring evidence. |
-| `scripts/dbbench_pipeline/README.md` | Numbered 10M–50M workflow and caveats. | Current operational path for the scaled single-run sweep. |
+| `scripts/dbbench_pipeline/README.md` | Oracle gate, tuned sweep/manifest, paired 10M–50M workflow, evaluators, stress suites, geometry, and caveats. | Current operational path. |
 | `lib/tectonic/README.md`, `lib/tectonic/USAGE.md` | Upstream Tectonic build, commands, spec grammar, expressions, and operations. | Generator reference. |
 | bundled RusKey PDF | Online RL and FLSM motivation. | Research inspiration, not implementation documentation. |
 | bundled Vertiorizon PDF | Vertical/horizontal growth analysis and hybrid design. | Longer-term research inspiration. |
@@ -1263,8 +1492,9 @@ timeline.
 
 ## 17. Glossary
 
-- **Action lease:** single-use authorization to actuate one source level for
-  one trigger decision; it contains no SST identity.
+- **Level permit:** held trigger eligibility for one source level over a control
+  interval; due permits can schedule repeatedly and optional permits are
+  one-shot. It contains no SST identity.
 - **Analytic prior:** hand-derived LSM cost/value estimate added to the learned
   Q residual.
 - **Candidate:** historical v3 term for a source SST action; not part of the
@@ -1316,11 +1546,13 @@ The most important achievement is not a favorable benchmark number. It is that
 the project repaired the measurement and control path sufficiently to know what
 an RL decision actually did: the metrics now represent the intended
 amplifications, the workload parser produces the intended scans, the controller
-does not block under the DB mutex, authority is level-scoped, one response can
-actuate only one level authorization, fallbacks and maintenance are explicit,
-and RocksDB retains sole file-selection authority.
+does not block under the DB mutex, authority is level-scoped, due actions are
+held gates rather than undersupplied pulses, fallbacks and maintenance are
+explicit, and RocksDB retains sole file-selection authority.
 
 The most important remaining fact is equally clear: the restored trigger-only
-controller has not yet passed the formal repeated evaluation. The next credible
-milestone is a preregistered tuned baseline plus repeated, paired trigger-policy
+controller has not yet compiled or passed its new focused tests on the cloud
+machine, and it has not passed the formal repeated evaluation. The next
+credible milestone is therefore the deterministic build/test/oracle gate,
+followed by a preregistered tuned baseline and repeated paired trigger-policy
 results satisfying the amplification, space, latency, and stall criteria above.
