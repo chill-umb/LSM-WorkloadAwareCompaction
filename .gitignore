@@ -44,9 +44,11 @@ workload.txt
 
 # build
 **/build/**
+/build-dbbench/*
 
 # venv
 .venv
+.venv-dbbench/*
 
 # python
 __pycache__/
