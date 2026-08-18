@@ -222,6 +222,21 @@ EXPLORATION = os.environ.get("RL_EXPLORATION", "boltzmann").strip().lower()
 # with a different constant. 60 anneals within a 1M run; experiment_runner.sh
 # overrides it from the workload's actual op count.
 EXPLORATION_DECAY_STEPS = _env_int("RL_EXPLORATION_DECAY_STEPS", 60)
+# D6. Anneal on wall time instead of decision count when this is positive.
+#
+# A decision-count schedule has now been invalidated twice by repairs to the
+# control loop: the original 2000-step default, and then the 0.11-decisions-per
+# -1000-operations constant the pipeline derived from a 2.6/s observation rate
+# that the Phase 1a repair raised to ~20/s. Any schedule keyed to decision count
+# is wrong again the moment the cadence changes -- and event-driven triggering
+# would make the decision count workload-dependent rather than merely faster.
+# Wall time is what actually determines how much of the run remains.
+#
+# The schedule SHAPE is unchanged: linear to a floor, not an exponential
+# half-life. A half-life never reaches its floor, and the acceptance check for
+# this fix is "temperature reaches its floor around one third of the way through
+# the run", so only the clock is being replaced here, not the curve.
+EXPLORATION_ANNEAL_SECONDS = _env_float("RL_EXPLORATION_ANNEAL_SECONDS", 0.0)
 BOLTZMANN_TEMP_START = _env_float("RL_BOLTZMANN_TEMP_START", 1.0)
 BOLTZMANN_TEMP_END = _env_float("RL_BOLTZMANN_TEMP_END", 0.05)
 EPSILON_START = _env_float("RL_EPSILON_START", 1.0)

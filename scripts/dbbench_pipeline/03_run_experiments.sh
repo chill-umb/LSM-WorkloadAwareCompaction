@@ -273,7 +273,7 @@ trap 'stop_server; exit 130' INT TERM
 
 start_server() {  # result dir, policy seed, decay steps, eval, manifest, fingerprint
   local result_dir="$1" policy_seed="$2" decay_steps="$3" eval_mode="$4"
-  local manifest_path="$5" fingerprint="$6"
+  local manifest_path="$5" fingerprint="$6" anneal_seconds="${7:-0}"
   SERVER_SOCKET="/tmp/dbbench_rl_${USER:-u}_$$_${policy_seed}.sock"
   rm -f "$SERVER_SOCKET"
   env \
@@ -285,6 +285,7 @@ start_server() {  # result dir, policy seed, decay steps, eval, manifest, finger
     RL_DECISION_INTERVAL_MS="$RL_DECISION_INTERVAL_MS" \
     RL_OBSERVE_INTERVAL_MS="$RL_OBSERVE_INTERVAL_MS" \
     RL_EXPLORATION_DECAY_STEPS="$decay_steps" \
+    RL_EXPLORATION_ANNEAL_SECONDS="$anneal_seconds" \
     RL_EVAL_MODE="$eval_mode" \
     RL_BASELINE_SLO_PATH="$manifest_path" \
     RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
@@ -334,6 +335,7 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   local load_ops=$(( total_ops * LOAD_PERCENT / 100 ))
   local mixed_ops=$(( total_ops - load_ops ))
   local style=0 policy_seed="null" decay_steps=0 uses_server=0 oracle=0
+  local anneal_seconds=0 anneal_source="none"
   local safety_enforcement=1
   local run_seed=$(( DBBENCH_SEED + repeat - 1 ))
   if [[ "$arm" != "regular" ]]; then
@@ -347,9 +349,33 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     uses_server=1
     [[ "$arm" != "unconstrained_rl" ]] || safety_enforcement=0
     policy_seed=$(( POLICY_SEED_BASE + repeat * 100000 + size_m * 100 + ratio ))
-    local expected_decisions=$(( total_ops * 11 / 100000 ))
-    decay_steps=$(( expected_decisions / 3 ))
-    (( decay_steps < 20 )) && decay_steps=20
+    # D6. Exploration anneals on wall time, not decision count.
+    #
+    # The previous formula encoded 0.11 decisions per 1000 operations, measured
+    # when the observation rate was 2.6/s. The Phase 1a repair raised that to
+    # ~19.95/s at a 50 ms cadence, so the derived schedule annealed 5.5x to 27x
+    # too fast -- exploration reached its floor within the first few percent of
+    # a run instead of the first third. Deriving a NEW decision count from the
+    # current cadence would repeat the defect the next time the cadence moves.
+    #
+    # Duration comes from the paired regular arm when it has already run;
+    # 03 appends elapsed_seconds to metadata.env only after an arm completes,
+    # and ALTERNATE_ARM_ORDER puts the regular arm second on odd pairs, so the
+    # fallback is taken on roughly half of all pairs by design.
+    local paired_regular="$RESULTS_ROOT/$size_label/T${ratio}/${repeat_path}regular/metadata.env"
+    local expected_seconds="" anneal_source="expected_per_mop"
+    if [[ -f "$paired_regular" ]]; then
+      expected_seconds="$(sed -n 's/^elapsed_seconds=//p' "$paired_regular" | tail -n 1)"
+      [[ -z "$expected_seconds" ]] || anneal_source="paired_regular_arm"
+    fi
+    if [[ -z "$expected_seconds" ]]; then
+      expected_seconds=$(( size_m * RL_EXPECTED_RUN_SECONDS_PER_MOP ))
+    fi
+    anneal_seconds="$(awk -v s="$expected_seconds" -v f="$RL_EXPLORATION_ANNEAL_FRACTION" \
+      'BEGIN { v = s * f; if (v < 1) v = 1; printf "%.3f", v }')"
+    # Retained so the step-based ablation remains reachable; it is inert
+    # whenever anneal_seconds is positive.
+    decay_steps=20
   fi
 
   local fingerprint
@@ -422,7 +448,7 @@ PY
     local eval_mode=0
     [[ "$arm" != "prior_only" ]] || eval_mode=1
     start_server "$result_dir" "$policy_seed" "$decay_steps" "$eval_mode" \
-      "$manifest_env_path" "$fingerprint"
+      "$manifest_env_path" "$fingerprint" "$anneal_seconds"
   fi
 
   command=(
@@ -475,6 +501,9 @@ PY
     printf 'rl_safety_enforcement=%s\n' "$safety_enforcement"
     printf 'rl_optional_min_score=%s\n' "$RL_OPTIONAL_MIN_SCORE"
     printf 'rl_l0_allow_defer=%s\n' "$RL_L0_ALLOW_DEFER"
+    printf 'rl_crossing_posture=%s\n' "$RL_CROSSING_POSTURE"
+    printf 'rl_exploration_anneal_seconds=%s\n' "$anneal_seconds"
+    printf 'rl_exploration_anneal_source=%s\n' "$anneal_source"
     printf 'rl_epsilon_bound_ms=%s\n' "$RL_EPSILON_BOUND_MS"
   } > "$result_dir/metadata.env"
   git rev-parse HEAD > "$result_dir/git_revision.txt" 2>/dev/null || true
@@ -510,6 +539,7 @@ PY
       RL_STRUCTURAL_DIRTY_DEADLINE_MS="$RL_STRUCTURAL_DIRTY_DEADLINE_MS" \
       RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
       RL_L0_ALLOW_DEFER="$RL_L0_ALLOW_DEFER" \
+      RL_CROSSING_POSTURE="$RL_CROSSING_POSTURE" \
       RL_EPSILON_BOUND_MS="$RL_EPSILON_BOUND_MS" \
       "${command[@]}" > "$result_dir/run.log" 2>&1
     status=$?
@@ -524,6 +554,7 @@ PY
       RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
       RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
       RL_L0_ALLOW_DEFER="$RL_L0_ALLOW_DEFER" \
+      RL_CROSSING_POSTURE="$RL_CROSSING_POSTURE" \
       RL_EPSILON_BOUND_MS="$RL_EPSILON_BOUND_MS" \
       "${command[@]}" > "$result_dir/run.log" 2>&1
     status=$?

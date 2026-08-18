@@ -239,6 +239,9 @@ class DQNAgent:
             self.buffer = ReplayBuffer(config.REPLAY_BUFFER_SIZE)
 
         self.step: int = 0
+        # Set on the first decision so the schedule measures time in the run,
+        # not time since process start (the server outlives socket connects).
+        self._anneal_start: Optional[float] = None
         self.epsilon: float = config.EPSILON_START
         self.temperature: float = config.BOLTZMANN_TEMP_START
         self._last_loss: Optional[float] = None
@@ -320,16 +323,28 @@ class DQNAgent:
     # -- exploration -------------------------------------------------------
 
     def _anneal(self) -> None:
-        """Anneal exploration by decision count. Callers must hold _data_lock.
+        """Anneal exploration. Callers must hold _data_lock.
 
-        Epsilon mode reads its own schedule so that RL_EPSILON_DECAY_STEPS is
-        not silently inert — several scripts still set it, and a knob that
+        Wall-clock schedule when RL_EXPLORATION_ANNEAL_SECONDS is positive,
+        otherwise the legacy decision-count schedule, retained as an explicit
+        ablation rather than as a fallback anyone should rely on.
+
+        Epsilon mode reads its own step schedule so that RL_EPSILON_DECAY_STEPS
+        is not silently inert — several scripts still set it, and a knob that
         looks like it is matching exploration to the run budget while doing
         nothing is exactly how the original 2000-step defect survived.
         """
-        steps = (config.EPSILON_DECAY_STEPS if config.EXPLORATION == "epsilon"
-                 else config.EXPLORATION_DECAY_STEPS)
-        frac = min(1.0, self.step / max(1, steps))
+        if config.EXPLORATION_ANNEAL_SECONDS > 0.0:
+            now = time.monotonic()
+            if self._anneal_start is None:
+                self._anneal_start = now
+            frac = min(1.0, (now - self._anneal_start)
+                       / config.EXPLORATION_ANNEAL_SECONDS)
+        else:
+            steps = (config.EPSILON_DECAY_STEPS
+                     if config.EXPLORATION == "epsilon"
+                     else config.EXPLORATION_DECAY_STEPS)
+            frac = min(1.0, self.step / max(1, steps))
         self.epsilon = (config.EPSILON_START
                         + frac * (config.EPSILON_END - config.EPSILON_START))
         self.temperature = (config.BOLTZMANN_TEMP_START

@@ -100,6 +100,39 @@ def tolerance_bound(values: list[float]):
     return None, meta
 
 
+def censored_tolerance_bound(completed: list[float], censored: list[float]):
+    """Upper tolerance bound over completed episodes, respecting censoring.
+
+    A truncated episode was cut off by a phase boundary, so its recorded
+    duration and integrated pressure are LOWER BOUNDS on their true values, not
+    samples from the same distribution. Ranking them alongside completed
+    episodes drags the empirical distribution downward and produces a tighter
+    limit -- the same direction as the defect that losing them caused in the
+    first place, which is why "include them and count them separately" is not
+    an adequate treatment.
+
+    The bound is therefore computed from completed episodes only, then raised
+    if any censored observation already exceeds it: a censored value of X is
+    proof the true value reached at least X, so a bound below X is known to be
+    wrong. Censoring can only ever loosen the limit here, never tighten it.
+    """
+    bound, meta = tolerance_bound(completed)
+    finite_censored = [v for v in censored if math.isfinite(v)]
+    meta = dict(meta)
+    meta["completed_count"] = len(completed)
+    meta["censored_count"] = len(finite_censored)
+    meta["bound_raised_by_censored"] = False
+    if bound is None:
+        return None, meta
+    if finite_censored:
+        largest = max(finite_censored)
+        if largest > bound:
+            meta["bound_raised_by_censored"] = True
+            meta["bound_before_censoring"] = bound
+            return largest, meta
+    return bound, meta
+
+
 def finite_mean(rows: list[dict], key: str) -> float:
     values = [float(row[key]) for row in rows
               if math.isfinite(float(row.get(key, math.nan)))]
@@ -128,7 +161,17 @@ def collect_episodes(run_dirs: list[Path]) -> list[dict]:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise SystemExit(f"{path}:{line_number}: {exc}") from exc
-            if record.get("schema_version") == 1:
+            version = record.get("schema_version")
+            if version == 1:
+                # Pre-flush logs silently drop every episode still open at a
+                # phase boundary, which is exactly the upper tail these limits
+                # are estimated from. Calibrating from one would produce limits
+                # that look principled and are systematically too tight.
+                raise SystemExit(
+                    f"{path}:{line_number}: episode schema_version 1 predates "
+                    "the open-episode flush; re-run the baseline sweep with a "
+                    "rebuilt library before generating a manifest")
+            if version == 2:
                 episodes.append(record)
     return episodes
 
@@ -251,14 +294,23 @@ def main() -> int:
     debt_values = []
     for level in range(max(1, parse_levels(fingerprint) - 1)):
         records = by_level[level]
+        complete = [item for item in records if not item.get("truncated")]
+        censored = [item for item in records if item.get("truncated")]
         durations = [float(item["duration_micros"]) for item in records]
-        pressures = [float(item["integrated_excess_score_micros"])
-                     for item in records]
         scores = [float(item["max_score"]) for item in records]
         debts = [float(item["max_pending_debt_ratio"]) for item in records]
         debt_values.extend(debts)
-        due_bound, due_meta = tolerance_bound(durations)
-        pressure_bound, pressure_meta = tolerance_bound(pressures)
+        # Duration and integrated pressure are right-censored on a truncated
+        # record, so they go through the censoring-aware bound. `max_score` is
+        # not: it is a maximum observed while the episode was open, and
+        # truncation cannot have inflated it, so it is a valid sample either
+        # way.
+        due_bound, due_meta = censored_tolerance_bound(
+            [float(item["duration_micros"]) for item in complete],
+            [float(item["duration_micros"]) for item in censored])
+        pressure_bound, pressure_meta = censored_tolerance_bound(
+            [float(item["integrated_excess_score_micros"]) for item in complete],
+            [float(item["integrated_excess_score_micros"]) for item in censored])
         score_bound, score_meta = tolerance_bound(scores)
         # A level is calibrated only if every limit it exports rests on a real
         # tolerance bound. Mixing one estimated limit with two bootstrap caps
@@ -284,6 +336,8 @@ def main() -> int:
         distributions.append({
             "level": level,
             "episode_count": len(records),
+            "completed_episode_count": len(complete),
+            "censored_episode_count": len(censored),
             "duration_micros_q50": optional_quantile(durations, 0.50),
             # Reported for continuity with earlier manifests. These are
             # interpolated sample quantiles, NOT the exported limits: the

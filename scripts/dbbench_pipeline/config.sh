@@ -73,6 +73,22 @@ RL_OPTIONAL_MIN_SCORE="${RL_OPTIONAL_MIN_SCORE:-0.10}"
 # native leveled behavior on the axis that drives stalls. Set to 1 only for a
 # deliberate learned-L0 experiment.
 RL_L0_ALLOW_DEFER="${RL_L0_ALLOW_DEFER:-0}"
+# D3a. A `defer` selected while a level was BELOW its trigger expressed no
+# judgement about a due level, so it does not bind once the level crosses;
+# the level is admitted under the kPosture reason and the transition stays
+# valid for replay. Set to "defer" to restore the binding behaviour for the
+# ablation. RocksDB already wakes its scheduler on the crossing, so this is
+# what removes trigger latency rather than merely shortening it.
+RL_CROSSING_POSTURE="${RL_CROSSING_POSTURE:-compact}"
+# D6. Seconds over which exploration anneals to its floor, expressed as a
+# fraction of expected run duration. A decision-count schedule has been
+# invalidated by every repair to the observation cadence so far; wall time is
+# invariant to it. 0 keeps the legacy step schedule.
+RL_EXPLORATION_ANNEAL_FRACTION="${RL_EXPLORATION_ANNEAL_FRACTION:-0.3333}"
+# Fallback when the paired regular arm has not run yet. ALTERNATE_ARM_ORDER
+# puts the regular arm second on odd pairs, so this is taken on roughly half of
+# all pairs and is not an edge case.
+RL_EXPECTED_RUN_SECONDS_PER_MOP="${RL_EXPECTED_RUN_SECONDS_PER_MOP:-30}"
 # Measured admission-latency budget (H_i + epsilon). Zero measures and reports
 # epsilon without failing on it; set a bound once a run has established the
 # distribution on the target machine.
