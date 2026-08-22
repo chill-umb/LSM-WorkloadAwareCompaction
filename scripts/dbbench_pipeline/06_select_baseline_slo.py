@@ -64,8 +64,36 @@ def order_statistic_confidence(n: int, rank: int, coverage: float) -> float:
     """
     if not 1 <= rank <= n:
         return 0.0
-    return sum(math.comb(n, i) * coverage ** i * (1.0 - coverage) ** (n - i)
-               for i in range(rank))
+    # Computed in log space. The direct form multiplies math.comb(n, i) -- an
+    # exact int that reaches ~1e600 for n in the low thousands -- by a float,
+    # which forces an int->float conversion and raises OverflowError. Episode
+    # counts pass that threshold as soon as the workload is larger than 1M.
+    return min(1.0, sum(_binomial_pmf(n, i, coverage) for i in range(rank)))
+
+
+def _binomial_pmf(n: int, i: int, probability: float) -> float:
+    if probability >= 1.0:
+        return 1.0 if i == n else 0.0
+    return math.exp(math.lgamma(n + 1) - math.lgamma(i + 1)
+                    - math.lgamma(n - i + 1)
+                    + i * math.log(probability)
+                    + (n - i) * math.log1p(-probability))
+
+
+def smallest_valid_rank(n: int, coverage: float, confidence: float):
+    """Smallest order-statistic rank whose confidence reaches `confidence`.
+
+    One incremental pass over the binomial PMF. Calling
+    order_statistic_confidence once per candidate rank re-sums the whole
+    distribution each time, which is O(n^2) and unusable once a level has a few
+    thousand episodes.
+    """
+    total = 0.0
+    for i in range(n):
+        total += _binomial_pmf(n, i, coverage)
+        if total >= confidence:
+            return i + 1, min(total, 1.0)
+    return None, min(total, 1.0)
 
 
 def tolerance_bound(values: list[float]):
@@ -83,20 +111,18 @@ def tolerance_bound(values: list[float]):
     if n == 0:
         return None, meta
     for coverage in TOLERANCE_COVERAGES:
-        # The maximum is the most permissive rank, so if it cannot reach the
-        # confidence target no smaller rank can either.
-        if order_statistic_confidence(n, n, coverage) < TOLERANCE_CONFIDENCE:
+        rank, confidence = smallest_valid_rank(n, coverage, TOLERANCE_CONFIDENCE)
+        if rank is None:
+            # Even the maximum cannot reach the confidence target at this
+            # coverage, so no smaller rank can either.
             continue
-        for rank in range(1, n + 1):
-            confidence = order_statistic_confidence(n, rank, coverage)
-            if confidence >= TOLERANCE_CONFIDENCE:
-                meta.update({
-                    "method": "order_statistic_tolerance_bound",
-                    "achieved_coverage": coverage,
-                    "achieved_confidence": confidence,
-                    "order_statistic_rank": rank,
-                })
-                return ordered[rank - 1], meta
+        meta.update({
+            "method": "order_statistic_tolerance_bound",
+            "achieved_coverage": coverage,
+            "achieved_confidence": confidence,
+            "order_statistic_rank": rank,
+        })
+        return ordered[rank - 1], meta
     return None, meta
 
 
