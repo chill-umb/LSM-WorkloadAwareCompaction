@@ -17,7 +17,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/config.sh"
 
-SMOKE_SIZES_M="${SMOKE_SIZES_M:-10 20 30 40 50 60 70 80 90 100}"
+SMOKE_SIZES_M="${SMOKE_SIZES_M:-1 5 10 20 30 40 50 60 70 80 90 100}"
 SMOKE_RATIO="${SMOKE_RATIO:-2}"
 SMOKE_ARMS="${SMOKE_ARMS:-regular prior_only rl}"
 SMOKE_REPEATS="${SMOKE_REPEATS:-1}"

@@ -299,6 +299,11 @@ def main() -> int:
         durations = [float(item["duration_micros"]) for item in records]
         scores = [float(item["max_score"]) for item in records]
         debts = [float(item["max_pending_debt_ratio"]) for item in records]
+        # Diagnostic quantiles below span every record, censored included, and
+        # are reported for continuity with earlier manifests. They are NOT the
+        # exported limits -- those come from the censoring-aware bounds.
+        pressures = [float(item["integrated_excess_score_micros"])
+                     for item in records]
         debt_values.extend(debts)
         # Duration and integrated pressure are right-censored on a truncated
         # record, so they go through the censoring-aware bound. `max_score` is

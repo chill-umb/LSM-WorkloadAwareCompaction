@@ -147,30 +147,55 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    runs = {}
+    # Key by (size, ratio) and accumulate every repeat. Keying by size alone
+    # silently kept only the last matching path, which with 3 ratios x 10
+    # repeats discarded 29 runs out of 30.
+    collected: dict[tuple[int, int], list[dict]] = defaultdict(list)
     for metrics_path in sorted(args.results_root.glob(f"*M/T*/**/{args.arm}/metrics.jsonl")):
         if not (metrics_path.parent / "COMPLETED").exists():
             continue
-        size_label = None
+        size_millions = None
+        size_ratio = None
         for part in metrics_path.parts:
             if part.endswith("M") and part[:-1].isdigit():
-                size_label = part
-        if size_label is None:
+                size_millions = int(part[:-1])
+            elif part.startswith("T") and part[1:].isdigit():
+                size_ratio = int(part[1:])
+        if size_millions is None or size_ratio is None:
             continue
-        runs[int(size_label[:-1])] = read_arm(metrics_path)
-    if not runs:
+        collected[(size_millions, size_ratio)].append(read_arm(metrics_path))
+    if not collected:
         raise SystemExit(
             f"no completed '{args.arm}' arms with metrics.jsonl under {args.results_root}")
 
-    print(f"arm: {args.arm}")
+    # Average each scalar diagnostic across repeats, per level. Concatenating
+    # the raw series instead would splice unrelated runs together and corrupt
+    # the TD trend, which is measured within a run.
+    runs: dict[tuple[int, int], dict] = {}
+    repeat_counts: dict[tuple[int, int], int] = {}
+    for key, per_run in sorted(collected.items()):
+        repeat_counts[key] = len(per_run)
+        levels = sorted({level for run in per_run for level in run})
+        merged = {}
+        for level in levels:
+            present = [run[level] for run in per_run if level in run]
+            merged[level] = {
+                field: finite_mean([entry[field] for entry in present])
+                for field in present[0]
+            }
+            merged[level]["repeats"] = len(present)
+        runs[key] = merged
+
+    print(f"arm: {args.arm}   (values are means across repeats)")
     print()
-    print("  size  lvl   samples   grad     td_1q     td_4q  td_trend  "
+    print("  size   T  lvl  rpt   samples   grad     td_1q     td_4q  td_trend  "
           "resid/prior  flip_rate  compact  final_eps")
-    print("  " + "-" * 105)
-    for size_m in sorted(runs):
-        for level, s in sorted(runs[size_m].items()):
-            print(f"  {size_m:4d}M {level:3d} {s['samples']:9d} "
-                  f"{s['gradient_steps']:6d} "
+    print("  " + "-" * 118)
+    for (size_m, ratio) in sorted(runs):
+        for level, s in sorted(runs[(size_m, ratio)].items()):
+            print(f"  {size_m:4d}M {ratio:3d} {level:4d} {int(s['repeats']):4d} "
+                  f"{s['samples']:9.0f} "
+                  f"{s['gradient_steps']:6.0f} "
                   f"{fmt(s['td_first_quarter'], '9.4f')} "
                   f"{fmt(s['td_last_quarter'], '9.4f')} "
                   f"{fmt(s['td_trend'], '9.3f')} "
@@ -195,7 +220,7 @@ def main() -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(
-            {str(k): {str(lv): sv for lv, sv in v.items()}
+            {f"{k[0]}M_T{k[1]}": {str(lv): sv for lv, sv in v.items()}
              for k, v in runs.items()}, indent=2, sort_keys=True) + "\n")
         print()
         print(f"json: {args.output}")
