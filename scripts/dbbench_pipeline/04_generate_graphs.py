@@ -114,6 +114,9 @@ def parse_mix_counts(text: str) -> tuple[float, float, float, float, float]:
     return gets, puts, scans, returned, average_scan_length
 
 
+EVENT_LOG = re.compile(r"EVENT_LOG_v1 (\{.*\})")
+
+
 def parse_drain(text: str, log_path: Path) -> dict[str, float]:
     starts = [int(value) for value in re.findall(
         r"^RL_DRAIN_START_MICROS (\d+)$", text, re.M)]
@@ -131,14 +134,23 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
     workload_compaction_seconds = 0.0
     if log_path.exists():
         events = []
-        for raw in log_path.read_text(errors="replace").splitlines():
-            match = re.search(r"EVENT_LOG_v1 (\{.*\})", raw)
-            if not match:
-                continue
-            try:
-                events.append(json.loads(match.group(1)))
-            except json.JSONDecodeError:
-                pass
+        # rocksdb_LOG.txt runs to hundreds of MB per arm: two EVENT_LOG_v1
+        # records per compaction plus a full stats block every
+        # stats_dump_period_sec. Reading it whole and running a regex on every
+        # line made graph generation dominate the pipeline. Stream the file and
+        # reject non-event lines with a substring test, which is a C-level
+        # search rather than the regex engine, before matching.
+        with log_path.open(errors="replace") as handle:
+            for raw in handle:
+                if "EVENT_LOG_v1" not in raw:
+                    continue
+                match = EVENT_LOG.search(raw)
+                if not match:
+                    continue
+                try:
+                    events.append(json.loads(match.group(1)))
+                except json.JSONDecodeError:
+                    pass
         drain_jobs = {int(item["job"]) for item in events if "job" in item
                       if item.get("event") == "compaction_started" and
                       item.get("rl_drain") in (True, 1, "true", "1")}

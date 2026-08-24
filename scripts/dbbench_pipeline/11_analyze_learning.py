@@ -33,6 +33,7 @@ import argparse
 import json
 import math
 import statistics
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -67,31 +68,56 @@ def finite_mean(values: list) -> float:
     return statistics.fmean(usable) if usable else math.nan
 
 
-def read_arm(metrics_path: Path) -> dict[int, dict]:
+def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
+    """Summarise one arm's per-decision metrics log.
+
+    The log carries one fat record per level per decision -- 31 state features
+    plus the raw observation, reward components and Q values -- and reaches
+    hundreds of MB on the larger workloads. Reading it whole and json.loads-ing
+    every record dominated this script's runtime, so the file is streamed and
+    `stride` allows parsing only every Nth record. Every line is still counted,
+    so `samples` reports the true decision count regardless of stride; only the
+    series used for trends and ratios is subsampled, which is harmless for
+    quantities that are means, trends or rates.
+    """
     by_level: dict[int, dict[str, list]] = defaultdict(
         lambda: {"loss": [], "prior": [], "residual": [], "action": [],
                  "epsilon": [], "override": [], "reward": []})
-    for line in metrics_path.read_text(errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        level = record.get("level")
-        if level is None:
-            continue
-        bucket = by_level[int(level)]
-        if record.get("loss") is not None:
-            bucket["loss"].append(float(record["loss"]))
-        bucket["prior"].append(advantage(record.get("analytic_advantage")))
-        bucket["residual"].append(advantage(record.get("residual_advantage")))
-        bucket["action"].append(int(record.get("action", 0)))
-        if record.get("epsilon") is not None:
-            bucket["epsilon"].append(float(record["epsilon"]))
-        if record.get("override_rate_100") is not None:
-            bucket["override"].append(float(record["override_rate_100"]))
-        bucket["reward"].append(float(record.get("reward", 0.0)))
+    counted: dict[int, int] = defaultdict(int)
+    seen = 0
+    with metrics_path.open(errors="replace") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            seen += 1
+            if stride > 1 and seen % stride:
+                # Still needs the level to keep `samples` honest, and that is
+                # cheaper to find by substring than by parsing the record.
+                marker = line.find('"level":')
+                if marker != -1:
+                    digits = line[marker + 8:marker + 20].strip().split(",")[0]
+                    if digits.lstrip("-").isdigit():
+                        counted[int(digits)] += 1
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            level = record.get("level")
+            if level is None:
+                continue
+            counted[int(level)] += 1
+            bucket = by_level[int(level)]
+            if record.get("loss") is not None:
+                bucket["loss"].append(float(record["loss"]))
+            bucket["prior"].append(advantage(record.get("analytic_advantage")))
+            bucket["residual"].append(advantage(record.get("residual_advantage")))
+            bucket["action"].append(int(record.get("action", 0)))
+            if record.get("epsilon") is not None:
+                bucket["epsilon"].append(float(record["epsilon"]))
+            if record.get("override_rate_100") is not None:
+                bucket["override"].append(float(record["override_rate_100"]))
+            bucket["reward"].append(float(record.get("reward", 0.0)))
 
     summary = {}
     for level, bucket in sorted(by_level.items()):
@@ -113,7 +139,8 @@ def read_arm(metrics_path: Path) -> dict[int, dict]:
                 flips += 1
 
         summary[level] = {
-            "samples": len(bucket["action"]),
+            "samples": counted.get(level, len(bucket["action"])),
+            "parsed": len(bucket["action"]),
             "gradient_steps": len(losses),
             "td_first_quarter": first,
             "td_last_quarter": last,
@@ -144,6 +171,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("results_root", type=Path)
     parser.add_argument("--arm", default="rl")
+    parser.add_argument(
+        "--stride", type=int, default=1,
+        help="parse only every Nth record (default 1 = all). Trends, ratios "
+             "and rates are unaffected by uniform subsampling; `samples` still "
+             "counts every decision. Use 10-50 for a fast first look at the "
+             "larger workloads.")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -163,7 +196,10 @@ def main() -> int:
                 size_ratio = int(part[1:])
         if size_millions is None or size_ratio is None:
             continue
-        collected[(size_millions, size_ratio)].append(read_arm(metrics_path))
+        print(f"  reading {metrics_path.parent.relative_to(args.results_root)}",
+              file=sys.stderr, flush=True)
+        collected[(size_millions, size_ratio)].append(
+            read_arm(metrics_path, args.stride))
     if not collected:
         raise SystemExit(
             f"no completed '{args.arm}' arms with metrics.jsonl under {args.results_root}")
