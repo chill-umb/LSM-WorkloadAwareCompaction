@@ -89,6 +89,10 @@ def main() -> int:
     parser.add_argument("summary", type=Path)
     parser.add_argument("--outdir", type=Path, default=Path("report"))
     parser.add_argument("--baseline", default="regular")
+    parser.add_argument(
+        "--metrics",
+        default="write_amplification,point_read_amplification",
+        help="comma-separated metrics for the absolute-comparison figure")
     args = parser.parse_args()
 
     import matplotlib
@@ -104,6 +108,8 @@ def main() -> int:
 
     index, cells, arms = load(args.summary)
     compared = [a for a in arms if a != args.baseline]
+    cell_sizes = sorted({c[0] for c in cells})
+    cell_ratios = sorted({c[1] for c in cells})
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     # ---- fig 1: the trade-off plane ------------------------------------
@@ -193,6 +199,64 @@ def main() -> int:
     fig.savefig(args.outdir / "fig2_paired.png")
     plt.close(fig)
 
+    # ---- fig 3: absolute levels, arms side by side ----------------------
+    # figs 1-2 plot differences, which puts the baseline at the origin and
+    # hides both its absolute level and how the metric scales with workload
+    # size. This is the direct baseline-vs-arm comparison.
+    show = [m for m in args.metrics.split(",") if m]
+    pretty = dict(METRICS)
+    fig, axes = plt.subplots(len(show), len(cell_ratios),
+                             figsize=(2.6 * len(cell_ratios), 2.5 * len(show)),
+                             squeeze=False, sharex=True)
+    for row, metric in enumerate(show):
+        row_axes = axes[row]
+        for col, ratio in enumerate(cell_ratios):
+            axis = row_axes[col]
+            for arm in arms:
+                color, label = SERIES[arm]
+                xs, ys = [], []
+                for size in cell_sizes:
+                    values = []
+                    for repeat in range(1, 11):
+                        row_data = index.get((size, ratio, arm, repeat))
+                        if not row_data:
+                            continue
+                        try:
+                            value = float(row_data[metric])
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isfinite(value):
+                            values.append(value)
+                    if values:
+                        xs.append(size)
+                        ys.append(statistics.fmean(values))
+                if xs:
+                    axis.plot(xs, ys, marker="o", ms=5, lw=2, color=color,
+                              label=label, markeredgecolor="#fcfcfb",
+                              markeredgewidth=0.9, zorder=3)
+            axis.set_xscale("log")
+            axis.set_xticks(cell_sizes, [f"{s}M" for s in cell_sizes])
+            axis.minorticks_off()
+            axis.grid(True, alpha=0.6)
+            axis.set_axisbelow(True)
+            if row == 0:
+                axis.set_title(f"T = {ratio}", fontsize=9.5, color=INK, loc="left")
+            if col == 0:
+                axis.set_ylabel(pretty.get(metric, metric))
+            if row == len(show) - 1:
+                axis.set_xlabel("workload size")
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    legend = fig.legend(handles, labels, loc="lower center", ncol=len(labels),
+                        frameon=False, fontsize=8.5, bbox_to_anchor=(0.5, -0.01))
+    for text in legend.get_texts():
+        text.set_color(INK)
+    fig.suptitle("Absolute levels: every arm against the leveled baseline",
+                 x=0.02, ha="left", fontsize=11, fontweight="semibold")
+    fig.tight_layout(rect=(0, 0.05, 1, 0.94))
+    fig.savefig(args.outdir / "fig3_absolute.pdf")
+    fig.savefig(args.outdir / "fig3_absolute.png")
+    plt.close(fig)
+
     # ---- LaTeX table -----------------------------------------------------
     lines = [
         r"\begin{tabular}{llrrrr}", r"\toprule",
@@ -224,6 +288,7 @@ def main() -> int:
 
     print(f"figures: {args.outdir}/fig1_tradeoff.{{pdf,png}}")
     print(f"         {args.outdir}/fig2_paired.{{pdf,png}}")
+    print(f"         {args.outdir}/fig3_absolute.{{pdf,png}}")
     print(f"tables:  {args.outdir}/table_paired.{{tex,txt}}")
     return 0
 
