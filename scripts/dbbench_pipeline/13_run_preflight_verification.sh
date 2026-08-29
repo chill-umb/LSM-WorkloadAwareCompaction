@@ -2,7 +2,7 @@
 # Cloud-only, staged verification before launching the full multi-day matrix.
 #
 # Default sequence:
-#   1. 1M/T2 regular-vs-oracle bridge regression (3 pairs).
+#   1. 1M/T2 regular-vs-oracle bridge regression (10 pairs).
 #   2. 5M/T2 narrowed baseline, 3+3 live-guard protocol, 1 four-arm repeat.
 #   3. 10M/T2 narrowed baseline, 3+3 live-guard protocol, 3 four-arm repeats.
 #
@@ -23,7 +23,7 @@ PREFLIGHT_MANIFEST_ROOT="${PREFLIGHT_MANIFEST_ROOT:-$PREFLIGHT_ROOT/manifests}"
 PREFLIGHT_WORKLOAD_PROFILE="${PREFLIGHT_WORKLOAD_PROFILE:-balanced-v1}"
 PREFLIGHT_CELLS_M="${PREFLIGHT_CELLS_M:-5 10}"
 PREFLIGHT_RUN_ORACLE="${PREFLIGHT_RUN_ORACLE:-1}"
-PREFLIGHT_ORACLE_REPEATS="${PREFLIGHT_ORACLE_REPEATS:-3}"
+PREFLIGHT_ORACLE_REPEATS="${PREFLIGHT_ORACLE_REPEATS:-10}"
 PREFLIGHT_FINAL_REPEATS_5M="${PREFLIGHT_FINAL_REPEATS_5M:-1}"
 PREFLIGHT_FINAL_REPEATS_10M="${PREFLIGHT_FINAL_REPEATS_10M:-3}"
 PREFLIGHT_MIN_TRAIN_STEPS="${PREFLIGHT_MIN_TRAIN_STEPS:-100}"
@@ -53,6 +53,11 @@ for integer in "$PREFLIGHT_ORACLE_REPEATS" \
     exit 1
   }
 done
+if (( PREFLIGHT_RUN_ORACLE && PREFLIGHT_ORACLE_REPEATS < 10 )); then
+  echo "Oracle preflight requires at least 10 paired repeats;" >&2
+  echo "the per-level maximum-score invariant is not reliable at three." >&2
+  exit 1
+fi
 
 cell_count=0
 estimated_operations_m=0

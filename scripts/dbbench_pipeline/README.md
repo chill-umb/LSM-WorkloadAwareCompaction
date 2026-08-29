@@ -18,7 +18,7 @@ SLO manifest:
 
 ```bash
 WORKLOAD_SIZES_M=1 SIZE_RATIOS=2 \
-EXPERIMENT_ARMS="regular oracle" REPEATS=3 \
+EXPERIMENT_ARMS="regular oracle" REPEATS=10 \
 DB_ROOT=/mnt/nvme/oracle-databases \
 RESULTS_ROOT=/mnt/nvme/oracle-results \
 CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh

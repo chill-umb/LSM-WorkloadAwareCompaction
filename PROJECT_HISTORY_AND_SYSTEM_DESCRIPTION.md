@@ -1755,7 +1755,7 @@ works:
 
 1. build RocksDB and `db_bench` on the cloud machine and execute focused Python,
    C++, socket, lifecycle, and forced-interleaving tests;
-2. run at least three paired 1M/T2 regular/oracle repeats and require the oracle
+2. run ten paired 1M/T2 regular/oracle repeats and require the oracle
    parity evaluator to pass;
 3. generate each workload-specific tuned leveled frontier without examining RL
    trigger outcomes, then export and review its manifest;

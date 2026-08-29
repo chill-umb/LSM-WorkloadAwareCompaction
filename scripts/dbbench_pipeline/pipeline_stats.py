@@ -46,8 +46,8 @@ def ci95(values: list[float]) -> dict:
 
 
 def required_pairs(values: list[float], limit: float,
-                   maximum: int = 200):
-    """Smallest pair count at which the interval stops straddling `limit`.
+                   maximum: int = 200, *, two_sided: bool = False):
+    """Smallest pair count at which the interval stops straddling a boundary.
 
     A criterion of the form "the 95% bound is on one side of `limit`" is
     decidable only once the half-width is smaller than the distance from the
@@ -73,7 +73,17 @@ def required_pairs(values: list[float], limit: float,
         return None, "non-finite differences"
     if deviation == 0.0:
         return 2, "zero dispersion; any pair count decides"
-    margin = abs(limit - mean)
+    if two_sided:
+        if limit < 0.0:
+            raise ValueError("a two-sided envelope limit must be non-negative")
+        # A two-sided parity envelope has boundaries at -limit and +limit.
+        # Decidability is controlled by the boundary nearest the observed mean,
+        # whether the mean is currently inside or outside the envelope.  Using
+        # only +limit understates the required sample count whenever the mean
+        # is negative and can turn an underpowered result into a false failure.
+        margin = abs(limit - abs(mean))
+    else:
+        margin = abs(limit - mean)
     if margin == 0.0:
         return None, "observed mean sits exactly on the limit"
     for n in range(2, maximum + 1):
@@ -92,7 +102,9 @@ def envelope_verdict(values: list[float], limit: float, minimum_pairs: int,
     constrained (regression checks).
     """
     interval = ci95(values)
-    needed, reason = required_pairs(values, limit)
+    needed, reason = required_pairs(
+        values, limit, two_sided=two_sided
+    )
     result = {
         "kind": "paired_envelope",
         "limit": limit,
