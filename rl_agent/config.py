@@ -51,6 +51,7 @@ SOCKET_PATH = os.environ.get("RL_COMPACTION_SOCKET_PATH", os.path.expanduser("~/
 MODEL_SAVE_PATH = os.environ.get("RL_MODEL_SAVE_PATH", os.path.expanduser("~/lsm_dqn/rl_compaction_model.pt"))
 METRICS_LOG_PATH = os.environ.get("RL_METRICS_LOG_PATH", os.path.expanduser("~/lsm_dqn/rl_compaction_metrics.jsonl"))
 IO_LOG_PATH = os.environ.get("RL_IO_LOG_PATH", os.path.expanduser("~/lsm_dqn/rl_compaction_io.jsonl"))
+SERVER_SUMMARY_PATH = os.environ.get("RL_SERVER_SUMMARY_PATH", "")
 
 
 def _load_latency_limits() -> dict[str, float]:
@@ -63,11 +64,13 @@ def _load_latency_limits() -> dict[str, float]:
             manifest = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"cannot load RL baseline SLO manifest {path}: {exc}") from exc
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") != 2:
         raise RuntimeError(f"unsupported RL baseline SLO schema in {path}")
-    if manifest.get("metric_definitions_version") != "trigger-v2-logical-v1":
+    if manifest.get("metric_definitions_version") != "trigger-v2-logical-v2":
         raise RuntimeError(
             f"unsupported RL metric definitions in baseline SLO {path}")
+    if manifest.get("guard_calibrated") is not True:
+        raise RuntimeError(f"RL live guard is not calibrated in {path}")
     expected = os.environ.get("RL_EXPERIMENT_FINGERPRINT", "")
     actual = manifest.get("experiment_fingerprint", "")
     if expected and actual != expected:

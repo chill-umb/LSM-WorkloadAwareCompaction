@@ -8,6 +8,10 @@ WORKLOAD_SIZES_M="${WORKLOAD_SIZES_M:-10 20 30 40 50}"
 SIZE_RATIOS="${SIZE_RATIOS:-2 6 10}"
 EXPERIMENT_ARMS="${EXPERIMENT_ARMS:-regular rl}"
 REPEATS="${REPEATS:-1}"
+# calibration: oracle + provisional manifest + compact latency log
+# holdout: oracle + calibrated manifest + non-mutating safety-shadow log
+# experiment: ordinary paired/smoke runs with mandatory learner-health gating
+RL_RUN_PHASE="${RL_RUN_PHASE:-experiment}"
 
 # The 5M balanced workload expressed as db_bench phases:
 #   29% initial unique inserts, followed by 71% mixed operations.

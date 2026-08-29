@@ -13,19 +13,16 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+from slo_statistics import (
+    TOLERANCE_CONFIDENCE,
+    censored_tolerance_bound,
+    tolerance_bound,
+)
+
 
 MIN_EPISODES = 299
 MARGIN = 1.02
-METRIC_VERSION = "trigger-v2-logical-v1"
-
-# Distribution-free upper tolerance bounds. A bare Q99 read off a few dozen
-# episodes is not an envelope: for N independent episodes the chance of even
-# one sample beyond the true 99th percentile is 1 - 0.99^N, so N=30 misses the
-# tail three quarters of the time. Instead of interpolating a quantile that the
-# sample cannot support, take an order statistic whose coverage/confidence is
-# exactly computable, and record what was actually achieved.
-TOLERANCE_CONFIDENCE = 0.95
-TOLERANCE_COVERAGES = (0.99, 0.90)
+METRIC_VERSION = "trigger-v2-logical-v2"
 
 
 def load_graph_module(script: Path):
@@ -51,112 +48,6 @@ def quantile(values: list[float], probability: float) -> float:
 
 def optional_quantile(values: list[float], probability: float):
     return quantile(values, probability) if values else None
-
-
-def order_statistic_confidence(n: int, rank: int, coverage: float) -> float:
-    """Confidence that at least `coverage` of the distribution lies below the
-    `rank`-th smallest of `n` samples.
-
-    P(X_(rank) is an upper tolerance limit) = P(Binomial(n, coverage) < rank),
-    which is the probability that fewer than `rank` of the n draws fell in the
-    covered lower portion. Using the maximum (rank = n) reduces to the familiar
-    1 - coverage**n.
-    """
-    if not 1 <= rank <= n:
-        return 0.0
-    # Computed in log space. The direct form multiplies math.comb(n, i) -- an
-    # exact int that reaches ~1e600 for n in the low thousands -- by a float,
-    # which forces an int->float conversion and raises OverflowError. Episode
-    # counts pass that threshold as soon as the workload is larger than 1M.
-    return min(1.0, sum(_binomial_pmf(n, i, coverage) for i in range(rank)))
-
-
-def _binomial_pmf(n: int, i: int, probability: float) -> float:
-    if probability >= 1.0:
-        return 1.0 if i == n else 0.0
-    return math.exp(math.lgamma(n + 1) - math.lgamma(i + 1)
-                    - math.lgamma(n - i + 1)
-                    + i * math.log(probability)
-                    + (n - i) * math.log1p(-probability))
-
-
-def smallest_valid_rank(n: int, coverage: float, confidence: float):
-    """Smallest order-statistic rank whose confidence reaches `confidence`.
-
-    One incremental pass over the binomial PMF. Calling
-    order_statistic_confidence once per candidate rank re-sums the whole
-    distribution each time, which is O(n^2) and unusable once a level has a few
-    thousand episodes.
-    """
-    total = 0.0
-    for i in range(n):
-        total += _binomial_pmf(n, i, coverage)
-        if total >= confidence:
-            return i + 1, min(total, 1.0)
-    return None, min(total, 1.0)
-
-
-def tolerance_bound(values: list[float]):
-    """Smallest order statistic that is a valid upper tolerance bound.
-
-    Returns (bound, metadata) or (None, metadata) when the sample cannot
-    support any bound at the configured coverages, in which case the caller
-    must fall back to an explicitly uncalibrated cap rather than inventing one.
-    """
-    ordered = sorted(v for v in values if math.isfinite(v))
-    n = len(ordered)
-    meta = {"episode_count": n, "method": "insufficient_samples",
-            "achieved_coverage": None, "achieved_confidence": None,
-            "order_statistic_rank": None}
-    if n == 0:
-        return None, meta
-    for coverage in TOLERANCE_COVERAGES:
-        rank, confidence = smallest_valid_rank(n, coverage, TOLERANCE_CONFIDENCE)
-        if rank is None:
-            # Even the maximum cannot reach the confidence target at this
-            # coverage, so no smaller rank can either.
-            continue
-        meta.update({
-            "method": "order_statistic_tolerance_bound",
-            "achieved_coverage": coverage,
-            "achieved_confidence": confidence,
-            "order_statistic_rank": rank,
-        })
-        return ordered[rank - 1], meta
-    return None, meta
-
-
-def censored_tolerance_bound(completed: list[float], censored: list[float]):
-    """Upper tolerance bound over completed episodes, respecting censoring.
-
-    A truncated episode was cut off by a phase boundary, so its recorded
-    duration and integrated pressure are LOWER BOUNDS on their true values, not
-    samples from the same distribution. Ranking them alongside completed
-    episodes drags the empirical distribution downward and produces a tighter
-    limit -- the same direction as the defect that losing them caused in the
-    first place, which is why "include them and count them separately" is not
-    an adequate treatment.
-
-    The bound is therefore computed from completed episodes only, then raised
-    if any censored observation already exceeds it: a censored value of X is
-    proof the true value reached at least X, so a bound below X is known to be
-    wrong. Censoring can only ever loosen the limit here, never tighten it.
-    """
-    bound, meta = tolerance_bound(completed)
-    finite_censored = [v for v in censored if math.isfinite(v)]
-    meta = dict(meta)
-    meta["completed_count"] = len(completed)
-    meta["censored_count"] = len(finite_censored)
-    meta["bound_raised_by_censored"] = False
-    if bound is None:
-        return None, meta
-    if finite_censored:
-        largest = max(finite_censored)
-        if largest > bound:
-            meta["bound_raised_by_censored"] = True
-            meta["bound_before_censoring"] = bound
-            return largest, meta
-    return bound, meta
 
 
 def finite_mean(rows: list[dict], key: str) -> float:
@@ -401,7 +292,7 @@ def main() -> int:
     }
     physical_reference = finite_mean(selected_rows, "sst_bytes_before")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "metric_definitions_version": METRIC_VERSION,
         "experiment_fingerprint": fingerprint,
         "selection_rule": {
@@ -417,10 +308,15 @@ def main() -> int:
             **selected_options,
             "fingerprint": fingerprint,
         },
-        "minimum_samples": MIN_EPISODES,
-        "rolling_window_count": 20,
-        "hysteresis_enter_windows": 3,
-        "hysteresis_exit_windows": 3,
+        # Phase one deliberately contains no executable latency guard. The
+        # guard calibrator copies this immutable selection/objective manifest,
+        # adds statistically supported guard_* limits, and flips this flag.
+        "guard_calibrated": False,
+        "guard_minimum_samples": MIN_EPISODES,
+        "guard_rolling_window_count": 20,
+        "guard_hysteresis_enter_windows": 3,
+        "guard_hysteresis_exit_windows": 3,
+        "guard_p95_method": "merged_log2_histogram",
         "expected_physical_sst_bytes": round(physical_reference),
         "allowed_physical_sst_bytes": round(MARGIN * physical_reference),
         "allowed_pending_debt_ratio": (
@@ -448,7 +344,7 @@ def main() -> int:
             "point_read_amplification": "logical SST probes / point Get",
             "scan_amplification": "(returned entries + internal skipped entries) / returned entries",
             "space_amplification": "physical SST bytes / live logical bytes",
-            "rolling_p95": "maximum interval p95 within the rolling window (conservative)",
+            "rolling_p95": "p95 of the merged 64-bucket log2 histogram over the rolling window",
         },
         "level_limits": level_limits,
         "episode_distributions": distributions,

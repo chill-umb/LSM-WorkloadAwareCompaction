@@ -1284,3 +1284,67 @@ class AgentPool:
         train independently. This is the number that says whether pooling
         actually raised the learning budget."""
         return None if self._shared is None else self._shared.train_steps
+
+    def quiesce_training(self, timeout: float = 5.0) -> bool:
+        if self._shared is not None:
+            return self._shared.quiesce(timeout)
+        with self._lock:
+            agents = list(self._agents.values())
+        return all(agent.quiesce(timeout) for agent in agents)
+
+    def health_summary(self) -> dict:
+        with self._lock:
+            agents = dict(self._agents)
+        levels = {
+            str(level): agent.health_snapshot()
+            for level, agent in sorted(agents.items())
+        }
+        snapshots = list(levels.values())
+        if self._shared is not None:
+            learner = self._shared.health_snapshot()
+        else:
+            errors = [item["trainer_error"] for item in snapshots
+                      if item["trainer_error"]]
+            first_times = [item["first_train_elapsed_seconds"]
+                           for item in snapshots
+                           if item["first_train_elapsed_seconds"] is not None]
+            learner = {
+                "replay_size": sum(item["replay_size"] for item in snapshots),
+                "train_steps": sum(item["train_steps"] for item in snapshots),
+                "first_train_elapsed_seconds": (
+                    min(first_times) if first_times else None
+                ),
+                "trainer_error": "; ".join(errors) if errors else None,
+                "last_loss": None,
+            }
+        return {
+            "shared_trunk": self._shared is not None,
+            "decisions": sum(item["decisions"] for item in snapshots),
+            "finalized_transitions": sum(
+                item["finalized_transitions"] for item in snapshots
+            ),
+            "replay_size": learner["replay_size"],
+            "invalid_intervals": sum(
+                item["invalid_intervals"] for item in snapshots
+            ),
+            "cleared_pending_windows": sum(
+                item["cleared_pending_windows"] for item in snapshots
+            ),
+            "pending_windows": sum(item["pending_windows"] for item in snapshots),
+            "train_steps": learner["train_steps"],
+            "first_train_elapsed_seconds": learner[
+                "first_train_elapsed_seconds"
+            ],
+            "trainer_error": learner["trainer_error"],
+            "max_abs_residual_advantage": max(
+                (item["max_abs_residual_advantage"] for item in snapshots),
+                default=0.0,
+            ),
+            "argmax_flip_count": sum(
+                item["argmax_flip_count"] for item in snapshots
+            ),
+            "argmax_comparison_count": sum(
+                item["argmax_comparison_count"] for item in snapshots
+            ),
+            "levels": levels,
+        }

@@ -84,20 +84,30 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
         lambda: {"loss": [], "prior": [], "residual": [], "action": [],
                  "epsilon": [], "override": [], "reward": []})
     counted: dict[int, int] = defaultdict(int)
-    seen = 0
+    per_level_seen: dict[int, int] = defaultdict(int)
+    health = None
+    health_path = metrics_path.with_name("server_summary.json")
+    try:
+        health = json.loads(health_path.read_text())
+        if health.get("schema_version") != 1:
+            health = None
+    except (OSError, json.JSONDecodeError):
+        health = None
     with metrics_path.open(errors="replace") as handle:
         for line in handle:
             if not line.strip():
                 continue
-            seen += 1
-            if stride > 1 and seen % stride:
-                # Still needs the level to keep `samples` honest, and that is
-                # cheaper to find by substring than by parsing the record.
-                marker = line.find('"level":')
-                if marker != -1:
-                    digits = line[marker + 8:marker + 20].strip().split(",")[0]
-                    if digits.lstrip("-").isdigit():
-                        counted[int(digits)] += 1
+            marker = line.find('"level":')
+            level_hint = None
+            if marker != -1:
+                digits = line[marker + 8:marker + 20].strip().split(",")[0]
+                if digits.lstrip("-").isdigit():
+                    level_hint = int(digits)
+            if level_hint is not None:
+                counted[level_hint] += 1
+                per_level_seen[level_hint] += 1
+            if (stride > 1 and level_hint is not None and
+                    per_level_seen[level_hint] % stride):
                 continue
             try:
                 record = json.loads(line)
@@ -106,7 +116,9 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
             level = record.get("level")
             if level is None:
                 continue
-            counted[int(level)] += 1
+            if level_hint is None:
+                counted[int(level)] += 1
+                per_level_seen[int(level)] += 1
             bucket = by_level[int(level)]
             if record.get("loss") is not None:
                 bucket["loss"].append(float(record["loss"]))
@@ -141,7 +153,18 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
         summary[level] = {
             "samples": counted.get(level, len(bucket["action"])),
             "parsed": len(bucket["action"]),
-            "gradient_steps": len(losses),
+            "gradient_steps": (
+                int(health["train_steps"]) if health is not None else len(losses)
+            ),
+            "gradient_steps_exact": 1.0 if health is not None else 0.0,
+            "finalized_transitions": (
+                int(health.get("finalized_transitions", 0))
+                if health is not None else math.nan
+            ),
+            "replay_size": (
+                int(health.get("replay_size", 0))
+                if health is not None else math.nan
+            ),
             "td_first_quarter": first,
             "td_last_quarter": last,
             "td_trend": (last / first if first and math.isfinite(first)
@@ -223,6 +246,13 @@ def main() -> int:
         runs[key] = merged
 
     print(f"arm: {args.arm}   (values are means across repeats)")
+    exact = all(
+        s.get("gradient_steps_exact", 0.0) == 1.0
+        for run in runs.values() for s in run.values()
+    )
+    print("gradient-step source: " +
+          ("exact server summaries" if exact else
+           "APPROXIMATE sticky-loss records for at least one legacy run"))
     print()
     print("  size   T  lvl  rpt   samples   grad     td_1q     td_4q  td_trend  "
           "resid/prior  flip_rate  compact  final_eps")

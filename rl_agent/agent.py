@@ -59,6 +59,11 @@ class SharedTrunk:
         self._net_lock = threading.RLock()
         self._train_event = threading.Event()
         self._stop_event = threading.Event()
+        self._train_idle = threading.Event()
+        self._train_idle.set()
+        self._started_at = time.monotonic()
+        self.first_train_elapsed_seconds: Optional[float] = None
+        self.trainer_error: Optional[str] = None
         self.last_loss: Optional[float] = None
         # Gradient steps taken across all levels — the number that says whether
         # pooling actually raised the learning budget.
@@ -77,21 +82,31 @@ class SharedTrunk:
         if config.EVAL_MODE:
             return
         if config.ASYNC_TRAINING:
+            self._train_idle.clear()
             self._train_event.set()
         else:
             for _ in range(config.TRAIN_STEPS_PER_OBSERVATION):
                 self.train_step()
 
     def _training_loop(self) -> None:
-        while not self._stop_event.is_set():
-            self._train_event.wait(timeout=0.1)
-            if self._stop_event.is_set():
-                break
-            if not self._train_event.is_set():
-                continue
-            self._train_event.clear()
-            for _ in range(config.TRAIN_STEPS_PER_OBSERVATION):
-                self.train_step()
+        try:
+            while not self._stop_event.is_set():
+                self._train_event.wait(timeout=0.1)
+                if self._stop_event.is_set():
+                    break
+                if not self._train_event.is_set():
+                    continue
+                self._train_event.clear()
+                self._train_idle.clear()
+                try:
+                    for _ in range(config.TRAIN_STEPS_PER_OBSERVATION):
+                        self.train_step()
+                finally:
+                    self._train_idle.set()
+        except Exception as exc:  # noqa: BLE001 - persisted in health summary
+            self.trainer_error = f"{type(exc).__name__}: {exc}"
+            self._train_idle.set()
+            self._stop_event.set()
 
     def _soft_update(self) -> None:
         tau = config.TARGET_TAU
@@ -149,6 +164,10 @@ class SharedTrunk:
             if config.TARGET_TAU > 0.0:
                 self._soft_update()
             self.train_steps += 1
+            if self.first_train_elapsed_seconds is None:
+                self.first_train_elapsed_seconds = (
+                    time.monotonic() - self._started_at
+                )
 
         self.last_loss = loss.item()
 
@@ -176,7 +195,26 @@ class SharedTrunk:
             self.optimizer.load_state_dict(ckpt["optimizer"])
             self.train_steps = ckpt.get("train_steps", 0)
 
+    def quiesce(self, timeout: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._train_idle.wait(0.05) and not self._train_event.is_set():
+                return True
+        return not self._train_event.is_set() and self._train_idle.is_set()
+
+    def health_snapshot(self) -> dict:
+        with self._data_lock:
+            replay_size = len(self.buffer)
+        return {
+            "replay_size": replay_size,
+            "train_steps": self.train_steps,
+            "first_train_elapsed_seconds": self.first_train_elapsed_seconds,
+            "trainer_error": self.trainer_error,
+            "last_loss": self.last_loss,
+        }
+
     def close(self) -> None:
+        self.quiesce()
         self._stop_event.set()
         self._train_event.set()
         if self._trainer_thread is not None:
@@ -253,6 +291,16 @@ class DQNAgent:
         self.last_prior_advantage: Optional[float] = None
         self.last_residual_advantage: Optional[float] = None
         self.last_credit_lag: Optional[float] = None
+        self.finalized_transitions: int = 0
+        self.invalid_intervals: int = 0
+        self.cleared_pending_windows: int = 0
+        self.max_abs_residual_advantage: float = 0.0
+        self.argmax_flip_count: int = 0
+        self.argmax_comparison_count: int = 0
+        self.train_steps: int = 0
+        self.first_train_elapsed_seconds: Optional[float] = None
+        self.trainer_error: Optional[str] = None
+        self._started_at = time.monotonic()
 
         # Pending decisions awaiting their credit window. Each entry holds the
         # decision, its accumulated discounted return, the running discount
@@ -274,6 +322,8 @@ class DQNAgent:
                           else threading.RLock())
         self._train_event = threading.Event()
         self._stop_event = threading.Event()
+        self._train_idle = threading.Event()
+        self._train_idle.set()
         self._trainer_thread: Optional[threading.Thread] = None
 
         # One trainer thread per pool, owned by the SharedTrunk. Starting one
@@ -394,6 +444,18 @@ class DQNAgent:
         if prior is not None and self.action_dim >= 2:
             self.last_prior_advantage = float(prior[1] - prior[0])
             self.last_residual_advantage = float(residual[1] - residual[0])
+            with self._data_lock:
+                self.max_abs_residual_advantage = max(
+                    self.max_abs_residual_advantage,
+                    abs(self.last_residual_advantage),
+                )
+                prior_action = max(valid_actions, key=lambda a: float(prior[a]))
+                composed_action = max(
+                    valid_actions, key=lambda a: float(q_vals[a])
+                )
+                self.argmax_comparison_count += 1
+                if prior_action != composed_action:
+                    self.argmax_flip_count += 1
 
         if config.EVAL_MODE:
             return max(valid_actions, key=lambda a: float(q_vals[a]))
@@ -471,6 +533,8 @@ class DQNAgent:
             # overlap; retaining even an older n-step window would leak the
             # invalid interval's global reward into replay.
             if not transition_valid:
+                self.invalid_intervals += 1
+                self.cleared_pending_windows += len(self._pending)
                 self._pending.clear()
 
             # 0. Correct the previous decision's action to what was executed.
@@ -492,6 +556,7 @@ class DQNAgent:
                 self.buffer.push(entry["state"], entry["action"],
                                  entry["return"], state, False,
                                  entry["prior"], prior, entry["discount"])
+                self.finalized_transitions += 1
                 self.last_returns.append(entry["return"])
                 self.last_credit_lag = now - entry["t0"]
 
@@ -503,6 +568,7 @@ class DQNAgent:
                     self.buffer.push(entry["state"], entry["action"],
                                      entry["return"], state, True,
                                      entry["prior"], prior, entry["discount"])
+                    self.finalized_transitions += 1
                     self.last_returns.append(entry["return"])
 
             # 4. Choose this step's action and open its window, unless the
@@ -548,6 +614,7 @@ class DQNAgent:
                 self.buffer.push(entry["state"], entry["action"],
                                  entry["return"], bootstrap, True,
                                  entry["prior"], None, entry["discount"])
+                self.finalized_transitions += 1
 
     # -- training ----------------------------------------------------------
 
@@ -560,24 +627,33 @@ class DQNAgent:
         if config.EVAL_MODE:
             return
         if config.ASYNC_TRAINING:
+            self._train_idle.clear()
             self._train_event.set()
         else:
             for _ in range(config.TRAIN_STEPS_PER_OBSERVATION):
                 self._train_step()
 
     def _training_loop(self) -> None:
-        while not self._stop_event.is_set():
-            self._train_event.wait(timeout=0.1)
-            if self._stop_event.is_set():
-                break
-            if not self._train_event.is_set():
-                continue
-            self._train_event.clear()
-            for _ in range(config.TRAIN_STEPS_PER_OBSERVATION):
-                # The net lock is taken per gradient step, not around the whole
-                # batch of them, so action selection can interleave instead of
-                # queueing behind every step.
-                self._train_step()
+        try:
+            while not self._stop_event.is_set():
+                self._train_event.wait(timeout=0.1)
+                if self._stop_event.is_set():
+                    break
+                if not self._train_event.is_set():
+                    continue
+                self._train_event.clear()
+                self._train_idle.clear()
+                try:
+                    for _ in range(config.TRAIN_STEPS_PER_OBSERVATION):
+                        # The net lock is taken per gradient step, not around the
+                        # whole batch, so action selection can interleave.
+                        self._train_step()
+                finally:
+                    self._train_idle.set()
+        except Exception as exc:  # noqa: BLE001 - persisted in health summary
+            self.trainer_error = f"{type(exc).__name__}: {exc}"
+            self._train_idle.set()
+            self._stop_event.set()
 
     def _soft_update(self) -> None:
         tau = config.TARGET_TAU
@@ -643,6 +719,12 @@ class DQNAgent:
             if config.TARGET_TAU > 0.0:
                 self._soft_update()
 
+            self.train_steps += 1
+            if self.first_train_elapsed_seconds is None:
+                self.first_train_elapsed_seconds = (
+                    time.monotonic() - self._started_at
+                )
+
         self.last_loss = loss.item()
 
     # -- persistence -------------------------------------------------------
@@ -669,6 +751,7 @@ class DQNAgent:
                     state["policy_net"] = self.policy_net.state_dict()
                     state["target_net"] = self.target_net.state_dict()
                     state["optimizer"] = self.optimizer.state_dict()
+                    state["train_steps"] = self.train_steps
         torch.save(state, path)
 
     def load(self, path: str) -> None:
@@ -690,8 +773,50 @@ class DQNAgent:
                     self.policy_net.load_state_dict(ckpt["policy_net"])
                     self.target_net.load_state_dict(ckpt["target_net"])
                     self.optimizer.load_state_dict(ckpt["optimizer"])
+                    self.train_steps = int(ckpt.get("train_steps", 0))
+
+    def quiesce(self, timeout: float = 2.0) -> bool:
+        if self.shared is not None:
+            return self.shared.quiesce(timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._train_idle.wait(0.05) and not self._train_event.is_set():
+                return True
+        return not self._train_event.is_set() and self._train_idle.is_set()
+
+    def health_snapshot(self) -> dict:
+        with self._data_lock:
+            return {
+                "level": self.level,
+                "decisions": self.step,
+                "finalized_transitions": self.finalized_transitions,
+                "replay_size": len(self.buffer),
+                "invalid_intervals": self.invalid_intervals,
+                "cleared_pending_windows": self.cleared_pending_windows,
+                "pending_windows": len(self._pending),
+                "train_steps": (
+                    self.shared.train_steps
+                    if self.shared is not None
+                    else self.train_steps
+                ),
+                "first_train_elapsed_seconds": (
+                    self.shared.first_train_elapsed_seconds
+                    if self.shared is not None
+                    else self.first_train_elapsed_seconds
+                ),
+                "trainer_error": (
+                    self.shared.trainer_error
+                    if self.shared is not None
+                    else self.trainer_error
+                ),
+                "max_abs_residual_advantage": self.max_abs_residual_advantage,
+                "argmax_flip_count": self.argmax_flip_count,
+                "argmax_comparison_count": self.argmax_comparison_count,
+            }
 
     def close(self) -> None:
+        if self.shared is None:
+            self.quiesce()
         # A pooled agent has no thread of its own; the SharedTrunk owns the one
         # trainer and AgentPool closes it.
         self._stop_event.set()

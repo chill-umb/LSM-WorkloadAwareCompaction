@@ -45,8 +45,8 @@ def main() -> int:
     parser.add_argument(
         "--scan-objective",
         choices=("amplification", "sorted_run_seeks", "nonregression"),
-        default="amplification",
-        help="must be chosen before the final run; see plan section 14.5",
+        default="sorted_run_seeks",
+        help="preregistered objective; scan amplification remains non-regression",
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -108,7 +108,9 @@ def main() -> int:
         "scan_latency_avg_us", "scan_latency_p95_us",
         "write_latency_avg_us", "write_latency_p95_us",
     ]
-    if not args.safety_only and args.scan_objective == "nonregression":
+    if not args.safety_only and args.scan_objective in (
+        "sorted_run_seeks", "nonregression"
+    ):
         nonregression.append("scan_amplification")
     for key in nonregression:
         regressions = [relative(f(rl, key), f(base, key))

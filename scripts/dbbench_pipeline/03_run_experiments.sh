@@ -66,6 +66,16 @@ for arm in $EXPERIMENT_ARMS; do
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
 done
+case "$RL_RUN_PHASE" in
+  calibration|holdout)
+    [[ "$EXPERIMENT_ARMS" == "oracle" ]] || {
+      echo "RL_RUN_PHASE=$RL_RUN_PHASE requires EXPERIMENT_ARMS=oracle" >&2
+      exit 1
+    }
+    ;;
+  experiment) ;;
+  *) echo "Unsupported RL_RUN_PHASE: $RL_RUN_PHASE" >&2; exit 1 ;;
+esac
 SLO_DRIVEN_MATRIX=0
 for arm in $EXPERIMENT_ARMS; do
   if [[ "$arm" == "prior_only" || "$arm" == "rl" ||
@@ -73,6 +83,9 @@ for arm in $EXPERIMENT_ARMS; do
     SLO_DRIVEN_MATRIX=1
   fi
 done
+if [[ "$RL_RUN_PHASE" == "calibration" || "$RL_RUN_PHASE" == "holdout" ]]; then
+  SLO_DRIVEN_MATRIX=1
+fi
 [[ "$RL_REQUIRE_BASELINE_SLO" =~ ^[01]$ ]] || {
   echo "RL_REQUIRE_BASELINE_SLO must be 0 or 1." >&2
   exit 1
@@ -175,6 +188,7 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'WORKLOAD_PROFILE=%q\n' "$WORKLOAD_PROFILE"
   printf 'SIZE_RATIOS=%q\n' "$SIZE_RATIOS"
   printf 'EXPERIMENT_ARMS=%q\n' "$EXPERIMENT_ARMS"
+  printf 'RL_RUN_PHASE=%q\n' "$RL_RUN_PHASE"
   printf 'REPEATS=%q\n' "$REPEATS"
   printf 'LOAD_PERCENT=%q\n' "$LOAD_PERCENT"
   printf 'MIX_GET_RATIO=%q\n' "$MIX_GET_RATIO"
@@ -281,6 +295,7 @@ start_server() {  # result dir, policy seed, decay steps, eval, manifest, finger
     RL_MODEL_SAVE_PATH="$result_dir/model.pt" \
     RL_METRICS_LOG_PATH="$result_dir/metrics.jsonl" \
     RL_IO_LOG_PATH="$result_dir/io.jsonl" \
+    RL_SERVER_SUMMARY_PATH="$result_dir/server_summary.json" \
     RL_SEED="$policy_seed" \
     RL_DECISION_INTERVAL_MS="$RL_DECISION_INTERVAL_MS" \
     RL_OBSERVE_INTERVAL_MS="$RL_OBSERVE_INTERVAL_MS" \
@@ -387,17 +402,27 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   local effective_l0_stop="$L0_STOP_TRIGGER"
   local effective_priority="$COMPACTION_PRIORITY"
   local manifest_fingerprint=""
+  if (( SLO_DRIVEN_MATRIX )) && [[ ! -f "$manifest_path" ]]; then
+    echo "Missing required baseline manifest: $manifest_path" >&2
+    exit 1
+  fi
   if (( SLO_DRIVEN_MATRIX )) && [[ -f "$manifest_path" ]]; then
     local manifest_values=()
     mapfile -t manifest_values < <(
-      "$PYTHON" - "$manifest_path" "$size_m" "$ratio" <<'PY'
+      "$PYTHON" - "$manifest_path" "$size_m" "$ratio" "$RL_RUN_PHASE" <<'PY'
 import json
 import sys
 
-path, expected_size, expected_ratio = sys.argv[1:]
+path, expected_size, expected_ratio, phase = sys.argv[1:]
 manifest = json.load(open(path, encoding="utf-8"))
-if manifest.get("schema_version") != 1:
+if manifest.get("schema_version") != 2 or \
+        manifest.get("metric_definitions_version") != "trigger-v2-logical-v2":
     raise SystemExit(f"unsupported baseline manifest schema: {path}")
+calibrated = manifest.get("guard_calibrated") is True
+if phase == "calibration" and calibrated:
+    raise SystemExit(f"calibration requires a provisional manifest: {path}")
+if phase in ("holdout", "experiment") and not calibrated:
+    raise SystemExit(f"{phase} requires a calibrated live guard: {path}")
 options = manifest.get("selected_baseline_options", {})
 required = (
     "size_millions", "size_ratio",
@@ -489,6 +514,7 @@ PY
     printf 'repeat=%s\n' "$repeat"
     printf 'policy_seed=%s\n' "$policy_seed"
     printf 'rl_protocol_version=%s\n' "$RL_PROTOCOL_VERSION"
+    printf 'rl_run_phase=%s\n' "$RL_RUN_PHASE"
     printf 'rl_file_picker=rocksdb_native\n'
     printf 'rl_exploration_decay_steps=%s\n' "$decay_steps"
     printf 'experiment_fingerprint=%s\n' "$fingerprint"
@@ -525,13 +551,28 @@ PY
 
   echo "[run] $size_label T=$ratio $arm"
   local start_ns end_ns status
+  local trigger_trace_path="$result_dir/trigger_trace.jsonl"
+  local latency_window_log=""
+  local safety_shadow_log=""
+  local oracle_manifest_env_path=""
+  if [[ "$RL_RUN_PHASE" == "calibration" ]]; then
+    trigger_trace_path=""
+    latency_window_log="$result_dir/latency_windows.jsonl"
+    oracle_manifest_env_path="$manifest_env_path"
+  elif [[ "$RL_RUN_PHASE" == "holdout" ]]; then
+    trigger_trace_path=""
+    safety_shadow_log="$result_dir/safety_shadow.jsonl"
+    oracle_manifest_env_path="$manifest_env_path"
+  fi
   start_ns="$(date +%s%N)"
   set +e
   if (( uses_server )); then
     env RL_COMPACTION_SOCKET_PATH="$SERVER_SOCKET" \
       RL_COMPACTION_SOCKET_TIMEOUT_MS="$RL_SOCKET_TIMEOUT_MS" \
       RL_PRESSURE_EPISODE_LOG="$result_dir/pressure_episodes.jsonl" \
-      RL_TRIGGER_TRACE_PATH="$result_dir/trigger_trace.jsonl" \
+      RL_TRIGGER_TRACE_PATH="$trigger_trace_path" \
+      RL_LATENCY_WINDOW_LOG="$latency_window_log" \
+      RL_SAFETY_SHADOW_LOG="$safety_shadow_log" \
       RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
       RL_BASELINE_SLO_PATH="$manifest_env_path" \
       RL_REQUIRE_BASELINE_SLO="$RL_REQUIRE_BASELINE_SLO" \
@@ -550,7 +591,11 @@ PY
     env RL_TRIGGER_ORACLE=1 RL_SAFETY_ENFORCEMENT=0 \
       RL_STRUCTURAL_DIRTY_DEADLINE_MS="$RL_STRUCTURAL_DIRTY_DEADLINE_MS" \
       RL_PRESSURE_EPISODE_LOG="$result_dir/pressure_episodes.jsonl" \
-      RL_TRIGGER_TRACE_PATH="$result_dir/trigger_trace.jsonl" \
+      RL_TRIGGER_TRACE_PATH="$trigger_trace_path" \
+      RL_LATENCY_WINDOW_LOG="$latency_window_log" \
+      RL_SAFETY_SHADOW_LOG="$safety_shadow_log" \
+      RL_BASELINE_SLO_PATH="$oracle_manifest_env_path" \
+      RL_REQUIRE_BASELINE_SLO=0 \
       RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
       RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
       RL_L0_ALLOW_DEFER="$RL_L0_ALLOW_DEFER" \
@@ -567,6 +612,21 @@ PY
   end_ns="$(date +%s%N)"
   (( ! uses_server )) || stop_server
   check_log "$status" "$result_dir/run.log" || exit 4
+  if (( uses_server )); then
+    set +e
+    "$PYTHON" "$PIPELINE_DIR/10_validate_learning_health.py" \
+      --summary "$result_dir/server_summary.json" --arm "$arm" \
+      --output "$result_dir/learning_health.json" \
+      > "$result_dir/learning_health.log" 2>&1
+    status=$?
+    set -e
+    if (( status != 0 )); then
+      touch "$result_dir/FAILED_LEARNING_HEALTH"
+      echo "Learning-health gate failed; preserving result and DB: $result_dir" >&2
+      sed -n '1,120p' "$result_dir/learning_health.log" >&2
+      exit 5
+    fi
+  fi
   printf 'elapsed_seconds=%.6f\n' "$(( end_ns - start_ns ))e-9" \
     >> "$result_dir/metadata.env"
   cp "$db_dir/LOG" "$result_dir/rocksdb_LOG.txt" 2>/dev/null || true

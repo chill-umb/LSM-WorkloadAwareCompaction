@@ -49,8 +49,27 @@ pair that will be evaluated:
 scripts/dbbench_pipeline/06_select_baseline_slo.py \
   --baseline-results /mnt/nvme/baseline-results \
   --size-millions 10 --size-ratio 2 \
-  --output baseline_slo/balanced-v1/10M/T2/baseline_slo.json
+  --output baseline_selection/balanced-v1/10M/T2/baseline_slo.json
 ```
+
+The selection file is deliberately provisional: its formal +2% objectives are
+fixed, but `guard_calibrated` is false. After every size/T selection exists,
+run three oracle calibration repeats and three independent oracle holdouts.
+Only the compact latency-window and safety-shadow JSONL files are processed;
+the large agent I/O, metrics, and RocksDB logs are not calibration inputs.
+
+```bash
+WORKLOAD_SIZES_M="10 20 30 40 50" SIZE_RATIOS="2 6 10" \
+SELECTION_SLO_ROOT=baseline_selection FINAL_SLO_ROOT=baseline_slo \
+GUARD_DB_ROOT=/mnt/nvme/guard-databases \
+GUARD_RESULTS_ROOT=/mnt/nvme/guard-results \
+CONFIRM_GUARD_PROTOCOL=YES \
+scripts/dbbench_pipeline/06_run_guard_protocol.sh
+```
+
+The holdout gate must pass every repeat before a learned experiment is run.
+Calibration and holdout use disjoint seed ranges; a failed holdout cannot be
+used to loosen the guard without a new calibration version and fresh holdouts.
 
 Finally run the selected regular, prior-only, unconstrained-learning ablation,
 and constrained learned arms. The trigger and
@@ -60,6 +79,7 @@ before launching an arm if the remaining geometry does not match the manifest.
 
 ```bash
 EXPERIMENT_ARMS="regular prior_only unconstrained_rl rl" REPEATS=10 \
+RL_RUN_PHASE=experiment BASELINE_SLO_DIR=baseline_slo \
 DB_ROOT=/mnt/nvme/dbbench-databases \
 RESULTS_ROOT=/mnt/nvme/dbbench-results \
 CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh
@@ -70,8 +90,16 @@ scripts/dbbench_pipeline/04_generate_graphs.sh \
 scripts/dbbench_pipeline/07_evaluate_paired.py \
   /mnt/nvme/dbbench-results/graphs/summary.csv \
   --size-millions 10 --size-ratio 2 \
-  --scan-objective amplification
+  --scan-objective sorted_run_seeks
 ```
+
+Sorted-run seeks is the strict scan-improvement objective because this
+workload's scan-amplification baseline is already at its physical floor. Scan
+amplification remains a 2% non-regression check. Every learned arm also has a
+hard pre-completion health gate: finalized replay, replay warmup, a true
+optimizer step, a nonzero residual, drained clients, quiesced training, zero
+pending credit windows, and no trainer exception are required before diagnostic
+full compaction and `COMPLETED`.
 
 After balanced acceptance, the read-heavy and write-heavy stress runner
 performs separate tuned-baseline calibration for each workload identity and
@@ -92,7 +120,8 @@ describes 10M, 20M, 30M, 40M, and 50M total operations at `T=2,6,10`.
 ablation only; it is not the production policy.
 `REPEATS` creates distinct repeat directories, pairs workload seeds, assigns
 distinct policy seeds, and alternates arm order. Learned and prior-only arms
-require a workload/configuration-matched manifest by default.
+require a workload/configuration-matched, schema-v2, calibrated manifest by
+default. Schema-v1 manifests are rejected.
 
 `WORKLOAD_PROFILE` is part of that identity. The fingerprint also includes the
 load/mix proportions, scan settings, cache, Bloom filter, background jobs,

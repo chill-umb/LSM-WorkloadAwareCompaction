@@ -2,13 +2,26 @@
 
 **Document status:** consolidated project record
 
-**Repository state inspected:** 2026-08-16 (Asia/Dhaka)
+**Repository state inspected:** 2026-08-26 (Asia/Dhaka)
 
 **Scope:** root repository, modified RocksDB submodule, Python RL controller,
 workload tooling, experiment pipelines, project-authored Markdown documents,
 the two bundled research papers, and the relevant upstream RocksDB and Tectonic
 documentation
 
+> **2026-08-26 status correction (read first).** The trigger bridge has now
+> been built, executed, and gated on the cloud machine. Two facts supersede the
+> "unvalidated prototype" framing that dominates the rest of this document.
+> First, **the oracle parity gate passes**: at ten paired 1M/T2 repeats, eleven
+> of thirteen checks pass and none fail, including the event-time due-to-admission
+> latency the D3a fix targets. Phase 1b is discharged for every criterion that is
+> decidable at that sample size. Second, **the learned residual never trained**:
+> across a full 1/5/10/20M x T=2/6/10 matrix the DQN recorded zero gradient steps
+> and a residual identically equal to zero, so every arm labelled `rl` executed
+> the analytic prior. No result in this project has yet tested a learned policy.
+> Sections 8, 9, 10.6, 11.5, 13.5, 14.1, 15 and 18 carry the detail; earlier
+> statements about pending compilation and pending gates are historical.
+>
 > **2026-08-15 scope correction (authoritative):** the project implements an
 > RL compaction **trigger**, not an RL file-picking policy. Protocol v3's
 > candidate-aware/exact-SST controller was an experimental scope deviation. It
@@ -1049,6 +1062,120 @@ not been made; the tests were deliberately left failing rather than rewritten to
 match the code, because a suite edited to agree with its implementation stops
 being evidence about it. This must be resolved before Phase 4.
 
+### 2026-08-18 to 2026-08-19: the oracle-gate defect analysis and its fixes
+
+The first execution of the repaired bridge produced a gate reporting
+`passed: false` on four checks. Analysis (`ORACLE_GATE_FIX_PLAN.md`, Revision 3)
+decomposed those four into seven defects, of which **only one was in the
+controller**. The rest were defects in how the controller was being measured,
+and two of them were manufacturing false failures.
+
+| | Defect | Nature |
+| --- | --- | --- |
+| D1 | `per_level_maximum_score` compared the oracle's trigger-trace maxima against the baseline's *episode* maxima. A regular arm constructs `LevelCompactionPicker` and cannot write a trace at any setting, so a populated-but-never-due level got a fabricated baseline of 0 and a limit of `max(1.05 x 0, 0.10)`. | Instrument asymmetry; worsens as more levels stay populated-but-not-due at larger scales |
+| D2 | `CompactionPressureObserver` exported an episode only on a due->healthy transition, so every level still due at a phase boundary lost that episode -- the exact upper tail `06_select_baseline_slo.py` estimates its tolerance bounds from. | Silent data loss in both arms; corrupts manifest calibration |
+| D3 | Nothing acted on the due edge. A level crossing between two ticks carried the previous frame's `kDefer`, so trigger latency tracked the decision interval. | The only genuine controller defect |
+| D4 | Envelope criteria were gated with `all()` over three repeats on quantities whose seed-to-seed spread exceeds their effect size. | Methodology; the gate could not decide |
+| D5 | The stall allowance was derived from the observation period, so shortening the decision interval tightened the tolerance at the same moment it improved the controller. | Methodology; the two runs were not judged by the same yardstick |
+| D6 | The exploration schedule was derived from `11/100000` -- 0.11 decisions per 1000 operations, measured when the observation rate was 2.6/s and invalidated by the Phase 1a repair that raised it to ~20/s. | Configuration; would mis-anneal every learned arm |
+| D7 | The due->eligible latency estimator had no episode-end bound, treated a gate held open from an earlier decision as instant authorization, and dropped unauthorized episodes without counting them. | Instrument; it is the measurement D3's magnitude claim rested on |
+
+Fixes landed in four stages, ordered so each one changed what the remaining work
+was. Stage 1 was evaluator-only and needed no rebuild.
+
+- **D1** the gate compares per-level maxima drawn from the pressure episode log,
+  which *both* arms write through the same exporter. Levels the baseline never
+  exercised are reported separately as informational output rather than compared
+  against a fabricated zero.
+- **D2** `CompactionPressureObserver` gained `FlushOpenEpisodes` and a
+  process-wide registry so the workload/drain boundary and process teardown both
+  close open episodes; the episode record moved to `schema_version` 2 carrying
+  `truncated` and `phase`.
+- **D3a** the crossing posture. A `defer` selected while a level was *below* its
+  trigger expressed no judgement about a due level, so it no longer binds once
+  the level crosses; the level is admitted under `ActionReason::kPosture`.
+- **D4/D5** invariant-versus-envelope split, paired confidence bounds sharing one
+  instrument with `07_evaluate_paired.py`, a per-metric `required_pairs` computed
+  from observed dispersion, and a stall allowance that is no longer a function of
+  the decision interval.
+- **D6** exploration anneals on wall time.
+- **D7** the estimator gained an episode-end bound, a gate-transition test, and
+  exported denominators; a C++ event-time histogram was added because the trace
+  is written once per worker tick and therefore cannot express an acceptance
+  threshold below one tick.
+
+**Stage 5 (D3b, the due-edge wake) was deliberately not built.** It must land
+alone after the gate passes under D3a so a regression is attributable, and its
+rate budget cannot be sized without the measured due-crossing rate.
+
+Two implementation deviations from the plan as written are recorded in
+`ORACLE_GATE_FIX_PLAN.md` Section 10.2. D3a is a permit promotion rather than the
+predicate change the plan specified, because `RecordSuccessfulSchedule` validates
+`eligibility_generation` and a still-closed permit fails attribution downstream.
+D6 anneals linearly in wall time rather than on the "half-life" the plan
+proposed, because an exponential half-life never reaches a floor and the plan's
+own acceptance check is stated as reaching one.
+
+### 2026-08-22: the oracle parity gate passes
+
+Built and executed on a fresh cloud machine (single 447 GB SSD, root filesystem
+shared with the OS -- absolute runtimes are therefore not comparable with the
+earlier NVMe-backed runs, though paired differences remain valid).
+
+Ten paired 1M/T2 regular/oracle repeats. **Verdict `undecided`, `failed: []`** --
+eleven of thirteen checks pass and none fail.
+
+| Check | Result |
+| --- | --- |
+| `due_to_admission_latency` | **passed** -- p50 511 us against a 5000 us limit, at the 50 ms cadence |
+| `per_level_maximum_score` | **passed** at ten pairs, having failed 2 of 3 at three pairs |
+| `mean_l0_l1_input_size` | **passed**, mean -0.41%, CI [-1.09, +0.28] |
+| write amp / point-read amp / seeks | **passed** as paired envelopes: +0.01%, -0.40%, -0.33% |
+| `maximum_pending_debt` | passed, +0.57% |
+| decision rate, observation health, held-gate service, due-level authorization, workload identity | passed |
+| `no_new_oracle_stop_event` | **insufficient_pairs** -- `required_pairs` returns null (">200 pairs; the effect size is small relative to the seed-to-seed spread") |
+| `stall_duration` | **no_allowance_configured** -- the D5 allowance must come from the baseline sweep's dispersion, which had not yet run |
+
+The latency result is the substantive one. Against the pre-fix trace-derived
+median of ~33 ms at the same 50 ms cadence, and ~6.5 ms at a 10 ms cadence, D3a
+brings due-to-admission latency to 511 us **at the original cadence** -- a 65x
+reduction, and better than the 10 ms configuration achieved, without paying its
+socket and CPU cost. That is the outcome D3b was designed to produce, obtained
+from the cheaper semantic fix.
+
+`per_level_maximum_score` passing at ten pairs also settles an open question:
+its failures at three pairs moved between L1 and L2 across configurations, which
+is what noise on a maximum statistic looks like. It survives as an all-repeats
+invariant and does not need reclassifying.
+
+### 2026-08-22 to 2026-08-24: preregistered decisions and the paired matrix
+
+Recorded before any RL arm ran (`ORACLE_GATE_FIX_PLAN.md` Section 11):
+
+- **`compaction_pri` fixed at 3 (`kMinOverlappingRatio`), not swept.** It selects
+  which file inside an eligible level compacts first, which is outside the
+  trigger-only scope; the runner applies it identically to every arm and folds it
+  into the shared fingerprint, so it cannot produce a paired difference in either
+  direction. This is a deliberate deviation from the sweep specified in
+  `TRIGGER_CONTROLLER_REPAIR_PLAN.md` Section 3.1 step 1.
+- **`level0_slowdown_writes_trigger` fixed at 20 and `level0_stop_writes_trigger`
+  at 36, not swept.** Live on this workload but the proposed ranges span 11-20%
+  of their own scale, a 4x multiplier on the sweep for a perturbation.
+- **`level0_file_num_compaction_trigger` remains swept over {4, 8}** -- it is the
+  static analogue of the research variable.
+- **Workload sizes 1M, 5M, 10M, 20M** on a total-time budget, with 1M and 5M
+  retained as low anchors and not expected to discriminate any trigger policy.
+
+The sweep therefore ran 6 configurations (3 size ratios x 2 L0 triggers) x 4
+sizes x 3 repeats, and the paired matrix ran 4 arms x 12 cells x 3 repeats = 144
+arms. Manifests were generated for all twelve size/ratio combinations.
+
+### 2026-08-24 to 2026-08-26: the matrix result, and what it does not test
+
+See Section 10.6. The headline is that **the learner never trained**, so the
+matrix measures the analytic prior with and without the live SLO mask, and not a
+learned policy at all.
+
 ## 9. Defect and fix catalogue
 
 The following table consolidates the failure modes documented across the
@@ -1098,6 +1225,17 @@ context, system guide, workload notes, and current code.
 | Single-run claims | One lucky seed was treated as a result. | Repeat-aware paired seeds and alternating order; final acceptance requires at least ten paired repeats and confidence intervals. | Runner implemented; final experiment not run. |
 | Build parity check | A grep-based parity check was incorrectly treated as proof of equivalent binaries/options. | Record commands/options/revisions and perform behavioral/control-path checks. | Methodology correction. |
 | Script sprawl | Multiple overlapping runners and plotters caused confusion and unsafe reuse. | Replace the current use case with a numbered `db_bench` pipeline. | Current working-tree cleanup. |
+| Gate instrument asymmetry (D1) | The per-level score check compared the oracle's trigger trace against the baseline's episode log; a regular arm cannot write a trace, so a never-due level got a fabricated baseline of zero. | Compare only quantities both arms produce; report baseline-unexercised levels separately. | Fixed 2026-08-19; verified against the recorded runs. |
+| Lost final episodes (D2) | Episodes were exported only on due->healthy, so any level still due at a phase boundary was dropped -- the tail the manifest's tolerance bounds are estimated from. | `FlushOpenEpisodes` plus a process-wide registry; episode `schema_version` 2 with `truncated`/`phase`. | Fixed in source 2026-08-19; measured effect on this workload is small (one truncated record across six arm-runs). |
+| Censored episodes ranked as samples | The first D2 design pooled truncated episodes into the order-statistic bound. A truncated record is a *lower bound*, so pooling biases the distribution downward and tightens the limit -- the same direction as the defect being repaired. | `censored_tolerance_bound`: rank completed episodes only, then raise the bound if a censored observation already exceeds it. | Fixed 2026-08-19. |
+| Trigger latency tracked the decision interval (D3) | A level crossing between ticks carried the previous frame's `kDefer`, so a due level waited up to one interval for authorization. | D3a: a below-threshold `defer` no longer binds across the crossing; the level is admitted under `kPosture` with the transition kept replay-valid. | Fixed; gate-verified 2026-08-22 at 511 us p50 against ~33 ms pre-fix. |
+| Undecidable gate criteria (D4) | `all()` over three repeats on quantities whose seed spread exceeds their effect size. | Invariant/envelope split, paired confidence bounds, per-metric `required_pairs` from observed dispersion, explicit `insufficient_pairs`. | Fixed 2026-08-19. `no_new_oracle_stop_event` is now known to need >200 pairs and must be replaced, not re-run. |
+| Tolerance keyed to a tuning knob (D5) | The stall allowance was derived from the observation period, so tuning the controller tightened its own yardstick. | `--stall-allowance-seconds`, preregistered from the baseline sweep's dispersion, with no default. | Fixed 2026-08-19; the allowance itself is still to be derived. |
+| Dead exploration constant (D6) | The decay schedule encoded 0.11 decisions per 1000 operations, measured before the Phase 1a repair raised the rate ~8x. | Anneal on wall time (`RL_EXPLORATION_ANNEAL_SECONDS`); the step schedule is retained as an explicit ablation. | Fixed 2026-08-19. Verified in the matrix: final epsilon sat at its 0.05 floor. |
+| Biased latency estimator (D7) | No episode-end bound (an unauthorized episode inherited a later one's timestamp), a held-open gate read as instant authorization, and dropped episodes were not counted. | Bound the window, require a gate transition, export the denominators, and add a C++ event-time histogram because the trace is tick-quantised. | Fixed 2026-08-19. ~20% of episodes at 50 ms were opening and closing between two ticks, previously invisible. |
+| Binomial overflow in the tolerance bound | `math.comb(n, i)` reaches ~1e600 for n in the low thousands; multiplying by a float raises `OverflowError`. The search was also O(n^2) over candidate ranks. | Log-space PMF plus a single incremental pass (`smallest_valid_rank`). | Pre-existing; exposed at 5M and fixed 2026-08-24. n=299 remains exactly where the maximum becomes a 99%/95% bound. |
+| Graph generator coupling | `06_select_baseline_slo.py` loads `04_generate_graphs.py` only for `collect_arm`, but that module imported matplotlib at top level, so manifest generation failed on any interpreter without it. | Import matplotlib lazily inside the two functions that draw. | Fixed 2026-08-24. |
+| **Learner never trained** | Zero gradient steps and an identically zero residual across all 37 active level-cells, at up to 61,597 decisions per level. Every `rl` arm executed the analytic prior. | **Not yet diagnosed.** Leading hypothesis: `ForceOpenLevel` marks *every* level's transition invalid, and with most levels uncalibrated the SLO mask fires often enough that replay never accumulates a valid transition. | **Open. This is the blocking defect.** |
 
 ## 10. Experimental record and interpretation
 
@@ -1170,6 +1308,82 @@ run. It is a negative engineering result, not an accepted policy comparison.
 Protocol v3 was removed after it increased write amplification, logical read
 work, stalls, latency, and runtime. No future experiment in the current project
 should label exact-SST selection as the RL arm.
+
+### 10.6 The 2026-08-24 paired matrix, and the training defect it exposed
+
+**Configuration.** 1M/5M/10M/20M x T=2/6/10 x {`regular`, `prior_only`,
+`unconstrained_rl`, `rl`} x 3 repeats = 144 arms. Manifests generated for all
+twelve cells from the narrowed 6-configuration sweep. Paired seeds, alternating
+arm order.
+
+**Result against the acceptance criteria: fails.** Pooled over 36 paired
+differences, relative to the leveled baseline:
+
+| Arm | write amp | point-read amp | seeks/scan | space amp | runtime | stall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `prior_only` | +0.11% | +0.72% | +0.50% | -0.18% | +3.57% | +5.74% |
+| `rl` | **+0.92%** [+0.4, +1.4] | +0.92% [-0.4, +2.2] | +0.70% [-0.4, +1.8] | +0.98% [-1.2, +3.1] | **+3.99%** [+2.3, +5.7] | **+10.56%** [+7.1, +14.0] |
+| `unconstrained_rl` | **+18.94%** [+16.2, +21.7] | **-11.82%** [-14.9, -8.8] | **-11.95%** [-15.0, -8.9] | +3.46% [+0.6, +6.3] | +6.34% | +7.99% |
+
+The criteria in Section 3.1 require the interval for write, point-read *and* scan
+amplification each strictly below zero, space within 2%, and no stall increase.
+`rl` has write amplification significantly *above* zero, stalls up 10.6%, and
+runtime up 4.0%.
+
+Pooling across heterogeneous cells makes these intervals tighter than the
+per-cell picture warrants -- runtime ranges from -5% at 1M/T2 to +12% at 20M/T6 --
+so the pooled bounds should be read as direction, not precision. At three repeats
+most per-cell differences are individually undecidable.
+
+**But none of this tests a learned policy.** `11_analyze_learning.py` reports,
+for all 37 active level-cells across all twelve configurations:
+
+- **zero gradient steps**, at 523 to 61,597 decisions per level;
+- **residual advantage identically 0.000000** wherever the analytic prior was
+  non-zero -- the residual head never left its zero initialisation;
+- **argmax flip rate 0.0** -- learning changed no decision anywhere.
+
+So `Q = analytic_prior + 0`, and every arm labelled `rl` executed
+`argmax_a b(s,a)`: the same closed-form heuristic `prior_only` runs.
+
+A third, independent confirmation comes from the summary metrics rather than the
+learning logs. `prior_only` and `rl` both run with the SLO mask on and both run
+the pure prior, so their only mechanical difference is exploration --
+`prior_only` is in eval mode with none, `rl` anneals to a 0.05 temperature floor.
+Their gap is +0.8pp write amplification and +4.8pp stalls, which is what
+exploration costs when nothing is learned from the samples it generates. A
+trained residual would have moved `rl` away from `prior_only` in some other
+direction.
+
+**What the matrix does establish.** Two findings survive, provided the arms are
+labelled by what they are rather than as "RL":
+
+1. **The analytic prior is systematically biased toward over-compaction.**
+   Unmasked, it buys 11.8% fewer point probes and 12.0% fewer sorted-run seeks
+   for 18.9% more write amplification, consistent in sign across all twelve
+   cells. That is a directional error, not noise, and it is precisely what the
+   learned residual exists to correct.
+2. **The live SLO mask substantially replaces the policy rather than trimming
+   it.** `rl` and `unconstrained_rl` run the same policy; the mask alone
+   collapses an ~19%/-12% excursion to within ~1% of baseline on every
+   amplification metric.
+
+**Leading hypothesis for the training defect**, not yet confirmed:
+`ForceOpenLevel` sets `transition_valid = false` for *every* level in the frame,
+because the reward is a whole-tree quantity and one forced compaction makes the
+whole frame unattributable. Invalid transitions are excluded from replay. Most
+levels in the generated manifests came back `calibrated: false` and therefore
+enforce the hard-coded bootstrap caps rather than measured limits, which would
+make the mask fire often. If it fires often enough, replay never accumulates a
+valid transition and no gradient step ever happens -- the mask suppressing both
+the policy and the learning meant to improve it.
+
+The alternative -- that training ran but the diagnostics failed to record it --
+is weakly supported, because a trained residual would still change behaviour and
+`rl`'s deviation from `prior_only` is exactly exploration-shaped. The two are
+separated by one command on any `rl` arm: `grep -c '"loss": null' metrics.jsonl`
+against a non-null count, plus `slo_masked_windows` and the count of
+`"prev_transition_valid": false` in `io.jsonl`.
 
 ## 11. Current db_bench experiment pipeline
 
@@ -1284,6 +1498,38 @@ directory.
 The default remains one repeat for operational safety. Set `REPEATS` to the
 preregistered count before asserting final 95% confidence criteria.
 
+### 11.5 Scripts added 2026-08-19 to 2026-08-26
+
+| File | Purpose |
+| --- | --- |
+| `pipeline_stats.py` | `ci95`, `required_pairs`, `envelope_verdict`. One instrument shared by `07_evaluate_paired.py` and `09_evaluate_oracle_parity.py`, so the engineering gate cannot use a weaker test than the research criterion it precedes. |
+| `10_run_scaling_smoke.sh` | Workload-size ladder at one size ratio, launching `03` once per size so a failure late in the ladder does not discard the earlier rungs. Sets `RL_REQUIRE_BASELINE_SLO=0` and records in `scaling_smoke.env` that the mask ran uncalibrated. |
+| `11_analyze_learning.py` | The learning diagnostics: per size/ratio/level, decisions, gradient steps, TD-loss trend, residual-to-prior magnitude, and argmax flip rate. This is the script that detected the training defect; `summary.csv` cannot, because a policy that never leaves its prior produces an ordinary-looking summary row. `--stride` subsamples the fat per-decision records for a fast first look. |
+| `12_report_figures.py` | Presentation graphs: one PNG per metric with all arms plotted against workload size and faceted by size ratio, plus a read/write trade-off plane and a paired-difference panel with intervals. |
+
+### 11.6 As-run configuration, 2026-08-22 to 2026-08-24
+
+The matrix that produced Section 10.6 differed from the operational default
+matrix in Section 11.1 in three preregistered ways, all recorded before any RL
+arm ran:
+
+- sizes `1 5 10 20` rather than `10 20 30 40 50`;
+- the tuned sweep narrowed from 48 configurations to 6 (`compaction_pri` fixed
+  at 3, slowdown/stop fixed at 20/36, L0 trigger swept over {4, 8});
+- three repeats rather than the preregistered ten, so the paired intervals are
+  wide and most per-cell differences are individually undecidable.
+
+`level_compaction_dynamic_level_bytes` is **disabled** for every arm. The library
+default is `true` (`include/rocksdb/advanced_options.h:670`) but db_bench's flag
+defaults to `false` and is assigned unconditionally
+(`tools/db_bench_tool.cc:923, 4514`), and the pipeline never passes it. Level
+targets are therefore static: `L1 = 16 MiB`, `Li = 16 MiB x T^(i-1)`. Combined
+with the measured SST bytes this puts the populated depth at roughly L0-L9/L10
+for T=2 at 20M, and L0-L3/L4 for T=10 -- which is why `num_levels` is pinned at
+13 for every arm and size, so varying the ratio cannot silently vary the
+available depth. Any entry point other than db_bench would inherit the library
+default of `true` and a different level ladder.
+
 ## 12. Tectonic workload system and lessons
 
 Tectonic is a Rust workload generator embedded under `lib/tectonic`. A JSON spec
@@ -1394,6 +1640,40 @@ fake-clock, forced-interleaving, multi-CF lifecycle, TSan, and deterministic
 end-to-end matrix is not yet fully implemented or executed; a fresh
 trigger-only end-to-end report remains required.
 
+### 13.5 Verification performed 2026-08-19 to 2026-08-26
+
+Static, before the cloud build:
+
+- every modified C++ translation unit passes `-fsyntax-only` under the exact
+  flags in `build/compile_commands.json`;
+- all pipeline shell scripts pass `bash -n`; all changed Python byte-compiles;
+- `09_evaluate_oracle_parity.py` was run end to end against a synthetic fixture
+  built to reproduce the reported symptoms. **D1's falsifiability condition
+  holds**: the L5 entries disappear while the L2 repeat-3 entry survives at
+  exactly the recorded numbers (oracle 5.66636, regular 5.25032, limit
+  5.512836). D7 correctly excludes both trap episodes -- one authorized only by a
+  gate held open under an earlier decision, one never authorized inside its own
+  window -- and reports them as denominators rather than letting them contribute
+  0 us and 1,020,000 us respectively;
+- `censored_tolerance_bound` was checked to move a limit only upward;
+- `06_select_baseline_slo.py` was executed end to end against a fixture after a
+  `NameError` and an `OverflowError` were found by running it rather than
+  compiling it.
+
+Executed on the cloud machine:
+
+- RocksDB and `db_bench` built; the binary was confirmed to contain the D3a
+  instrumentation before any experiment ran;
+- ten paired 1M/T2 oracle repeats, gate verdict `undecided` with no failures;
+- the 6-configuration tuned sweep at four sizes and three repeats, and twelve
+  manifests generated from it;
+- the 144-arm paired matrix.
+
+Still not executed: the C++ picker tests, the socket tests, and the `rl_agent`
+Python suite. The last could not run locally either -- the system interpreter has
+no `torch` and the project venv has no `pytest` -- so the "exactly two
+pre-existing failures" condition remains unchecked for this pass.
+
 ## 14. Implementation status after restoring trigger-only scope
 
 | Deliverable | Status on 2026-08-16 | Notes |
@@ -1416,10 +1696,62 @@ trigger-only end-to-end report remains required.
 | Read-heavy/write-heavy safety suites | **Not run for current trigger code** | Required for acceptance. |
 | Full tuned frontier and trigger ablations | **Not run** | The regular frontier, analytic-prior-only, and learned trigger results remain to be produced. |
 
+### 14.1 Status update, 2026-08-26
+
+The table above described the state before anything had been built or run. This
+supersedes the rows that have since changed.
+
+| Deliverable | Status on 2026-08-26 |
+| --- | --- |
+| RocksDB and `db_bench` built with the trigger controller | **Done.** Binary confirmed to carry the D3a instrumentation before any experiment ran. |
+| Oracle parity gate | **Passed** for every decidable criterion at ten pairs. Two checks remain undecidable: `stall_duration` awaits its preregistered allowance, `no_new_oracle_stop_event` needs >200 pairs and must be replaced rather than re-run. |
+| Held per-level trigger gates, native file selection, per-level authority | **Executed and gate-verified.** Write amp, point probes and sorted-run seeks all inside the parity envelope as paired confidence bounds, not eyeballed. |
+| Trigger latency (D3a crossing posture) | **Executed.** 511 us p50 due-to-admission at a 50 ms cadence, against ~33 ms pre-fix. |
+| Tuned leveled grid and `baseline_slo.json` | **Run**, at a deliberately narrowed 6-configuration grid. Most levels at 1M and 5M come back `calibrated: false` and fall to bootstrap caps. |
+| Paired matrix with prior-only, unconstrained and constrained arms | **Run** at 1/5/10/20M x T=2/6/10 x 3 repeats. Fails the acceptance criteria, and does not test a learned policy. |
+| Two-action trigger DQN | **Implemented but never trained.** Zero gradient steps, zero residual, across every configuration. This is the blocking defect. |
+| C++ picker tests, socket tests, `rl_agent` suite | **Still not run.** |
+| Ten paired balanced repeats and formal CIs | **Not run** -- the matrix used three. |
+| Read-heavy / write-heavy safety suites | **Not run.** |
+
 ## 15. Current limitations and next work
 
-The immediate research work is not another model redesign. It is validating the
-implemented source in the required order:
+**Superseded 2026-08-26.** Steps 1 through 4 of the list below were executed;
+the gate passed and the matrix ran. What that produced was not a policy result
+but the discovery that the learner never trained, so the ordering has changed.
+
+The immediate work is a debugging task, not a model redesign and not more
+compute:
+
+1. **Diagnose why no gradient step ever ran.** Zero gradient steps at up to
+   61,597 decisions per level is a training-path defect, not a learning-rate or
+   reward-shaping problem. Nothing measured so far implicates the reward
+   function, the analytic prior, or the model architecture -- they were never
+   exercised. Two commands separate the leading hypotheses on any existing `rl`
+   arm: `grep -c '"loss": null' metrics.jsonl` against a non-null count, and
+   `slo_masked_windows` in the RocksDB log against the count of
+   `"prev_transition_valid": false` in `io.jsonl`.
+2. **If the mask is starving replay, decide what to do about it.**
+   `ForceOpenLevel` invalidating every level's transition is correct for the
+   whole-tree reward and fatal for the sample budget if the mask fires often.
+   The options -- narrower invalidation, a calibrated manifest so the mask fires
+   less, or accepting fewer valid transitions -- are a research decision, not a
+   bug fix.
+3. **Fix the manifest calibration at small sizes.** Most levels at 1M and 5M come
+   back `calibrated: false` and enforce hard-coded bootstrap caps. Those cells
+   cannot distinguish `rl` from `unconstrained_rl` in the way the ablation
+   intends.
+4. **Re-run the matrix once learning demonstrably happens**, at the preregistered
+   ten repeats, and only then apply the paired evaluator.
+5. Resolve the four items still open in `ORACLE_GATE_FIX_PLAN.md` Section 11.2:
+   the stall allowance, the `no_new_oracle_stop_event` replacement, the
+   `per_level_maximum_score` test form (now settled empirically -- it holds as an
+   invariant at ten pairs), and the scan objective.
+6. Only after a learned policy is shown to act at all, revisit D3b (the due-edge
+   wake), the stress suites, and the full frontier.
+
+The original ordering, retained because steps 5 and 6 remain valid once learning
+works:
 
 1. build RocksDB and `db_bench` on the cloud machine and execute focused Python,
    C++, socket, lifecycle, and forced-interleaving tests;
@@ -1477,6 +1809,7 @@ as follows.
 | `docs/system_guide.md` | Most complete v2 system explanation, valid ten-pair result, and hard-won rules. | Primary trigger-only system reference. |
 | `docs/candidate_aware_protocol_v3.md` | Concise record of the rejected v3 exact-file prototype and its smoke result. | Historical only; explicitly not an experiment guide. |
 | `workload_specs/README.md` | Balanced-workload timing and generator/parser pitfalls. | Current workload-authoring evidence. |
+| `ORACLE_GATE_FIX_PLAN.md` | Revision 3. The D1-D7 defect analysis, the fixes as built, two recorded deviations from the plan as written, the preregistered experiment-design decisions, and what the evidence does not establish. | Current; the authoritative record for everything after 2026-08-18. |
 | `scripts/dbbench_pipeline/README.md` | Oracle gate, tuned sweep/manifest, paired 10M–50M workflow, evaluators, stress suites, geometry, and caveats. | Current operational path. |
 | `lib/tectonic/README.md`, `lib/tectonic/USAGE.md` | Upstream Tectonic build, commands, spec grammar, expressions, and operations. | Generator reference. |
 | bundled RusKey PDF | Online RL and FLSM motivation. | Research inspiration, not implementation documentation. |
@@ -1550,9 +1883,34 @@ does not block under the DB mutex, authority is level-scoped, due actions are
 held gates rather than undersupplied pulses, fallbacks and maintenance are
 explicit, and RocksDB retains sole file-selection authority.
 
-The most important remaining fact is equally clear: the restored trigger-only
-controller has not yet compiled or passed its new focused tests on the cloud
-machine, and it has not passed the formal repeated evaluation. The next
-credible milestone is therefore the deterministic build/test/oracle gate,
-followed by a preregistered tuned baseline and repeated paired trigger-policy
-results satisfying the amplification, space, latency, and stall criteria above.
+That claim is no longer only an argument. **The bridge has now been gated.** At
+ten paired 1M/T2 repeats the oracle parity evaluator passes eleven of thirteen
+checks with none failing, including due-to-admission latency at 511 us against a
+5000 us limit -- a 65x improvement over the pre-fix measurement at the same
+cadence. Write amplification, point probes and sorted-run seeks all sit inside
+the parity envelope as paired confidence bounds rather than as eyeballed
+three-repeat means. When the policy is a no-op, the machinery is behaviourally
+transparent, which is what makes any later difference attributable to a policy.
+
+**The most important remaining fact has changed.** It is no longer that the
+controller is unbuilt. It is that the learner has never learned. Across a full
+1/5/10/20M x T=2/6/10 matrix the DQN recorded zero gradient steps and a residual
+identically equal to zero, at up to 61,597 decisions per level, with exploration
+correctly annealing to its floor. Every arm labelled `rl` executed
+`argmax_a b(s,a)` -- the analytic prior, unchanged. The measured difference
+between `rl` and `prior_only` is exactly the cost of exploring and learning
+nothing from it.
+
+So the project now has three results and one blocker. The results: the bridge is
+transparent; the analytic prior is directionally biased toward over-compaction,
+buying 12% of reads with 19% of writes across all twelve cells; and the live SLO
+mask substantially replaces that policy rather than trimming it. The blocker is
+that no gradient step has ever run, which means nothing measured so far tests
+the research claim, and no amount of additional compute will change that until
+the training path is repaired.
+
+The next credible milestone is therefore not another experiment. It is
+determining why replay never produced a training step -- with the leading
+suspicion being that whole-tree reward attribution invalidates every level's
+transition whenever the safety mask fires, and that an uncalibrated manifest
+makes it fire constantly.

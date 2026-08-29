@@ -23,6 +23,7 @@ SMOKE_ARMS="${SMOKE_ARMS:-regular prior_only rl}"
 SMOKE_REPEATS="${SMOKE_REPEATS:-1}"
 SMOKE_DB_ROOT="${SMOKE_DB_ROOT:-/mnt/nvme/smoke-databases}"
 SMOKE_RESULTS_ROOT="${SMOKE_RESULTS_ROOT:-/mnt/nvme/smoke-results}"
+SMOKE_SLO_ROOT="${SMOKE_SLO_ROOT:-baseline_slo}"
 
 if [[ "${CONFIRM_SCALING_SMOKE:-}" != "YES" ]]; then
   echo "Refusing to start. Set CONFIRM_SCALING_SMOKE=YES." >&2
@@ -42,14 +43,15 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 for size_m in $SMOKE_SIZES_M; do
   echo "=== ${size_m}M T=${SMOKE_RATIO} ==="
-  # No manifest exists yet, so the live SLO mask is uncalibrated. That is
-  # acceptable for a learning smoke test and NOT acceptable for an acceptance
-  # run: it is recorded here so no later reader mistakes one for the other.
+  # A smoke may be shorter than the final matrix, but it is not allowed to use
+  # the broken uncalibrated mask. Each size/T must have passed the independent
+  # oracle holdout and have a final schema-v2 manifest first.
   WORKLOAD_SIZES_M="$size_m" \
   SIZE_RATIOS="$SMOKE_RATIO" \
   EXPERIMENT_ARMS="$SMOKE_ARMS" \
   REPEATS="$SMOKE_REPEATS" \
-  RL_REQUIRE_BASELINE_SLO=0 \
+  RL_RUN_PHASE=experiment \
+  BASELINE_SLO_DIR="$SMOKE_SLO_ROOT" \
   RESUME=1 \
   DB_ROOT="$SMOKE_DB_ROOT" \
   RESULTS_ROOT="$SMOKE_RESULTS_ROOT" \
@@ -64,8 +66,9 @@ done
   printf 'size_ratio=%s\n' "$SMOKE_RATIO"
   printf 'arms=%s\n' "$SMOKE_ARMS"
   printf 'repeats=%s\n' "$SMOKE_REPEATS"
-  printf 'baseline_slo_required=0\n'
-  printf 'note=uncalibrated SLO mask; learning smoke test only, not an acceptance run\n'
+  printf 'baseline_slo_required=1\n'
+  printf 'baseline_slo_root=%s\n' "$SMOKE_SLO_ROOT"
+  printf 'note=calibrated guard required; learning smoke test only, not an acceptance run\n'
 } > "$SMOKE_RESULTS_ROOT/scaling_smoke.env"
 
 echo

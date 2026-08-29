@@ -18,8 +18,10 @@ import os
 import signal
 import socket
 import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import config
 import multilevel
@@ -33,6 +35,41 @@ _io_log_lock = threading.Lock()
 # Serializes multi-level message handling across client reconnects/connections
 # so the shared processor's prev-state bookkeeping stays consistent.
 _ml_lock = threading.Lock()
+
+
+def _atomic_write_json(path: str, value: dict) -> None:
+    if not path:
+        return
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=destination.parent, delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+
+
+def _server_health_summary(
+    pool: "multilevel.AgentPool",
+    clients_drained: bool,
+    training_quiesced: bool,
+) -> dict:
+    summary = pool.health_summary()
+    summary.update({
+        "schema_version": 1,
+        "eval_mode": config.EVAL_MODE,
+        "analytic_prior": config.ANALYTIC_PRIOR,
+        "credit_horizon_ms": config.CREDIT_HORIZON_MS,
+        "minimum_replay_size": config.MIN_REPLAY_SIZE,
+        "clients_drained": clients_drained,
+        "training_quiesced": training_quiesced,
+    })
+    summary["pending_windows_at_shutdown"] = summary.pop("pending_windows")
+    return summary
 
 
 def _write_io_log(
@@ -253,8 +290,30 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
     print(f"[server] listening on {socket_path}")
     print(f"[server] I/O log → {config.IO_LOG_PATH}")
 
+    client_threads = []
+    client_threads_lock = threading.Lock()
+    shutting_down = False
+
     def _shutdown(sig, frame):
+        nonlocal shutting_down
+        if shutting_down:
+            return
+        shutting_down = True
         print("[server] shutting down …")
+        srv.close()
+        with client_threads_lock:
+            threads = list(client_threads)
+        for thread in threads:
+            thread.join(timeout=5.0)
+        clients_drained = all(not thread.is_alive() for thread in threads)
+        if pool is not None:
+            training_quiesced = pool.quiesce_training(timeout=5.0)
+            _atomic_write_json(
+                config.SERVER_SUMMARY_PATH,
+                _server_health_summary(
+                    pool, clients_drained, training_quiesced
+                ),
+            )
         agent.close()
         agent.save(config.MODEL_SAVE_PATH)
         if pool is not None:
@@ -262,7 +321,6 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
             pool.save_all()
         tracker.close()
         io_log.close()
-        srv.close()
         try:
             os.unlink(socket_path)
         except OSError:
@@ -283,6 +341,8 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
             daemon=True,
             name="rl-client",
         )
+        with client_threads_lock:
+            client_threads.append(t)
         t.start()
 
 

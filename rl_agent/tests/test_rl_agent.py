@@ -9,6 +9,7 @@ at the finding it re-opens.
 
 import os
 import sys
+import threading
 import time
 import unittest
 
@@ -962,6 +963,8 @@ class TestCreditAssignment(unittest.TestCase):
         agent.observe(state, -100.0, False, valid_actions=(0,),
                       transition_valid=False)
         self.assertEqual(len(agent.buffer), 0)
+        self.assertEqual(agent.invalid_intervals, 1)
+        self.assertEqual(agent.cleared_pending_windows, 1)
         # A fresh valid decision after the invalid boundary can learn normally.
         agent.observe(state, 1.0, False, valid_actions=(0,))
         self.assertEqual(len(agent.buffer), 1)
@@ -1039,12 +1042,55 @@ class TestSharedTrunk(unittest.TestCase):
                 before = trunk.q_values(probe, 2).copy()
                 for _ in range(20):
                     trunk.train_step()
+                self.assertEqual(trunk.train_steps, 20)
+                self.assertIsNotNone(trunk.first_train_elapsed_seconds)
                 after = trunk.q_values(probe, 2)
                 self.assertGreater(
                     float(np.abs(after - before).max()), 1e-6,
                     "level 2's Q did not move although the shared trunk was "
                     "trained on level 0's experience")
             finally:
+                trunk.close()
+
+    def test_quiesce_waits_for_coalesced_async_training(self):
+        """A request arriving during a gradient step remains pending; the
+        completion gate must not snapshot the learner between the two."""
+        with ConfigOverride(
+            ASYNC_TRAINING=True,
+            EVAL_MODE=False,
+            TRAIN_STEPS_PER_OBSERVATION=1,
+        ):
+            trunk = self._trunk()
+            first_started = threading.Event()
+            first_release = threading.Event()
+            second_started = threading.Event()
+            second_release = threading.Event()
+            calls = 0
+
+            def blocked_train_step():
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    first_started.set()
+                    first_release.wait(2.0)
+                else:
+                    second_started.set()
+                    second_release.wait(2.0)
+
+            trunk.train_step = blocked_train_step
+            try:
+                trunk.request_training()
+                self.assertTrue(first_started.wait(1.0))
+                trunk.request_training()
+                first_release.set()
+                self.assertTrue(second_started.wait(1.0))
+                self.assertFalse(trunk.quiesce(timeout=0.05))
+                second_release.set()
+                self.assertTrue(trunk.quiesce(timeout=1.0))
+                self.assertEqual(calls, 2)
+            finally:
+                first_release.set()
+                second_release.set()
                 trunk.close()
 
     def test_heads_stay_distinguishable(self):

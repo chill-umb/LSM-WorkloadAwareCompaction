@@ -18,6 +18,7 @@ fi
 STRESS_ROOT="${STRESS_ROOT:-results/stress_suites}"
 STRESS_DB_ROOT="${STRESS_DB_ROOT:-.dbbench_pipeline_dbs/stress_suites}"
 STRESS_SLO_ROOT="${STRESS_SLO_ROOT:-baseline_slo}"
+STRESS_SELECTION_SLO_ROOT="${STRESS_SELECTION_SLO_ROOT:-baseline_selection}"
 STRESS_BASELINE_REPEATS="${STRESS_BASELINE_REPEATS:-3}"
 STRESS_FINAL_REPEATS="${STRESS_FINAL_REPEATS:-10}"
 
@@ -43,15 +44,27 @@ run_profile() {  # profile, get ratio, put ratio, seek ratio
         --workload-profile "$profile" \
         --size-millions "$size_m" --size-ratio "$ratio" \
         --minimum-repeats "$STRESS_BASELINE_REPEATS" \
-        --output "$STRESS_SLO_ROOT/$profile/${size_m}M/T${ratio}/baseline_slo.json"
+        --output "$STRESS_SELECTION_SLO_ROOT/$profile/${size_m}M/T${ratio}/baseline_slo.json"
     done
   done
+
+  echo "[stress guard calibration + holdout] $profile"
+  WORKLOAD_PROFILE="$profile" \
+  MIX_GET_RATIO="$get_ratio" MIX_PUT_RATIO="$put_ratio" \
+  MIX_SEEK_RATIO="$seek_ratio" \
+  SELECTION_SLO_ROOT="$STRESS_SELECTION_SLO_ROOT" \
+  FINAL_SLO_ROOT="$STRESS_SLO_ROOT" \
+  GUARD_RESULTS_ROOT="$STRESS_ROOT/guard" \
+  GUARD_DB_ROOT="$STRESS_DB_ROOT/guard" \
+  RESUME="${RESUME:-0}" CONFIRM_GUARD_PROTOCOL=YES \
+  "$PIPELINE_DIR/06_run_guard_protocol.sh"
 
   echo "[stress paired] $profile"
   WORKLOAD_PROFILE="$profile" \
   MIX_GET_RATIO="$get_ratio" MIX_PUT_RATIO="$put_ratio" \
   MIX_SEEK_RATIO="$seek_ratio" \
   EXPERIMENT_ARMS="regular rl" REPEATS="$STRESS_FINAL_REPEATS" \
+  RL_RUN_PHASE=experiment \
   BASELINE_SLO_DIR="$STRESS_SLO_ROOT" \
   RESULTS_ROOT="$final_results" DB_ROOT="$STRESS_DB_ROOT/$profile/final" \
   RESUME="${RESUME:-0}" CONFIRM_EXPERIMENTS=YES \
