@@ -16,7 +16,6 @@ from pathlib import Path
 from slo_statistics import (
     TOLERANCE_CONFIDENCE,
     censored_tolerance_bound,
-    tolerance_bound,
 )
 
 
@@ -78,6 +77,8 @@ def collect_episodes(run_dirs: list[Path]) -> list[dict]:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise SystemExit(f"{path}:{line_number}: {exc}") from exc
+            if not isinstance(record, dict):
+                raise SystemExit(f"{path}:{line_number}: episode is not an object")
             version = record.get("schema_version")
             if version == 1:
                 # Pre-flush logs silently drop every episode still open at a
@@ -88,8 +89,27 @@ def collect_episodes(run_dirs: list[Path]) -> list[dict]:
                     f"{path}:{line_number}: episode schema_version 1 predates "
                     "the open-episode flush; re-run the baseline sweep with a "
                     "rebuilt library before generating a manifest")
-            if version == 2:
-                episodes.append(record)
+            if type(version) is not int or version != 2:
+                raise SystemExit(
+                    f"{path}:{line_number}: unsupported episode schema {version!r}")
+            if type(record.get("level")) is not int or record["level"] < 0:
+                raise SystemExit(f"{path}:{line_number}: invalid episode level")
+            if type(record.get("truncated")) is not bool:
+                raise SystemExit(
+                    f"{path}:{line_number}: truncated is not a JSON Boolean")
+            for name in (
+                "duration_micros", "max_score",
+                "integrated_excess_score_micros", "max_pending_debt_ratio",
+            ):
+                value = record.get(name)
+                if (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or value < 0
+                ):
+                    raise SystemExit(
+                        f"{path}:{line_number}: invalid episode {name}")
+            episodes.append(record)
     return episodes
 
 
@@ -203,13 +223,19 @@ def main() -> int:
     selected_rows = grouped[fingerprint]
     episodes = collect_episodes(run_dirs[fingerprint])
     by_level: dict[int, list[dict]] = defaultdict(list)
+    expected_source_levels = max(1, parse_levels(fingerprint) - 1)
     for episode in episodes:
-        by_level[int(episode["level"])].append(episode)
+        level = episode["level"]
+        if level >= expected_source_levels:
+            raise SystemExit(
+                f"episode level {level} is outside the selected geometry")
+        by_level[level].append(episode)
 
     level_limits = []
     distributions = []
-    debt_values = []
-    for level in range(max(1, parse_levels(fingerprint) - 1)):
+    completed_debt_values = []
+    censored_debt_values = []
+    for level in range(expected_source_levels):
         records = by_level[level]
         complete = [item for item in records if not item.get("truncated")]
         censored = [item for item in records if item.get("truncated")]
@@ -221,19 +247,24 @@ def main() -> int:
         # exported limits -- those come from the censoring-aware bounds.
         pressures = [float(item["integrated_excess_score_micros"])
                      for item in records]
-        debt_values.extend(debts)
-        # Duration and integrated pressure are right-censored on a truncated
-        # record, so they go through the censoring-aware bound. `max_score` is
-        # not: it is a maximum observed while the episode was open, and
-        # truncation cannot have inflated it, so it is a valid sample either
-        # way.
+        completed_debt_values.extend(
+            float(item["max_pending_debt_ratio"]) for item in complete)
+        censored_debt_values.extend(
+            float(item["max_pending_debt_ratio"]) for item in censored)
+        # All three episode maxima are lower bounds when an episode is
+        # truncated: duration and integrated pressure can keep accumulating,
+        # and a later score can exceed the maximum observed so far. No
+        # distribution-free upper tolerance bound follows from such a lower
+        # bound, so censored_tolerance_bound marks that level uncalibrated.
         due_bound, due_meta = censored_tolerance_bound(
             [float(item["duration_micros"]) for item in complete],
             [float(item["duration_micros"]) for item in censored])
         pressure_bound, pressure_meta = censored_tolerance_bound(
             [float(item["integrated_excess_score_micros"]) for item in complete],
             [float(item["integrated_excess_score_micros"]) for item in censored])
-        score_bound, score_meta = tolerance_bound(scores)
+        score_bound, score_meta = censored_tolerance_bound(
+            [float(item["max_score"]) for item in complete],
+            [float(item["max_score"]) for item in censored])
         # A level is calibrated only if every limit it exports rests on a real
         # tolerance bound. Mixing one estimated limit with two bootstrap caps
         # and labelling the level "calibrated" is the failure mode the plan
@@ -282,7 +313,10 @@ def main() -> int:
             },
         })
 
-    debt_bound, debt_meta = tolerance_bound(debt_values)
+    # Pending debt is also the episode maximum observed so far, hence it has
+    # the same censoring contract as the per-level maxima above.
+    debt_bound, debt_meta = censored_tolerance_bound(
+        completed_debt_values, censored_debt_values)
     refs = {
         metric: finite_mean(selected_rows, metric) for metric in (
             "get_latency_avg_us", "get_latency_p95_us",

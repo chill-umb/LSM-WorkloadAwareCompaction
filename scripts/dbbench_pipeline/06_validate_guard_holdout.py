@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import tempfile
@@ -17,6 +18,21 @@ MIN_FINALIZED = 320
 REPLAY_WARMUP = 32
 FIRST_WARMUP_FRACTION = 0.20
 CREDIT_HORIZON_MICROS = 4_000_000
+
+
+def json_boolean(record: dict, name: str, context: str) -> bool:
+    value = record.get(name)
+    if type(value) is not bool:
+        raise ValueError(f"{context}: {name} is not a JSON Boolean")
+    return value
+
+
+def nonnegative_json_integer(record: dict, name: str, context: str) -> int:
+    value = record.get(name)
+    if type(value) is not int or value < 0:
+        raise ValueError(
+            f"{context}: {name} is not a non-negative JSON integer")
+    return value
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -41,7 +57,7 @@ def atomic_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
-def validate_run(path: Path, fingerprint: str) -> dict:
+def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
     ready = False
     elapsed = 0
     ready_elapsed = 0
@@ -54,6 +70,7 @@ def validate_run(path: Path, fingerprint: str) -> dict:
     first_warmup_at = None
     actual_interventions = 0
     reason_counts: dict[str, int] = {}
+    previous_time = None
 
     with path.open(errors="strict") as handle:
         for line_number, line in enumerate(handle, 1):
@@ -67,32 +84,46 @@ def validate_run(path: Path, fingerprint: str) -> dict:
                 raise ValueError(f"{path}:{line_number}: unsupported schema")
             if record.get("experiment_fingerprint") != fingerprint:
                 raise ValueError(f"{path}:{line_number}: fingerprint mismatch")
-            try:
-                interval = int(record["interval_micros"])
-                observed_levels = int(record["observed_levels"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(f"{path}:{line_number}: malformed shadow frame") from exc
-            if interval <= 0 or observed_levels < 0:
+            if record.get("baseline_slo_sha256") != manifest_sha256:
+                raise ValueError(
+                    f"{path}:{line_number}: baseline manifest mismatch")
+            context = f"{path}:{line_number}"
+            interval = nonnegative_json_integer(
+                record, "interval_micros", context)
+            observed_levels = nonnegative_json_integer(
+                record, "observed_levels", context)
+            timestamp = nonnegative_json_integer(record, "time_micros", context)
+            reason_mask = nonnegative_json_integer(record, "reason_mask", context)
+            enforcement_enabled = json_boolean(
+                record, "enforcement_enabled", context)
+            intervention_applied = json_boolean(
+                record, "intervention_applied", context)
+            guard_ready = json_boolean(record, "guard_ready", context)
+            actuation_frame = json_boolean(record, "actuation_frame", context)
+            invalid = json_boolean(record, "would_invalidate_frame", context)
+            if interval == 0 or (
+                previous_time is not None and timestamp <= previous_time
+            ):
                 raise ValueError(f"{path}:{line_number}: invalid shadow counters")
+            previous_time = timestamp
             elapsed += interval
-            if record.get("enforcement_enabled") is not False:
+            if enforcement_enabled:
                 raise ValueError(f"{path}:{line_number}: holdout enforcement was enabled")
-            if bool(record.get("intervention_applied", False)):
+            if intervention_applied:
                 actual_interventions += 1
 
-            if not bool(record.get("guard_ready", False)):
+            if not guard_ready:
                 pending.clear()
                 current_streak = 0
                 continue
             if not ready:
                 ready = True
                 ready_elapsed = elapsed
-            if not bool(record.get("actuation_frame", False)):
+            if not actuation_frame:
                 continue
 
             actuation_frames += 1
-            invalid = bool(record.get("would_invalidate_frame", False))
-            reason = str(record.get("reason_mask", 0))
+            reason = str(reason_mask)
             if invalid:
                 override_frames += 1
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
@@ -156,7 +187,9 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
 
-    manifest = json.loads(args.manifest.read_text())
+    manifest_bytes = args.manifest.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     if (
         manifest.get("schema_version") != 2
         or manifest.get("guard_calibrated") is not True
@@ -202,6 +235,7 @@ def main() -> int:
             or metadata.get("arm") != "oracle"
             or metadata.get("rl_run_phase") != "holdout"
             or metadata.get("rl_safety_enforcement") != "0"
+            or metadata.get("baseline_slo_sha256") != manifest_sha256
         ):
             raise SystemExit(f"holdout metadata mismatch: {run_dir}")
         try:
@@ -219,7 +253,8 @@ def main() -> int:
             )
         holdout_seeds.add(workload_seed)
         try:
-            run = validate_run(run_dir / "safety_shadow.jsonl", fingerprint)
+            run = validate_run(
+                run_dir / "safety_shadow.jsonl", fingerprint, manifest_sha256)
         except (OSError, UnicodeError, ValueError) as exc:
             raise SystemExit(str(exc)) from exc
         run["dbbench_seed"] = workload_seed
@@ -228,6 +263,7 @@ def main() -> int:
     report = {
         "schema_version": 1,
         "experiment_fingerprint": fingerprint,
+        "baseline_slo_sha256": manifest_sha256,
         "size_millions": size_m,
         "size_ratio": ratio,
         "calibration_workload_seeds": sorted(calibration_seeds),

@@ -6,7 +6,7 @@ from pathlib import Path
 PIPELINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPELINE))
 
-from pipeline_stats import envelope_verdict, required_pairs
+from pipeline_stats import critical_value, envelope_verdict, required_pairs
 
 
 class RequiredPairsTest(unittest.TestCase):
@@ -49,6 +49,10 @@ class RequiredPairsTest(unittest.TestCase):
     def test_two_sided_limit_cannot_be_negative(self):
         with self.assertRaises(ValueError):
             required_pairs(self.VALUES, -0.05, two_sided=True)
+
+    def test_large_sample_t_value_does_not_collapse_to_normal_early(self):
+        self.assertAlmostEqual(critical_value(32), 2.0395, places=4)
+        self.assertGreater(critical_value(200), 1.96)
 
 
 if __name__ == "__main__":

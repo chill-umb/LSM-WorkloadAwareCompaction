@@ -598,7 +598,7 @@ class DQNAgent:
 
         return action
 
-    def flush_pending(self, state: np.ndarray = None) -> None:
+    def flush_pending(self, state: np.ndarray = None) -> int:
         """Finalize every open credit window as a terminal transition.
 
         Called when the client disconnects: without it the last decisions of a
@@ -607,7 +607,8 @@ class DQNAgent:
         """
         with self._data_lock:
             if not self._pending:
-                return
+                return 0
+            flushed = len(self._pending)
             bootstrap = state if state is not None else self._pending[-1]["state"]
             while self._pending:
                 entry = self._pending.popleft()
@@ -615,6 +616,7 @@ class DQNAgent:
                                  entry["return"], bootstrap, True,
                                  entry["prior"], None, entry["discount"])
                 self.finalized_transitions += 1
+            return flushed
 
     # -- training ----------------------------------------------------------
 

@@ -1,5 +1,6 @@
 import importlib.util
 import csv
+import hashlib
 import json
 import subprocess
 import sys
@@ -23,6 +24,8 @@ def load_script(name: str, filename: str):
 calibration = load_script("guard_calibration", "06_calibrate_live_guard.py")
 holdout = load_script("guard_holdout", "06_validate_guard_holdout.py")
 learning = load_script("learning_analysis", "11_analyze_learning.py")
+oracle_parity = load_script("oracle_parity", "09_evaluate_oracle_parity.py")
+from slo_statistics import censored_tolerance_bound  # noqa: E402
 
 
 class GuardCalibrationTest(unittest.TestCase):
@@ -63,6 +66,55 @@ class GuardCalibrationTest(unittest.TestCase):
             self.assertEqual(len(values["get_avg"]), 30)
             self.assertEqual(len(values["scan_p95"]), 30)
 
+    def test_operation_count_must_match_histogram_total(self):
+        record = {
+            "get": {"count": 2, "sum_ns": 10, "buckets": [1] + [0] * 63},
+        }
+        with self.assertRaises(ValueError):
+            calibration.parse_operation(record, "get", Path("telemetry"), 1)
+
+    def test_right_censored_episode_cannot_claim_an_upper_bound(self):
+        completed = [float(value) for value in range(1, 31)]
+        bound, metadata = censored_tolerance_bound(completed, [5.0])
+        self.assertIsNone(bound)
+        self.assertEqual(metadata["method"],
+                         "right_censored_bound_unavailable")
+        self.assertIsNone(metadata["achieved_confidence"])
+
+    def test_non_finite_censored_episode_cannot_be_silently_dropped(self):
+        bound, metadata = censored_tolerance_bound(
+            [float(value) for value in range(1, 31)], [float("nan")])
+        self.assertIsNone(bound)
+        self.assertEqual(
+            metadata["method"], "invalid_non_finite_censored_samples")
+
+    def test_non_finite_completed_episode_keeps_its_parse_failure(self):
+        bound, metadata = censored_tolerance_bound(
+            [1.0, float("nan")], [5.0])
+        self.assertIsNone(bound)
+        self.assertEqual(metadata["method"], "invalid_non_finite_samples")
+
+
+class OracleScoreEnvelopeTest(unittest.TestCase):
+    def test_each_repeat_contributes_only_its_worst_shared_level(self):
+        facts = [
+            (1,
+             {"max_score_by_level": {1: 2.0, 2: 4.0}},
+             {"max_score_by_level": {1: 2.05, 2: 4.3, 3: 1.2}}),
+            (2,
+             {"max_score_by_level": {1: 2.0, 2: 4.0}},
+             {"max_score_by_level": {1: 1.9, 2: 4.1}}),
+        ]
+        values, details, unexercised = oracle_parity.maximum_score_growth(facts)
+        # Repeat 1: L2 grows by .3 against a .2 allowance => 1.5, worse than
+        # L1's .05/.10. Repeat 2: L2 grows by .1/.2 => .5.
+        self.assertAlmostEqual(values[0], 1.5)
+        self.assertAlmostEqual(values[1], 0.5)
+        self.assertEqual([item["level"] for item in details], [2, 2])
+        self.assertEqual(unexercised, [{
+            "repeat": 1, "level": 3, "oracle_max_score": 1.2,
+        }])
+
 
 class GuardHoldoutTest(unittest.TestCase):
     def write_shadow(self, path: Path, invalid_at=None):
@@ -72,6 +124,7 @@ class GuardHoldoutTest(unittest.TestCase):
                 handle.write(json.dumps({
                     "schema_version": 1,
                     "experiment_fingerprint": "fp",
+                    "baseline_slo_sha256": "hash",
                     "time_micros": index * 50_000,
                     "interval_micros": 50_000,
                     "guard_ready": True,
@@ -87,7 +140,7 @@ class GuardHoldoutTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "shadow.jsonl"
             self.write_shadow(path)
-            report = holdout.validate_run(path, "fp")
+            report = holdout.validate_run(path, "fp", "hash")
             self.assertTrue(report["passed"], report)
             self.assertGreaterEqual(report["simulated_finalized_transitions"], 320)
 
@@ -99,6 +152,7 @@ class GuardHoldoutTest(unittest.TestCase):
                     handle.write(json.dumps({
                         "schema_version": 1,
                         "experiment_fingerprint": "fp",
+                        "baseline_slo_sha256": "hash",
                         "time_micros": index * 50_000,
                         "interval_micros": 50_000,
                         "guard_ready": True,
@@ -109,7 +163,7 @@ class GuardHoldoutTest(unittest.TestCase):
                         "enforcement_enabled": False,
                         "intervention_applied": False,
                     }) + "\n")
-            report = holdout.validate_run(path, "fp")
+            report = holdout.validate_run(path, "fp", "hash")
             self.assertFalse(report["passed"])
             self.assertFalse(report["checks"]["override_fraction"])
 
@@ -130,6 +184,7 @@ class GuardHoldoutTest(unittest.TestCase):
                     "workload_seeds": [11, 12, 13],
                 },
             }))
+            manifest_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
             for repeat, seed in enumerate((11, 21, 22), 1):
                 run = (
                     root / "holdout" / "1M" / "T2"
@@ -142,6 +197,7 @@ class GuardHoldoutTest(unittest.TestCase):
                     "arm=oracle\n"
                     "rl_run_phase=holdout\n"
                     "rl_safety_enforcement=0\n"
+                    f"baseline_slo_sha256={manifest_sha256}\n"
                     f"dbbench_seed={seed}\n"
                 )
             completed = subprocess.run(
@@ -169,6 +225,8 @@ class LearningHealthGateTest(unittest.TestCase):
             summary.write_text(json.dumps({
                 "schema_version": 1,
                 "eval_mode": False,
+                "analytic_prior": True,
+                "shared_trunk": True,
                 "clients_drained": True,
                 "training_quiesced": True,
                 "pending_windows_at_shutdown": 0,
@@ -177,6 +235,7 @@ class LearningHealthGateTest(unittest.TestCase):
                 "replay_size": 64,
                 "train_steps": 3,
                 "max_abs_residual_advantage": 0.01,
+                "argmax_comparison_count": 4,
             }))
             completed = subprocess.run(
                 [sys.executable, str(PIPELINE / "10_validate_learning_health.py"),
@@ -195,6 +254,8 @@ class LearningHealthGateTest(unittest.TestCase):
             summary.write_text(json.dumps({
                 "schema_version": 1,
                 "eval_mode": False,
+                "analytic_prior": True,
+                "shared_trunk": True,
                 "clients_drained": True,
                 "training_quiesced": False,
                 "pending_windows_at_shutdown": 0,
@@ -203,6 +264,7 @@ class LearningHealthGateTest(unittest.TestCase):
                 "replay_size": 64,
                 "train_steps": 3,
                 "max_abs_residual_advantage": 0.01,
+                "argmax_comparison_count": 4,
             }))
             completed = subprocess.run(
                 [sys.executable, str(PIPELINE / "10_validate_learning_health.py"),
@@ -226,6 +288,7 @@ class LearningHealthGateTest(unittest.TestCase):
                     "size_millions": 1, "size_ratio": 2,
                     "repeat": repeat, "workload_profile": "balanced-v1",
                     "experiment_fingerprint": "fp", "dbbench_seed": repeat,
+                    "baseline_slo_sha256": "hash",
                     "get_operations": 100, "put_operations": 100,
                     "scan_operations": 100, "user_write_bytes": 1000,
                     "space_amplification": 1.0,

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 
@@ -55,7 +56,7 @@ SERVER_SUMMARY_PATH = os.environ.get("RL_SERVER_SUMMARY_PATH", "")
 
 
 def _load_latency_limits() -> dict[str, float]:
-    """Load reward budgets from the same manifest enforced by C++."""
+    """Load formal reward budgets from the guard's shared manifest."""
     path = os.environ.get("RL_BASELINE_SLO_PATH", "")
     if not path:
         return {}
@@ -73,9 +74,17 @@ def _load_latency_limits() -> dict[str, float]:
         raise RuntimeError(f"RL live guard is not calibrated in {path}")
     expected = os.environ.get("RL_EXPERIMENT_FINGERPRINT", "")
     actual = manifest.get("experiment_fingerprint", "")
-    if expected and actual != expected:
+    if not expected:
+        raise RuntimeError(
+            "RL_EXPERIMENT_FINGERPRINT is required with a baseline SLO")
+    if actual != expected:
         raise RuntimeError(
             f"RL baseline SLO fingerprint mismatch: expected {expected}, got {actual}")
+    # These unprefixed limits are the preregistered formal objective the reward
+    # should optimize. The guard_* fields deliberately describe a different
+    # instrument: a rolling, in-process classifier calibrated from compact
+    # telemetry. Using guard_* here would make a safety tolerance the learning
+    # target and silently relax the final whole-run latency objective.
     names = (
         "get_latency_avg_ns_limit", "get_latency_p95_ns_limit",
         "scan_latency_avg_ns_limit", "scan_latency_p95_ns_limit",
@@ -85,8 +94,10 @@ def _load_latency_limits() -> dict[str, float]:
         limits = {name: float(manifest[name]) for name in names}
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"baseline SLO manifest lacks latency limits: {path}") from exc
-    if any(not value > 0.0 for value in limits.values()):
-        raise RuntimeError(f"baseline SLO manifest has non-positive latency limits: {path}")
+    if any(not math.isfinite(value) or value <= 0.0
+           for value in limits.values()):
+        raise RuntimeError(
+            f"baseline SLO manifest has invalid formal latency limits: {path}")
     return limits
 
 

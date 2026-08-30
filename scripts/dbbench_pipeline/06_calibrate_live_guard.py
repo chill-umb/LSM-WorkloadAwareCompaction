@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -18,6 +19,14 @@ OPS = ("get", "scan", "write")
 BUCKETS = 64
 MARGIN = 1.02
 DEFINITIONS = "trigger-v2-logical-v2"
+
+
+def nonnegative_json_integer(value, context: str) -> int:
+    # bool is an int subclass in Python; accepting true as a sample count would
+    # let malformed JSON survive every later range check.
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{context}: expected a non-negative JSON integer")
+    return value
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -51,14 +60,19 @@ def parse_operation(record: dict, operation: str, path: Path, line: int) -> dict
     if not isinstance(value, dict):
         raise ValueError(f"{path}:{line}: missing {operation} object")
     try:
-        count = int(value["count"])
-        sum_ns = int(value["sum_ns"])
-        buckets = [int(item) for item in value["buckets"]]
+        count = nonnegative_json_integer(
+            value["count"], f"{path}:{line}:{operation}.count")
+        sum_ns = nonnegative_json_integer(
+            value["sum_ns"], f"{path}:{line}:{operation}.sum_ns")
+        raw_buckets = value["buckets"]
+        if not isinstance(raw_buckets, list):
+            raise ValueError("buckets is not an array")
+        buckets = [nonnegative_json_integer(
+            item, f"{path}:{line}:{operation}.buckets[{index}]")
+            for index, item in enumerate(raw_buckets)]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"{path}:{line}: malformed {operation} telemetry") from exc
-    if count < 0 or sum_ns < 0 or len(buckets) != BUCKETS or any(
-        item < 0 for item in buckets
-    ):
+    if len(buckets) != BUCKETS or sum(buckets) != count:
         raise ValueError(f"{path}:{line}: invalid {operation} counters")
     return {"count": count, "sum_ns": sum_ns, "buckets": buckets}
 
@@ -86,6 +100,7 @@ def read_run(
         for statistic in ("avg", "p95")
     }
     interval_count = 0
+    previous_time = None
     with path.open(errors="strict") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -98,6 +113,22 @@ def read_run(
                 raise ValueError(f"{path}:{line_number}: unsupported schema")
             if record.get("experiment_fingerprint") != fingerprint:
                 raise ValueError(f"{path}:{line_number}: fingerprint mismatch")
+            try:
+                timestamp = nonnegative_json_integer(
+                    record["time_micros"], f"{path}:{line_number}:time_micros")
+                interval = nonnegative_json_integer(
+                    record["interval_micros"],
+                    f"{path}:{line_number}:interval_micros")
+            except (KeyError, ValueError) as exc:
+                raise ValueError(
+                    f"{path}:{line_number}: malformed interval metadata") from exc
+            if interval == 0 or (
+                previous_time is not None and timestamp <= previous_time
+            ):
+                raise ValueError(
+                    f"{path}:{line_number}: non-positive interval or "
+                    "non-monotonic timestamp")
+            previous_time = timestamp
             interval_count += 1
             for operation in OPS:
                 windows[operation].append(
@@ -145,7 +176,9 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
 
-    manifest = json.loads(args.selection_manifest.read_text())
+    selection_bytes = args.selection_manifest.read_bytes()
+    manifest = json.loads(selection_bytes)
+    selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
     if (
         manifest.get("schema_version") != 2
         or manifest.get("metric_definitions_version") != DEFINITIONS
@@ -191,6 +224,8 @@ def main() -> int:
         if (
             metadata.get("arm") != "oracle"
             or metadata.get("rl_run_phase") != "calibration"
+            or metadata.get("rl_safety_enforcement") != "0"
+            or metadata.get("baseline_slo_sha256") != selection_sha256
         ):
             raise SystemExit(f"not an oracle calibration run: {run_dir}")
         try:
@@ -241,6 +276,7 @@ def main() -> int:
     manifest["guard_calibrated"] = True
     manifest["guard_calibration"] = {
         "source_arm": "oracle",
+        "selection_manifest_sha256": selection_sha256,
         "repeats": args.repeats,
         "rolling_window_count": rolling,
         "sample_stride_windows": rolling,

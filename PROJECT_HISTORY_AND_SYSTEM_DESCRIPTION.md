@@ -1227,7 +1227,7 @@ context, system guide, workload notes, and current code.
 | Script sprawl | Multiple overlapping runners and plotters caused confusion and unsafe reuse. | Replace the current use case with a numbered `db_bench` pipeline. | Current working-tree cleanup. |
 | Gate instrument asymmetry (D1) | The per-level score check compared the oracle's trigger trace against the baseline's episode log; a regular arm cannot write a trace, so a never-due level got a fabricated baseline of zero. | Compare only quantities both arms produce; report baseline-unexercised levels separately. | Fixed 2026-08-19; verified against the recorded runs. |
 | Lost final episodes (D2) | Episodes were exported only on due->healthy, so any level still due at a phase boundary was dropped -- the tail the manifest's tolerance bounds are estimated from. | `FlushOpenEpisodes` plus a process-wide registry; episode `schema_version` 2 with `truncated`/`phase`. | Fixed in source 2026-08-19; measured effect on this workload is small (one truncated record across six arm-runs). |
-| Censored episodes ranked as samples | The first D2 design pooled truncated episodes into the order-statistic bound. A truncated record is a *lower bound*, so pooling biases the distribution downward and tightens the limit -- the same direction as the defect being repaired. | `censored_tolerance_bound`: rank completed episodes only, then raise the bound if a censored observation already exceeds it. | Fixed 2026-08-19. |
+| Censored episodes ranked as samples | The first D2 design pooled truncated episodes into the order-statistic bound. A truncated record is a *lower bound*, so pooling biases the distribution downward and tightens the limit -- the same direction as the defect being repaired. | The 2026-08-19 repair still raised a completed-sample bound to a censored lower bound, which was not a valid upper tolerance bound. The 2026-08-30 audit now refuses calibration when any relevant episode is right-censored unless a censoring model is preregistered. | Corrected 2026-08-30; cloud regeneration and holdout remain pending. |
 | Trigger latency tracked the decision interval (D3) | A level crossing between ticks carried the previous frame's `kDefer`, so a due level waited up to one interval for authorization. | D3a: a below-threshold `defer` no longer binds across the crossing; the level is admitted under `kPosture` with the transition kept replay-valid. | Fixed; gate-verified 2026-08-22 at 511 us p50 against ~33 ms pre-fix. |
 | Undecidable gate criteria (D4) | `all()` over three repeats on quantities whose seed spread exceeds their effect size. | Invariant/envelope split, paired confidence bounds, per-metric `required_pairs` from observed dispersion, explicit `insufficient_pairs`. | Fixed 2026-08-19. `no_new_oracle_stop_event` is now known to need >200 pairs and must be replaced, not re-run. |
 | Tolerance keyed to a tuning knob (D5) | The stall allowance was derived from the observation period, so tuning the controller tightened its own yardstick. | `--stall-allowance-seconds`, preregistered from the baseline sweep's dispersion, with no default. | Fixed 2026-08-19; the allowance itself is still to be derived. |
@@ -1714,6 +1714,52 @@ supersedes the rows that have since changed.
 | Ten paired balanced repeats and formal CIs | **Not run** -- the matrix used three. |
 | Read-heavy / write-heavy safety suites | **Not run.** |
 
+### 14.2 Source-audit correction, 2026-08-30
+
+A fresh three-pair 1M/T2 cloud preflight exposed two failures in the oracle
+gate. Re-auditing the complete C++/Python repair found that the run was useful
+as a diagnostic, but the evaluator's conclusions were not all sound:
+
+- the two-sided `required_pairs` calculation used only the positive boundary,
+  so a negative mean could be called failed while its interval still crossed
+  the negative boundary;
+- `per_level_maximum_score` was still an all-repeat invariant over a noisy
+  per-run maximum. More repeats increase the probability of seeing one extreme
+  under that rule; the earlier ten-pair pass did not validate the test form;
+- optional-revocation classification and enforcement used different permit
+  snapshots without revalidation, and oracle shadow runs had no optional
+  permit, so the holdout could not see optional actions a learned policy might
+  choose;
+- a new policy permit was queued before its frame's safety evaluation, leaving
+  a scheduler-admission window in which optional work could start before
+  revocation or due work could receive policy attribution before a force;
+- a completed-sample order statistic raised to a censored observation's lower
+  bound was described as a censoring-aware upper tolerance bound. It is not one
+  without an additional censoring model;
+- resume and paired evaluation were keyed only by workload geometry, not the
+  exact calibrated manifest, so regenerated limits could be paired with stale
+  holdouts or completed arms, and individually matched pairs from different
+  manifests could be combined into one confidence interval.
+
+The corrected gate uses the nearest boundary for two-sided power, treats the
+worst shared level in each paired repeat as one normalized confidence-envelope
+observation, revalidates the live permit under the enforcement lock, models
+optional/held/release frames in non-mutating shadow classification, refuses to
+claim a distribution-free bound when an episode is right-censored, and binds
+calibration, holdout, resume, and the entire final paired cell to one manifest
+SHA-256; the oracle gate likewise refuses to combine different experiment
+fingerprints across repeats. The picker also keeps newly installed
+policy/posture permits ineligible and defers their scheduler wakes until the
+same response frame has passed safety classification. The formal whole-run
+latency objectives remain deliberately separate from the rolling `guard_*`
+limits: the former train and judge the policy; the latter are an independently
+calibrated safety instrument.
+
+These are source-level corrections only. The current revision must be rebuilt
+and rerun on the cloud machine before the oracle bridge, live guard, or learner
+health is described as verified. The older ten-pair result remains evidence for
+the older binary, not validation of this revision.
+
 ## 15. Current limitations and next work
 
 **Superseded 2026-08-26.** Steps 1 through 4 of the list below were executed;
@@ -1883,14 +1929,14 @@ does not block under the DB mutex, authority is level-scoped, due actions are
 held gates rather than undersupplied pulses, fallbacks and maintenance are
 explicit, and RocksDB retains sole file-selection authority.
 
-That claim is no longer only an argument. **The bridge has now been gated.** At
-ten paired 1M/T2 repeats the oracle parity evaluator passes eleven of thirteen
-checks with none failing, including due-to-admission latency at 511 us against a
-5000 us limit -- a 65x improvement over the pre-fix measurement at the same
-cadence. Write amplification, point probes and sorted-run seeks all sit inside
-the parity envelope as paired confidence bounds rather than as eyeballed
-three-repeat means. When the policy is a no-op, the machinery is behaviourally
-transparent, which is what makes any later difference attributable to a policy.
+For the 2026-08-26 revision, that claim was no longer only an argument: ten
+paired 1M/T2 repeats passed every then-decidable oracle-parity check, including
+due-to-admission latency at 511 us against a 5000 us limit. The 2026-08-30 audit
+subsequently corrected the two-sided power calculation, the stochastic
+maximum-score test form, and several safety-shadow transitions. The older run
+remains useful evidence for its binary, but **the current revision is not yet
+gate-verified**. It must be rebuilt and rerun on the cloud machine before a
+no-op policy can again be described as behaviourally transparent.
 
 **The most important remaining fact has changed.** It is no longer that the
 controller is unbuilt. It is that the learner has never learned. Across a full

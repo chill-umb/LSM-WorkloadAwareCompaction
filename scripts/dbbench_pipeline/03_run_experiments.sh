@@ -330,7 +330,27 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   fi
   local result_dir="$RESULTS_ROOT/$size_label/T${ratio}/${repeat_path}${arm}"
   local db_dir="$DB_ROOT/$size_label/T${ratio}/${repeat_path}${arm}"
+  local manifest_path="$BASELINE_SLO_DIR/$WORKLOAD_PROFILE/$size_label/T${ratio}/baseline_slo.json"
+  local manifest_sha256=""
+  if (( SLO_DRIVEN_MATRIX )); then
+    [[ -f "$manifest_path" ]] || {
+      echo "Missing required baseline manifest: $manifest_path" >&2
+      exit 1
+    }
+    manifest_sha256="$(sha256sum "$manifest_path" | awk '{print $1}')"
+  fi
   if [[ -f "$result_dir/COMPLETED" && "$RESUME" == "1" ]]; then
+    if (( SLO_DRIVEN_MATRIX )); then
+      local recorded_manifest_sha256
+      recorded_manifest_sha256="$(sed -n 's/^baseline_slo_sha256=//p' \
+        "$result_dir/metadata.env" | tail -n 1)"
+      if [[ "$recorded_manifest_sha256" != "$manifest_sha256" ]]; then
+        echo "Cannot resume $result_dir against a different baseline manifest." >&2
+        echo "recorded: ${recorded_manifest_sha256:-missing}" >&2
+        echo "current:  $manifest_sha256" >&2
+        exit 1
+      fi
+    fi
     echo "[skip] $size_label T=$ratio $arm"
     return
   fi
@@ -394,7 +414,6 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   fi
 
   local fingerprint
-  local manifest_path="$BASELINE_SLO_DIR/$WORKLOAD_PROFILE/$size_label/T${ratio}/baseline_slo.json"
   local manifest_env_path=""
   [[ ! -f "$manifest_path" ]] || manifest_env_path="$manifest_path"
   local effective_l0_compaction="$L0_COMPACTION_TRIGGER"
@@ -523,6 +542,7 @@ PY
     printf 'level0_stop_writes_trigger=%s\n' "$effective_l0_stop"
     printf 'compaction_priority=%s\n' "$effective_priority"
     printf 'baseline_slo_path=%s\n' "$manifest_path"
+    printf 'baseline_slo_sha256=%s\n' "$manifest_sha256"
     printf 'rl_trigger_oracle=%s\n' "$oracle"
     printf 'rl_safety_enforcement=%s\n' "$safety_enforcement"
     printf 'rl_optional_min_score=%s\n' "$RL_OPTIONAL_MIN_SCORE"
@@ -575,6 +595,7 @@ PY
       RL_SAFETY_SHADOW_LOG="$safety_shadow_log" \
       RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
       RL_BASELINE_SLO_PATH="$manifest_env_path" \
+      RL_BASELINE_SLO_SHA256="$manifest_sha256" \
       RL_REQUIRE_BASELINE_SLO="$RL_REQUIRE_BASELINE_SLO" \
       RL_SAFETY_ENFORCEMENT="$safety_enforcement" \
       RL_STRUCTURAL_DIRTY_DEADLINE_MS="$RL_STRUCTURAL_DIRTY_DEADLINE_MS" \
@@ -595,6 +616,7 @@ PY
       RL_LATENCY_WINDOW_LOG="$latency_window_log" \
       RL_SAFETY_SHADOW_LOG="$safety_shadow_log" \
       RL_BASELINE_SLO_PATH="$oracle_manifest_env_path" \
+      RL_BASELINE_SLO_SHA256="$manifest_sha256" \
       RL_REQUIRE_BASELINE_SLO=0 \
       RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
       RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \

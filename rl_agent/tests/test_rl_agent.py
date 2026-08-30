@@ -984,7 +984,8 @@ class TestCreditAssignment(unittest.TestCase):
         for _ in range(3):
             agent.observe(state, 0.5, False, dt_seconds=0.05)
         self.assertEqual(len(agent.buffer), 0)
-        agent.flush_pending()
+        self.assertEqual(agent.flush_pending(), 3)
+        self.assertEqual(agent.flush_pending(), 0)
         self.assertEqual(len(agent.buffer), 3)
         self.assertTrue(all(t[4] for t in agent.buffer._buf),
                         "flushed transitions must be terminal")

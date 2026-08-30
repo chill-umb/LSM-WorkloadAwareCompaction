@@ -271,8 +271,15 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
         # meaningful slice of the collected experience.
         if pool is not None:
             for level in pool.levels():
-                pool.get(level).flush_pending()
-        agent.flush_pending()
+                level_agent = pool.get(level)
+                if level_agent.flush_pending() > 0:
+                    # Make the final replay additions visible to at least one
+                    # optimizer cycle before shutdown's quiescence snapshot.
+                    # Previously health reported these as finalized even
+                    # though no training request followed their insertion.
+                    level_agent.request_training()
+        if agent.flush_pending() > 0:
+            agent.request_training()
         conn.close()
 
 

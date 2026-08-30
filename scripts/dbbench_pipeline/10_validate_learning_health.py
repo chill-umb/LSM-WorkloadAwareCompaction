@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -15,17 +16,16 @@ MINIMUM_REPLAY = 32
 
 
 def integer(summary: dict, name: str, default: int) -> int:
-    try:
-        return int(summary.get(name, default))
-    except (TypeError, ValueError):
-        return default
+    value = summary.get(name, default)
+    return value if type(value) is int else default
 
 
 def number(summary: dict, name: str, default: float) -> float:
-    try:
-        return float(summary.get(name, default))
-    except (TypeError, ValueError):
+    value = summary.get(name, default)
+    if type(value) not in (int, float):
         return default
+    value = float(value)
+    return value if math.isfinite(value) else default
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -62,6 +62,11 @@ def main() -> int:
         checks["schema_version"] = summary.get("schema_version") == 1
         checks["clients_drained"] = summary.get("clients_drained") is True
         checks["training_quiesced"] = summary.get("training_quiesced") is True
+        # These are part of the treatment, not optional diagnostics. A run
+        # without the analytic prior or shared representation answers a
+        # different research question even if its optimizer moved.
+        checks["analytic_prior"] = summary.get("analytic_prior") is True
+        checks["shared_trunk"] = summary.get("shared_trunk") is True
         checks["no_pending_credit"] = integer(
             summary, "pending_windows_at_shutdown", -1
         ) == 0
@@ -88,6 +93,9 @@ def main() -> int:
                 "nonzero_residual": number(
                     summary, "max_abs_residual_advantage", 0.0
                 ) > RESIDUAL_EPSILON,
+                "prior_residual_compared": integer(
+                    summary, "argmax_comparison_count", 0
+                ) > 0,
             })
         errors.extend(name for name, passed in checks.items() if not passed)
 

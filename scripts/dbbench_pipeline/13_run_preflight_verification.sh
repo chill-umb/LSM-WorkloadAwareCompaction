@@ -53,9 +53,9 @@ for integer in "$PREFLIGHT_ORACLE_REPEATS" \
     exit 1
   }
 done
-if (( PREFLIGHT_RUN_ORACLE && PREFLIGHT_ORACLE_REPEATS < 10 )); then
-  echo "Oracle preflight requires at least 10 paired repeats;" >&2
-  echo "the per-level maximum-score invariant is not reliable at three." >&2
+if (( PREFLIGHT_RUN_ORACLE && PREFLIGHT_ORACLE_REPEATS < 5 )); then
+  echo "Oracle preflight requires at least 5 paired repeats;" >&2
+  echo "paired confidence envelopes are not judged from fewer than five." >&2
   exit 1
 fi
 
@@ -172,9 +172,29 @@ report = json.load(open(path, encoding="utf-8"))
 failed = report.get("failed_checks", [])
 if failed:
     raise SystemExit(f"oracle regression has failed checks: {failed}")
+blocking_undecided = []
+for name, check in report.get("checks", {}).items():
+    if check.get("passed") is not None:
+        continue
+    allowed = (
+        check.get("kind") == "paired_envelope"
+        and check.get("verdict") == "insufficient_pairs"
+    ) or (
+        name == "stall_duration"
+        and check.get("verdict") == "no_allowance_configured"
+    )
+    if not allowed:
+        blocking_undecided.append(
+            {"check": name, "verdict": check.get("verdict")}
+        )
+if blocking_undecided:
+    raise SystemExit(
+        "oracle regression has non-statistical undecided checks: "
+        f"{blocking_undecided}"
+    )
 print(
     "oracle regression:", report.get("verdict"),
-    "(no failed checks; undecided envelopes are allowed at this stage)",
+    "(no failed checks; only underpowered envelopes are deferred)",
 )
 PY
 }

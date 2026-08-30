@@ -70,6 +70,10 @@ scripts/dbbench_pipeline/06_run_guard_protocol.sh
 The holdout gate must pass every repeat before a learned experiment is run.
 Calibration and holdout use disjoint seed ranges; a failed holdout cannot be
 used to loosen the guard without a new calibration version and fresh holdouts.
+Each run records the SHA-256 of the exact manifest it used. Resume refuses to
+mix completed arms from another manifest, and the holdout checks that every
+shadow frame carries the calibrated manifest's hash rather than relying only on
+the geometry fingerprint.
 
 Finally run the selected regular, prior-only, unconstrained-learning ablation,
 and constrained learned arms. The trigger and

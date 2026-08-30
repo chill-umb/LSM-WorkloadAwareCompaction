@@ -226,6 +226,7 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         "dbbench_seed": int(metadata.get("dbbench_seed", "0")),
         "policy_seed": metadata.get("policy_seed", "null"),
         "experiment_fingerprint": metadata.get("experiment_fingerprint", ""),
+        "baseline_slo_sha256": metadata.get("baseline_slo_sha256", ""),
         "elapsed_seconds": number(metadata.get("elapsed_seconds")),
         **amplification,
         "stall_seconds": tickers.get("rocksdb.stall.micros", 0.0) / 1e6,

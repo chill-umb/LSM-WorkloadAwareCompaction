@@ -64,18 +64,31 @@ def main() -> int:
     if len(pairs) < args.minimum_pairs:
         raise SystemExit(f"need {args.minimum_pairs} pairs; found {len(pairs)}")
 
+    cell_fingerprints = set()
+    cell_manifest_hashes = set()
     for repeat, baseline, rl in pairs:
         if baseline.get("workload_profile") != rl.get("workload_profile"):
             raise SystemExit(f"repeat {repeat}: workload profile mismatch")
-        if baseline.get("experiment_fingerprint") != rl.get(
-                "experiment_fingerprint"):
+        if (not baseline.get("experiment_fingerprint") or
+                baseline.get("experiment_fingerprint") != rl.get(
+                    "experiment_fingerprint")):
             raise SystemExit(f"repeat {repeat}: experiment fingerprint mismatch")
+        if (not baseline.get("baseline_slo_sha256") or
+                baseline.get("baseline_slo_sha256") !=
+                rl.get("baseline_slo_sha256")):
+            raise SystemExit(f"repeat {repeat}: baseline SLO manifest mismatch")
+        cell_fingerprints.add(baseline["experiment_fingerprint"])
+        cell_manifest_hashes.add(baseline["baseline_slo_sha256"])
         if baseline.get("dbbench_seed") != rl.get("dbbench_seed"):
             raise SystemExit(f"repeat {repeat}: workload seed mismatch")
         for key in ("get_operations", "put_operations", "scan_operations",
                     "user_write_bytes"):
             if f(baseline, key) != f(rl, key):
                 raise SystemExit(f"repeat {repeat}: unpaired {key}")
+    if len(cell_fingerprints) != 1:
+        raise SystemExit("paired cell mixes experiment fingerprints across repeats")
+    if len(cell_manifest_hashes) != 1:
+        raise SystemExit("paired cell mixes baseline SLO manifests across repeats")
 
     strict = {} if args.safety_only else {
         "write_amplification": "write_amplification",
@@ -144,6 +157,8 @@ def main() -> int:
         "size_millions": args.size_millions,
         "size_ratio": args.size_ratio,
         "pairs": len(pairs),
+        "experiment_fingerprint": next(iter(cell_fingerprints)),
+        "baseline_slo_sha256": next(iter(cell_manifest_hashes)),
         "scan_objective": args.scan_objective,
         "safety_only": args.safety_only,
         "checks": checks,

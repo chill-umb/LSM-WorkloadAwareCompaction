@@ -19,7 +19,6 @@ import statistics
 
 
 # Two-sided 95% Student-t critical values, indexed by degrees of freedom.
-# Above df=30 the normal approximation is used; the error there is under 1%.
 T95 = {
     1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
     6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
@@ -31,7 +30,25 @@ T95 = {
 
 
 def critical_value(n: int) -> float:
-    return T95.get(n - 1, 1.96)
+    degrees = n - 1
+    if degrees in T95:
+        return T95[degrees]
+    if degrees <= 0:
+        raise ValueError("a Student-t critical value requires at least 2 samples")
+    # Cornish-Fisher expansion of t_(.975, degrees). The former 1.96 fallback
+    # is the infinite-sample limit and is therefore slightly too small for
+    # every finite n > 31; that narrowed the very confidence intervals used as
+    # hard gates. This expansion is accurate well beyond the precision of the
+    # measurements while retaining the correct finite-sample direction.
+    z = 1.959963984540054
+    v = float(degrees)
+    return (
+        z
+        + (z ** 3 + z) / (4.0 * v)
+        + (5.0 * z ** 5 + 16.0 * z ** 3 + 3.0 * z) / (96.0 * v ** 2)
+        + (3.0 * z ** 7 + 19.0 * z ** 5 + 17.0 * z ** 3 - 15.0 * z)
+        / (384.0 * v ** 3)
+    )
 
 
 def ci95(values: list[float]) -> dict:

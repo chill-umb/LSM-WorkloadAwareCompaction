@@ -52,6 +52,46 @@ def relative(candidate: float, baseline: float) -> float:
     return candidate / baseline - 1.0
 
 
+def maximum_score_growth(facts: list[tuple[int, dict, dict]]):
+    """Return one paired, worst-level score statistic per repeat.
+
+    The old check treated every per-repeat maximum as a deterministic
+    invariant. Maxima are deliberately noisy, however, and adding repeats made
+    that rule *more* likely to fail. Normalize each shared level's oracle-minus-
+    regular growth by the preregistered allowance, then take the worst level in
+    that repeat. A one-sided paired confidence envelope can now ask whether the
+    worst per-repeat growth is below 1 without averaging levels as though they
+    were independent observations.
+    """
+    values = []
+    details = []
+    unexercised = []
+    for repeat, regular, oracle in facts:
+        baseline_levels = set(regular["max_score_by_level"])
+        comparable = []
+        for level, oracle_max in sorted(oracle["max_score_by_level"].items()):
+            if level not in baseline_levels:
+                unexercised.append({"repeat": repeat, "level": level,
+                                    "oracle_max_score": oracle_max})
+                continue
+            baseline_max = regular["max_score_by_level"][level]
+            allowance = max(0.05 * baseline_max, 0.10)
+            normalized = (oracle_max - baseline_max) / allowance
+            comparable.append({
+                "repeat": repeat,
+                "level": level,
+                "oracle": oracle_max,
+                "regular": baseline_max,
+                "absolute_allowance": allowance,
+                "normalized_growth": normalized,
+            })
+        if comparable:
+            worst = max(comparable, key=lambda item: item["normalized_growth"])
+            values.append(worst["normalized_growth"])
+            details.append(worst)
+    return values, details, unexercised
+
+
 def read_jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -322,6 +362,19 @@ def main() -> int:
                                    "regular": regular[key],
                                    "oracle": oracle[key]})
     invariant("paired_workload_identity", not mismatches, mismatches)
+    identities = {
+        (regular.get("workload_profile"),
+         regular.get("experiment_fingerprint"))
+        for _, regular, _ in pairs
+    }
+    invariant(
+        "consistent_experiment_identity",
+        len(identities) == 1 and all(profile and fingerprint
+                                     for profile, fingerprint in identities),
+        [{"workload_profile": profile, "experiment_fingerprint": fingerprint}
+         for profile, fingerprint in sorted(
+             identities, key=lambda item: (str(item[0]), str(item[1])))],
+    )
 
     facts = []
     for repeat, regular, oracle in pairs:
@@ -373,23 +426,25 @@ def main() -> int:
     # D1: compare only levels the baseline actually exercised. A level the
     # baseline never drove to due has no defined baseline maximum, and the old
     # `.get(level, 0.0)` turned that absence into a limit of 0.1 that any
-    # populated level exceeds.
-    score_failures = []
-    unexercised = []
-    for repeat, regular, oracle in facts:
-        baseline_levels = set(regular["max_score_by_level"])
-        for level, oracle_max in sorted(oracle["max_score_by_level"].items()):
-            if level not in baseline_levels:
-                unexercised.append({"repeat": repeat, "level": level,
-                                    "oracle_max_score": oracle_max})
-                continue
-            baseline_max = regular["max_score_by_level"][level]
-            limit = max(1.05 * baseline_max, baseline_max + 0.10)
-            if oracle_max > limit:
-                score_failures.append({"repeat": repeat, "level": level,
-                                       "oracle": oracle_max,
-                                       "regular": baseline_max, "limit": limit})
-    invariant("per_level_maximum_score", not score_failures, score_failures)
+    # populated level exceeds. This is an envelope rather than an all-repeat
+    # invariant: it is a maximum of a stochastic trajectory, not a protocol
+    # law. The worst level is selected within each paired repeat so levels are
+    # not incorrectly counted as independent samples.
+    score_values, score_details, unexercised = maximum_score_growth(facts)
+    if score_values:
+        envelope("per_level_maximum_score", score_values, 1.0)
+    else:
+        checks["per_level_maximum_score"] = {
+            "kind": "paired_envelope",
+            "verdict": "instrument_unavailable",
+            "passed": None,
+            "per_repeat": [],
+        }
+    checks["per_level_maximum_score"].update({
+        "normalization": "(oracle - regular) / max(0.05 * regular, 0.10)",
+        "worst_level_by_repeat": score_details,
+        "comparable_repeat_count": len(score_values),
+    })
     informational["baseline_unexercised_levels"] = unexercised
 
     held = [oracle["held_decision_max_jobs"] for _, _, oracle in facts]
