@@ -30,7 +30,7 @@ from pathlib import Path
 
 from pipeline_stats import ci95, envelope_verdict
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 EVENT = re.compile(r"EVENT_LOG_v1 (\{.*\})")
 LEVEL_SUMMARY = re.compile(
@@ -418,10 +418,30 @@ def main() -> int:
     else:
         envelope("stall_duration", stall_excess, args.stall_allowance_seconds)
         checks["stall_duration"]["allowance_seconds"] = args.stall_allowance_seconds
-    envelope("no_new_oracle_stop_event",
-             [float(o["stop_log_events"] - r["stop_log_events"])
-              for _, r, o in facts],
-             0.0)
+    # `Stopping writes` is emitted by RecalculateWriteStallConditions every
+    # time RocksDB revisits a still-stopped condition. It is not a transition
+    # counter, so treating the difference in log-line counts as "new stop
+    # events" creates a false gate whose value depends on how often versions
+    # were recalculated. Preserve it beside the real user-wait instruments for
+    # diagnosis, but do not attach a pass/fail threshold to it.
+    informational["write_stall_diagnostics"] = {
+        "note": "rocksdb.db.write.stall counts user write waits; "
+                "Stopping-writes log lines count condition recalculations, "
+                "not distinct stop transitions",
+        "per_repeat": [
+            {
+                "repeat": repeat,
+                "regular_stall_seconds": float(regular["stall_seconds"]),
+                "oracle_stall_seconds": float(oracle["stall_seconds"]),
+                "regular_stall_wait_observations": float(
+                    regular["stall_events"]),
+                "oracle_stall_wait_observations": float(oracle["stall_events"]),
+                "regular_stopping_write_log_lines": r["stop_log_events"],
+                "oracle_stopping_write_log_lines": o["stop_log_events"],
+            }
+            for (repeat, regular, oracle), (_, r, o) in zip(pairs, facts)
+        ],
+    }
 
     # D1: compare only levels the baseline actually exercised. A level the
     # baseline never drove to due has no defined baseline maximum, and the old
