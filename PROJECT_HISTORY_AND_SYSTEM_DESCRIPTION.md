@@ -1229,7 +1229,7 @@ context, system guide, workload notes, and current code.
 | Lost final episodes (D2) | Episodes were exported only on due->healthy, so any level still due at a phase boundary was dropped -- the tail the manifest's tolerance bounds are estimated from. | `FlushOpenEpisodes` plus a process-wide registry; episode `schema_version` 2 with `truncated`/`phase`. | Fixed in source 2026-08-19; measured effect on this workload is small (one truncated record across six arm-runs). |
 | Censored episodes ranked as samples | The first D2 design pooled truncated episodes into the order-statistic bound. A truncated record is a *lower bound*, so pooling biases the distribution downward and tightens the limit -- the same direction as the defect being repaired. | The 2026-08-19 repair still raised a completed-sample bound to a censored lower bound, which was not a valid upper tolerance bound. The 2026-08-30 audit now refuses calibration when any relevant episode is right-censored unless a censoring model is preregistered. | Corrected 2026-08-30; cloud regeneration and holdout remain pending. |
 | Trigger latency tracked the decision interval (D3) | A level crossing between ticks carried the previous frame's `kDefer`, so a due level waited up to one interval for authorization. | D3a: a below-threshold `defer` no longer binds across the crossing; the level is admitted under `kPosture` with the transition kept replay-valid. | Fixed; gate-verified 2026-08-22 at 511 us p50 against ~33 ms pre-fix. |
-| Undecidable gate criteria (D4) | `all()` over three repeats on quantities whose seed spread exceeds their effect size. | Invariant/envelope split, paired confidence bounds, per-metric `required_pairs` from observed dispersion, explicit `insufficient_pairs`. | Fixed 2026-08-19. `no_new_oracle_stop_event` is now known to need >200 pairs and must be replaced, not re-run. |
+| Undecidable gate criteria (D4) | `all()` over three repeats on quantities whose seed spread exceeds their effect size. | Invariant/envelope split, paired confidence bounds, per-metric `required_pairs` from observed dispersion, explicit `insufficient_pairs`. The later audit also removed `Stopping writes` log-line counts as a gate because RocksDB emits them on condition recalculation, not only on stop transitions. | Corrected 2026-08-30. Stall duration still needs a preregistered allowance. |
 | Tolerance keyed to a tuning knob (D5) | The stall allowance was derived from the observation period, so tuning the controller tightened its own yardstick. | `--stall-allowance-seconds`, preregistered from the baseline sweep's dispersion, with no default. | Fixed 2026-08-19; the allowance itself is still to be derived. |
 | Dead exploration constant (D6) | The decay schedule encoded 0.11 decisions per 1000 operations, measured before the Phase 1a repair raised the rate ~8x. | Anneal on wall time (`RL_EXPLORATION_ANNEAL_SECONDS`); the step schedule is retained as an explicit ablation. | Fixed 2026-08-19. Verified in the matrix: final epsilon sat at its 0.05 floor. |
 | Biased latency estimator (D7) | No episode-end bound (an unauthorized episode inherited a later one's timestamp), a held-open gate read as instant authorization, and dropped episodes were not counted. | Bound the window, require a gate transition, export the denominators, and add a C++ event-time histogram because the trace is tick-quantised. | Fixed 2026-08-19. ~20% of episodes at 50 ms were opening and closing between two ticks, previously invisible. |
@@ -1704,7 +1704,7 @@ supersedes the rows that have since changed.
 | Deliverable | Status on 2026-08-26 |
 | --- | --- |
 | RocksDB and `db_bench` built with the trigger controller | **Done.** Binary confirmed to carry the D3a instrumentation before any experiment ran. |
-| Oracle parity gate | **Passed** for every decidable criterion at ten pairs. Two checks remain undecidable: `stall_duration` awaits its preregistered allowance, `no_new_oracle_stop_event` needs >200 pairs and must be replaced rather than re-run. |
+| Oracle parity gate | **Passed** for every sound decidable criterion at ten pairs. `stall_duration` still awaits its preregistered allowance. The former `no_new_oracle_stop_event` check was removed after source inspection proved that it counted repeated condition-recalculation warnings rather than distinct stop transitions. |
 | Held per-level trigger gates, native file selection, per-level authority | **Executed and gate-verified.** Write amp, point probes and sorted-run seeks all inside the parity envelope as paired confidence bounds, not eyeballed. |
 | Trigger latency (D3a crossing posture) | **Executed.** 511 us p50 due-to-admission at a 50 ms cadence, against ~33 ms pre-fix. |
 | Tuned leveled grid and `baseline_slo.json` | **Run**, at a deliberately narrowed 6-configuration grid. Most levels at 1M and 5M come back `calibrated: false` and fall to bootstrap caps. |
@@ -1739,7 +1739,11 @@ as a diagnostic, but the evaluator's conclusions were not all sound:
 - resume and paired evaluation were keyed only by workload geometry, not the
   exact calibrated manifest, so regenerated limits could be paired with stale
   holdouts or completed arms, and individually matched pairs from different
-  manifests could be combined into one confidence interval.
+  manifests could be combined into one confidence interval;
+- `no_new_oracle_stop_event` counted occurrences of RocksDB's `Stopping
+  writes` warning. That warning is emitted whenever a still-stopped condition
+  is recalculated, so the quantity was neither a stop-transition count nor a
+  valid event-rate gate.
 
 The corrected gate uses the nearest boundary for two-sided power, treats the
 worst shared level in each paired repeat as one normalized confidence-envelope
@@ -1754,6 +1758,12 @@ same response frame has passed safety classification. The formal whole-run
 latency objectives remain deliberately separate from the rolling `guard_*`
 limits: the former train and judge the policy; the latter are an independently
 calibrated safety instrument.
+
+The oracle report retains the stop-warning count, the actual write-stall
+histogram count, and stall seconds together as diagnostics. Only stall seconds
+can receive a formal parity verdict, and only after its allowance is derived
+from preregistered baseline dispersion rather than from the observation being
+judged.
 
 These are source-level corrections only. The current revision must be rebuilt
 and rerun on the cloud machine before the oracle bridge, live guard, or learner
@@ -1789,10 +1799,10 @@ compute:
    intends.
 4. **Re-run the matrix once learning demonstrably happens**, at the preregistered
    ten repeats, and only then apply the paired evaluator.
-5. Resolve the four items still open in `ORACLE_GATE_FIX_PLAN.md` Section 11.2:
-   the stall allowance, the `no_new_oracle_stop_event` replacement, the
-   `per_level_maximum_score` test form (now settled empirically -- it holds as an
-   invariant at ten pairs), and the scan objective.
+5. Resolve the remaining preregistered methodology choices: the stall allowance
+   and the final scan objective. The stop-warning check has been retired as an
+   invalid instrument, and `per_level_maximum_score` is now a paired worst-level
+   envelope rather than an all-repeat invariant.
 6. Only after a learned policy is shown to act at all, revisit D3b (the due-edge
    wake), the stress suites, and the full frontier.
 

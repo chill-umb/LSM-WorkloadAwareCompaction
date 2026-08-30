@@ -72,8 +72,13 @@ def parse_operation(record: dict, operation: str, path: Path, line: int) -> dict
             for index, item in enumerate(raw_buckets)]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"{path}:{line}: malformed {operation} telemetry") from exc
-    if len(buckets) != BUCKETS or sum(buckets) != count:
-        raise ValueError(f"{path}:{line}: invalid {operation} counters")
+    histogram_count = sum(buckets)
+    if len(buckets) != BUCKETS or histogram_count != count:
+        raise ValueError(
+            f"{path}:{line}: invalid {operation} counters "
+            f"(count={count}, histogram_count={histogram_count}, "
+            f"buckets={len(buckets)})"
+        )
     return {"count": count, "sum_ns": sum_ns, "buckets": buckets}
 
 
