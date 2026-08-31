@@ -1828,6 +1828,44 @@ actions. No local RocksDB or `db_bench` build was performed. A fresh cloud
 build and the staged 5M/10M diagnostics remain required before any performance
 matrix is authorized.
 
+### 14.4 Learner liveness proved; startup ownership repaired, 2026-09-01
+
+The first fresh schema-2 5M/T2 `unconstrained_rl` preflight exited 5, but it
+resolved the original question. It produced 39,624 full-horizon transitions,
+a replay size of 39,960, 57,160 optimizer steps, nonzero residual advantages,
+49,866 prior/residual comparisons, and 21,360 greedy-action flips. Acceptance
+and proposal accounting both balanced, with no unresolved or pending decision
+at shutdown. Replay starvation and zero-gradient learning are therefore fixed.
+
+The sole failed health check was one hard-invalid frame, reported for every
+level as `unknown_control_ownership`. The RocksDB log isolated it to one
+startup `LevelL0FilesNum` compaction with `rl_decision_id=0` and fallback
+reason 4. All later diagnostics remained at exactly one hard-invalid frame,
+while socket/query fallbacks, watchdog expiries, protocol mismatches, and
+fallback frames remained zero. The cause was a state-model error: before the
+asynchronous worker installed its first Python frame, `rl_available=false`
+meant both "still bootstrapping" and "control failed," so an ordinary native
+compaction was admitted under unknown ownership.
+
+The picker now has three explicit controller states. `bootstrap` holds ordinary
+policy gates closed while waiting for the first acknowledged, structurally
+current response; known maintenance, emergency, SLO, drain, and structural
+deadline paths remain available and explicitly attributed. Only a real
+query/protocol/watchdog failure enters `fallback` and marks reward invalid. A
+successfully installed response transitions to `active`; a later successful
+response can recover `fallback` directly to `active` without pretending to
+bootstrap again. Structurally stale but otherwise valid responses leave the
+current state unchanged, so they reject only their proposal as required by
+credit-assignment schema 2.
+
+Diagnostics now report numeric `control_state` (0 bootstrap, 1 active, 2
+fallback), bootstrap gate/picker checks, activation/failure counts, and
+bootstrap duration. Regression cases cover clean closed-gate startup,
+first-query failure into real native fallback, and fallback recovery. The
+zero-hard-invalid health gate is intentionally unchanged: the first schema-2
+run remains failed evidence and must not be relabelled, resumed, or used as the
+10M checkpoint. A fresh cloud rebuild and 5M/T2 rerun are required.
+
 ## 15. Current limitations and next work
 
 **Superseded 2026-08-26.** Steps 1 through 4 of the list below were executed;
@@ -1837,9 +1875,11 @@ but the discovery that the learner never trained, so the ordering has changed.
 The immediate work is staged validation, not model tuning and not a full
 performance matrix:
 
-1. **Rebuild only on the cloud machine and run a fresh 5M/T2
+1. **Rebuild the startup-state repair only on the cloud machine and run a fresh
+   5M/T2
    `unconstrained_rl` diagnostic with workload seed 20001.** Do not resume the
-   failed old-credit run. Require schema/credit version 2, zero hard-invalid
+   failed old-credit or startup-contaminated run. Require schema/credit version
+   2, zero hard-invalid
    intervals, balanced accounting, at least 320 full-horizon transitions, 100
    optimizer steps, and a nonzero residual.
 2. **Run the matching constrained 5M/T2 diagnostic as mechanical validation.**
@@ -2003,12 +2043,13 @@ gate-verified**. It must be rebuilt and rerun on the cloud machine before a
 no-op policy can again be described as behaviourally transparent.
 
 **The most important remaining fact has changed again.** The learner still has
-no valid cloud result, but replay starvation is now diagnosed rather than
-speculative. The 5M/T2 unconstrained diagnostic showed that the guard was not
-the immediate cause: the old Python rule cleared all overlapping four-second
-windows after any rejected interval, yielding zero replay from 89,652
-decisions. Credit-assignment schema v2 repairs that rule in source and makes
-installation, known override, and hard attribution loss separate events.
+no gate-valid cloud result, but learner liveness is now demonstrated. The first
+schema-2 5M/T2 preflight reached 39,960 replay entries and 57,160 optimizer
+steps with nonzero residuals and action flips. Its one formal failure was a
+single startup compaction admitted before the first asynchronous control frame,
+not replay starvation. The explicit bootstrap/active/fallback state repair now
+closes that ownership gap in source; a fresh 5M rerun must confirm zero hard
+invalid intervals before proceeding.
 
 So the project now has three historical results and two independent validation
 blockers. The results remain: the bridge was transparent for the older binary;
