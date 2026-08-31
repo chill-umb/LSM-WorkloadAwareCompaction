@@ -122,14 +122,14 @@ class GuardHoldoutTest(unittest.TestCase):
             for index in range(500):
                 invalid = index == invalid_at
                 handle.write(json.dumps({
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "experiment_fingerprint": "fp",
                     "baseline_slo_sha256": "hash",
                     "time_micros": index * 50_000,
                     "interval_micros": 50_000,
                     "guard_ready": True,
                     "actuation_frame": True,
-                    "would_invalidate_frame": invalid,
+                    "would_override_frame": invalid,
                     "reason_mask": 1 if invalid else 0,
                     "observed_levels": 12,
                     "enforcement_enabled": False,
@@ -142,22 +142,22 @@ class GuardHoldoutTest(unittest.TestCase):
             self.write_shadow(path)
             report = holdout.validate_run(path, "fp", "hash")
             self.assertTrue(report["passed"], report)
-            self.assertGreaterEqual(report["simulated_finalized_transitions"], 320)
+            self.assertEqual(report["would_override_fraction"], 0.0)
 
-    def test_frequent_invalidations_fail_streak_or_replay(self):
+    def test_frequent_known_overrides_fail_intrusiveness_threshold(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "shadow.jsonl"
             with path.open("w") as handle:
                 for index in range(500):
                     handle.write(json.dumps({
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "experiment_fingerprint": "fp",
                         "baseline_slo_sha256": "hash",
                         "time_micros": index * 50_000,
                         "interval_micros": 50_000,
                         "guard_ready": True,
                         "actuation_frame": True,
-                        "would_invalidate_frame": index % 20 == 0,
+                        "would_override_frame": index % 20 == 0,
                         "reason_mask": 64,
                         "observed_levels": 12,
                         "enforcement_enabled": False,
@@ -223,15 +223,22 @@ class LearningHealthGateTest(unittest.TestCase):
             summary = root / "server_summary.json"
             output = root / "health.json"
             summary.write_text(json.dumps({
-                "schema_version": 1,
+                "schema_version": 2,
+                "credit_assignment_version": 2,
                 "eval_mode": False,
                 "analytic_prior": True,
                 "shared_trunk": True,
                 "clients_drained": True,
                 "training_quiesced": True,
                 "pending_windows_at_shutdown": 0,
+                "unresolved_decisions_at_shutdown": 0,
+                "protocol_errors": 0,
+                "reward_invalid_intervals": 0,
+                "accepted_accounting_balanced": True,
+                "proposal_accounting_balanced": True,
                 "trainer_error": None,
                 "finalized_transitions": 64,
+                "full_horizon_transitions": 64,
                 "replay_size": 64,
                 "train_steps": 3,
                 "max_abs_residual_advantage": 0.01,
@@ -246,21 +253,65 @@ class LearningHealthGateTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue(json.loads(output.read_text())["passed"])
 
+    def test_hard_reward_invalid_interval_fails_an_otherwise_healthy_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "server_summary.json"
+            output = root / "health.json"
+            summary.write_text(json.dumps({
+                "schema_version": 2,
+                "credit_assignment_version": 2,
+                "eval_mode": False,
+                "analytic_prior": True,
+                "shared_trunk": True,
+                "clients_drained": True,
+                "training_quiesced": True,
+                "pending_windows_at_shutdown": 0,
+                "unresolved_decisions_at_shutdown": 0,
+                "protocol_errors": 0,
+                "reward_invalid_intervals": 1,
+                "accepted_accounting_balanced": True,
+                "proposal_accounting_balanced": True,
+                "trainer_error": None,
+                "full_horizon_transitions": 64,
+                "replay_size": 64,
+                "train_steps": 3,
+                "max_abs_residual_advantage": 0.01,
+                "argmax_comparison_count": 4,
+            }))
+            completed = subprocess.run(
+                [sys.executable, str(PIPELINE / "10_validate_learning_health.py"),
+                 "--summary", str(summary), "--arm", "rl",
+                 "--output", str(output)],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            report = json.loads(output.read_text())
+            self.assertFalse(report["checks"]["no_reward_invalid_intervals"])
+            self.assertFalse(report["passed"])
+
     def test_active_trainer_cannot_pass_completion_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             summary = root / "server_summary.json"
             output = root / "health.json"
             summary.write_text(json.dumps({
-                "schema_version": 1,
+                "schema_version": 2,
+                "credit_assignment_version": 2,
                 "eval_mode": False,
                 "analytic_prior": True,
                 "shared_trunk": True,
                 "clients_drained": True,
                 "training_quiesced": False,
                 "pending_windows_at_shutdown": 0,
+                "unresolved_decisions_at_shutdown": 0,
+                "protocol_errors": 0,
+                "reward_invalid_intervals": 0,
+                "accepted_accounting_balanced": True,
+                "proposal_accounting_balanced": True,
                 "trainer_error": None,
                 "finalized_transitions": 64,
+                "full_horizon_transitions": 64,
                 "replay_size": 64,
                 "train_steps": 3,
                 "max_abs_residual_advantage": 0.01,
@@ -337,8 +388,19 @@ class LearningHealthGateTest(unittest.TestCase):
                             "override_rate_100": 0.0,
                         }) + "\n")
             metrics.with_name("server_summary.json").write_text(json.dumps({
-                "schema_version": 1, "train_steps": 7,
+                "schema_version": 2, "train_steps": 7,
                 "finalized_transitions": 40, "replay_size": 40,
+                "levels": {
+                    str(level): {
+                        "finalized_transitions": 10,
+                        "accepted_decisions": 10,
+                        "rejected_decisions": 0,
+                        "override_relabels": 0,
+                        "full_horizon_transitions": 10,
+                        "boundary_truncated_transitions": 0,
+                        "shutdown_terminal_transitions": 0,
+                    } for level in range(4)
+                },
             }))
             report = learning.read_arm(metrics, stride=4)
             self.assertEqual(set(report), {0, 1, 2, 3})

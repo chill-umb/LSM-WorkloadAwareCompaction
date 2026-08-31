@@ -8,9 +8,10 @@ level i+1, so the trigger decision needs visibility into the destination's
 fullness and key-range overlap.
 
 Protocol v2 (C++ -> Python), newline-delimited JSON:
-  {"version": 2, <globals...>, "levels": [{"level": 0, ...}, ...]}
+  {"version": 2, "credit_assignment_version": 2, "decision_id": N,
+   <globals...>, "levels": [{"level": 0, ...}, ...]}
 Response (Python -> C++):
-  {"actions": [a_0, a_1, ...]}    # one per level entry, in request order
+  {"decision_id": N, "actions": [a_0, a_1, ...]}
 """
 
 from __future__ import annotations
@@ -25,6 +26,62 @@ import numpy as np
 
 import config
 from agent import DQNAgent, SharedTrunk
+
+
+CREDIT_ASSIGNMENT_VERSION = 2
+UINT64_MAX = (1 << 64) - 1
+REWARD_INVALID_REASON_NAMES = {
+    0: "socket_or_query_fallback",
+    1: "watchdog_native_fallback",
+    2: "malformed_protocol",
+    3: "rejected_manifest",
+    4: "unknown_control_ownership",
+}
+
+
+def _exact_uint64(value, name: str, *, nonzero: bool) -> int:
+    if type(value) is not int or value < (1 if nonzero else 0) \
+            or value > UINT64_MAX:
+        qualifier = "nonzero " if nonzero else ""
+        raise ValueError(f"{name} must be an exact {qualifier}uint64")
+    return value
+
+
+def validate_protocol_message(msg: dict) -> tuple[int, int]:
+    """Reject old/malformed credit semantics before any reward is consumed."""
+    if type(msg) is not dict:
+        raise ValueError("multi-level request must be a JSON object")
+    if type(msg.get("version")) is not int or msg["version"] != 2:
+        raise ValueError("trigger protocol version 2 is required")
+    if (type(msg.get("credit_assignment_version")) is not int
+            or msg["credit_assignment_version"] != CREDIT_ASSIGNMENT_VERSION):
+        raise ValueError("credit_assignment_version 2 is required")
+    decision_id = _exact_uint64(
+        msg.get("decision_id"), "decision_id", nonzero=True)
+    invalid_mask = _exact_uint64(
+        msg.get("prev_reward_invalid_reason_mask"),
+        "prev_reward_invalid_reason_mask", nonzero=False)
+    levels = msg.get("levels")
+    if type(levels) is not list or not levels:
+        raise ValueError("levels must be a non-empty JSON array")
+    seen_levels = set()
+    for index, entry in enumerate(levels):
+        if type(entry) is not dict:
+            raise ValueError(f"levels[{index}] must be a JSON object")
+        level = entry.get("level")
+        if type(level) is not int or level < 0 or level in seen_levels:
+            raise ValueError(f"levels[{index}].level is invalid or duplicated")
+        seen_levels.add(level)
+        _exact_uint64(entry.get("prev_decision_id"),
+                      f"levels[{index}].prev_decision_id", nonzero=False)
+        executed = entry.get("prev_action_executed")
+        if type(executed) is not int or executed not in (0, 1):
+            raise ValueError(
+                f"levels[{index}].prev_action_executed must be 0 or 1")
+        if type(entry.get("prev_action_overridden")) is not bool:
+            raise ValueError(
+                f"levels[{index}].prev_action_overridden must be Boolean")
+    return decision_id, invalid_mask
 
 
 GLOBAL_DEFAULTS = {
@@ -82,6 +139,7 @@ GLOBAL_DEFAULTS = {
     "structural_source_generation": 0.0,
     "structural_built_generation": 0.0,
     "score_event_generation": 0.0,
+    "prev_reward_invalid_reason_mask": 0,
     "done": 0.0,
 }
 
@@ -141,7 +199,6 @@ LEVEL_DEFAULTS = {
     "trivial_move_bytes": 0.0,
     "consecutive_blocked": 0.0,
     "in_backoff": 0.0,
-    "prev_transition_valid": 1.0,
 }
 
 # Steps-since-compaction saturates at this many decisions.
@@ -427,14 +484,19 @@ class LevelDecision:
 
     __slots__ = ("level", "raw", "state", "reward", "components",
                  "valid_actions", "prior", "dt_seconds", "executed_action",
-                 "prev_chosen_action", "dt_discount", "transition_valid")
+                 "prev_chosen_action", "dt_discount", "decision_id",
+                 "prev_decision_id", "previous_overridden",
+                 "reward_invalid_reason_mask")
 
     def __init__(self, level: int, raw: dict, state: np.ndarray,
                  reward: float, components: dict, valid_actions,
                  prior: Optional[np.ndarray], dt_seconds: float,
                  executed_action: Optional[int],
                  prev_chosen_action: Optional[int] = None,
-                 dt_discount: float = 0.0, transition_valid: bool = True):
+                 dt_discount: float = 0.0, decision_id: int = 0,
+                 prev_decision_id: int = 0,
+                 previous_overridden: bool = False,
+                 reward_invalid_reason_mask: int = 0):
         self.level = level
         self.raw = raw
         self.state = state
@@ -462,7 +524,10 @@ class LevelDecision:
         # one decision and would misreport the override rate.
         self.executed_action = executed_action
         self.prev_chosen_action = prev_chosen_action
-        self.transition_valid = transition_valid
+        self.decision_id = decision_id
+        self.prev_decision_id = prev_decision_id
+        self.previous_overridden = previous_overridden
+        self.reward_invalid_reason_mask = reward_invalid_reason_mask
 
 
 class MultiLevelProcessor:
@@ -492,7 +557,8 @@ class MultiLevelProcessor:
         # them to the same float and hide a superseded structural snapshot.
         for identifier in ("structural_source_generation",
                            "structural_built_generation",
-                           "score_event_generation"):
+                           "score_event_generation",
+                           "prev_reward_invalid_reason_mask"):
             try:
                 g[identifier] = int(msg.get(identifier, 0) or 0)
             except (TypeError, ValueError):
@@ -517,8 +583,7 @@ class MultiLevelProcessor:
             except (TypeError, ValueError):
                 raw[identifier] = 0
         for flag in ("default_needed", "is_last", "prev_action_overridden",
-                     "prev_compaction_picked", "gate_open", "in_backoff",
-                     "prev_transition_valid"):
+                     "prev_compaction_picked", "gate_open", "in_backoff"):
             raw[flag] = 1.0 if raw[flag] else 0.0
         return raw
 
@@ -1134,6 +1199,7 @@ class MultiLevelProcessor:
 
     def process(self, msg: dict) -> List[LevelDecision]:
         """Parse a v2 message into per-level decisions, in request order."""
+        decision_id, invalid_mask = validate_protocol_message(msg)
         g = self._parse_globals(msg)
         self.scales.tick()
         dt = self._dt_seconds(g)
@@ -1144,6 +1210,12 @@ class MultiLevelProcessor:
             if not isinstance(entry, dict):
                 continue
             parsed.append(self._parse_level(entry))
+        if invalid_mask:
+            # Re-anchor potential shaping at the known state on this boundary;
+            # the excluded interval must never appear as a potential delta in
+            # the following valid reward.
+            self._prev_tree_cost = None
+            self._prev_potential.clear()
         shares = self._stall_shares(parsed, g)
         global_reward, global_components = self._global_reward(g, parsed, dt)
 
@@ -1193,8 +1265,10 @@ class MultiLevelProcessor:
             decisions.append(
                 LevelDecision(level, raw, state, reward, components,
                               valid_actions, prior, dt, executed, prev_chosen,
-                              dt_discount,
-                              bool(raw["prev_transition_valid"]))
+                              dt_discount, decision_id,
+                              int(raw["prev_decision_id"]),
+                              bool(raw["prev_action_overridden"]),
+                              invalid_mask)
             )
         return decisions
 
@@ -1223,6 +1297,9 @@ class AgentPool:
     def __init__(self):
         self._agents: Dict[int, DQNAgent] = {}
         self._lock = threading.Lock()
+        self._protocol_errors = 0
+        self._reward_invalid_intervals = 0
+        self._reward_invalid_reason_counts: Dict[str, int] = {}
         # Built eagerly: it is small, and creating it lazily inside get() would
         # put network construction on the decision path of whichever level
         # happened to appear first.
@@ -1263,6 +1340,27 @@ class AgentPool:
         with self._lock:
             return sorted(self._agents.keys())
 
+    def record_protocol_error(self) -> None:
+        with self._lock:
+            self._protocol_errors += 1
+
+    def record_reward_invalid(self, reason_mask: int) -> None:
+        if not reason_mask:
+            return
+        with self._lock:
+            self._reward_invalid_intervals += 1
+            for bit, name in REWARD_INVALID_REASON_NAMES.items():
+                if reason_mask & (1 << bit):
+                    self._reward_invalid_reason_counts[name] = (
+                        self._reward_invalid_reason_counts.get(name, 0) + 1
+                    )
+            unknown = reason_mask & ~sum(
+                1 << bit for bit in REWARD_INVALID_REASON_NAMES)
+            if unknown:
+                key = f"unknown_mask_{unknown}"
+                self._reward_invalid_reason_counts[key] = (
+                    self._reward_invalid_reason_counts.get(key, 0) + 1)
+
     def save_all(self) -> None:
         with self._lock:
             agents = dict(self._agents)
@@ -1295,6 +1393,10 @@ class AgentPool:
     def health_summary(self) -> dict:
         with self._lock:
             agents = dict(self._agents)
+            protocol_errors = self._protocol_errors
+            reward_invalid_intervals = self._reward_invalid_intervals
+            reward_invalid_reason_counts = dict(
+                self._reward_invalid_reason_counts)
         levels = {
             str(level): agent.health_snapshot()
             for level, agent in sorted(agents.items())
@@ -1320,17 +1422,42 @@ class AgentPool:
         return {
             "shared_trunk": self._shared is not None,
             "decisions": sum(item["decisions"] for item in snapshots),
+            "selected_proposals": sum(
+                item["selected_proposals"] for item in snapshots),
+            "accepted_decisions": sum(
+                item["accepted_decisions"] for item in snapshots),
+            "rejected_decisions": sum(
+                item["rejected_decisions"] for item in snapshots),
+            "override_relabels": sum(
+                item["override_relabels"] for item in snapshots),
+            "full_horizon_transitions": sum(
+                item["full_horizon_transitions"] for item in snapshots),
+            "boundary_truncated_transitions": sum(
+                item["boundary_truncated_transitions"] for item in snapshots),
+            "shutdown_terminal_transitions": sum(
+                item["shutdown_terminal_transitions"] for item in snapshots),
+            "discarded_unconfirmed_windows": sum(
+                item["discarded_unconfirmed_windows"] for item in snapshots),
+            "unresolved_decisions_at_shutdown": sum(
+                item["unresolved_decisions_at_shutdown"] for item in snapshots),
+            "discarded_zero_credit_windows": sum(
+                item["discarded_zero_credit_windows"] for item in snapshots),
             "finalized_transitions": sum(
                 item["finalized_transitions"] for item in snapshots
             ),
             "replay_size": learner["replay_size"],
-            "invalid_intervals": sum(
-                item["invalid_intervals"] for item in snapshots
-            ),
-            "cleared_pending_windows": sum(
-                item["cleared_pending_windows"] for item in snapshots
-            ),
+            "protocol_errors": protocol_errors,
+            "reward_invalid_intervals": reward_invalid_intervals,
+            "reward_invalid_reason_counts": reward_invalid_reason_counts,
             "pending_windows": sum(item["pending_windows"] for item in snapshots),
+            "pending_confirmed_windows": sum(
+                item["pending_confirmed_windows"] for item in snapshots),
+            "pending_unconfirmed_windows": sum(
+                item["pending_unconfirmed_windows"] for item in snapshots),
+            "accepted_accounting_balanced": all(
+                item["accepted_accounting_balanced"] for item in snapshots),
+            "proposal_accounting_balanced": all(
+                item["proposal_accounting_balanced"] for item in snapshots),
             "train_steps": learner["train_steps"],
             "first_train_elapsed_seconds": learner[
                 "first_train_elapsed_seconds"

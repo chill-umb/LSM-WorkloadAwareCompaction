@@ -1195,8 +1195,8 @@ context, system guide, workload notes, and current code.
 | Sticky actions | Boolean force state could survive too long, vanish too early, or be reused. | Atomic response frames with decision and stable eligibility generations; due gates are deliberately held and optional tokens are one-shot. | Replaced by the 2026-08-16 held-gate design. |
 | Stale candidate | A missing/blocked exact-file action could not survive ordinary tree changes. | Exact-file action mechanism removed; RocksDB selects from current state at actuation. | Retired with protocol v3. |
 | Decision attribution | Requested action was confused with executed/scheduled action. | Record request, scheduling result, completion result, decision, epoch, and reason. | Fixed. |
-| Safety override replay | Samples were labeled with the selected action even when a guard executed another action. | Key transition to executed action and drop every credit window overlapping fallback, stale advice, or a safety-masked interval. | Fixed in current v2 source. |
-| Parent compactions | Maintenance work could be attributed to the learner. | Explicit bypass reasons and transition-valid bit. | Fixed. |
+| Safety override replay | Samples were labeled with the selected action even when a guard executed another action. The first repair then cleared every overlapping four-second window for any rejected or overridden frame. | Credit-assignment schema v2 acknowledges decisions by exact ID, relabels known overrides to the executed action, rejects only an uninstalled proposal, and reserves hard boundaries for uncontrolled attribution loss. | Repaired in source 2026-08-31; cloud validation pending. |
+| Parent compactions | Maintenance work could be attributed to the learner. | Explicit bypass reasons; maintenance/drain preserve the installed ID and publish compact, while uncontrolled native fallback clears the ID and raises a hard attribution boundary. | Updated for credit schema v2. |
 | Interval semantics | Counter deltas covered variable time but were used as if fixed-rate samples. | Carry `interval_micros`; calculate rates and gamma from real elapsed time. | Fixed. |
 | Decision-density reward | Rate costs were summed per decision, so faster polling changed return. | Integrate over `dt`; test return invariance. | Fixed. |
 | Reward/prior scale | Reward dominated the analytic prior and destabilized TD learning. | Rescale/integrate reward; monitor return/prior/TD distributions. | Fixed for v2 and reflected in v3 design. |
@@ -1235,7 +1235,7 @@ context, system guide, workload notes, and current code.
 | Biased latency estimator (D7) | No episode-end bound (an unauthorized episode inherited a later one's timestamp), a held-open gate read as instant authorization, and dropped episodes were not counted. | Bound the window, require a gate transition, export the denominators, and add a C++ event-time histogram because the trace is tick-quantised. | Fixed 2026-08-19. ~20% of episodes at 50 ms were opening and closing between two ticks, previously invisible. |
 | Binomial overflow in the tolerance bound | `math.comb(n, i)` reaches ~1e600 for n in the low thousands; multiplying by a float raises `OverflowError`. The search was also O(n^2) over candidate ranks. | Log-space PMF plus a single incremental pass (`smallest_valid_rank`). | Pre-existing; exposed at 5M and fixed 2026-08-24. n=299 remains exactly where the maximum becomes a 99%/95% bound. |
 | Graph generator coupling | `06_select_baseline_slo.py` loads `04_generate_graphs.py` only for `collect_arm`, but that module imported matplotlib at top level, so manifest generation failed on any interpreter without it. | Import matplotlib lazily inside the two functions that draw. | Fixed 2026-08-24. |
-| **Learner never trained** | Zero gradient steps and an identically zero residual across all 37 active level-cells, at up to 61,597 decisions per level. Every `rl` arm executed the analytic prior. | **Not yet diagnosed.** Leading hypothesis: `ForceOpenLevel` marks *every* level's transition invalid, and with most levels uncalibrated the SLO mask fires often enough that replay never accumulates a valid transition. | **Open. This is the blocking defect.** |
+| **Learner never trained** | Zero gradient steps and an identically zero residual across the earlier matrix. A later 5M/T2 unconstrained diagnostic produced 89,652 decisions and zero replay transitions because one rejected interval cleared every overlapping four-second window. | Credit-assignment schema v2 separates C++ installation acknowledgement from reward validity, retains known overrides off-policy, terminalizes valid prefixes only at a hard attribution boundary, and enforces explicit accounting. | Root cause diagnosed and repaired in source 2026-08-31; fresh cloud learner-health validation remains blocking. |
 
 ## 10. Experimental record and interpretation
 
@@ -1770,40 +1770,94 @@ and rerun on the cloud machine before the oracle bridge, live guard, or learner
 health is described as verified. The older ten-pair result remains evidence for
 the older binary, not validation of this revision.
 
+### 14.3 Replay-starvation diagnosis and credit protocol repair, 2026-08-31
+
+A fresh 5M/T2 `unconstrained_rl` diagnostic ruled out the live guard as the
+immediate cause of zero learning. It produced 89,652 per-level decisions and
+52,748 prior/residual comparisons. Although safety enforcement was disabled,
+25,216 intervals (28.1%) were marked invalid, 89,640 pending credit windows
+were cleared, and zero transitions reached replay. Replay size, optimizer
+steps, residual magnitude, and learned-versus-prior action flips therefore all
+remained zero. This run is failed evidence under the old credit semantics and
+must not be resumed or reclassified as a learned result.
+
+The root cause was `DQNAgent.observe()`: one rejected interval called
+`_pending.clear()`, conflating whether the newest response was installed with
+whether rewards remained usable by older, already-accepted four-second
+windows. A stale structural response rejects only the new proposal; it does not
+retroactively erase the returns of earlier installed decisions. Likewise,
+budget, emergency, SLO, posture, optional-revocation, forced-release, and
+maintenance actions have known effective actions and are valid off-policy DQN
+experience.
+
+The active trigger protocol remains overall version 2 but now requires
+`credit_assignment_version: 2` and an exact nonzero uint64 `decision_id` echoed
+by Python. C++ reports the previous installed ID and effective action for every
+level. Python confirms or rejects only the newest proposal, relabels known
+overrides, extends only confirmed windows, and preserves the four-second SMDP
+horizon. Socket/query fallback, watchdog fallback, malformed protocol,
+rejected manifests, and unknown control ownership set a frame-level hard-invalid
+reason mask. Their reward is excluded; preceding valid prefixes are stored as
+terminal boundary-truncated samples so bootstrapping cannot cross the unknown
+interval. Clean shutdown finalizes acknowledged partial windows and discards an
+unacknowledged last proposal.
+
+`server_summary.json` and `learning_health.json` are schema 2. They separate
+accepted/rejected decisions, override relabels, full-horizon,
+boundary-truncated, and shutdown-terminal transitions, unresolved proposals,
+hard-invalid reasons, and both acceptance and proposal accounting invariants.
+Learned arms require zero protocol/hard-invalid events, balanced and quiescent
+shutdown accounting, at least 32 full-horizon transitions and replay entries,
+an optimizer step, a nonzero residual, and a prior/residual comparison. The 5M
+screen remains stronger at 320 full-horizon transitions and 100 optimizer
+steps; only the 10M checkpoint requires a learned-versus-prior greedy-action
+flip.
+
+Guard methodology remains independent. Shadow records now say
+`would_override_frame`, and known predicted overrides no longer simulate replay
+clears. Valid-streak and replay-warmup acceptance tests were removed because
+they encoded the obsolete blanket-invalidation model. The holdout still
+requires no actual intervention and at most a 1% predicted override fraction.
+The existing 3.8--6.0% result therefore remains failed; repairing replay does
+not make the guard ready.
+
+Local deterministic checks cover frequent proposal rejection, override
+relabeling, hard boundaries, shutdown accounting, shared replay/training, exact
+C++ uint64 response parsing, and optional-revoke/forced-release effective
+actions. No local RocksDB or `db_bench` build was performed. A fresh cloud
+build and the staged 5M/10M diagnostics remain required before any performance
+matrix is authorized.
+
 ## 15. Current limitations and next work
 
 **Superseded 2026-08-26.** Steps 1 through 4 of the list below were executed;
 the gate passed and the matrix ran. What that produced was not a policy result
 but the discovery that the learner never trained, so the ordering has changed.
 
-The immediate work is a debugging task, not a model redesign and not more
-compute:
+The immediate work is staged validation, not model tuning and not a full
+performance matrix:
 
-1. **Diagnose why no gradient step ever ran.** Zero gradient steps at up to
-   61,597 decisions per level is a training-path defect, not a learning-rate or
-   reward-shaping problem. Nothing measured so far implicates the reward
-   function, the analytic prior, or the model architecture -- they were never
-   exercised. Two commands separate the leading hypotheses on any existing `rl`
-   arm: `grep -c '"loss": null' metrics.jsonl` against a non-null count, and
-   `slo_masked_windows` in the RocksDB log against the count of
-   `"prev_transition_valid": false` in `io.jsonl`.
-2. **If the mask is starving replay, decide what to do about it.**
-   `ForceOpenLevel` invalidating every level's transition is correct for the
-   whole-tree reward and fatal for the sample budget if the mask fires often.
-   The options -- narrower invalidation, a calibrated manifest so the mask fires
-   less, or accepting fewer valid transitions -- are a research decision, not a
-   bug fix.
-3. **Fix the manifest calibration at small sizes.** Most levels at 1M and 5M come
-   back `calibrated: false` and enforce hard-coded bootstrap caps. Those cells
-   cannot distinguish `rl` from `unconstrained_rl` in the way the ablation
-   intends.
-4. **Re-run the matrix once learning demonstrably happens**, at the preregistered
-   ten repeats, and only then apply the paired evaluator.
-5. Resolve the remaining preregistered methodology choices: the stall allowance
+1. **Rebuild only on the cloud machine and run a fresh 5M/T2
+   `unconstrained_rl` diagnostic with workload seed 20001.** Do not resume the
+   failed old-credit run. Require schema/credit version 2, zero hard-invalid
+   intervals, balanced accounting, at least 320 full-horizon transitions, 100
+   optimizer steps, and a nonzero residual.
+2. **Run the matching constrained 5M/T2 diagnostic as mechanical validation.**
+   It cannot establish guard readiness while the independent holdout remains
+   above the 1% predicted-override limit.
+3. **Generate the small learning-analysis JSONs and then run one 10M/T2
+   checkpoint.** Require TD losses, nonzero residuals, uncontaminated protocol
+   accounting, and at least one prior-versus-learned greedy-action flip at 10M.
+4. **Repair and revalidate guard calibration separately.** The existing
+   3.8--6.0% predicted intervention rate is still a methodology failure, even
+   though those known interventions no longer starve replay.
+5. **Only after learner health and guard readiness both pass, re-run the
+   matrix** at the preregistered ten repeats and apply the paired evaluator.
+6. Resolve the remaining preregistered methodology choices: the stall allowance
    and the final scan objective. The stop-warning check has been retired as an
    invalid instrument, and `per_level_maximum_score` is now a paired worst-level
    envelope rather than an all-repeat invariant.
-6. Only after a learned policy is shown to act at all, revisit D3b (the due-edge
+7. Only after a learned policy is shown to act at all, revisit D3b (the due-edge
    wake), the stress suites, and the full frontier.
 
 The original ordering, retained because steps 5 and 6 remain valid once learning
@@ -1948,25 +2002,26 @@ remains useful evidence for its binary, but **the current revision is not yet
 gate-verified**. It must be rebuilt and rerun on the cloud machine before a
 no-op policy can again be described as behaviourally transparent.
 
-**The most important remaining fact has changed.** It is no longer that the
-controller is unbuilt. It is that the learner has never learned. Across a full
-1/5/10/20M x T=2/6/10 matrix the DQN recorded zero gradient steps and a residual
-identically equal to zero, at up to 61,597 decisions per level, with exploration
-correctly annealing to its floor. Every arm labelled `rl` executed
-`argmax_a b(s,a)` -- the analytic prior, unchanged. The measured difference
-between `rl` and `prior_only` is exactly the cost of exploring and learning
-nothing from it.
+**The most important remaining fact has changed again.** The learner still has
+no valid cloud result, but replay starvation is now diagnosed rather than
+speculative. The 5M/T2 unconstrained diagnostic showed that the guard was not
+the immediate cause: the old Python rule cleared all overlapping four-second
+windows after any rejected interval, yielding zero replay from 89,652
+decisions. Credit-assignment schema v2 repairs that rule in source and makes
+installation, known override, and hard attribution loss separate events.
 
-So the project now has three results and one blocker. The results: the bridge is
-transparent; the analytic prior is directionally biased toward over-compaction,
-buying 12% of reads with 19% of writes across all twelve cells; and the live SLO
-mask substantially replaces that policy rather than trimming it. The blocker is
-that no gradient step has ever run, which means nothing measured so far tests
-the research claim, and no amount of additional compute will change that until
-the training path is repaired.
+So the project now has three historical results and two independent validation
+blockers. The results remain: the bridge was transparent for the older binary;
+the analytic prior was directionally biased toward over-compaction, buying 12%
+of reads with 19% of writes across all twelve cells; and the live SLO mask
+substantially replaced that policy rather than trimming it. The blockers are a
+fresh schema-v2 cloud learner-health run and guard holdout readiness below the
+preregistered 1% predicted-override threshold. Passing one does not waive the
+other.
 
-The next credible milestone is therefore not another experiment. It is
-determining why replay never produced a training step -- with the leading
-suspicion being that whole-tree reward attribution invalidates every level's
-transition whenever the safety mask fires, and that an uncalibrated manifest
-makes it fire constantly.
+The next credible milestone is the staged 5M/10M cloud validation, not the
+multi-day matrix: prove that full-horizon transitions reach replay, optimizer
+steps move the residual, accounting remains exact, no hard-invalid interval
+contaminates the run, and a 10M checkpoint produces at least one learned action
+flip. Only then, and only after the separate guard criterion passes, is another
+performance experiment methodologically meaningful.

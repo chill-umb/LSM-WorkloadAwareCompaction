@@ -8,16 +8,10 @@ import hashlib
 import json
 import os
 import tempfile
-from collections import deque
 from pathlib import Path
 
 
 MAX_OVERRIDE_FRACTION = 0.01
-MIN_VALID_STREAK_SECONDS = 8.0
-MIN_FINALIZED = 320
-REPLAY_WARMUP = 32
-FIRST_WARMUP_FRACTION = 0.20
-CREDIT_HORIZON_MICROS = 4_000_000
 
 
 def json_boolean(record: dict, name: str, context: str) -> bool:
@@ -60,14 +54,8 @@ def atomic_json(path: Path, value: dict) -> None:
 def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
     ready = False
     elapsed = 0
-    ready_elapsed = 0
     actuation_frames = 0
     override_frames = 0
-    current_streak = 0
-    longest_streak = 0
-    pending: deque[tuple[int, int]] = deque()
-    finalized = 0
-    first_warmup_at = None
     actual_interventions = 0
     reason_counts: dict[str, int] = {}
     previous_time = None
@@ -80,7 +68,7 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number}: invalid JSON") from exc
-            if record.get("schema_version") != 1:
+            if record.get("schema_version") != 2:
                 raise ValueError(f"{path}:{line_number}: unsupported schema")
             if record.get("experiment_fingerprint") != fingerprint:
                 raise ValueError(f"{path}:{line_number}: fingerprint mismatch")
@@ -90,8 +78,7 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
             context = f"{path}:{line_number}"
             interval = nonnegative_json_integer(
                 record, "interval_micros", context)
-            observed_levels = nonnegative_json_integer(
-                record, "observed_levels", context)
+            nonnegative_json_integer(record, "observed_levels", context)
             timestamp = nonnegative_json_integer(record, "time_micros", context)
             reason_mask = nonnegative_json_integer(record, "reason_mask", context)
             enforcement_enabled = json_boolean(
@@ -100,7 +87,8 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
                 record, "intervention_applied", context)
             guard_ready = json_boolean(record, "guard_ready", context)
             actuation_frame = json_boolean(record, "actuation_frame", context)
-            invalid = json_boolean(record, "would_invalidate_frame", context)
+            would_override = json_boolean(
+                record, "would_override_frame", context)
             if interval == 0 or (
                 previous_time is not None and timestamp <= previous_time
             ):
@@ -113,41 +101,19 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
                 actual_interventions += 1
 
             if not guard_ready:
-                pending.clear()
-                current_streak = 0
                 continue
             if not ready:
                 ready = True
-                ready_elapsed = elapsed
             if not actuation_frame:
                 continue
 
             actuation_frames += 1
             reason = str(reason_mask)
-            if invalid:
+            if would_override:
                 override_frames += 1
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                pending.clear()
-                current_streak = 0
-                continue
-
-            current_streak += interval
-            longest_streak = max(longest_streak, current_streak)
-            pending.append((elapsed, observed_levels))
-            while pending and elapsed - pending[0][0] >= CREDIT_HORIZON_MICROS:
-                _, count = pending.popleft()
-                finalized += count
-                if finalized >= REPLAY_WARMUP and first_warmup_at is None:
-                    first_warmup_at = elapsed
-
-    measured = elapsed - ready_elapsed if ready else 0
     override_fraction = (
         override_frames / actuation_frames if actuation_frames else None
-    )
-    first_warmup_fraction = (
-        (first_warmup_at - ready_elapsed) / measured
-        if first_warmup_at is not None and measured > 0
-        else None
     )
     checks = {
         "guard_became_ready": ready,
@@ -156,12 +122,6 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
             override_fraction is not None
             and override_fraction <= MAX_OVERRIDE_FRACTION
         ),
-        "valid_streak": longest_streak >= MIN_VALID_STREAK_SECONDS * 1_000_000,
-        "finalized_transitions": finalized >= MIN_FINALIZED,
-        "replay_warmup_early": (
-            first_warmup_fraction is not None
-            and first_warmup_fraction <= FIRST_WARMUP_FRACTION
-        ),
         "no_actual_intervention": actual_interventions == 0,
     }
     return {
@@ -169,9 +129,6 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
         "actuation_frames": actuation_frames,
         "would_override_frames": override_frames,
         "would_override_fraction": override_fraction,
-        "longest_valid_streak_seconds": longest_streak / 1_000_000,
-        "simulated_finalized_transitions": finalized,
-        "first_replay_warmup_fraction": first_warmup_fraction,
         "actual_interventions": actual_interventions,
         "reason_mask_counts": reason_counts,
         "checks": checks,
@@ -261,7 +218,7 @@ def main() -> int:
         runs.append(run)
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "experiment_fingerprint": fingerprint,
         "baseline_slo_sha256": manifest_sha256,
         "size_millions": size_m,
@@ -270,10 +227,6 @@ def main() -> int:
         "holdout_workload_seeds": sorted(holdout_seeds),
         "thresholds": {
             "maximum_would_override_fraction": MAX_OVERRIDE_FRACTION,
-            "minimum_valid_streak_seconds": MIN_VALID_STREAK_SECONDS,
-            "minimum_simulated_finalized_transitions": MIN_FINALIZED,
-            "replay_warmup": REPLAY_WARMUP,
-            "maximum_first_warmup_fraction": FIRST_WARMUP_FRACTION,
         },
         "runs": runs,
         "passed": all(run["passed"] for run in runs),

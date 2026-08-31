@@ -89,7 +89,7 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
     health_path = metrics_path.with_name("server_summary.json")
     try:
         health = json.loads(health_path.read_text())
-        if health.get("schema_version") != 1:
+        if health.get("schema_version") != 2:
             health = None
     except (OSError, json.JSONDecodeError):
         health = None
@@ -133,6 +133,8 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
 
     summary = {}
     for level, bucket in sorted(by_level.items()):
+        level_health = ((health.get("levels", {}).get(str(level), {}))
+                        if health is not None else {})
         losses = bucket["loss"]
         first = finite_mean(head(losses))
         last = finite_mean(tail(losses))
@@ -158,7 +160,31 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
             ),
             "gradient_steps_exact": 1.0 if health is not None else 0.0,
             "finalized_transitions": (
-                int(health.get("finalized_transitions", 0))
+                int(level_health.get("finalized_transitions", 0))
+                if health is not None else math.nan
+            ),
+            "accepted_decisions": (
+                int(level_health.get("accepted_decisions", 0))
+                if health is not None else math.nan
+            ),
+            "rejected_decisions": (
+                int(level_health.get("rejected_decisions", 0))
+                if health is not None else math.nan
+            ),
+            "override_relabels": (
+                int(level_health.get("override_relabels", 0))
+                if health is not None else math.nan
+            ),
+            "full_horizon_transitions": (
+                int(level_health.get("full_horizon_transitions", 0))
+                if health is not None else math.nan
+            ),
+            "boundary_truncated_transitions": (
+                int(level_health.get("boundary_truncated_transitions", 0))
+                if health is not None else math.nan
+            ),
+            "shutdown_terminal_transitions": (
+                int(level_health.get("shutdown_terminal_transitions", 0))
                 if health is not None else math.nan
             ),
             "replay_size": (

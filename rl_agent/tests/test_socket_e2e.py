@@ -40,6 +40,7 @@ def level_entry(level=0, files=2, default_needed=False, is_last=False,
         "compactions_forced": 1,
         "prev_action_executed": prev_action_executed,
         "prev_action_overridden": False, "prev_compaction_picked": True,
+        "prev_decision_id": 0, "prev_override_reason": 0,
         "defer_count": defer_count, "default_needed": default_needed,
         "is_last": is_last,
     }
@@ -47,7 +48,9 @@ def level_entry(level=0, files=2, default_needed=False, is_last=False,
 
 def v2_message(levels, done=False, interval_micros=50_000):
     return {
-        "version": 2, "pending_compaction_bytes": 1 << 20,
+        "version": 2, "credit_assignment_version": 2,
+        "prev_reward_invalid_reason_mask": 0,
+        "pending_compaction_bytes": 1 << 20,
         "flushed_bytes": 1 << 22, "compaction_bytes_read": 1 << 21,
         "compaction_bytes_written": 1 << 21, "compactions_completed": 1,
         "stall_count": 0, "stop_count": 0, "l0_compaction_trigger": 4,
@@ -111,6 +114,9 @@ class ServerHarness:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(10)
         client.connect(self.socket_path)
+        if not hasattr(send_and_receive, "client_ids"):
+            send_and_receive.client_ids = {}
+        send_and_receive.client_ids[client.fileno()] = 0
         return client
 
     @staticmethod
@@ -140,6 +146,14 @@ class ServerHarness:
 
 
 def send_and_receive(client, message):
+    if "levels" in message:
+        previous = getattr(send_and_receive, "client_ids", {}).get(
+            client.fileno(), 0)
+        ids = getattr(send_and_receive, "next_ids", 1)
+        message["decision_id"] = ids
+        send_and_receive.next_ids = ids + 1
+        for level in message["levels"]:
+            level["prev_decision_id"] = previous
     client.sendall((json.dumps(message) + "\n").encode())
     buffer = b""
     while not buffer.endswith(b"\n"):
@@ -147,7 +161,15 @@ def send_and_receive(client, message):
         if not chunk:
             raise RuntimeError("server closed the connection")
         buffer += chunk
-    return buffer.decode()
+    raw = buffer.decode()
+    if "levels" in message:
+        response = json.loads(raw)
+        if response.get("decision_id") != message["decision_id"]:
+            raise RuntimeError("server did not echo the request decision_id")
+        if not hasattr(send_and_receive, "client_ids"):
+            send_and_receive.client_ids = {}
+        send_and_receive.client_ids[client.fileno()] = message["decision_id"]
+    return raw
 
 
 class TestSocketEndToEnd(unittest.TestCase):
@@ -247,19 +269,20 @@ class TestSocketEndToEnd(unittest.TestCase):
             self.assertGreater(sum(finalized), 0,
                                "done must finalise the open credit windows")
 
-    def test_legacy_single_level_protocol_still_served(self):
-        """Scope boundary: the old protocol is not extended, but must not
-        break — old binaries share the socket."""
+    def test_legacy_single_level_protocol_is_rejected(self):
+        """An old C++ binary must fail instead of producing a misleading run
+        under obsolete acknowledgement and reward-validity semantics."""
         with ServerHarness() as server:
             client = server.connect()
-            raw = send_and_receive(client, {
+            message = {
                 "l0_files": 3, "l0_size_bytes": 1 << 24, "l0_score": 0.75,
                 "pending_compaction_bytes": 1 << 20, "flushed_bytes": 1 << 22,
                 "compaction_bytes_read": 0, "compaction_bytes_written": 0,
                 "l0_compactions_completed": 0, "stall_count": 0,
                 "l0_compaction_trigger": 4, "done": False,
-            })
-            self.assertIn("action", json.loads(raw))
+            }
+            client.sendall((json.dumps(message) + "\n").encode())
+            self.assertEqual(client.recv(4096), b"")
             client.close()
 
     def test_reconnect_preserves_processor_state(self):

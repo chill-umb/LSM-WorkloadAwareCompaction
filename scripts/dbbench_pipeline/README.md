@@ -73,7 +73,16 @@ used to loosen the guard without a new calibration version and fresh holdouts.
 Each run records the SHA-256 of the exact manifest it used. Resume refuses to
 mix completed arms from another manifest, and the holdout checks that every
 shadow frame carries the calibrated manifest's hash rather than relying only on
-the geometry fingerprint.
+the geometry fingerprint. Shadow schema 2 reports `would_override_frame`.
+Known predicted overrides do not simulate replay invalidation; readiness still
+independently requires no actual holdout intervention and at most a 1%
+predicted-override fraction.
+
+Before the repeated matrix, use `13_run_preflight_verification.sh` for fresh
+5M/T2 and 10M/T2 learner checks. Old-credit runs must not be resumed. The 5M
+screen requires at least 320 full-horizon transitions and 100 optimizer steps;
+the 10M checkpoint additionally requires a learned-versus-prior greedy-action
+flip.
 
 Finally run the selected regular, prior-only, unconstrained-learning ablation,
 and constrained learned arms. The trigger and
@@ -100,10 +109,12 @@ scripts/dbbench_pipeline/07_evaluate_paired.py \
 Sorted-run seeks is the strict scan-improvement objective because this
 workload's scan-amplification baseline is already at its physical floor. Scan
 amplification remains a 2% non-regression check. Every learned arm also has a
-hard pre-completion health gate: finalized replay, replay warmup, a true
+hard pre-completion schema-2 health gate: credit-assignment version 2, zero
+protocol errors and hard-invalid reward intervals, balanced decision
+accounting, at least 32 full-horizon replay transitions, replay warmup, a true
 optimizer step, a nonzero residual, drained clients, quiesced training, zero
-pending credit windows, and no trainer exception are required before diagnostic
-full compaction and `COMPLETED`.
+pending or unresolved decisions, and no trainer exception are required before
+diagnostic full compaction and `COMPLETED`.
 
 After balanced acceptance, the read-heavy and write-heavy stress runner
 performs separate tuned-baseline calibration for each workload identity and

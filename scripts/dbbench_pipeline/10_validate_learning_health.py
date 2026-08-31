@@ -59,7 +59,9 @@ def main() -> int:
 
     checks = {}
     if summary is not None:
-        checks["schema_version"] = summary.get("schema_version") == 1
+        checks["schema_version"] = summary.get("schema_version") == 2
+        checks["credit_assignment_version"] = (
+            summary.get("credit_assignment_version") == 2)
         checks["clients_drained"] = summary.get("clients_drained") is True
         checks["training_quiesced"] = summary.get("training_quiesced") is True
         # These are part of the treatment, not optional diagnostics. A run
@@ -70,6 +72,19 @@ def main() -> int:
         checks["no_pending_credit"] = integer(
             summary, "pending_windows_at_shutdown", -1
         ) == 0
+        checks["no_unresolved_decisions"] = integer(
+            summary, "unresolved_decisions_at_shutdown", -1
+        ) == 0
+        checks["no_protocol_errors"] = integer(
+            summary, "protocol_errors", -1
+        ) == 0
+        checks["no_reward_invalid_intervals"] = integer(
+            summary, "reward_invalid_intervals", -1
+        ) == 0
+        checks["accepted_accounting_balanced"] = (
+            summary.get("accepted_accounting_balanced") is True)
+        checks["proposal_accounting_balanced"] = (
+            summary.get("proposal_accounting_balanced") is True)
         checks["trainer_error"] = (
             "trainer_error" in summary and summary["trainer_error"] is None
         )
@@ -84,8 +99,8 @@ def main() -> int:
         else:
             checks.update({
                 "training_mode": summary.get("eval_mode") is False,
-                "finalized_replay": integer(
-                    summary, "finalized_transitions", -1
+                "full_horizon_replay": integer(
+                    summary, "full_horizon_transitions", -1
                 ) >= MINIMUM_REPLAY,
                 "replay_warm": integer(summary, "replay_size", -1)
                 >= MINIMUM_REPLAY,
@@ -100,11 +115,11 @@ def main() -> int:
         errors.extend(name for name, passed in checks.items() if not passed)
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "arm": args.arm,
         "summary_path": str(args.summary),
         "thresholds": {
-            "minimum_finalized_transitions": MINIMUM_REPLAY,
+            "minimum_full_horizon_transitions": MINIMUM_REPLAY,
             "minimum_replay_size": MINIMUM_REPLAY,
             "residual_epsilon": RESIDUAL_EPSILON,
         },

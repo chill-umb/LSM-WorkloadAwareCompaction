@@ -18,6 +18,14 @@ from replay_buffer import ReplayBuffer, LevelBufferView
 # and latency on the decision path.
 torch.set_num_threads(1)
 
+_REWARD_INVALID_REASON_NAMES = {
+    0: "socket_or_query_fallback",
+    1: "watchdog_native_fallback",
+    2: "malformed_protocol",
+    3: "rejected_manifest",
+    4: "unknown_control_ownership",
+}
+
 
 class SharedTrunk:
     """Trunk, optimizer, replay buffer and trainer thread shared by every level.
@@ -292,8 +300,21 @@ class DQNAgent:
         self.last_residual_advantage: Optional[float] = None
         self.last_credit_lag: Optional[float] = None
         self.finalized_transitions: int = 0
-        self.invalid_intervals: int = 0
-        self.cleared_pending_windows: int = 0
+        # Credit-assignment schema v2 distinguishes installation acknowledgement
+        # from reward validity.  A rejected proposal removes only that proposal;
+        # a genuinely unattributable interval terminalizes older valid prefixes.
+        self.selected_proposals: int = 0
+        self.accepted_decisions: int = 0
+        self.rejected_decisions: int = 0
+        self.override_relabels: int = 0
+        self.full_horizon_transitions: int = 0
+        self.boundary_truncated_transitions: int = 0
+        self.shutdown_terminal_transitions: int = 0
+        self.discarded_unconfirmed_windows: int = 0
+        self.unresolved_decisions_at_shutdown: int = 0
+        self.discarded_zero_credit_windows: int = 0
+        self.reward_invalid_intervals: int = 0
+        self.reward_invalid_reason_counts: dict[str, int] = {}
         self.max_abs_residual_advantage: float = 0.0
         self.argmax_flip_count: int = 0
         self.argmax_comparison_count: int = 0
@@ -503,7 +524,10 @@ class DQNAgent:
                 valid_actions=None, prior: Optional[np.ndarray] = None,
                 dt_seconds: float = 0.0,
                 executed_action: Optional[int] = None,
-                transition_valid: bool = True) -> int:
+                decision_id: Optional[int] = None,
+                prev_decision_id: Optional[int] = None,
+                previous_overridden: bool = False,
+                reward_invalid_reason_mask: int = 0) -> int:
         """
         Assemble transitions and return the next action for `state`.
 
@@ -513,12 +537,15 @@ class DQNAgent:
         transition (state, action, discounted return, bootstrap state) is
         pushed to the replay buffer.
 
-        `executed_action` is what RocksDB actually did with the previous
-        decision. It can differ from what was chosen — a safety guard or native
-        admission outcome may have overridden it — and Q-learning is off-policy,
-        so the transition must be keyed on the action that was executed.
-        Otherwise every override becomes a mislabelled sample, and overrides
-        cluster in exactly the high-pressure states that matter most.
+        For credit-assignment schema v2, `decision_id` identifies the proposal
+        opened by this call and `prev_decision_id` acknowledges the proposal
+        that C++ actually installed.  A mismatched acknowledgement rejects only
+        the newest proposal.  Known overrides are retained as off-policy
+        experience and relabelled to `executed_action`.
+
+        `reward_invalid_reason_mask` is reserved for genuinely uncontrolled
+        intervals.  Their reward is excluded, and older confirmed prefixes are
+        terminalized so bootstrapping cannot cross the unknown boundary.
 
         This method does not train synchronously. Call request_training() after
         the response has been sent to keep backpropagation off the decision
@@ -528,48 +555,87 @@ class DQNAgent:
         with self._data_lock:
             self.last_returns = []
 
-            # Fallback, stale-observation and safety-masked intervals have no
-            # attributable counterfactual. Drop every credit window they
-            # overlap; retaining even an older n-step window would leak the
-            # invalid interval's global reward into replay.
-            if not transition_valid:
-                self.invalid_intervals += 1
-                self.cleared_pending_windows += len(self._pending)
-                self._pending.clear()
-
-            # 0. Correct the previous decision's action to what was executed.
-            if transition_valid and executed_action is not None and self._pending:
+            legacy_credit = decision_id is None and prev_decision_id is None
+            if legacy_credit and executed_action is not None and self._pending:
+                changed = self._pending[-1]["action"] != int(executed_action)
                 self._pending[-1]["action"] = int(executed_action)
+                if previous_overridden or changed:
+                    self.override_relabels += 1
 
-            # 1. This interval's reward extends every open credit window, with
-            #    wall-clock discounting.
-            step_discount = self._discount(dt_seconds)
-            for entry in self._pending:
-                entry["return"] += entry["discount"] * reward
-                entry["discount"] *= step_discount
-                entry["steps"] += 1
+            # 0. Reconcile only the newest proposal.  A stale/rejected response
+            #    cannot retroactively invalidate older confirmed windows.
+            if not legacy_credit and self._pending:
+                newest = self._pending[-1]
+                if not newest["confirmed"]:
+                    if (prev_decision_id is not None
+                            and int(prev_decision_id) == newest["decision_id"]):
+                        newest["confirmed"] = True
+                        self.accepted_decisions += 1
+                        if executed_action is not None:
+                            changed = newest["action"] != int(executed_action)
+                            newest["action"] = int(executed_action)
+                            if previous_overridden or changed:
+                                self.override_relabels += 1
+                    else:
+                        self._pending.pop()
+                        self.rejected_decisions += 1
 
-            # 2. Finalize windows that are complete. `state` is the bootstrap
-            #    state for those decisions.
-            while self._pending and self._window_complete(self._pending[0], now):
-                entry = self._pending.popleft()
-                self.buffer.push(entry["state"], entry["action"],
-                                 entry["return"], state, False,
-                                 entry["prior"], prior, entry["discount"])
-                self.finalized_transitions += 1
-                self.last_returns.append(entry["return"])
-                self.last_credit_lag = now - entry["t0"]
+            hard_boundary = int(reward_invalid_reason_mask) != 0
+            if hard_boundary:
+                self.reward_invalid_intervals += 1
+                mask = int(reward_invalid_reason_mask)
+                bit = 0
+                while mask:
+                    if mask & 1:
+                        key = _REWARD_INVALID_REASON_NAMES.get(
+                            bit, f"unknown_bit_{bit}")
+                        self.reward_invalid_reason_counts[key] = (
+                            self.reward_invalid_reason_counts.get(key, 0) + 1
+                        )
+                    mask >>= 1
+                    bit += 1
 
-            # 3. On episode end every pending decision becomes a Monte-Carlo
-            #    return with the bootstrap masked off.
+                # Exclude the unknown interval.  Valid prefixes become terminal
+                # samples; unresolved and zero-credit entries cannot be used.
+                while self._pending:
+                    entry = self._pending.popleft()
+                    if not entry["confirmed"]:
+                        self.discarded_unconfirmed_windows += 1
+                    elif entry["steps"] <= 0:
+                        self.discarded_zero_credit_windows += 1
+                    else:
+                        self._push_transition(entry, state, prior, terminal=True)
+                        self.boundary_truncated_transitions += 1
+            else:
+                # 1. Only installed decisions receive this interval's reward.
+                step_discount = self._discount(dt_seconds)
+                for entry in self._pending:
+                    if not entry["confirmed"]:
+                        continue
+                    entry["return"] += entry["discount"] * reward
+                    entry["discount"] *= step_discount
+                    entry["steps"] += 1
+
+                # 2. Preserve the four-second SMDP horizon for uninterrupted
+                #    confirmed windows and bootstrap from the current state.
+                while (self._pending and self._pending[0]["confirmed"]
+                       and self._window_complete(self._pending[0], now)):
+                    entry = self._pending.popleft()
+                    self._push_transition(entry, state, prior, terminal=False)
+                    self.full_horizon_transitions += 1
+                    self.last_credit_lag = now - entry["t0"]
+
+            # 3. A clean terminal observation finalizes acknowledged partial
+            #    windows and discards any proposal C++ never acknowledged.
             if done:
                 while self._pending:
                     entry = self._pending.popleft()
-                    self.buffer.push(entry["state"], entry["action"],
-                                     entry["return"], state, True,
-                                     entry["prior"], prior, entry["discount"])
-                    self.finalized_transitions += 1
-                    self.last_returns.append(entry["return"])
+                    if entry["confirmed"]:
+                        self._push_transition(entry, state, prior, terminal=True)
+                        self.shutdown_terminal_transitions += 1
+                    else:
+                        self.discarded_unconfirmed_windows += 1
+                        self.unresolved_decisions_at_shutdown += 1
 
             # 4. Choose this step's action and open its window, unless the
             #    episode just ended (a dangling decision would bleed into the
@@ -577,9 +643,16 @@ class DQNAgent:
             action = self.select_action(state, valid_actions, prior)
             self._anneal()
             if not done:
+                self.selected_proposals += 1
+                confirmed = legacy_credit
+                if confirmed:
+                    self.accepted_decisions += 1
                 self._pending.append({
                     "state": state.copy(),
                     "action": action,
+                    "decision_id": (self.selected_proposals
+                                    if legacy_credit else int(decision_id)),
+                    "confirmed": confirmed,
                     "prior": None if prior is None else np.asarray(prior).copy(),
                     "return": 0.0,
                     "discount": 1.0,
@@ -598,6 +671,14 @@ class DQNAgent:
 
         return action
 
+    def _push_transition(self, entry: dict, state: np.ndarray,
+                         prior: Optional[np.ndarray], terminal: bool) -> None:
+        self.buffer.push(entry["state"], entry["action"], entry["return"],
+                         state, terminal, entry["prior"], prior,
+                         entry["discount"])
+        self.finalized_transitions += 1
+        self.last_returns.append(entry["return"])
+
     def flush_pending(self, state: np.ndarray = None) -> int:
         """Finalize every open credit window as a terminal transition.
 
@@ -608,14 +689,17 @@ class DQNAgent:
         with self._data_lock:
             if not self._pending:
                 return 0
-            flushed = len(self._pending)
+            flushed = 0
             bootstrap = state if state is not None else self._pending[-1]["state"]
             while self._pending:
                 entry = self._pending.popleft()
-                self.buffer.push(entry["state"], entry["action"],
-                                 entry["return"], bootstrap, True,
-                                 entry["prior"], None, entry["discount"])
-                self.finalized_transitions += 1
+                if not entry["confirmed"]:
+                    self.discarded_unconfirmed_windows += 1
+                    self.unresolved_decisions_at_shutdown += 1
+                    continue
+                self._push_transition(entry, bootstrap, None, terminal=True)
+                self.shutdown_terminal_transitions += 1
+                flushed += 1
             return flushed
 
     # -- training ----------------------------------------------------------
@@ -788,14 +872,51 @@ class DQNAgent:
 
     def health_snapshot(self) -> dict:
         with self._data_lock:
+            pending_confirmed = sum(
+                1 for entry in self._pending if entry["confirmed"])
+            pending_unconfirmed = len(self._pending) - pending_confirmed
+            # A window confirmed on the same frame that raised a hard
+            # boundary carries no reward interval yet, so it is dropped rather
+            # than stored as a zero-return sample. It was still an accepted
+            # decision, so it has to appear on this side of the identity or the
+            # invariant reports an imbalance for a correctly handled boundary.
+            accepted_accounted = (
+                self.full_horizon_transitions
+                + self.boundary_truncated_transitions
+                + self.shutdown_terminal_transitions
+                + self.discarded_zero_credit_windows
+                + pending_confirmed
+            )
+            proposals_accounted = (
+                self.accepted_decisions + self.rejected_decisions
+                + self.discarded_unconfirmed_windows + pending_unconfirmed
+            )
             return {
                 "level": self.level,
                 "decisions": self.step,
+                "selected_proposals": self.selected_proposals,
+                "accepted_decisions": self.accepted_decisions,
+                "rejected_decisions": self.rejected_decisions,
+                "override_relabels": self.override_relabels,
+                "full_horizon_transitions": self.full_horizon_transitions,
+                "boundary_truncated_transitions": self.boundary_truncated_transitions,
+                "shutdown_terminal_transitions": self.shutdown_terminal_transitions,
+                "discarded_unconfirmed_windows": self.discarded_unconfirmed_windows,
+                "unresolved_decisions_at_shutdown": (
+                    self.unresolved_decisions_at_shutdown),
+                "discarded_zero_credit_windows": self.discarded_zero_credit_windows,
+                "reward_invalid_intervals": self.reward_invalid_intervals,
+                "reward_invalid_reason_counts": dict(
+                    self.reward_invalid_reason_counts),
                 "finalized_transitions": self.finalized_transitions,
                 "replay_size": len(self.buffer),
-                "invalid_intervals": self.invalid_intervals,
-                "cleared_pending_windows": self.cleared_pending_windows,
                 "pending_windows": len(self._pending),
+                "pending_confirmed_windows": pending_confirmed,
+                "pending_unconfirmed_windows": pending_unconfirmed,
+                "accepted_accounting_balanced": (
+                    self.accepted_decisions == accepted_accounted),
+                "proposal_accounting_balanced": (
+                    self.selected_proposals == proposals_accounted),
                 "train_steps": (
                     self.shared.train_steps
                     if self.shared is not None

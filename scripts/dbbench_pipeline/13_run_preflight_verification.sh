@@ -3,8 +3,9 @@
 #
 # Default sequence:
 #   1. 1M/T2 regular-vs-oracle bridge regression (10 pairs).
-#   2. 5M/T2 narrowed baseline, 3+3 live-guard protocol, 1 four-arm repeat.
-#   3. 10M/T2 narrowed baseline, 3+3 live-guard protocol, 3 four-arm repeats.
+#   2. 5M/T2 narrowed baseline, 3+3 live-guard protocol, then one
+#      unconstrained/constrained learner checkpoint at seed 20001.
+#   3. One 10M/T2 learned-arm checkpoint only after 5M learner health passes.
 #
 # This script never builds RocksDB/db_bench. It requires freshly rebuilt cloud
 # binaries and invokes only the existing experiment/analysis entry points.
@@ -25,16 +26,16 @@ PREFLIGHT_CELLS_M="${PREFLIGHT_CELLS_M:-5 10}"
 PREFLIGHT_RUN_ORACLE="${PREFLIGHT_RUN_ORACLE:-1}"
 PREFLIGHT_ORACLE_REPEATS="${PREFLIGHT_ORACLE_REPEATS:-10}"
 PREFLIGHT_FINAL_REPEATS_5M="${PREFLIGHT_FINAL_REPEATS_5M:-1}"
-PREFLIGHT_FINAL_REPEATS_10M="${PREFLIGHT_FINAL_REPEATS_10M:-3}"
+PREFLIGHT_FINAL_REPEATS_10M="${PREFLIGHT_FINAL_REPEATS_10M:-1}"
 PREFLIGHT_MIN_TRAIN_STEPS="${PREFLIGHT_MIN_TRAIN_STEPS:-100}"
-PREFLIGHT_MIN_FINALIZED_TRANSITIONS="${PREFLIGHT_MIN_FINALIZED_TRANSITIONS:-320}"
-PREFLIGHT_MAX_INVALID_FRACTION="${PREFLIGHT_MAX_INVALID_FRACTION:-0.01}"
+PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS="${PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS:-320}"
 PREFLIGHT_REQUIRE_10M_ACTION_FLIP="${PREFLIGHT_REQUIRE_10M_ACTION_FLIP:-1}"
 PREFLIGHT_RESUME="${PREFLIGHT_RESUME:-0}"
 PREFLIGHT_KEEP_DATABASES="${PREFLIGHT_KEEP_DATABASES:-0}"
 PREFLIGHT_CALIBRATION_SEED_BASE="${PREFLIGHT_CALIBRATION_SEED_BASE:-1001}"
 PREFLIGHT_HOLDOUT_SEED_BASE="${PREFLIGHT_HOLDOUT_SEED_BASE:-11001}"
 PREFLIGHT_EXPERIMENT_SEED_BASE="${PREFLIGHT_EXPERIMENT_SEED_BASE:-20001}"
+PREFLIGHT_GUARD_READY=1
 
 for flag in "$PREFLIGHT_RUN_ORACLE" "$PREFLIGHT_REQUIRE_10M_ACTION_FLIP" \
             "$PREFLIGHT_RESUME" "$PREFLIGHT_KEEP_DATABASES"; do
@@ -47,7 +48,7 @@ for integer in "$PREFLIGHT_ORACLE_REPEATS" \
                "$PREFLIGHT_FINAL_REPEATS_5M" \
                "$PREFLIGHT_FINAL_REPEATS_10M" \
                "$PREFLIGHT_MIN_TRAIN_STEPS" \
-               "$PREFLIGHT_MIN_FINALIZED_TRANSITIONS"; do
+               "$PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS"; do
   [[ "$integer" =~ ^[1-9][0-9]*$ ]] || {
     echo "Preflight counts must be positive integers; got: $integer" >&2
     exit 1
@@ -75,10 +76,10 @@ for size_m in $PREFLIGHT_CELLS_M; do
       ;;
   esac
   cell_count=$(( cell_count + 1 ))
-  # Six narrowed-baseline arms, six calibration/holdout oracle arms, and four
-  # final arms per repeat.
+  # Six narrowed-baseline arms, six calibration/holdout oracle arms, and two
+  # learned diagnostic arms per repeat.
   estimated_operations_m=$(( estimated_operations_m +
-      size_m * (12 + 4 * final_repeats) ))
+      size_m * (12 + 2 * final_repeats) ))
 done
 (( cell_count > 0 )) || {
   echo "PREFLIGHT_CELLS_M must contain at least one cell." >&2
@@ -119,14 +120,6 @@ fi
   echo "Rebuild the modified cloud checkout before running this preflight." >&2
   exit 1
 }
-"$PREFLIGHT_PYTHON" - "$PREFLIGHT_MAX_INVALID_FRACTION" <<'PY'
-import sys
-
-value = float(sys.argv[1])
-if not 0.0 <= value <= 1.0:
-    raise SystemExit("PREFLIGHT_MAX_INVALID_FRACTION must be in [0, 1]")
-PY
-
 mkdir -p "$PREFLIGHT_RESULTS_ROOT" "$PREFLIGHT_DB_ROOT" \
          "$PREFLIGHT_MANIFEST_ROOT/selection" \
          "$PREFLIGHT_MANIFEST_ROOT/final"
@@ -204,8 +197,8 @@ screen_learning_health() {
   local output="$result_root/learning-health-screen.json"
   "$PREFLIGHT_PYTHON" - "$result_root" "$size_m" "$repeats" \
     "$PREFLIGHT_MIN_TRAIN_STEPS" \
-    "$PREFLIGHT_MIN_FINALIZED_TRANSITIONS" \
-    "$PREFLIGHT_MAX_INVALID_FRACTION" "$require_flip" "$output" <<'PY'
+    "$PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS" \
+    "$require_flip" "$output" <<'PY'
 import json
 import os
 import sys
@@ -213,19 +206,18 @@ import tempfile
 from pathlib import Path
 
 (root_arg, size_arg, repeats_arg, steps_arg, finalized_arg,
- invalid_arg, require_flip_arg, output_arg) = sys.argv[1:]
+ require_flip_arg, output_arg) = sys.argv[1:]
 root = Path(root_arg)
 size_m = int(size_arg)
 expected_repeats = int(repeats_arg)
 minimum_steps = int(steps_arg)
 minimum_finalized = int(finalized_arg)
-maximum_invalid_fraction = float(invalid_arg)
 require_flip = bool(int(require_flip_arg))
 output = Path(output_arg)
 
 failures = []
 runs = {}
-for arm in ("prior_only", "unconstrained_rl", "rl"):
+for arm in ("unconstrained_rl", "rl"):
     paths = sorted(root.glob(f"{size_m}M/T2/**/{arm}/learning_health.json"))
     if len(paths) != expected_repeats:
         failures.append(
@@ -236,12 +228,22 @@ for arm in ("prior_only", "unconstrained_rl", "rl"):
         report = json.loads(path.read_text())
         summary = report.get("server_summary") or {}
         decisions = int(summary.get("decisions", 0))
-        invalid = int(summary.get("invalid_intervals", 0))
-        invalid_fraction = invalid / decisions if decisions else None
         item = {
             "directory": str(path.parent),
             "passed": report.get("passed") is True,
             "decisions": decisions,
+            "accepted_decisions": int(summary.get("accepted_decisions", 0)),
+            "rejected_decisions": int(summary.get("rejected_decisions", 0)),
+            "override_relabels": int(summary.get("override_relabels", 0)),
+            "full_horizon_transitions": int(
+                summary.get("full_horizon_transitions", 0)
+            ),
+            "boundary_truncated_transitions": int(
+                summary.get("boundary_truncated_transitions", 0)
+            ),
+            "shutdown_terminal_transitions": int(
+                summary.get("shutdown_terminal_transitions", 0)
+            ),
             "finalized_transitions": int(
                 summary.get("finalized_transitions", 0)
             ),
@@ -254,8 +256,17 @@ for arm in ("prior_only", "unconstrained_rl", "rl"):
             "argmax_comparison_count": int(
                 summary.get("argmax_comparison_count", 0)
             ),
-            "invalid_intervals": invalid,
-            "invalid_fraction": invalid_fraction,
+            "reward_invalid_intervals": int(
+                summary.get("reward_invalid_intervals", 0)
+            ),
+            "reward_invalid_reason_counts": summary.get(
+                "reward_invalid_reason_counts", {}
+            ),
+            "protocol_errors": int(summary.get("protocol_errors", 0)),
+            "accepted_accounting_balanced": summary.get(
+                "accepted_accounting_balanced") is True,
+            "proposal_accounting_balanced": summary.get(
+                "proposal_accounting_balanced") is True,
             "trainer_error": summary.get("trainer_error"),
         }
         runs[arm].append(item)
@@ -263,46 +274,38 @@ for arm in ("prior_only", "unconstrained_rl", "rl"):
             failures.append(f"{arm}: hard learning-health gate failed at {path.parent}")
         if not (path.parent / "COMPLETED").exists():
             failures.append(f"{arm}: missing COMPLETED at {path.parent}")
-        if arm == "prior_only":
-            continue
         if item["train_steps"] < minimum_steps:
             failures.append(
                 f"{arm}: only {item['train_steps']} optimizer steps at {path.parent}; "
                 f"meaningful-screen minimum is {minimum_steps}"
             )
-        if item["finalized_transitions"] < minimum_finalized:
+        if item["full_horizon_transitions"] < minimum_finalized:
             failures.append(
-                f"{arm}: only {item['finalized_transitions']} finalized transitions "
+                f"{arm}: only {item['full_horizon_transitions']} full-horizon "
+                "transitions "
                 f"at {path.parent}; minimum is {minimum_finalized}"
             )
         if item["max_abs_residual_advantage"] <= 1e-8:
             failures.append(f"{arm}: residual remained zero at {path.parent}")
-        if arm == "rl" and (
-            invalid_fraction is None
-            or invalid_fraction > maximum_invalid_fraction
-        ):
-            failures.append(
-                f"rl: invalid interval fraction {invalid_fraction} exceeds "
-                f"{maximum_invalid_fraction} at {path.parent}"
-            )
-
 if require_flip:
-    constrained_flips = sum(item["argmax_flip_count"] for item in runs["rl"])
-    if constrained_flips == 0:
+    learned_flips = sum(
+        item["argmax_flip_count"]
+        for arm in ("unconstrained_rl", "rl") for item in runs[arm]
+    )
+    if learned_flips == 0:
         failures.append(
-            "rl: zero prior-vs-learned argmax flips across the 10M checkpoint"
+            "zero prior-vs-learned argmax flips across the 10M checkpoint"
         )
 
 report = {
-    "schema_version": 1,
+    "schema_version": 2,
     "size_millions": size_m,
     "size_ratio": 2,
     "expected_repeats": expected_repeats,
     "thresholds": {
         "minimum_train_steps_per_learned_run": minimum_steps,
-        "minimum_finalized_transitions_per_learned_run": minimum_finalized,
-        "maximum_constrained_invalid_fraction": maximum_invalid_fraction,
-        "require_constrained_action_flip": require_flip,
+        "minimum_full_horizon_transitions_per_learned_run": minimum_finalized,
+        "require_learned_action_flip": require_flip,
     },
     "runs": runs,
     "failures": failures,
@@ -373,6 +376,7 @@ run_cell() {
 
   echo
   echo "=== ${size_m}M/T2: three calibrations + three holdouts ==="
+  set +e
   WORKLOAD_PROFILE="$PREFLIGHT_WORKLOAD_PROFILE" \
   WORKLOAD_SIZES_M="$size_m" SIZE_RATIOS=2 \
   SELECTION_SLO_ROOT="$PREFLIGHT_MANIFEST_ROOT/selection" \
@@ -383,17 +387,24 @@ run_cell() {
   RESUME="$PREFLIGHT_RESUME" KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
   CONFIRM_GUARD_PROTOCOL=YES \
     "$PIPELINE_DIR/06_run_guard_protocol.sh"
+  local guard_status=$?
+  set -e
+  if (( guard_status != 0 )); then
+    PREFLIGHT_GUARD_READY=0
+    echo "Guard holdout is not ready for ${size_m}M/T2; continuing only with " \
+         "the preregistered mechanical learner diagnostics." >&2
+  fi
 
   echo
-  echo "=== ${size_m}M/T2: four-arm learning checkpoint (${final_repeats} repeat(s)) ==="
+  echo "=== ${size_m}M/T2: learned-arm mechanical checkpoint (${final_repeats} repeat(s)) ==="
   WORKLOAD_PROFILE="$PREFLIGHT_WORKLOAD_PROFILE" \
   WORKLOAD_SIZES_M="$size_m" SIZE_RATIOS=2 \
-  EXPERIMENT_ARMS="regular prior_only unconstrained_rl rl" \
+  EXPERIMENT_ARMS="unconstrained_rl rl" \
   REPEATS="$final_repeats" RL_RUN_PHASE=experiment \
   BASELINE_SLO_DIR="$final_manifest_root" \
   DBBENCH_SEED="$PREFLIGHT_EXPERIMENT_SEED_BASE" \
   RESULTS_ROOT="$experiment_results" DB_ROOT="$experiment_databases" \
-  RESUME="$PREFLIGHT_RESUME" KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
+  RESUME=0 KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
   CONFIRM_EXPERIMENTS=YES \
     "$PIPELINE_DIR/03_run_experiments.sh"
 
@@ -406,31 +417,6 @@ run_cell() {
   "$PREFLIGHT_PYTHON" "$PIPELINE_DIR/11_analyze_learning.py" \
     "$experiment_results" --arm unconstrained_rl --stride 10 \
     --output "$experiment_results/learning-unconstrained.json"
-  "$PIPELINE_DIR/04_generate_graphs.sh" --results "$experiment_results"
-
-  if (( final_repeats >= 2 )); then
-    local acceptance="$experiment_results/graphs/acceptance-${size_m}M-T2.json"
-    set +e
-    "$PREFLIGHT_PYTHON" "$PIPELINE_DIR/07_evaluate_paired.py" \
-      "$experiment_results/graphs/summary.csv" \
-      --size-millions "$size_m" --size-ratio 2 \
-      --minimum-pairs "$final_repeats" \
-      --scan-objective sorted_run_seeks --output "$acceptance"
-    local acceptance_status=$?
-    set -e
-    [[ -f "$acceptance" ]] || {
-      echo "Performance screen did not produce $acceptance" >&2
-      exit 1
-    }
-    if (( acceptance_status == 0 )); then
-      echo "${size_m}M/T2 paired performance screen passed."
-    else
-      echo "${size_m}M/T2 paired performance screen did not pass at " \
-           "${final_repeats} repeats; inspect $acceptance."
-      echo "This is not treated as an implementation failure because the " \
-           "short preflight may not decide the confidence bounds."
-    fi
-  fi
 }
 
 if (( PREFLIGHT_RUN_ORACLE )); then
@@ -444,5 +430,10 @@ echo
 echo "Preflight verification completed without a mechanical/learning failure."
 echo "Results:   $PREFLIGHT_RESULTS_ROOT"
 echo "Manifests: $PREFLIGHT_MANIFEST_ROOT/final"
-echo "Review each learning-health-screen.json and the 10M acceptance report " \
+echo "Review each learning-health-screen.json and both learning-analysis JSONs " \
      "before launching the full matrix."
+if (( ! PREFLIGHT_GUARD_READY )); then
+  echo "Learner diagnostics completed, but guard holdout readiness failed; " \
+       "the repeated performance matrix remains blocked." >&2
+  exit 6
+fi

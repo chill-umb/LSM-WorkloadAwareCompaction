@@ -49,14 +49,18 @@ def make_level(level=0, files=2, bytes_=None, score=None, target=1 << 26,
         "gate_open": False, "gate_mode": 0,
         "jobs_attempted": 0, "jobs_blocked": 0,
         "consecutive_blocked": 0, "in_backoff": False,
-        "prev_transition_valid": True,
+        "prev_decision_id": 0, "prev_override_reason": 0,
     }
 
 
 def make_msg(levels, interval_micros=50_000, stall=0, stop=0, done=False,
              **globals_):
     msg = {
-        "version": 2, "pending_compaction_bytes": 1 << 20,
+        "version": 2, "credit_assignment_version": 2,
+        "decision_id": globals_.pop("decision_id", 1),
+        "prev_reward_invalid_reason_mask": globals_.pop(
+            "prev_reward_invalid_reason_mask", 0),
+        "pending_compaction_bytes": 1 << 20,
         "flushed_bytes": 1 << 22, "compaction_bytes_read": 1 << 21,
         "compaction_bytes_written": 1 << 21, "compactions_completed": 1,
         "stall_count": stall, "stop_count": stop,
@@ -697,6 +701,25 @@ class TestReadPathSignals(unittest.TestCase):
 
 class TestStateEncoding(unittest.TestCase):
 
+    def test_credit_assignment_v2_is_mandatory(self):
+        msg = make_msg([make_level()])
+        del msg["credit_assignment_version"]
+        with self.assertRaisesRegex(ValueError, "credit_assignment_version 2"):
+            MultiLevelProcessor().process(msg)
+
+    def test_hard_boundary_reanchors_potential_shaping(self):
+        with ConfigOverride(REWARD_STANDARDIZE=False, REWARD_LEGACY=False):
+            proc = MultiLevelProcessor()
+            proc.process(make_msg([make_level(files=2)], decision_id=1))
+            ordinary = proc.process(
+                make_msg([make_level(files=8)], decision_id=2))[0]
+            self.assertNotEqual(ordinary.components["shaping"], 0.0)
+            boundary = proc.process(make_msg(
+                [make_level(files=3)], decision_id=3,
+                prev_reward_invalid_reason_mask=1))[0]
+            self.assertEqual(boundary.reward_invalid_reason_mask, 1)
+            self.assertEqual(boundary.components["shaping"], 0.0)
+
     def test_64_bit_attribution_identifiers_remain_exact_in_diagnostics(self):
         identifier = (1 << 63) + 12345
         level = make_level()
@@ -956,19 +979,112 @@ class TestCreditAssignment(unittest.TestCase):
         agent.close()
 
     def test_invalid_interval_is_excluded_from_replay(self):
-        """Fallback/stale/masked global reward cannot enter an older window."""
+        """A hard fallback reward cannot enter an older valid prefix."""
         agent = self._agent(CREDIT_HORIZON_MS=0, N_STEP=1)
         state = np.zeros(4, dtype=np.float32)
         agent.observe(state, 0.0, False, valid_actions=(0,))
         agent.observe(state, -100.0, False, valid_actions=(0,),
-                      transition_valid=False)
+                      reward_invalid_reason_mask=1)
         self.assertEqual(len(agent.buffer), 0)
-        self.assertEqual(agent.invalid_intervals, 1)
-        self.assertEqual(agent.cleared_pending_windows, 1)
+        self.assertEqual(agent.reward_invalid_intervals, 1)
+        self.assertEqual(agent.discarded_zero_credit_windows, 1)
         # A fresh valid decision after the invalid boundary can learn normally.
         agent.observe(state, 1.0, False, valid_actions=(0,))
         self.assertEqual(len(agent.buffer), 1)
         agent.close()
+
+    def test_rejected_proposal_does_not_starve_older_windows(self):
+        """Rejecting every third proposal must not clear confirmed prefixes."""
+        agent = self._agent(CREDIT_HORIZON_MS=0, N_STEP=2)
+        state = np.zeros(4, dtype=np.float32)
+        previous_installed = 0
+        for decision_id in range(1, 13):
+            # IDs divisible by three are proposed but never installed.  The
+            # following frame therefore repeats the older installed ID.
+            agent.observe(
+                state, 1.0, False, valid_actions=(0,),
+                decision_id=decision_id,
+                prev_decision_id=previous_installed,
+                executed_action=0,
+            )
+            if decision_id % 3:
+                previous_installed = decision_id
+        # Reconcile the final proposal and close the episode cleanly.
+        agent.observe(
+            state, 1.0, True, valid_actions=(0,), decision_id=13,
+            prev_decision_id=previous_installed, executed_action=0)
+        self.assertGreater(agent.rejected_decisions, 0)
+        self.assertGreater(agent.full_horizon_transitions, 0)
+        self.assertGreater(len(agent.buffer), 0)
+        self.assertTrue(agent.health_snapshot()["accepted_accounting_balanced"])
+        agent.close()
+
+    def test_known_override_is_relabelled_without_clearing_prefixes(self):
+        agent = self._agent(CREDIT_HORIZON_MS=0, N_STEP=2)
+        state = np.zeros(4, dtype=np.float32)
+        agent.observe(state, 0.0, False, valid_actions=(0,),
+                      decision_id=1, prev_decision_id=0)
+        agent.observe(state, 2.0, False, valid_actions=(0,),
+                      decision_id=2, prev_decision_id=1,
+                      executed_action=1, previous_overridden=True)
+        agent.observe(state, 3.0, False, valid_actions=(0,),
+                      decision_id=3, prev_decision_id=2,
+                      executed_action=0)
+        self.assertEqual(agent.buffer._buf[0][1], 1)
+        self.assertEqual(agent.override_relabels, 1)
+        self.assertEqual(agent.reward_invalid_intervals, 0)
+        agent.close()
+
+    def test_hard_boundary_terminalizes_valid_prefix_only(self):
+        agent = self._agent(CREDIT_HORIZON_MS=10 ** 6)
+        state = np.zeros(4, dtype=np.float32)
+        agent.observe(state, 0.0, False, valid_actions=(0,),
+                      decision_id=1, prev_decision_id=0)
+        agent.observe(state, 2.0, False, valid_actions=(0,),
+                      decision_id=2, prev_decision_id=1,
+                      executed_action=0)
+        # Proposal 2 was replaced by uncontrolled fallback (ID 0).  Reward
+        # -100 is excluded; decision 1's preceding valid prefix is retained.
+        agent.observe(state, -100.0, False, valid_actions=(0,),
+                      decision_id=3, prev_decision_id=0,
+                      reward_invalid_reason_mask=1)
+        self.assertEqual(agent.rejected_decisions, 1)
+        self.assertEqual(agent.boundary_truncated_transitions, 1)
+        self.assertEqual(len(agent.buffer), 1)
+        self.assertAlmostEqual(agent.buffer._buf[0][2], 2.0)
+        self.assertTrue(agent.buffer._buf[0][4])
+        agent.close()
+
+    def test_shutdown_finalizes_acknowledged_and_discards_unacknowledged(self):
+        state = np.zeros(4, dtype=np.float32)
+        clean = self._agent(CREDIT_HORIZON_MS=10 ** 6)
+        clean.observe(state, 0.0, False, valid_actions=(0,),
+                      decision_id=1, prev_decision_id=0)
+        clean.observe(state, 1.0, False, valid_actions=(0,),
+                      decision_id=2, prev_decision_id=1,
+                      executed_action=0)
+        clean.observe(state, 1.0, True, valid_actions=(0,),
+                      decision_id=3, prev_decision_id=2,
+                      executed_action=0)
+        health = clean.health_snapshot()
+        self.assertEqual(health["shutdown_terminal_transitions"], 2)
+        self.assertEqual(health["unresolved_decisions_at_shutdown"], 0)
+        self.assertTrue(health["accepted_accounting_balanced"])
+        self.assertTrue(health["proposal_accounting_balanced"])
+        clean.close()
+        self._override.__exit__(None, None, None)
+        del self._override
+
+        unresolved = self._agent(CREDIT_HORIZON_MS=10 ** 6)
+        unresolved.observe(state, 0.0, False, valid_actions=(0,),
+                           decision_id=10, prev_decision_id=0)
+        self.assertEqual(unresolved.flush_pending(), 0)
+        self.assertEqual(
+            unresolved.health_snapshot()["unresolved_decisions_at_shutdown"],
+            1)
+        self.assertTrue(
+            unresolved.health_snapshot()["proposal_accounting_balanced"])
+        unresolved.close()
 
     def test_smdp_discount_is_per_second(self):
         with ConfigOverride(GAMMA_PER_SEC=0.5, GAMMA=0.99):
@@ -1021,6 +1137,58 @@ class TestSharedTrunk(unittest.TestCase):
                     q = trunk.q_values(state, level)
                     np.testing.assert_allclose(q, np.zeros_like(q), atol=1e-7)
             finally:
+                trunk.close()
+
+    def test_frequent_rejections_still_warm_shared_replay_and_train(self):
+        with ConfigOverride(
+                ASYNC_TRAINING=False, EVAL_MODE=False, ANALYTIC_PRIOR=True,
+                MIN_REPLAY_SIZE=32, BATCH_SIZE=32,
+                TRAIN_STEPS_PER_OBSERVATION=1,
+                CREDIT_HORIZON_MS=0, N_STEP=1):
+            trunk = SharedTrunk(state_dim=4, action_dim=2, num_levels=2,
+                                name="rejection-test")
+            agents = [DQNAgent(state_dim=4, action_dim=2, shared=trunk,
+                               level=level, name=f"l{level}")
+                      for level in range(2)]
+            installed = [0, 0]
+            try:
+                for decision_id in range(1, 81):
+                    level = decision_id % 2
+                    state = np.array(
+                        [level, decision_id / 80.0, 0.5, 1.0],
+                        dtype=np.float32)
+                    agents[level].observe(
+                        state, 0.25 if level == 0 else -0.15, False,
+                        valid_actions=(0, 1),
+                        prior=np.array([0.0, 0.2], dtype=np.float32),
+                        decision_id=decision_id,
+                        prev_decision_id=installed[level],
+                        executed_action=decision_id % 2,
+                    )
+                    if decision_id % 3:
+                        installed[level] = decision_id
+                    agents[level].request_training()
+
+                for offset, agent in enumerate(agents, 100):
+                    agent.observe(
+                        np.ones(4, dtype=np.float32), 0.2, False,
+                        valid_actions=(0, 1),
+                        prior=np.array([0.0, 0.2], dtype=np.float32),
+                        decision_id=offset,
+                        prev_decision_id=installed[agent.level],
+                        executed_action=0,
+                    )
+                    agent.request_training()
+
+                self.assertGreaterEqual(len(trunk.buffer), 32)
+                self.assertGreater(trunk.train_steps, 0)
+                self.assertGreater(
+                    max(agent.max_abs_residual_advantage for agent in agents),
+                    0.0)
+                self.assertGreater(sum(a.rejected_decisions for a in agents), 0)
+            finally:
+                for agent in agents:
+                    agent.close()
                 trunk.close()
 
     def test_every_level_trains_the_shared_trunk(self):

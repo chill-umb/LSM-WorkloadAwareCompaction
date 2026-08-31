@@ -3,12 +3,11 @@ Unix domain socket server — receives compaction state from RocksDB C++ client,
 returns RL action(s), and trains the DQN agent(s) online.
 
 Protocol (newline-delimited JSON):
-  Legacy (single-level L0):
-    Request  (C++ → Python): raw L0 state + telemetry deltas.
-    Response (Python → C++): {"action":1}
-  v2 (multi-level, one agent per level; detected by a "levels" array):
-    Request  (C++ → Python): globals + [{"level":i, ...}, ...].
-    Response (Python → C++): {"actions":[a_0, a_1, ...]} in request order.
+  Trigger protocol v2, credit-assignment schema v2:
+    Request  (C++ → Python): globals + [{"level":i, ...}, ...], with an
+      exact nonzero decision_id and previous installed decision IDs.
+    Response (Python → C++): the echoed decision_id and one action per
+      level entry, in request order.
 
 Actions: 0=do_nothing  1=compact_now
 """
@@ -60,7 +59,8 @@ def _server_health_summary(
 ) -> dict:
     summary = pool.health_summary()
     summary.update({
-        "schema_version": 1,
+        "schema_version": 2,
+        "credit_assignment_version": multilevel.CREDIT_ASSIGNMENT_VERSION,
         "eval_mode": config.EVAL_MODE,
         "analytic_prior": config.ANALYTIC_PRIOR,
         "credit_horizon_ms": config.CREDIT_HORIZON_MS,
@@ -69,6 +69,10 @@ def _server_health_summary(
         "training_quiesced": training_quiesced,
     })
     summary["pending_windows_at_shutdown"] = summary.pop("pending_windows")
+    summary["pending_confirmed_windows_at_shutdown"] = summary.pop(
+        "pending_confirmed_windows")
+    summary["pending_unconfirmed_windows_at_shutdown"] = summary.pop(
+        "pending_unconfirmed_windows")
     return summary
 
 
@@ -107,6 +111,8 @@ def handle_multilevel_message(
     """Process one v2 (multi-level) message: route each level's slice to its
     agent, reply with per-level actions in request order, then log and train."""
     done = bool(msg.get("done", False))
+    decision_id, invalid_mask = multilevel.validate_protocol_message(msg)
+    pool.record_reward_invalid(invalid_mask)
     try:
         g_pending = float(msg.get("pending_compaction_bytes", 0) or 0)
     except (TypeError, ValueError):
@@ -128,8 +134,13 @@ def handle_multilevel_message(
         # dt_discount, not dt_seconds: a level that emptied and came back spans
         # the whole gap, which is what the SMDP discount has to see.
         action = agent.observe(d.state, d.reward, done, d.valid_actions,
-                               d.prior, d.dt_discount, d.executed_action,
-                               d.transition_valid)
+                               d.prior, d.dt_discount,
+                               executed_action=d.executed_action,
+                               decision_id=d.decision_id,
+                               prev_decision_id=d.prev_decision_id,
+                               previous_overridden=d.previous_overridden,
+                               reward_invalid_reason_mask=(
+                                   d.reward_invalid_reason_mask))
         actions.append(action)
         handled.append((d, action, agent))
 
@@ -140,7 +151,10 @@ def handle_multilevel_message(
     # Compact separators are load-bearing: the C++ ParseIntArrayField needle
     # requires "actions":[ with no whitespace. json.dumps' default ": " made
     # every response unparseable -> silent fallback to leveled (2026-07-19 bug).
-    response = json.dumps({"actions": actions}, separators=(",", ":")) + "\n"
+    response = json.dumps(
+        {"decision_id": decision_id, "actions": actions},
+        separators=(",", ":"),
+    ) + "\n"
     conn.sendall(response.encode("utf-8"))
 
     # Everything below is off the response path.
@@ -159,7 +173,9 @@ def handle_multilevel_message(
             "executed_action": d.executed_action,
             "prev_chosen_action": d.prev_chosen_action,
             "prev_action_overridden": d.raw.get("prev_action_overridden"),
-            "prev_transition_valid": d.transition_valid,
+            "decision_id": d.decision_id,
+            "prev_decision_id": d.prev_decision_id,
+            "reward_invalid_reason_mask": d.reward_invalid_reason_mask,
             "defer_count": d.raw.get("defer_count"),
             "analytic_advantage": agent.last_prior_advantage,
             "residual_advantage": agent.last_residual_advantage,
@@ -213,12 +229,23 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
+                    if pool is not None:
+                        pool.record_protocol_error()
+                    raise ValueError("malformed JSON request")
 
-                if "levels" in msg and pool is not None:
-                    handle_multilevel_message(
-                        conn, msg, ml_processor, pool, tracker, io_log
-                    )
+                if pool is not None:
+                    if "levels" not in msg:
+                        pool.record_protocol_error()
+                        raise ValueError(
+                            "trigger protocol v2 with credit assignment v2 "
+                            "is required")
+                    try:
+                        handle_multilevel_message(
+                            conn, msg, ml_processor, pool, tracker, io_log
+                        )
+                    except (TypeError, ValueError):
+                        pool.record_protocol_error()
+                        raise
                     continue
 
                 raw_state, state, reward, reward_components = processor.process(msg)
