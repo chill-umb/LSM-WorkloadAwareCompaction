@@ -14,7 +14,17 @@
 # SUITE_ROOT a fresh root is created and all work is repeated.
 set -u
 
-PROJECT_ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Locate the project root by walking up to the pipeline marker, so this script
+# works whether it sits at the repo root or under scripts/.
+_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+PROJECT_ROOT=""
+while [[ "$_dir" != "/" ]]; do
+  if [[ -f "$_dir/scripts/dbbench_pipeline/config.sh" ]]; then PROJECT_ROOT="$_dir"; break; fi
+  _dir="$(dirname "$_dir")"
+done
+[[ -n "$PROJECT_ROOT" ]] || {
+  echo "Cannot find scripts/dbbench_pipeline/config.sh above $(readlink -f "$0")" >&2
+  exit 1; }
 cd "$PROJECT_ROOT"
 P="scripts/dbbench_pipeline"
 source "$P/config.sh"
@@ -23,7 +33,9 @@ SUITE_DEADLINE="${SUITE_DEADLINE:?set SUITE_DEADLINE, e.g. '2026-09-11 18:00'}"
 DEADLINE="$(date -d "$SUITE_DEADLINE" +%s)" || exit 1
 SUITE_REPEATS="${SUITE_REPEATS:-10}"
 SUITE_CELLS="${SUITE_CELLS:-10:2:12 20:2:22 10:6:12 20:6:22 10:10:12 20:10:22}"
-SUITE_EXTRA_CELLS="${SUITE_EXTRA_CELLS:-30:2:30 30:6:30 30:10:30}"
+# Note "-" not ":-": an explicitly empty SUITE_EXTRA_CELLS must disable the
+# optional ladder rather than fall back to the default.
+SUITE_EXTRA_CELLS="${SUITE_EXTRA_CELLS-30:2:30 30:6:30 30:10:30}"
 SUITE_STRESS_SIZE="${SUITE_STRESS_SIZE:-10}"
 SUITE_SEED="${SUITE_SEED:-40001}"
 # A stage that outruns its cell's whole budget is hung, not slow. Without this

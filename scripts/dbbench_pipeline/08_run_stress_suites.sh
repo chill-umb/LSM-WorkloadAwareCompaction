@@ -49,6 +49,12 @@ run_profile() {  # profile, get ratio, put ratio, seek ratio
   done
 
   echo "[stress guard calibration + holdout] $profile"
+  # The holdout is expected to fail while guard readiness is unresolved, and
+  # under set -e that would abort the suite before the safety comparison this
+  # script exists to run. 06_calibrate_live_guard.py writes the final manifest
+  # before the holdout, so gate on the manifest instead of the exit code --
+  # the same treatment 13_run_preflight_verification.sh applies.
+  set +e
   WORKLOAD_PROFILE="$profile" \
   MIX_GET_RATIO="$get_ratio" MIX_PUT_RATIO="$put_ratio" \
   MIX_SEEK_RATIO="$seek_ratio" \
@@ -58,6 +64,18 @@ run_profile() {  # profile, get ratio, put ratio, seek ratio
   GUARD_DB_ROOT="$STRESS_DB_ROOT/guard" \
   RESUME="${RESUME:-0}" CONFIRM_GUARD_PROTOCOL=YES \
   "$PIPELINE_DIR/06_run_guard_protocol.sh"
+  local guard_status=$?
+  set -e
+  if (( guard_status != 0 )); then
+    echo "[stress] $profile guard holdout not ready (exit $guard_status);" \
+         "the safety comparison still runs against the calibrated manifest." >&2
+  fi
+  for size_m in $WORKLOAD_SIZES_M; do
+    for ratio in $SIZE_RATIOS; do
+      local m="$STRESS_SLO_ROOT/$profile/${size_m}M/T${ratio}/baseline_slo.json"
+      [[ -f "$m" ]] || { echo "[stress] $profile: missing $m" >&2; return 1; }
+    done
+  done
 
   echo "[stress paired] $profile"
   WORKLOAD_PROFILE="$profile" \
