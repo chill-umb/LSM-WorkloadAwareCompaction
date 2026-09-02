@@ -5,11 +5,11 @@
 #
 # Never builds RocksDB or db_bench; run 01_/02_ first.
 #
-#   SUITE_DEADLINE='2026-09-11 18:00' ./run_full_experiment.sh
+#   ./run_full_experiment.sh
 #
 # TO RESUME after a crash, reboot or kill, pass the SAME root back:
 #   SUITE_ROOT=results/suite-20260904-101500 \
-#   SUITE_DEADLINE='2026-09-11 18:00' ./run_full_experiment.sh
+#   ./run_full_experiment.sh
 # Every stage runs with RESUME=1, so completed arms are skipped. Without
 # SUITE_ROOT a fresh root is created and all work is repeated.
 set -u
@@ -29,18 +29,13 @@ cd "$PROJECT_ROOT"
 P="scripts/dbbench_pipeline"
 source "$P/config.sh"
 
-SUITE_DEADLINE="${SUITE_DEADLINE:?set SUITE_DEADLINE, e.g. '2026-09-11 18:00'}"
-DEADLINE="$(date -d "$SUITE_DEADLINE" +%s)" || exit 1
 SUITE_REPEATS="${SUITE_REPEATS:-10}"
-SUITE_CELLS="${SUITE_CELLS:-10:2:12 20:2:22 10:6:12 20:6:22 10:10:12 20:10:22}"
+SUITE_CELLS="${SUITE_CELLS:-10:2 20:2 10:6 20:6 10:10 20:10}"
 # Note "-" not ":-": an explicitly empty SUITE_EXTRA_CELLS must disable the
 # optional ladder rather than fall back to the default.
-SUITE_EXTRA_CELLS="${SUITE_EXTRA_CELLS-30:2:30 30:6:30 30:10:30}"
+SUITE_EXTRA_CELLS="${SUITE_EXTRA_CELLS-30:2 30:6 30:10}"
 SUITE_STRESS_SIZE="${SUITE_STRESS_SIZE:-10}"
 SUITE_SEED="${SUITE_SEED:-40001}"
-# A stage that outruns its cell's whole budget is hung, not slow. Without this
-# one wedged db_bench or RL server consumes the entire lease.
-SUITE_TIMEOUT_SLACK="${SUITE_TIMEOUT_SLACK:-2}"
 # db_bench writes ~1 KB records; a 30M arm is ~30 GB and 03 KEEPS the database
 # when the learner gate fails (03_run_experiments.sh:647), so failures
 # accumulate. Refuse to start a cell that could fill the device.
@@ -55,11 +50,10 @@ else BENCH="$PROJECT_ROOT/$DBBENCH_BUILD_DIR/db_bench"; fi
 for src in lib/rocksdb/db/compaction/compaction_picker_rl.cc rl_agent/agent.py; do
   [[ "$BENCH" -nt "$src" ]] || { echo "db_bench is older than $src - rebuild" >&2; exit 1; }
 done
-command -v timeout >/dev/null || { echo "coreutils 'timeout' is required" >&2; exit 1; }
 
 for spec in $SUITE_CELLS $SUITE_EXTRA_CELLS; do
-  [[ "$spec" =~ ^[0-9]+:[0-9]+:[0-9]+$ ]] || {
-    echo "Bad cell spec '$spec'; want size:ratio:hours (e.g. 10:2:12)" >&2; exit 1; }
+  [[ "$spec" =~ ^[0-9]+:[0-9]+$ ]] || {
+    echo "Bad cell spec '$spec'; want size:ratio (e.g. 10:2)" >&2; exit 1; }
 done
 [[ "$SUITE_REPEATS" =~ ^[1-9][0-9]*$ ]] || { echo "SUITE_REPEATS must be > 0" >&2; exit 1; }
 
@@ -71,17 +65,12 @@ mkdir -p "$SR" "$MANI" "$SEL" || exit 1
 S="$SR/STAGES.txt"; touch "$S"
 
 log(){ echo "[$(date -u +'%m-%d %H:%M:%S')] $*" | tee -a "$SR/driver.log"; }
-hleft(){ echo $(( (DEADLINE - $(date +%s)) / 3600 )); }
-need(){ (( $(hleft) >= $1 )) && return 0
-  log "SKIP $2 - $(hleft)h left, needs $1h"; return 1; }
 
-stage(){  # name, logfile, cmd...   honours STAGE_TIMEOUT_H
+stage(){  # name, logfile, cmd...
   local n="$1" l="$2"; shift 2
-  local t="${STAGE_TIMEOUT_H:-24}"
-  log "START $n (timeout ${t}h)"
-  ( timeout --signal=TERM --kill-after=10m "${t}h" "$@" ) >> "$SR/$l" 2>&1
+  log "START $n"
+  ( "$@" ) >> "$SR/$l" 2>&1
   local rc=$?
-  (( rc == 124 || rc == 137 )) && log "!! $n TIMED OUT after ${t}h"
   printf '%-26s exit=%-4s %s\n' "$n" "$rc" "$l" >> "$S"
   log "END   $n exit=$rc"
   return $rc
@@ -117,23 +106,20 @@ disk_ok(){
 { echo "root HEAD:    $(git rev-parse HEAD 2>/dev/null)"
   echo "rocksdb HEAD: $(git -C lib/rocksdb rev-parse HEAD 2>/dev/null)"
   echo "resuming:     $RESUMING  root=$SR"
-  echo "deadline:     $SUITE_DEADLINE ($(hleft)h)"
   echo "repeats:      $SUITE_REPEATS"
   echo "cells:        $SUITE_CELLS"
   echo "extra cells:  $SUITE_EXTRA_CELLS"
   git diff --stat; git -C lib/rocksdb diff --stat; } >> "$SR/provenance.log" 2>&1
-log "suite root $SR (resuming=$RESUMING, $(hleft)h to deadline)"
+log "suite root $SR (resuming=$RESUMING)"
 
 # --------------------------------------------------------------- one cell ---
 cell(){
-  local sz="$1" T="$2" nh="$3" tag="${1}M-T${2}"
-  need "$nh" "$tag" || return 1
+  local sz="$1" T="$2" tag="${1}M-T${2}"
   disk_ok "$tag" || return 1
   reap_orphans
   local manifest="$MANI/$WORKLOAD_PROFILE/${sz}M/T${T}/baseline_slo.json"
 
   if [[ ! -f "$manifest" ]]; then
-    STAGE_TIMEOUT_H=$(( nh * SUITE_TIMEOUT_SLACK )) \
     stage "sweep-$tag" "sweep-$tag.log" env \
       WORKLOAD_PROFILE="$WORKLOAD_PROFILE" WORKLOAD_SIZES_M="$sz" SIZE_RATIOS="$T" \
       RL_RUN_PHASE=experiment BASELINE_REPEATS=3 \
@@ -143,7 +129,6 @@ cell(){
       RESUME=1 KEEP_DATABASES=0 CONFIRM_BASELINE_SWEEP=YES \
       bash "$P/05_run_baseline_sweep.sh" || { reap_orphans; return 2; }
 
-    STAGE_TIMEOUT_H=1 \
     stage "select-$tag" "select-$tag.log" "$PY" "$P/06_select_baseline_slo.py" \
       --baseline-results "$SR/baseline/$tag" --workload-profile "$WORKLOAD_PROFILE" \
       --size-millions "$sz" --size-ratio "$T" --minimum-repeats 3 \
@@ -152,7 +137,6 @@ cell(){
     # The guard HOLDOUT is expected to fail (known 3.8-6.0% predicted override
     # against a 1% limit). 06_calibrate_live_guard.py writes the final manifest
     # before the holdout runs, so check for the file, not the exit code.
-    STAGE_TIMEOUT_H=$(( nh * SUITE_TIMEOUT_SLACK )) \
     stage "guard-$tag" "guard-$tag.log" env \
       WORKLOAD_PROFILE="$WORKLOAD_PROFILE" WORKLOAD_SIZES_M="$sz" SIZE_RATIOS="$T" \
       SELECTION_SLO_ROOT="$SEL" FINAL_SLO_ROOT="$MANI" \
@@ -164,7 +148,6 @@ cell(){
     [[ -f "$manifest" ]] || { log "ABORT cell $tag: no final manifest"; return 4; }
   fi
 
-  STAGE_TIMEOUT_H=$(( nh * SUITE_TIMEOUT_SLACK )) \
   stage "matrix-$tag" "matrix-$tag.log" env \
     WORKLOAD_SIZES_M="$sz" SIZE_RATIOS="$T" \
     EXPERIMENT_ARMS="regular prior_only unconstrained_rl rl" \
@@ -177,13 +160,13 @@ cell(){
   reap_orphans
   (( mrc == 0 )) || { log "cell $tag matrix exit=$mrc; evaluating what completed"; }
 
-  STAGE_TIMEOUT_H=2 stage "graphs-$tag" "graphs-$tag.log" \
+  stage "graphs-$tag" "graphs-$tag.log" \
     bash "$P/04_generate_graphs.sh" --results "$SR/experiment" || return 6
-  STAGE_TIMEOUT_H=1 stage "paired-$tag" "paired-$tag.log" "$PY" "$P/07_evaluate_paired.py" \
+  stage "paired-$tag" "paired-$tag.log" "$PY" "$P/07_evaluate_paired.py" \
     "$SR/experiment/graphs/summary.csv" --size-millions "$sz" --size-ratio "$T" \
     --minimum-pairs "$SUITE_REPEATS" --scan-objective sorted_run_seeks \
     --output "$SR/acceptance-$tag.json"
-  STAGE_TIMEOUT_H=2 stage "learn-$tag" "learn-$tag.log" "$PY" "$P/11_analyze_learning.py" \
+  stage "learn-$tag" "learn-$tag.log" "$PY" "$P/11_analyze_learning.py" \
     "$SR/experiment" --arm rl --stride 10 --output "$SR/learning-rl-$tag.json"
   return 0
 }
@@ -191,16 +174,16 @@ cell(){
 # ------------------------------------- 1: oracle bridge gate (1M/T2, cheap) ---
 if [[ ! -f "$SR/oracle-parity.json" ]]; then
   reap_orphans
-  STAGE_TIMEOUT_H=6 stage oracle-run oracle-run.log env \
+  stage oracle-run oracle-run.log env \
     WORKLOAD_PROFILE="$WORKLOAD_PROFILE" WORKLOAD_SIZES_M=1 SIZE_RATIOS=2 \
     EXPERIMENT_ARMS="regular oracle" REPEATS=10 RL_RUN_PHASE=experiment \
     RESULTS_ROOT="$SR/oracle" DB_ROOT="$SR/db/oracle" \
     RESUME=1 KEEP_DATABASES=0 CONFIRM_EXPERIMENTS=YES \
     bash "$P/03_run_experiments.sh"
   reap_orphans
-  STAGE_TIMEOUT_H=2 stage oracle-graphs oracle-graphs.log \
+  stage oracle-graphs oracle-graphs.log \
     bash "$P/04_generate_graphs.sh" --results "$SR/oracle"
-  STAGE_TIMEOUT_H=1 stage oracle-gate oracle-gate.log "$PY" "$P/09_evaluate_oracle_parity.py" \
+  stage oracle-gate oracle-gate.log "$PY" "$P/09_evaluate_oracle_parity.py" \
     "$SR/oracle/graphs/summary.csv" --size-millions 1 --size-ratio 2 \
     --minimum-pairs 10 --minimum-envelope-pairs 10 \
     --admission-latency-limit-micros 5000 --output "$SR/oracle-parity.json"
@@ -217,13 +200,13 @@ fi
 
 # --------------------------------------- 2: balanced matrix, priority order ---
 for spec in $SUITE_CELLS; do
-  IFS=: read -r sz T nh <<< "$spec"; cell "$sz" "$T" "$nh"
+  IFS=: read -r sz T <<< "$spec"; cell "$sz" "$T"
 done
 
 # -------------------------------------------------- 3: safety stress suites ---
-if need 14 "stress suites" && disk_ok "stress suites"; then
+if disk_ok "stress suites"; then
   reap_orphans
-  STAGE_TIMEOUT_H=28 stage stress stress.log env \
+  stage stress stress.log env \
     WORKLOAD_SIZES_M="$SUITE_STRESS_SIZE" SIZE_RATIOS=2 \
     STRESS_ROOT="$SR/stress" STRESS_DB_ROOT="$SR/db/stress" \
     STRESS_SLO_ROOT="$SR/stress-manifests" \
@@ -236,19 +219,19 @@ fi
 
 # ------------------------------------------- 4: optional deeper size ladder ---
 for spec in $SUITE_EXTRA_CELLS; do
-  IFS=: read -r sz T nh <<< "$spec"; cell "$sz" "$T" "$nh"
+  IFS=: read -r sz T <<< "$spec"; cell "$sz" "$T"
 done
 
 # ------------------------------------------------------------- presentation ---
 if [[ -f "$SR/experiment/graphs/summary.csv" ]]; then
-  STAGE_TIMEOUT_H=1 stage figures figures.log "$PY" "$P/12_report_figures.py" \
+  stage figures figures.log "$PY" "$P/12_report_figures.py" \
     "$SR/experiment/graphs/summary.csv" --outdir "$SR/figures"
 fi
 
 reap_orphans
-log "SUITE DONE - $(hleft)h to spare, $(free_gb "$SR")GB free"
+log "SUITE DONE - $(free_gb "$SR")GB free"
 echo; cat "$S"
 echo; echo "Results:     $SR"
 echo "Acceptance:  $SR/acceptance-*.json"
 echo "Oracle gate: $SR/oracle-parity.json"
-echo "Resume with: SUITE_ROOT=$SR SUITE_DEADLINE='$SUITE_DEADLINE' $0"
+echo "Resume with: SUITE_ROOT=$SR $0"
