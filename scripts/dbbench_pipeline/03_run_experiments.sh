@@ -56,6 +56,15 @@ if [[ "$EXPERIMENT_ARMS" != "regular" ]]; then
 }
 fi
 DBBENCH_SHA256="$(sha256sum "$DB_BENCH" | awk '{print $1}')"
+# Written by 01_build_rocksdb.sh. A build directory predating it records the
+# architecture as unrecorded rather than blocking the run.
+BUILD_PROVENANCE="$(dirname "$DB_BENCH")/build_provenance.env"
+ROCKSDB_PORTABLE_BUILT="unrecorded"
+BUILD_CXX_VERSION="unrecorded"
+if [[ -f "$BUILD_PROVENANCE" ]]; then
+  ROCKSDB_PORTABLE_BUILT="$(awk -F= '/^rocksdb_portable=/ {print $2}' "$BUILD_PROVENANCE")"
+  BUILD_CXX_VERSION="$(awk -F= '/^build_cxx=/ {sub(/^build_cxx=/, ""); print}' "$BUILD_PROVENANCE")"
+fi
 RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.v1.json | awk '{print $1}')"
 
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS "$REPEATS"; do
@@ -547,6 +556,8 @@ PY
     printf 'rl_exploration_decay_steps=%s\n' "$decay_steps"
     printf 'experiment_fingerprint=%s\n' "$fingerprint"
     printf 'dbbench_sha256=%s\n' "$DBBENCH_SHA256"
+    printf 'rocksdb_portable=%s\n' "$ROCKSDB_PORTABLE_BUILT"
+    printf 'build_cxx=%s\n' "$BUILD_CXX_VERSION"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
     printf 'level_compaction_dynamic_level_bytes=false\n'
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"

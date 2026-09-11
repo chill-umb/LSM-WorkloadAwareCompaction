@@ -49,6 +49,13 @@ OPEN_FILES="${OPEN_FILES:-1000}"
 DBBENCH_SEED="${DBBENCH_SEED:-1}"
 THREADS="${THREADS:-1}"
 STATS_DUMP_PERIOD_SECONDS="${STATS_DUMP_PERIOD_SECONDS:-20}"
+# Target microarchitecture for the measured RocksDB/db_bench build, passed to
+# RocksDB's PORTABLE cache variable. RocksDB turns 0 into -march=native, which
+# silently resolves to a generic or older microarchitecture when the compiler
+# does not recognise the host CPU; naming the target turns that into a
+# configure-time failure instead. The measurement nodes are Chameleon
+# CHI@NCAR Zen 5, so znver5 is the default. Needs GCC 14.1+ or Clang 19+.
+ROCKSDB_PORTABLE="${ROCKSDB_PORTABLE:-znver5}"
 DBBENCH_BUILD_DIR="${DBBENCH_BUILD_DIR:-build-dbbench}"
 PYTHON_VENV="${PYTHON_VENV:-.venv-dbbench}"
 BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
