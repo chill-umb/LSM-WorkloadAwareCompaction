@@ -188,7 +188,7 @@
       "compaction_readahead_size_bytes": 2097152,
       "swept": false,
       "amended": "2026-09-12, in place, before any Gate 1 run",
-      "reason": "pinned off on measured cost. A 10M T=2 pilot ran mixgraph at 2750 ops/s against 7186 buffered, a 2.6x penalty putting Gate 1 near 95 h against 36-48 h, above the entire Lease 1 budget.",
+      "reason": "pinned off on measured cost. On the measurement node at 10M T=2, mixgraph ran at 2750 ops/s with direct I/O and 58332 ops/s buffered, a 21x penalty putting the Gate 1 sweep near 95 hours.",
       "consequence": "the host page cache holds the database, so latency, runtime and stall figures are warm-cache and are reported as such. They bound foreground disruption; they are not storage latency claims.",
       "unaffected_metrics": [
         "write_amplification",
@@ -203,7 +203,15 @@
       "recorded_in": [
         "experiment_fingerprint: dio field",
         "metadata.env: use_direct_io"
-      ]
+      ],
+      "measured": {
+        "node": "AMD EPYC 4545P, buffered vs direct, 10M T=2 mixgraph",
+        "buffered_ops_per_second": 58332,
+        "direct_ops_per_second_max_open_files_unlimited": 2750,
+        "direct_ops_per_second_max_open_files_1000": 1960,
+        "penalty": "21x"
+      },
+      "correction": "an earlier revision of this entry quoted a 2.6x penalty. That compared the direct-I/O pilot on this node against a buffered figure from the 2026-09-03 suite, which ran on different hardware. The cross-machine comparison was invalid; the same-node penalty is 21x. Recorded rather than silently replaced."
     }
   },
   "measurement_environment": {

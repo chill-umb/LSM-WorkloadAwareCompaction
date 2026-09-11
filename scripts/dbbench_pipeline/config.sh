@@ -38,15 +38,16 @@ BLOCK_SIZE="${BLOCK_SIZE:-4096}"                         # 4 KiB data blocks
 BLOOM_BITS="${BLOOM_BITS:-10}"
 DISABLE_WAL="${DISABLE_WAL:-1}"
 # Direct I/O for both the read path and background flush/compaction. Pinned OFF
-# on measured evidence: a 10M T=2 pilot ran mixgraph at 2,750 ops/s against
-# 7,186 buffered, a 2.6x cost that puts Gate 1 near 95 h against 36-48 h, more
-# than the whole Lease 1 budget. Buffered means the host page cache holds the
-# ~3.7 GB database, so latency and runtime are warm-cache figures and must be
-# reported as such. Write, point-read and space amplification, per-level merge
-# survival and the capacity-space curve are all byte ratios set by tree shape,
-# so they are unaffected. May be toggled to 1 for the final paper benchmark if
-# the amplification results justify the cost; such runs carry fingerprint dio1
-# and cannot be pooled with dio0 runs. compaction_readahead_size stays at the
+# on measured evidence from the measurement node, 10M T=2: mixgraph ran at
+# 2,750 ops/s with direct I/O (max_open_files=-1; 1,960 at 1000) against
+# 58,332 ops/s buffered, a 21x penalty putting the Gate 1 sweep near 95 h.
+# Buffered means the host page cache holds the ~3.7 GB database, so latency,
+# runtime and stall figures are warm-cache and must be reported as such. Write,
+# point-read and space amplification, per-level merge survival and the
+# capacity-space curve are byte ratios set by tree shape, so they are
+# unaffected. May be toggled to 1 for the final paper benchmark if the
+# amplification results justify the cost; such runs carry fingerprint dio1 and
+# cannot be pooled with dio0 runs. compaction_readahead_size stays at the
 # pinned tree's 2 MB default either way.
 USE_DIRECT_IO="${USE_DIRECT_IO:-0}"
 L0_COMPACTION_TRIGGER="${L0_COMPACTION_TRIGGER:-4}"
