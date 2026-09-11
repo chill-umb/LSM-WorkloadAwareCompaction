@@ -127,7 +127,9 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"sst(\d+):block(\d+):l1(\d+):levels(\d+):"
         r"l0-(\d+)-(\d+)-(\d+):pri(\d+):load(\d+):"
         r"mix([0-9.]+)-([0-9.]+)-([0-9.]+):scan(\d+)-(\d+):"
-        r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01])$"
+        r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
+        r"dio([01]):dynamic([01]):soft(\d+):hard(\d+):"
+        r"binary([0-9a-f]{64}):objective([0-9a-f]{64})$"
     )
     match = pattern.fullmatch(fingerprint)
     if not match:
@@ -141,11 +143,16 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "compaction_priority", "load_percent", "mix_get_ratio",
         "mix_put_ratio", "mix_seek_ratio", "scan_length",
         "mix_max_scan_length", "block_cache_size", "bloom_bits",
-        "max_background_jobs", "threads", "disable_wal",
+        "max_background_jobs", "threads", "disable_wal", "use_direct_io",
+        "level_compaction_dynamic_level_bytes",
+        "soft_pending_compaction_bytes_limit",
+        "hard_pending_compaction_bytes_limit",
+        "dbbench_sha256", "research_objective_sha256",
     )
+    OPAQUE = ("workload_profile", "dbbench_sha256", "research_objective_sha256")
     values: list[object] = list(match.groups())
     for index, name in enumerate(names):
-        if name == "workload_profile":
+        if name in OPAQUE:
             continue
         if name in ("mix_get_ratio", "mix_put_ratio", "mix_seek_ratio"):
             values[index] = float(values[index])
@@ -161,6 +168,12 @@ def main() -> int:
     parser.add_argument("--size-millions", required=True, type=int)
     parser.add_argument("--size-ratio", required=True, type=int)
     parser.add_argument("--minimum-repeats", type=int, default=3)
+    parser.add_argument(
+        "--level-base-bytes", type=int, default=16777216,
+        help="consider only configurations at this max_bytes_for_level_base. "
+             "The level-base scale axis exists to calibrate the capacity-space "
+             "curve; it is not a comparator axis, and letting the selection "
+             "range over it would silently redefine the tuned baseline.")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -207,6 +220,13 @@ def main() -> int:
             "sorted_run_seeks_per_scan": finite_mean(
                 rows, "sorted_run_seeks_per_scan"),
         })
+    summaries = [item for item in summaries
+                 if parse_fingerprint_options(item["fingerprint"])
+                 ["max_bytes_for_level_base"] == args.level_base_bytes]
+    if not summaries:
+        raise SystemExit(
+            f"no configuration at max_bytes_for_level_base="
+            f"{args.level_base_bytes}; the comparator grid is missing")
     min_space = min(item["space_amplification"] for item in summaries)
     eligible = [item for item in summaries
                 if item["space_amplification"] <= MARGIN * min_space]

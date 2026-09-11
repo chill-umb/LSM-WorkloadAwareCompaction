@@ -95,13 +95,31 @@ def analyze_points(configs: dict[str, dict[int, dict]]) -> dict:
             "c2_widths_passed": all(v["width_criterion_passed"] for v in top_up.values())}
 
 
+def policy_positions(policy: dict[str, dict[int, dict]], configs: dict,
+                     points: dict, hull: list[str]) -> dict:
+    """C-3/C-4: classify each policy arm against the static hull."""
+    positions = {}
+    for name, samples in policy.items():
+        means = {key: statistics.fmean(r[key] for r in samples.values())
+                 for key in (*AXES, "space_amplification")}
+        dominators = [h for h in hull if dominates(points[h]["means"], means)]
+        positions[name] = {
+            "means": means, "seeds": sorted(samples),
+            "dominated_by": dominators,
+            "verdict": "dominated" if dominators else "non_dominated",
+            "against_hull_points": {h: paired_comparison(configs[h], samples)
+                                    for h in hull}}
+    return positions
+
+
 def common_fingerprint(fingerprint: str) -> str:
     # These are the ONLY knobs deliberately varied by the Hull-0 sweep.
-    return re.sub(r":(?:l1\d+|l0-\d+-\d+-\d+|pri\d+)(?=:|$)",
+    return re.sub(r":(?:T\d+|l1\d+|l0-\d+-\d+-\d+|pri\d+)(?=:|$)",
                   "", fingerprint)
 
 
-def collect_grid(root: Path, size: int, ratio: int) -> tuple[dict, dict]:
+def collect_grid(root: Path, size: int, ratios: list[int],
+                 arm: str = "regular") -> tuple[dict, dict]:
     spec = importlib.util.spec_from_file_location(
         "frontier_graphs", Path(__file__).with_name("04_generate_graphs.py"))
     graph = importlib.util.module_from_spec(spec)
@@ -112,7 +130,7 @@ def collect_grid(root: Path, size: int, ratio: int) -> tuple[dict, dict]:
         directory = marker.parent
         row = graph.collect_arm(directory)
         if (row is None or row["size_millions"] != size or
-                row["size_ratio"] != ratio or row["arm"] != "regular"):
+                row["size_ratio"] not in ratios or row["arm"] != arm):
             continue
         metadata = graph.read_env(directory / "metadata.env")
         if (metadata.get("research_objective_sha256") != objective_hash or
@@ -143,10 +161,11 @@ def space_curves(configs: dict, measurements: dict, margins: list[float]) -> lis
     groups = defaultdict(dict)
     for config, samples in configs.items():
         metadata = measurements[next(iter(samples.values()))["result_directory"]]["metadata"]
-        group = tuple(metadata[k] for k in ("level0_file_num_compaction_trigger",
-                                            "level0_slowdown_writes_trigger",
-                                            "level0_stop_writes_trigger",
-                                            "compaction_priority"))
+        group = (metadata["size_ratio"],) + tuple(
+            metadata[k] for k in ("level0_file_num_compaction_trigger",
+                                  "level0_slowdown_writes_trigger",
+                                  "level0_stop_writes_trigger",
+                                  "compaction_priority"))
         scale = float(metadata["baseline_level_base_scale"])
         if scale in groups[group]:
             raise ValueError("duplicate base scale in curve")
@@ -169,7 +188,8 @@ def space_curves(configs: dict, measurements: dict, margins: list[float]) -> lis
                            "paired_seeds": seeds, "space_relative_ci95": ci95(differences),
                            "budget_checks": {str(m): objective_verdict(differences, m, 3)
                                              for m in margins}})
-        curves.append({"l0_priority_options": group, "points": points,
+        curves.append({"size_ratio": int(group[0]),
+                       "l0_priority_options": group[1:], "points": points,
                        "measured_feasible_base_scales": {
                            str(m): [p["scale"] for p in points if p["scale"] >= 1 and
                                     p["budget_checks"][str(m)]["passed"] is True]
@@ -184,14 +204,33 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
     parser.add_argument("--size-millions", type=int, default=10)
-    parser.add_argument("--size-ratio", type=int, required=True)
+    parser.add_argument("--size-ratio", type=int, nargs="+", required=True,
+                        help="one ratio for a per-T hull; several for the "
+                             "cross-T pooled hull required by C-6")
+    parser.add_argument("--policy-results", type=Path,
+                        help="results root holding a policy arm to place "
+                             "against the hull (C-3)")
+    parser.add_argument("--policy-arm", default="prior_only")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    configs, measurements = collect_grid(args.results, args.size_millions, args.size_ratio)
+    configs, measurements = collect_grid(
+        args.results, args.size_millions, args.size_ratio)
     contract, fingerprint = load_contract()
+    analysis = analyze_points(configs)
+    policy = {}
+    if args.policy_results:
+        policy_configs, _ = collect_grid(
+            args.policy_results, args.size_millions, args.size_ratio,
+            arm=args.policy_arm)
+        policy = policy_positions(policy_configs, configs, analysis["points"],
+                                  analysis["empirical_hull"])
     report = {"schema_version": 1, "research_objective_sha256": fingerprint,
-              "size_millions": args.size_millions, "size_ratio": args.size_ratio,
-              **analyze_points(configs),
+              "size_millions": args.size_millions,
+              "size_ratios": args.size_ratio,
+              "cross_t": len(args.size_ratio) > 1,
+              "policy_arm": args.policy_arm if policy else None,
+              "policy_positions": policy,
+              **analysis,
               "space_curves": space_curves(configs, measurements,
                   contract["constraints"]["space"]["relative_margin_axis"]),
               "per_run_measurements": measurements,

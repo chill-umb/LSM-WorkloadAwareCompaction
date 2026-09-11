@@ -106,6 +106,18 @@ scripts/dbbench_pipeline/07_evaluate_paired.py \
   --scan-objective sorted_run_seeks
 ```
 
+`db_bench` and the Python controller are pinned to disjoint cores by
+`DBBENCH_CPUS` and `CONTROLLER_CPUS` in `config.sh`, defaulting to `0-7` and
+`8` for the single-socket 16-core EPYC 4545P measurement node, whose cores 0-7
+and 8-15 are separate L3 domains. Both sets apply to every arm, `regular`
+included, so no arm has the controller's cores to itself. `03` refuses to start
+if the sets overlap, name an offline CPU, or share a last-level cache on a
+machine that offers a disjoint choice, and records both in `metadata.env`.
+Clear both variables to run unpinned. After the first pinned run, confirm
+`server_summary.json` reports no watchdog expiry: a starved controller trips
+the socket timeout, and a fallback frame is a hard-invalid interval that fails
+the learner-health gate for reasons unrelated to the policy.
+
 Gate 0 of `docs/PATHWAYS.md` runs off-box on the artifacts above. Every arm
 now writes `compaction_measurements.json` (per-level merge survival from the
 `merge_schema_version` 1 events, release-time occupancy from the

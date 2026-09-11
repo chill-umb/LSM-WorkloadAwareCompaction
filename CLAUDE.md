@@ -13,9 +13,10 @@ Read these before making non-trivial changes:
   - §13: test status.
   - §14–15: what is implemented and what is still open.
 - **`TRIGGER_CONTROLLER_REPAIR_PLAN.md`** is the current controller design plan. It covers the per-level state machine, the deferral math, the required tests and the phases.
-- **`docs/RESEARCH_OBJECTIVE_CONTRACT.md`** and **`config/research_objective_contract.v2.json`** hold the research objective, frozen on 2026-09-12. v2 supersedes v1 (frozen 2026-09-10) by adding the P1 amendments and the build/architecture pin; v1 stays in the tree as the superseded record.
+- **`docs/RESEARCH_OBJECTIVE_CONTRACT.md`** and **`config/research_objective_contract.v3.json`** hold the research objective, frozen on 2026-09-12. v3 supersedes v2, which superseded v1 (frozen 2026-09-10); v2 added the P1 amendments and the build/architecture pin, v3 added the direct-I/O pin. No run was executed under v1 or v2; both stay in the tree as superseded records.
   - Changing either needs a version bump and a written reason.
   - Never change them after seeing a gate's outcome.
+- **`docs/EXPERIMENTAL_SETUP.md`** records every experimental control in one place: node, build and architecture pin, source commits, engine options, workload, controller settings, CPU pinning, metric definitions, statistical protocol, declared deviations from RocksDB defaults. It is the source text for the paper's setup section. Update it whenever a control changes.
 - **`docs/rl_l0_compaction_technical_spec.md`** is tracked, but it describes the old L0-only, 3-action proof of concept. Don't treat it as current.
 
 ## Commands

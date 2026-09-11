@@ -37,6 +37,13 @@ BLOCK_CACHE_SIZE="${BLOCK_CACHE_SIZE:-8388608}"          # 8 MiB
 BLOCK_SIZE="${BLOCK_SIZE:-4096}"                         # 4 KiB data blocks
 BLOOM_BITS="${BLOOM_BITS:-10}"
 DISABLE_WAL="${DISABLE_WAL:-1}"
+# Direct I/O for both the read path and background flush/compaction. Without it
+# the host page cache absorbs most reads, so measured read latency reflects the
+# node's free RAM rather than the storage device, and the block cache is not the
+# only cache in the system. This is pinned rather than swept: it changes the
+# baseline, so it must be fixed before the Gate 1 hull is measured.
+# compaction_readahead_size stays at the pinned tree's 2 MB default.
+USE_DIRECT_IO="${USE_DIRECT_IO:-1}"
 L0_COMPACTION_TRIGGER="${L0_COMPACTION_TRIGGER:-4}"
 L0_SLOWDOWN_TRIGGER="${L0_SLOWDOWN_TRIGGER:-20}"
 L0_STOP_TRIGGER="${L0_STOP_TRIGGER:-36}"
