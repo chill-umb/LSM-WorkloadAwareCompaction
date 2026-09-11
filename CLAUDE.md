@@ -13,7 +13,7 @@ Read these before making non-trivial changes:
   - §13: test status.
   - §14–15: what is implemented and what is still open.
 - **`TRIGGER_CONTROLLER_REPAIR_PLAN.md`** is the current controller design plan. It covers the per-level state machine, the deferral math, the required tests and the phases.
-- **`docs/RESEARCH_OBJECTIVE_CONTRACT.md`** and **`config/research_objective_contract.v1.json`** hold the research objective, frozen on 2026-09-10.
+- **`docs/RESEARCH_OBJECTIVE_CONTRACT.md`** and **`config/research_objective_contract.v2.json`** hold the research objective, frozen on 2026-09-12. v2 supersedes v1 (frozen 2026-09-10) by adding the P1 amendments and the build/architecture pin; v1 stays in the tree as the superseded record.
   - Changing either needs a version bump and a written reason.
   - Never change them after seeing a gate's outcome.
 - **`docs/rl_l0_compaction_technical_spec.md`** is tracked, but it describes the old L0-only, 3-action proof of concept. Don't treat it as current.

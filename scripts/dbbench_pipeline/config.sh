@@ -56,6 +56,17 @@ STATS_DUMP_PERIOD_SECONDS="${STATS_DUMP_PERIOD_SECONDS:-20}"
 # configure-time failure instead. The measurement nodes are Chameleon
 # CHI@NCAR Zen 5, so znver5 is the default. Needs GCC 14.1+ or Clang 19+.
 ROCKSDB_PORTABLE="${ROCKSDB_PORTABLE:-znver5}"
+# CPU pinning for the measured processes, as taskset -c lists. db_bench and the
+# Python controller must not share a last-level cache: a controller sharing L3
+# with db_bench evicts its cache lines even from a core of its own. The
+# measurement node is a single-socket, single-NUMA-node AMD EPYC 4545P with SMT
+# off, 16 cores in two 8-core CCDs, so CPU N is physical core N and cores 0-7
+# and 8-15 are separate L3 domains. Both sets apply to every arm, including
+# `regular`, which starts no controller: an arm that had the controller's cores
+# to itself would not be comparable with one that did not. Empty disables
+# pinning. 03_run_experiments.sh validates the sets and records them per arm.
+DBBENCH_CPUS="${DBBENCH_CPUS:-0-7}"
+CONTROLLER_CPUS="${CONTROLLER_CPUS:-8}"
 DBBENCH_BUILD_DIR="${DBBENCH_BUILD_DIR:-build-dbbench}"
 PYTHON_VENV="${PYTHON_VENV:-.venv-dbbench}"
 BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"

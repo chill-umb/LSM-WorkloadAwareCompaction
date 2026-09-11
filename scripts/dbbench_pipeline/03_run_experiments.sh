@@ -65,7 +65,115 @@ if [[ -f "$BUILD_PROVENANCE" ]]; then
   ROCKSDB_PORTABLE_BUILT="$(awk -F= '/^rocksdb_portable=/ {print $2}' "$BUILD_PROVENANCE")"
   BUILD_CXX_VERSION="$(awk -F= '/^build_cxx=/ {sub(/^build_cxx=/, ""); print}' "$BUILD_PROVENANCE")"
 fi
-RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.v1.json | awk '{print $1}')"
+RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.v2.json | awk '{print $1}')"
+
+# Expand a taskset -c list ("0-7,12") into one CPU number per line.
+expand_cpu_list() {
+  local part start end
+  [[ -n "$1" ]] || return 0
+  for part in ${1//,/ }; do
+    if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+      (( start <= end )) || { echo "Inverted CPU range: $part" >&2; return 1; }
+      seq "$start" "$end"
+    elif [[ "$part" =~ ^[0-9]+$ ]]; then
+      echo "$part"
+    else
+      echo "Malformed CPU list element: $part" >&2
+      return 1
+    fi
+  done
+}
+
+# CPUs sharing a last-level cache with this one. Empty when the kernel exports
+# no L3 index, which is not an error.
+l3_siblings() {
+  local index level
+  for index in /sys/devices/system/cpu/cpu"$1"/cache/index*; do
+    [[ -r "$index/level" && -r "$index/shared_cpu_list" ]] || continue
+    level="$(<"$index/level")"
+    [[ "$level" == 3 ]] || continue
+    expand_cpu_list "$(<"$index/shared_cpu_list")"
+    return 0
+  done
+}
+
+# How many distinct last-level caches the machine exposes. Zero when it
+# exposes none, in which case no cache claim can be checked either way.
+count_l3_domains() {
+  local cpu
+  for cpu in $(expand_cpu_list "$(</sys/devices/system/cpu/online)"); do
+    l3_siblings "$cpu" | sort -n | tr '\n' ','
+    echo
+  done | sort -u | grep -c . || echo 0
+}
+
+DBBENCH_LAUNCHER=()
+CONTROLLER_LAUNCHER=()
+if [[ -n "$DBBENCH_CPUS" || -n "$CONTROLLER_CPUS" ]]; then
+  command -v taskset >/dev/null || {
+    echo "CPU pinning was requested but taskset is not installed." >&2
+    echo "Install util-linux, or clear DBBENCH_CPUS and CONTROLLER_CPUS." >&2
+    exit 1
+  }
+  [[ -n "$DBBENCH_CPUS" && -n "$CONTROLLER_CPUS" ]] || {
+    echo "Pin both DBBENCH_CPUS and CONTROLLER_CPUS, or neither." >&2
+    echo "Pinning one leaves the other free to run on its cores." >&2
+    exit 1
+  }
+  dbbench_expanded="$(expand_cpu_list "$DBBENCH_CPUS")" || exit 1
+  controller_expanded="$(expand_cpu_list "$CONTROLLER_CPUS")" || exit 1
+  online_expanded="$(expand_cpu_list "$(</sys/devices/system/cpu/online)")" || exit 1
+  mapfile -t dbbench_cpu_set <<< "$dbbench_expanded"
+  mapfile -t controller_cpu_set <<< "$controller_expanded"
+  online_cpus=" $(tr '\n' ' ' <<< "$online_expanded")"
+  for cpu in "${dbbench_cpu_set[@]}" "${controller_cpu_set[@]}"; do
+    [[ "$cpu" =~ ^[0-9]+$ ]] || {
+      echo "Unusable CPU set: $DBBENCH_CPUS / $CONTROLLER_CPUS" >&2
+      exit 1
+    }
+    [[ "$online_cpus" == *" $cpu "* ]] || {
+      echo "CPU $cpu is not online; check lscpu -e before pinning." >&2
+      exit 1
+    }
+  done
+  # Overlapping sets time-share a core, which is the interference the pinning
+  # exists to remove.
+  for cpu in "${controller_cpu_set[@]}"; do
+    for other in "${dbbench_cpu_set[@]}"; do
+      (( cpu != other )) || {
+        echo "DBBENCH_CPUS and CONTROLLER_CPUS both contain CPU $cpu." >&2
+        exit 1
+      }
+    done
+  done
+  # Distinct cores are not enough when they share a last-level cache: the
+  # controller then evicts db_bench cache lines from a core of its own. Only
+  # refuse when the machine actually offers a disjoint choice.
+  shared_l3=""
+  for cpu in "${dbbench_cpu_set[@]}"; do
+    dbbench_l3=" $(l3_siblings "$cpu" | tr '\n' ' ')"
+    for other in "${controller_cpu_set[@]}"; do
+      [[ "$dbbench_l3" != *" $other "* ]] || shared_l3="$cpu/$other"
+    done
+  done
+  if [[ -n "$shared_l3" ]]; then
+    l3_domains="$(count_l3_domains)"
+    if (( l3_domains > 1 )); then
+      echo "CPUs ${shared_l3%%/*} and ${shared_l3##*/} share a last-level cache," >&2
+      echo "so the controller would evict db_bench cache lines from its own core." >&2
+      echo "This machine exposes $l3_domains L3 domains; pick the two sets from" >&2
+      echo "different ones. Inspect:" >&2
+      echo "  cat /sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list" >&2
+      exit 1
+    fi
+    echo "[pinning] this machine exposes one L3 domain, so db_bench and the" >&2
+    echo "[pinning] controller share it. Cache interference is not eliminated." >&2
+  fi
+  DBBENCH_LAUNCHER=(taskset -c "$DBBENCH_CPUS")
+  CONTROLLER_LAUNCHER=(taskset -c "$CONTROLLER_CPUS")
+  echo "[pinning] db_bench CPUs $DBBENCH_CPUS, controller CPUs $CONTROLLER_CPUS"
+fi
 
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS "$REPEATS"; do
   [[ "$integer" =~ ^[0-9]+$ ]] || {
@@ -324,6 +432,7 @@ start_server() {  # result dir, policy seed, decay steps, eval, manifest, finger
     RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
     RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
     OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+    ${CONTROLLER_LAUNCHER[@]+"${CONTROLLER_LAUNCHER[@]}"} \
     "$PYTHON" "$PROJECT_ROOT/rl_agent/server.py" \
     > "$result_dir/server.log" 2>&1 &
   SERVER_PID=$!
@@ -514,6 +623,7 @@ PY
   fi
 
   command=(
+    ${DBBENCH_LAUNCHER[@]+"${DBBENCH_LAUNCHER[@]}"}
     "$DB_BENCH"
     --benchmarks=filluniquerandom,mixgraph,waitforcompaction,levelstats,stats
     --num="$load_ops"
@@ -558,6 +668,8 @@ PY
     printf 'dbbench_sha256=%s\n' "$DBBENCH_SHA256"
     printf 'rocksdb_portable=%s\n' "$ROCKSDB_PORTABLE_BUILT"
     printf 'build_cxx=%s\n' "$BUILD_CXX_VERSION"
+    printf 'dbbench_cpus=%s\n' "${DBBENCH_CPUS:-unpinned}"
+    printf 'controller_cpus=%s\n' "${CONTROLLER_CPUS:-unpinned}"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
     printf 'level_compaction_dynamic_level_bytes=false\n'
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
@@ -690,7 +802,8 @@ PY
   # This process is outside the measured phase. It supplies the physical size
   # of the same data after garbage removal; its I/O is not included in WAF.
   set +e
-  "$DB_BENCH" --benchmarks=compact --num="$load_ops" \
+  ${DBBENCH_LAUNCHER[@]+"${DBBENCH_LAUNCHER[@]}"} \
+    "$DB_BENCH" --benchmarks=compact --num="$load_ops" \
     --max_bytes_for_level_multiplier="$ratio" --compaction_style=0 \
     --level0_file_num_compaction_trigger="$effective_l0_compaction" \
     --level0_slowdown_writes_trigger="$effective_l0_slowdown" \

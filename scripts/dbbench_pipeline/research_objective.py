@@ -8,18 +8,18 @@ import math
 from pathlib import Path
 
 DEFAULT_CONTRACT = (Path(__file__).resolve().parents[2] / "config" /
-                    "research_objective_contract.v1.json")
+                    "research_objective_contract.v2.json")
 
 
 def load_contract(path: Path = DEFAULT_CONTRACT) -> tuple[dict, str]:
     raw = path.read_bytes()
     contract = json.loads(raw)
-    # Version 1 is frozen. Reject an incomplete or silently edited copy; a
+    # Version 2 is frozen. Reject an incomplete or silently edited copy; a
     # deliberate amendment needs a new schema implementation and provenance.
     frozen = json.loads(DEFAULT_CONTRACT.read_bytes())
     if contract != frozen:
-        raise ValueError("objective differs from frozen contract v1")
-    if (contract["schema_version"] != 1 or
+        raise ValueError("objective differs from frozen contract v2")
+    if (contract["schema_version"] != 2 or
             contract["contract_status"] != "frozen" or
             contract["difference_form"] != "paired_relative" or
             contract["confidence_level"] != 0.95):

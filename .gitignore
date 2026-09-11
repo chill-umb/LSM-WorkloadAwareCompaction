@@ -80,6 +80,7 @@ results/*
 *.txt
 *.json
 !config/research_objective_contract.v1.json
+!config/research_objective_contract.v2.json
 !workload_specs/**/*.json
 !workload_specs/**/*.md
 
