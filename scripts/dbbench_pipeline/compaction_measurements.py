@@ -27,6 +27,13 @@ def events(path: Path):
             yield json.loads(match.group(1))
 
 
+def flag(value) -> bool:
+    """RocksDB's JSONWriter has no bool overload, so status.ok() and rl_drain
+    reach the log as 1/0, not true/false. Accept the same forms
+    04_generate_graphs.py does rather than testing identity against True."""
+    return value in (True, 1, "true", "1")
+
+
 def empty() -> dict:
     return {"jobs": 0, "input_bytes": 0, "output_bytes": 0, "eta": None}
 
@@ -97,7 +104,7 @@ def analyze(path: Path, num_levels: int) -> dict:
             if event.get("merge_schema_version") != 1:
                 missing_merges += 1
                 continue
-            if event.get("merge_success") is not True:
+            if not flag(event.get("merge_success")):
                 raise ValueError(f"unsuccessful merge job {job}")
             level = nonnegative_int(event["source_level"])
             if level >= num_levels:
@@ -107,7 +114,7 @@ def analyze(path: Path, num_levels: int) -> dict:
             if not read:
                 raise ValueError("non-trivial merge has no input")
             # Do not clamp eta: compression/table metadata can make it exceed 1.
-            phase = "drain" if event.get("rl_drain") is True else "workload"
+            phase = "drain" if flag(event.get("rl_drain")) else "workload"
             for view in (phase, "whole_run"):
                 for bucket in (views[view]["global"], views[view]["levels"][str(level)]):
                     bucket["jobs"] += 1

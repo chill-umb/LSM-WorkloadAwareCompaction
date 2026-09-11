@@ -183,12 +183,23 @@
     "binary_sha256_in_experiment_fingerprint": true,
     "level_compaction_dynamic_level_bytes": false,
     "io": {
-      "use_direct_reads": true,
-      "use_direct_io_for_flush_and_compaction": true,
+      "use_direct_reads": false,
+      "use_direct_io_for_flush_and_compaction": false,
       "compaction_readahead_size_bytes": 2097152,
       "swept": false,
-      "reason": "reads reach the drive, so the block cache is the only cache and the latency constraints measure the storage path",
-      "rejected_alternative": "a cgroup memory cap on the benchmark process. Equally defensible, but it is external state that is not carried in the experiment fingerprint and is silently lost on a new lease.",
+      "amended": "2026-09-12, in place, before any Gate 1 run",
+      "reason": "pinned off on measured cost. A 10M T=2 pilot ran mixgraph at 2750 ops/s against 7186 buffered, a 2.6x penalty putting Gate 1 near 95 h against 36-48 h, above the entire Lease 1 budget.",
+      "consequence": "the host page cache holds the database, so latency, runtime and stall figures are warm-cache and are reported as such. They bound foreground disruption; they are not storage latency claims.",
+      "unaffected_metrics": [
+        "write_amplification",
+        "point_read_amplification",
+        "space_amplification",
+        "sorted_run_seeks_per_scan",
+        "per_level_merge_survival",
+        "capacity_space_curve"
+      ],
+      "revisit": "may be set true for the final paper benchmark workload if the amplification results justify the cost. Such runs carry fingerprint field dio1, cannot be pooled with dio0 runs, and need their own comparator manifest because stage 06 selects on runtime, which is cache-sensitive.",
+      "rejected_alternative": "a cgroup memory cap on the benchmark process. It is external state the fingerprint cannot carry and a new lease silently loses.",
       "recorded_in": [
         "experiment_fingerprint: dio field",
         "metadata.env: use_direct_io"

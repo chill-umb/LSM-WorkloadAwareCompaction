@@ -37,13 +37,18 @@ BLOCK_CACHE_SIZE="${BLOCK_CACHE_SIZE:-8388608}"          # 8 MiB
 BLOCK_SIZE="${BLOCK_SIZE:-4096}"                         # 4 KiB data blocks
 BLOOM_BITS="${BLOOM_BITS:-10}"
 DISABLE_WAL="${DISABLE_WAL:-1}"
-# Direct I/O for both the read path and background flush/compaction. Without it
-# the host page cache absorbs most reads, so measured read latency reflects the
-# node's free RAM rather than the storage device, and the block cache is not the
-# only cache in the system. This is pinned rather than swept: it changes the
-# baseline, so it must be fixed before the Gate 1 hull is measured.
-# compaction_readahead_size stays at the pinned tree's 2 MB default.
-USE_DIRECT_IO="${USE_DIRECT_IO:-1}"
+# Direct I/O for both the read path and background flush/compaction. Pinned OFF
+# on measured evidence: a 10M T=2 pilot ran mixgraph at 2,750 ops/s against
+# 7,186 buffered, a 2.6x cost that puts Gate 1 near 95 h against 36-48 h, more
+# than the whole Lease 1 budget. Buffered means the host page cache holds the
+# ~3.7 GB database, so latency and runtime are warm-cache figures and must be
+# reported as such. Write, point-read and space amplification, per-level merge
+# survival and the capacity-space curve are all byte ratios set by tree shape,
+# so they are unaffected. May be toggled to 1 for the final paper benchmark if
+# the amplification results justify the cost; such runs carry fingerprint dio1
+# and cannot be pooled with dio0 runs. compaction_readahead_size stays at the
+# pinned tree's 2 MB default either way.
+USE_DIRECT_IO="${USE_DIRECT_IO:-0}"
 L0_COMPACTION_TRIGGER="${L0_COMPACTION_TRIGGER:-4}"
 L0_SLOWDOWN_TRIGGER="${L0_SLOWDOWN_TRIGGER:-20}"
 L0_STOP_TRIGGER="${L0_STOP_TRIGGER:-36}"
