@@ -17,6 +17,21 @@ SPEC.loader.exec_module(GRAPH)
 
 
 class AmplificationMetricTest(unittest.TestCase):
+    def test_heavy_tail_preserves_all_histogram_statistics(self):
+        histogram = GRAPH.parse_histograms(
+            "rocksdb.db.write.micros P50 : 1 P95 : 5.6 P99 : 100 "
+            "P100 : 4000 COUNT : 100 SUM : 4200\n"
+        )["rocksdb.db.write.micros"]
+        self.assertEqual(histogram["avg"], histogram["sum"] / histogram["count"])
+        self.assertEqual(histogram["p100"], 4000)
+        self.assertLess(histogram["p95"], histogram["avg"])
+
+    def test_nonmonotone_histogram_is_rejected(self):
+        with self.assertRaises(ValueError):
+            GRAPH.parse_histograms(
+                "rocksdb.db.write.micros P50 : 1 P95 : 30 P99 : 20 "
+                "P100 : 100 COUNT : 10 SUM : 50\n")
+
     def test_synthetic_get_scan_write_and_space(self):
         metrics = GRAPH.amplification_metrics(
             # Logical bytes may include inserts, updates, and deletes; the

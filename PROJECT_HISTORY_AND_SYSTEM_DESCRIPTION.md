@@ -9,6 +9,25 @@ workload tooling, experiment pipelines, project-authored Markdown documents,
 the two bundled research papers, and the relevant upstream RocksDB and Tectonic
 documentation
 
+> **2026-09-05 status correction (read first; supersedes the 2026-08-26 block
+> below).** **The learner now trains.** Credit-assignment schema v2 and the
+> bootstrap/fallback state repair were verified on hardware at 1M, 5M and 10M,
+> with the C++ and Python sides agreeing to the decision. That closes the
+> blocker which had made every earlier arm labelled `rl` a synonym for the
+> analytic prior. The first trained-learner matrix — 10M x T=2/6/10, five
+> paired repeats, four arms — is recorded in Section 10.7. It **fails** the
+> Section 3.1 criteria in every cell, and the blocker is **write
+> amplification**: no arm improves it anywhere, at any size ratio. Two findings
+> survive. First, the analytic prior is the strongest read policy and improves
+> as T grows (-12.5%, -17.3%, -19.3% point-read amplification at T=2/6/10).
+> Second, the learned residual defers top-of-tree compaction, deepens the tree
+> by one to three levels, and trades part of that read advantage for space
+> amplification that the criteria only require it not to regress. Sections
+> 10.7, 14.5, 15 and 18 carry the detail. **The objective decision that failure
+> forced has since been made and preregistered:** see the amendment at the head
+> of Section 3.1, and `docs/PATHWAYS.md` for the proofs, gates and acceptance
+> criteria that follow from it.
+>
 > **2026-08-26 status correction (read first).** The trigger bridge has now
 > been built, executed, and gated on the cloud machine. Two facts supersede the
 > "unvalidated prototype" framing that dominates the rest of this document.
@@ -179,6 +198,74 @@ physical I/O without changing the number of logical runs exposed by the tree.
 ## 3. Research objective, constraints, and non-goals
 
 ### 3.1 Formal objective
+
+> **2026-09-05 preregistered amendment (authoritative; supersedes the strict
+> three-way criterion below).** Recorded **before** any run of the programme in
+> `docs/PATHWAYS.md`, and specifically before Gate 1. The strict Pareto
+> requirement — write, point-read *and* scan amplification each strictly
+> improved against a tuned baseline — is **withdrawn as infeasible**, on the
+> grounds set out in Section 10.7 Finding 4 and proved in `docs/PATHWAYS.md`
+> Theorems A.2 and B.1: in a leveled LSM tree the read/write trade is intrinsic,
+> the comparator is selected to sit near the frontier, fanout conservation
+> forbids any expansion profile beating the uniform tree at fixed depth, and
+> elision below parity is capped by resident garbage, which this workload has
+> almost none of.
+>
+> **The replacement objective is constrained, not scalarised:**
+>
+> ```text
+> minimise    point-read amplification R(pi)
+> subject to  W(pi)    <= W_base           (parity, beta = 0)
+>             S(pi)    <= S_bound          (2% over baseline)
+>             lat(pi)  <= lat_bound        (2%, Get / scan / aggregate write)
+>             stall(pi) <= stall_base
+> ```
+>
+> The write constraint is **parity, not a budget**. Theorem A.2 says geometry
+> cannot go below parity and Theorem B.1 caps elision at the resident-garbage
+> fraction, so parity is the defensible target; any `beta > 0` would concede
+> headroom the theory says is not needed. A `beta` sweep is reported as
+> exposition of the frontier's shape, never as the acceptance criterion.
+>
+> **The comparator becomes a class, not a point.** A single tuned baseline is
+> replaced by the Pareto hull of the static configuration class over `(W, R)`
+> (`docs/PATHWAYS.md` Pathway C, Proposition C.1). Two hulls are preregistered
+> and are not interchangeable: **Hull-0** at `s = 1` is the comparator for arms
+> without a capacity action, and **Hull-s**, which adds statically
+> capacity-expanded configurations, is the comparator for any arm carrying one.
+> Comparing a policy against a class denied a knob the policy has — or given one
+> the policy lacks — is invalid in either direction.
+>
+> **Four subsidiary decisions, recorded here at the same time.**
+>
+> 1. **Scan objective.** `scan_amplification` sits at its mathematical floor of
+>    1.0 and passes vacuously, so it is withdrawn as an acceptance metric. The
+>    scan objective rests on `sorted_run_seeks` alone. This resolves the
+>    preregistered scan-sensitivity choice left open since the repair plan.
+> 2. **Stall test form.** The `all(delta <= 0)` form for `stall_events` and
+>    `stall_seconds` is retired — it failed a 5.4% mean improvement at T=10
+>    because one pair of ten increased. It is replaced by the paired-envelope
+>    form already adopted for `per_level_maximum_score` in Section 14.2.
+> 3. **Latency decidability.** Five pairs give confidence intervals spanning
+>    +/-20-30% against a 2% limit. Latency checks whose interval is wider than
+>    the limit are reported as **undecidable**, never as failed. Cells carrying a
+>    latency claim must run the preregistered ten repeats.
+> 4. **Space enters as a bound, not a minimand.** `Phi` currently treats space as
+>    a quantity to minimise while the criteria treat it as a bound; Section 10.7
+>    Finding 3 measures the learner spending reads on space it earns no credit
+>    for. Space enters the reward only as a hinge penalty above the manifest
+>    limit.
+>
+> **Still open, and blocking the gate named against each.** The
+> `write_latency_p95_us` below `write_latency_avg_us` anomaly (Section 10.7,
+> instrument problem 6) must be resolved before any latency figure appears in a
+> submitted table. Whether the paper claims write parity or write improvement
+> selects between two different acceptance sets and must be recorded before
+> Gate 4.
+>
+> The criteria below are retained as the record of what was preregistered from
+> the project's start until 2026-09-05, and as the standard the Section 10.7
+> matrix was judged against. They are no longer the acceptance criteria.
 
 The formal comparator is a **preregistered, workload-specific tuned leveled
 baseline**, not the historical `T=10` configuration and not whichever regular
@@ -1176,6 +1263,28 @@ See Section 10.6. The headline is that **the learner never trained**, so the
 matrix measures the analytic prior with and without the live SLO mask, and not a
 learned policy at all.
 
+### 2026-09-01: the learner trains for the first time
+
+Credit-assignment schema v2 was verified on the cloud machine and the
+bootstrap/fallback state model was repaired (Section 14.4). A staged 1M/5M/10M
+preflight then passed every learner-health gate at two scales, with exact
+C++/Python accounting agreement: `response_acknowledgements x levels ==
+accepted_decisions` and `stale_response_rejections x levels ==
+rejected_decisions` on all four learned arms. Zero hard-invalid intervals, zero
+watchdog expiries, zero protocol mismatches, zero bootstrap failures. The
+blocker standing since 2026-08-24 is closed.
+
+Two source fixes made during that pass are recorded in Section 14.5: an
+accounting identity that omitted a legitimate sink, and a watchdog that could
+not distinguish a busy structural-refresh path from a dead server.
+
+### 2026-09-03 to 2026-09-05: the first trained-learner matrix
+
+10M operations at T=2, 6 and 10; five paired repeats; `regular`, `prior_only`,
+`unconstrained_rl` and `rl`. See Section 10.7. Every cell fails acceptance, but
+for the first time the failure describes a policy that actually learned rather
+than a closed-form heuristic wearing the learner's name.
+
 ## 9. Defect and fix catalogue
 
 The following table consolidates the failure modes documented across the
@@ -1384,6 +1493,133 @@ is weakly supported, because a trained residual would still change behaviour and
 separated by one command on any `rl` arm: `grep -c '"loss": null' metrics.jsonl`
 against a non-null count, plus `slo_masked_windows` and the count of
 `"prev_transition_valid": false` in `io.jsonl`.
+
+### 10.7 The 2026-09-03 trained-learner matrix at 10M
+
+**Configuration.** 10M x T=2/6/10 x {`regular`, `prior_only`,
+`unconstrained_rl`, `rl`} x 5 paired repeats = 60 arms, from suite root
+`suite-20260902-193415`. Run on a fresh Chameleon zen3 node after the previous
+node's root filesystem failed mid-lease (Section 14.5). Per-cell manifests were
+regenerated from the narrowed 6-configuration sweep. **Five repeats rather than
+the preregistered ten** is a deliberate lease-budget deviation, so these cells
+are directional evidence, not formal acceptance.
+
+**This is the first matrix in the project's history in which the learner
+trained.** At 10M the learned arms recorded 85,740 and 92,592 full-horizon
+transitions, 199,856 and 170,560 optimizer steps, nonzero residuals, and
+argmax flip rates of 0.42-0.73 per level, against exactly zero on every earlier
+matrix.
+
+**Arm means.**
+
+| metric | T | regular | prior_only | unconstrained_rl | rl |
+| --- | --- | ---: | ---: | ---: | ---: |
+| write amplification | 2 | 7.4199 | 8.7761 | 8.6098 | 8.5971 |
+| | 6 | 8.3344 | 9.6093 | 12.5624 | 10.2394 |
+| | 10 | 9.3553 | 10.6569 | 10.6242 | 10.2734 |
+| point-read amplification | 2 | 7.4635 | **6.5314** | 7.4563 | 7.5868 |
+| | 6 | 5.2982 | **4.3808** | 4.6027 | 4.7095 |
+| | 10 | 4.5234 | **3.6512** | 3.8158 | 4.0805 |
+| sorted-run seeks/scan | 2 | 9.6286 | **8.4995** | 10.1409 | 10.1694 |
+| | 6 | 6.0491 | **5.0203** | 5.7345 | 5.7905 |
+| | 10 | 5.5040 | **4.3427** | 4.7391 | 5.1487 |
+| space amplification | 2 | 2.2710 | 2.2836 | 1.8171 | **1.6225** |
+| | 6 | 1.2614 | 1.3706 | 1.2391 | **1.2346** |
+| | 10 | 1.1655 | 1.2196 | 1.1865 | **1.1647** |
+| stall seconds | 2 | 147.09 | 152.13 | 151.06 | 150.55 |
+| | 6 | 148.55 | 153.46 | 152.88 | 154.33 |
+| | 10 | 157.01 | 160.89 | 161.92 | 163.59 |
+
+**Result against the acceptance criteria: fails in all three cells.** The
+per-cell failing checks are: T=2 write amplification, point-read amplification,
+scan objective, stall seconds, and four latency bounds; T=6 write amplification,
+scan objective, stall seconds, and five latency bounds; T=10 write
+amplification, space amplification, stall events, stall seconds, and six
+latency bounds.
+
+**Finding 1: write amplification is the universal blocker.** Every RL-family arm
+compacts more than the tuned leveled baseline in every cell — `prior_only`
++18.3%/+15.3%/+13.9%, `rl` +15.9%/+22.9%/+9.8%, and `unconstrained_rl` reaching
++50.7% at T=6. Section 3.1 requires this interval strictly below zero. It is
+above zero everywhere, for every arm, at every size ratio. No other criterion
+matters until this one moves.
+
+**Finding 2: the analytic prior is the strongest read policy, and it improves
+with T.** Relative to `regular`, `prior_only` delivers -12.5%, -17.3% and
+-19.3% point-read amplification and -11.7%, -17.0% and -21.1% sorted-run seeks
+at T=2, 6 and 10, while its write penalty *shrinks* from +18.3% to +13.9%. At
+T=10 that is roughly 20% fewer probes and seeks for roughly 14% more write
+bytes. The T=2 figures reproduce the 2026-08-24 pooled matrix (-11.8%, -12.0%,
++18.9%) closely enough to serve as an independent replication on different
+hardware and a different binary.
+
+**Finding 3: the learned residual trades reads for space.** Against
+`prior_only`, `rl` is 16.2%, 7.5% and 11.8% *worse* on point-read amplification
+while improving space amplification by 29.0%, 9.9% and 4.5%. At T=10 space is
+already near its floor at 1.165 and the learner still spends reads on it.
+
+**The mechanism, from per-level compaction rates.** The learner defers
+top-of-tree compaction and lets the tree grow deeper:
+
+| cell | L0 compact rate, prior_only -> rl | populated depth, prior_only -> rl |
+| --- | --- | --- |
+| 10M T=2 | 0.18 -> 0.06 | L0-L8 -> L0-L11 (+3) |
+| 10M T=6 | 0.24 -> 0.15 | L0-L4 -> L0-L5 (+1) |
+| 10M T=10 | 0.29 -> 0.17 | L0-L3 -> L0-L4 (+1) |
+| 20M T=2 | 0.24 -> 0.06 | L0-L9 -> L0-L10 (+1) |
+
+One learned behaviour explains all three amplification results. More populated
+levels means more sorted runs on the read path, which is the point-read and
+seek regression. Data settling deeper is merged in larger bottom-level batches
+that drop more stale versions, which is the space gain. Bytes crossing more
+levels are rewritten more times, which is the extra write amplification —
+deferring at the top does not reduce write work, it relocates and increases it.
+The read damage tracks the depth increase: T=2 gains three levels and loses
+16.2% of reads, while T=6 and T=10 gain one and lose 7.5% and 11.8%. The prior
+does the opposite, front-loading compaction (L2 rates of 0.30, 0.42, 0.51) to
+keep the tree shallow, and that shallowness is its read advantage.
+
+Two caveats on those rates. They appear to be *selected* actions; L0 runs with
+`RL_L0_ALLOW_DEFER=0`, so C++ promotes L0 defers to compact under `kPosture`,
+and adding back the observed ~0.05 L0 override rate still leaves `rl` below the
+prior. And the 20M row is from the partially completed 20M cells, included
+because it shows the mechanism is not specific to the 10M scale.
+
+**Finding 4: the criteria may be structurally infeasible as written.** Section
+3.1 demands a strict Pareto improvement on write, point-read *and* scan
+amplification simultaneously, against a baseline deliberately tuned to sit near
+the frontier. In a leveled LSM tree, compacting less improves write
+amplification and worsens reads. `rl` passes both read criteria at T=10 and
+still fails the cell on write amplification. Whether the objective should
+become a constrained one — improve reads subject to a bounded write-amplification
+budget — is a preregistration decision that has not been made, and it
+determines whether this experiment can succeed at all.
+
+**Instrument problems exposed by this matrix.** These affect the verdict and
+should be resolved before the criteria are applied again.
+
+1. **The latency bounds are undecidable at five pairs.** All four read-latency
+   checks fail in all three cells, but at T=2 their confidence intervals span
+   +/-20-30% against a 2% limit. Some are genuine — T=10 shows a +14.6%
+   Get-average regression on the mean — and the report does not distinguish
+   undecidable from regressed.
+2. **`stall_events` and `stall_seconds` use `all(delta <= 0)`.** At T=10
+   `stall_events` is 5.4% better on the mean (96,639 against 102,107) and still
+   fails because one pair increased. This is the same brittleness class the D4
+   analysis corrected for other checks.
+3. **`space_amplification` fails at T=10 on a -0.07% mean**, purely from
+   interval width.
+4. **`scan_amplification` sits at its mathematical floor** and passes
+   vacuously, so the scan objective rests entirely on `sorted_run_seeks`. The
+   preregistered scan-objective choice noted in Section 15 now has to be made.
+5. **`unconstrained_rl` at T=6 reaches write amplification 12.56**, +50.7%
+   against baseline and far above `rl`'s 10.24. The live SLO mask is doing
+   substantially more work in that cell than elsewhere, and this is not yet
+   explained.
+6. **`write_latency_p95_us` (~5.6 us) is below `write_latency_avg_us`
+   (~42 us).** That requires an extreme heavy tail, which ~150 s of stalls in a
+   ~1,200 s run can produce, but the histogram parsing should be verified
+   rather than assumed.
 
 ## 11. Current db_bench experiment pipeline
 
@@ -1866,7 +2102,172 @@ zero-hard-invalid health gate is intentionally unchanged: the first schema-2
 run remains failed evidence and must not be relabelled, resumed, or used as the
 10M checkpoint. A fresh cloud rebuild and 5M/T2 rerun are required.
 
+### 14.5 Learner verified on hardware; first trained matrix, 2026-09-05
+
+Two source defects were found and fixed while preparing the verification run,
+both in code added by the 2026-08-31 credit repair.
+
+1. **`accepted_accounting_balanced` was not an invariant.** The identity omitted
+   `discarded_zero_credit_windows`. A window confirmed on the same frame that
+   raised a hard boundary carries no reward interval, so it is correctly dropped
+   rather than stored as a zero-return sample, but it was still an accepted
+   decision. A single hard-invalid frame therefore reported an imbalance on a
+   correctly handled boundary. Reproduced against the real agent, fixed, and
+   re-verified.
+2. **The response watchdog could not distinguish a busy structural-refresh path
+   from a dead server.** `last_valid_response_micros_` advanced only when a frame
+   was *installed*, while `AcceptResponseStructure` rejects structurally stale
+   frames. During a compaction storm — the `waitforcompaction` drain in
+   particular — many consecutive frames are rejected while Python is perfectly
+   responsive, and the watchdog would eventually fire and mark the interval
+   hard-invalid, failing the zero-tolerance health gate near-deterministically.
+   A separate `last_server_response_micros_` now records server liveness as soon
+   as a well-formed, decision-id-matched response arrives, before the structural
+   test. Watchdog expiries were zero on every subsequent run.
+
+**Verification.** A staged preflight ran the 1M mechanical smoke, then 5M and
+10M cells. All learned arms passed. At 10M: 85,740 and 92,592 full-horizon
+transitions, 199,856 and 170,560 optimizer steps, nonzero residuals, balanced
+accounting, and zero hard-invalid intervals, watchdog expiries, protocol
+mismatches and bootstrap failures. The C++ and Python sides agree exactly:
+`response_acknowledgements x 12 == accepted_decisions` and
+`stale_response_rejections x 12 == rejected_decisions` on every learned arm.
+
+**Learner health at 10M is convergent, with a heavy tail.** Per level,
+`residual_scale` is 0.50-4.13 against `prior_scale` 0.34-0.49, giving
+`residual_over_prior` of 3.5-7.0; `td_trend` is 0.41-0.43, with TD loss falling
+14,226 -> 6,136 over the run; `mean_reward_last_quarter` is stable at
+approximately -0.20 across 5M and 10M. Two caveats. `max_abs_residual_advantage`
+reaches 1012-1102 against a `residual_scale` of 1.5-3.4, a 300-600x tail, so
+some states produce wild Q estimates even though the aggregate converges. And
+absolute TD loss remains around 6,136, several times the observed return scale.
+
+**Do not read `max_abs_residual_advantage` as a scale.** It is a run maximum
+over every sample. Using it as one produced a false 500x-divergence reading
+during this analysis, corrected only by the per-level `residual_scale` and
+`td_trend` fields from `11_analyze_learning.py`. Note also that with
+`SHARED_TRUNK` enabled, `gradient_steps`, `td_first_quarter`, `td_last_quarter`
+and `mean_reward_last_quarter` are global rather than per level, so the
+per-level TD comparison used in the 2026-08-06 analysis is no longer separable
+from this output.
+
+**Hardware.** The first verification node's root filesystem failed during the
+2026-09-01 run: GCC aborted with `internal compiler error: Bus error` across
+many unrelated translation units, and `/usr/bin/df`, `free`, `nproc`, `grep` and
+`dmesg` all returned `Input/output error` when executed. That is mmap-backed
+read failure, not a source defect. The node was released and the matrix was
+rerun on a fresh zen3 node. Any build interrupted by SIGBUS must be discarded
+rather than resumed, since partially written object files link cleanly.
+
+**Status on 2026-09-05.**
+
+| Deliverable | Status |
+| --- | --- |
+| Credit-assignment schema v2 | **Verified on hardware** at 1M, 5M and 10M |
+| Learner reaches replay and trains | **Yes** — first time in project history |
+| Bootstrap/fallback state model | **Verified**: zero bootstrap failures, zero watchdog expiries |
+| Oracle parity gate, current binary | **Re-run 2026-09-03**; undecided verdict with no failed checks |
+| Balanced matrix, 10M x T=2/6/10 | **Run** at five repeats. Fails acceptance in every cell on write amplification |
+| Balanced matrix, 20M | Started; cut after the 10M finding was consistent across three ratios |
+| Ten paired repeats and formal CIs | **Not run** — five used for lease budget |
+| Guard holdout readiness | **Still failing**; unchanged by the learner repair |
+| Read-heavy / write-heavy safety suites | **Not run** |
+| C++ picker tests, socket tests | **Still not run** |
+
+### 14.6 Gate 0 executed on the 2026-09-03 artifacts, 2026-09-11
+
+`docs/PATHWAYS.md` Gate 0 has four items. Items 1 and 2 are instrumentation:
+the RocksDB working tree now logs `merge_schema_version` 1 fields (input and
+output SST bytes per job, source level) on `compaction_finished`, and a
+`compaction_release` event under the DB mutex immediately before a job runs,
+carrying per-level occupancy, nominal and effective targets, and the capacity
+generation. `compaction_measurements.py` parses both into per-level merge
+survival `eta` (trivial moves excluded, workload/drain/whole-run views) and
+release-time `phi_j`; `03_run_experiments.sh` runs it on every arm and fails
+the arm if the instrument is incomplete. These need the rebuilt binary; no
+historical arm carries either event.
+
+Items 3 and 4 were executed by `14_gate0_reanalysis.py` on suite
+`suite-20260902-193415` (10M x T=2/6/10 at five pairs; 20M/T2 at five pairs;
+20M/T6 at one pair). The historical arms retain only `run.log`, so per-level
+write bytes come from the final stats table at 0.1 GB resolution; the summed
+table agrees with the exact tickers to within 0.8% on every arm. The script
+uses exact `compaction_finished` output bytes whenever an arm kept
+`rocksdb_LOG.txt`, which every future arm does.
+
+**A-0.** Excess is relative to the paired `regular` run; `D_depth` is bytes
+written at levels `regular` never populated.
+
+| cell | arm | excess | D_depth (GiB) | D_eager (GiB) | depth share | levels added |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 10M T=2 | prior_only | +18.2% | 0.00 | +5.24 | 0.00 | L9 (moves only) |
+| | rl | +15.8% | +1.08 | +3.48 | 0.22 | L9-L12 |
+| | unconstrained_rl | +16.0% | +0.76 | +3.84 | 0.18 | L9-L12 |
+| 10M T=6 | prior_only | +15.2% | 0.00 | +4.92 | 0.00 | L5 (moves only) |
+| | rl | +22.8% | +0.68 | +6.68 | 0.14 | L5-L6 |
+| | unconstrained_rl | +50.6% | +0.28 | +16.08 | 0.02 | L5-L6 |
+| 10M T=10 | prior_only | +13.7% | 0.00 | +4.98 | 0.00 | none |
+| | rl | +9.7% | 0.00 | +3.52 | 0.00 | L5, below 0.05 GB |
+| | unconstrained_rl | +13.4% | 0.00 | +4.86 | 0.00 | L5, below 0.05 GB |
+| 20M T=2 | prior_only | +15.2% | 0.00 | +10.12 | 0.00 | L10 (moves only) |
+| | rl | +10.0% | +2.00 | +4.62 | 0.35 | L10-L12 |
+| | unconstrained_rl | +16.7% | +1.76 | +9.32 | 0.18 | L10-L12 |
+
+The prior's excess is entirely `D_eager` in every cell, and the learner's
+depth share never exceeds 0.35. This is the PATHWAYS expectation made
+quantitative: Pathway A can remove at most the depth share, and A-2 remains a
+joint A+D criterion.
+
+**Item 4.** `S_flow = user_bytes_written / live_logical_bytes` from the
+`regular` arm, `L` the number of merge stages (populated levels minus one).
+
+| cell | S_flow | g_flow | resident S | L | Theorem B.1 ceiling on W-1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10M T=2 | 2.553 | 0.608 | 2.271 | 8 | 79.5% |
+| 10M T=6 | 1.503 | 0.335 | 1.261 | 4 | 39.9% |
+| 10M T=10 | 1.422 | 0.297 | 1.166 | 4 | 36.3% |
+| 20M T=2 | 2.561 | 0.609 | 2.250 | 9 | 81.8% |
+
+These replace the resident-S table in PATHWAYS Theorem B.1, which was a lower
+bound on the ceiling. They are strict upper bounds, not expectations; B-2 and
+D-4 use them against the post-Gate-3b deficit.
+
 ## 15. Current limitations and next work
+
+**Superseded 2026-09-05.** Steps 1 through 3 of the 2026-08-26 list below were
+executed and passed: the learner reaches replay, the optimizer moves the
+residual, accounting is exact, no hard-invalid interval contaminates a run, and
+the 10M checkpoint produced learned action flips. The matrix in Section 10.7
+then ran and failed. The ordering has therefore changed again, and the immediate
+work is no longer validation.
+
+1. ~~**Decide the objective.**~~ **Done, 2026-09-05.** The strict three-way
+   criterion is withdrawn and replaced by the constrained objective and Pareto-hull
+   comparator preregistered in the Section 3.1 amendment, with the supporting
+   proofs, gates and acceptance criteria in `docs/PATHWAYS.md`. The write
+   constraint is parity rather than a budget, on the strength of Theorems A.2
+   and B.1. Recorded before any run of the new programme, as required.
+2. **Re-weight the reward to match whatever objective is chosen.** `Phi` carries
+   physical/live space as a term to minimise, while the criteria only require
+   space not to regress by more than 2%. Section 10.7 Finding 3 shows the
+   learner spending reads to buy space it receives no credit for — at T=10 it
+   beat the space bound by 28 percentage points of unusable headroom. Space
+   should enter as a hinge penalty above the manifest limit. This is expected to
+   recover most of the prior's read advantage; it will **not** fix write
+   amplification.
+3. **Address write amplification directly, or accept it as the cost.** No arm
+   improves it in any cell. Deferring top-of-tree compaction relocates write
+   work deeper rather than removing it, and adds level crossings. If the
+   objective stays as written, this is the criterion that fails, and no reward
+   re-weighting reaches it.
+4. **Resolve the instrument problems in Section 10.7** before applying the
+   criteria again: the undecidable latency bounds, the `all(delta <= 0)` stall
+   checks, the vacuous `scan_amplification` floor, and the unexplained
+   `unconstrained_rl` write amplification at T=6.
+5. **Repair and revalidate guard calibration separately.** Unchanged by the
+   learner repair and still failing its preregistered threshold.
+6. Only then re-run the matrix at the preregistered ten repeats, and only then
+   the stress suites and the full frontier.
 
 **Superseded 2026-08-26.** Steps 1 through 4 of the list below were executed;
 the gate passed and the matrix ran. What that produced was not a policy result
@@ -1944,6 +2345,7 @@ as follows.
 | Document | What it contains | How to interpret it now |
 | --- | --- | --- |
 | `README.md` | Trigger-only synopsis, build entry points, geometry, and scaled-pipeline link. | Current entry page. |
+| `docs/PATHWAYS.md` | Improvement pathways A-E, their proofs, per-pathway acceptance criteria, and the gated execution order. | **Current forward plan.** Authoritative for the post-2026-09-05 objective, the two-hull comparator, and gate costs. Nothing in it has been executed. |
 | `docs/rl_l0_compaction_technical_spec.md` | Original L0 acceptance/fix specification. | Historical requirements; most mechanics were implemented and later superseded. |
 | `docs/rl_l0_compaction_change_summary.md` | First working L0 implementation and early observations. | Historical v1 record. |
 | `docs/project_technical_overview.md` | Detailed June L0 architecture, files, parameters, artifacts, and early results. | Historical L0-only implementation; its non-file-selection boundary remains current. |
@@ -2015,6 +2417,57 @@ timeline.
 - **Tectonic:** bundled Rust generator for explicit operation traces.
 
 ## 18. Bottom line
+
+**Updated 2026-09-05. The paragraphs below this block predate the first
+trained-learner result and are retained as the record of what was true before
+it.**
+
+The blocker that defined this project from 2026-08-24 to 2026-09-01 is gone. The
+learner reaches replay, the optimizer moves the residual, the accounting
+balances exactly, and the C++ and Python sides agree to the decision. Every
+statement in this document about zero gradient steps and an identically zero
+residual is now historical.
+
+What replaced it is a real result, and it is negative. Across 10M at T=2, 6 and
+10, with five paired repeats per cell, **no arm improves write amplification in
+any cell** — the analytic prior by +13.9% to +18.3%, the learned policy by +9.8%
+to +22.9%. Section 3.1 requires that interval strictly below zero, so every cell
+fails, and no reward re-weighting reaches it.
+
+Two findings survive and are worth stating on their own terms. The **analytic
+prior is a genuinely good read policy and improves as the size ratio grows**:
+-12.5%, -17.3% and -19.3% point-read amplification at T=2, 6 and 10, with its
+write penalty shrinking from +18.3% to +13.9%. At T=10 that is roughly a fifth
+of the probes and seeks removed for roughly a seventh more write bytes — a
+defensible trade under a constrained objective, though not under the one
+preregistered. And the **learned residual has a coherent, identifiable
+strategy**: it defers top-of-tree compaction, deepens the tree by one to three
+levels, and thereby trades part of the prior's read advantage for space
+amplification. That single behaviour explains all three amplification outcomes,
+and it is rational for the reward it was given — `Phi` treats space as a cost to
+minimise, while the criteria treat it as a bound not to exceed.
+
+So the project's open question has moved up a level. It is no longer "does the
+learner learn"; it does. It is whether the objective as preregistered is
+achievable at all: a strict three-way Pareto improvement over a baseline tuned
+to sit near the read/write frontier, in a structure where compacting less
+improves writes and worsens reads. The next decision is a research one — keep
+the objective and accept that write amplification is the wall, or restate it as
+a constrained problem and re-run — and it must be recorded before another
+matrix, not after seeing its results.
+
+**That decision was taken on 2026-09-05, before any run of the successor
+programme.** The strict three-way criterion is withdrawn as structurally
+infeasible and replaced by a constrained objective — minimise point-read
+amplification subject to write parity, and to the space, latency and stall
+bounds — judged against the Pareto hull of the static configuration class rather
+than a single tuned point. The amendment at the head of Section 3.1 is
+authoritative; `docs/PATHWAYS.md` carries the proofs that make parity rather
+than a budget the defensible write target, the two-hull comparator, the five
+gates and their costs. Nothing in that programme has been executed, and its own
+decisive question — whether giving the controller authority over level capacity
+flattens the depth growth that Section 10.7 identified as the mechanism behind
+every one of its amplification results — is answered at Gate 3b, not before.
 
 The project has progressed through four distinct technical systems:
 

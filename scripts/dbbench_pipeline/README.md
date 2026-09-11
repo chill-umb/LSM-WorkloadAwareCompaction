@@ -106,6 +106,21 @@ scripts/dbbench_pipeline/07_evaluate_paired.py \
   --scan-objective sorted_run_seeks
 ```
 
+Gate 0 of `docs/PATHWAYS.md` runs off-box on the artifacts above. Every arm
+now writes `compaction_measurements.json` (per-level merge survival from the
+`merge_schema_version` 1 events, release-time occupancy from the
+`compaction_release` events; items 1 and 2). Items 3 and 4, the A-0
+write-excess decomposition and the flow-garbage elision ceiling, come from
+`14_gate0_reanalysis.py`, which needs only `summary.csv` and each arm's
+`run.log`; it uses `rocksdb_LOG.txt` for exact per-level bytes when the arm
+kept it and otherwise falls back to the 0.1 GB stats table and reports the
+quantisation.
+
+```bash
+scripts/dbbench_pipeline/14_gate0_reanalysis.py \
+  /mnt/nvme/dbbench-results --output /mnt/nvme/dbbench-results/gate0_reanalysis.json
+```
+
 Sorted-run seeks is the strict scan-improvement objective because this
 workload's scan-amplification baseline is already at its physical floor. Scan
 amplification remains a 2% non-regression check. Every learned arm also has a

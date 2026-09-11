@@ -328,7 +328,7 @@ class LearningHealthGateTest(unittest.TestCase):
             self.assertFalse(report["checks"]["training_quiesced"])
             self.assertFalse(report["passed"])
 
-    def test_sorted_seek_objective_keeps_scan_amp_nonregression(self):
+    def test_frozen_scan_constraint_keeps_scan_amp_diagnostic(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             summary = root / "summary.csv"
@@ -346,6 +346,8 @@ class LearningHealthGateTest(unittest.TestCase):
                     "get_latency_avg_us": 10, "get_latency_p95_us": 20,
                     "scan_latency_avg_us": 10, "scan_latency_p95_us": 20,
                     "write_latency_avg_us": 10, "write_latency_p95_us": 20,
+                    "get_latency_p99_us": 30, "scan_latency_p99_us": 30,
+                    "write_latency_p99_us": 30,
                     "stall_seconds": 0, "stall_events": 0,
                 }
                 rows.append({**common, "arm": "regular",
@@ -366,12 +368,15 @@ class LearningHealthGateTest(unittest.TestCase):
                 [sys.executable, str(PIPELINE / "07_evaluate_paired.py"),
                  str(summary), "--size-millions", "1", "--size-ratio", "2",
                  "--minimum-pairs", "10", "--scan-objective",
-                 "sorted_run_seeks", "--output", str(output)],
+                 "sorted_run_seeks", "--space-margin", ".02", "--pilot",
+                 "--output", str(output)],
                 check=False, capture_output=True, text=True,
             )
-            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
             report = json.loads(output.read_text())
-            self.assertFalse(report["checks"]["scan_amplification"]["passed"])
+            self.assertNotIn("scan_amplification", report["checks"])
+            self.assertIn("scan_amplification", report["diagnostics"])
+            self.assertFalse(report["formal_acceptance"])
 
     def test_learning_analyzer_stride_is_per_level_and_steps_are_exact(self):
         with tempfile.TemporaryDirectory() as directory:

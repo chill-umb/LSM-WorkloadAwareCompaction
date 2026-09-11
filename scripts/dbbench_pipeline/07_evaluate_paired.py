@@ -12,7 +12,9 @@ from pathlib import Path
 
 # Shared with 09_evaluate_oracle_parity.py so the engineering gate and the
 # research criterion cannot drift onto different instruments.
-from pipeline_stats import ci95
+from pipeline_stats import ci95, objective_verdict
+from research_objective import (DEFAULT_CONTRACT, load_contract, metric_specs,
+                                relative_difference)
 
 
 def f(row: dict, key: str) -> float:
@@ -23,11 +25,7 @@ def f(row: dict, key: str) -> float:
 
 
 def relative(rl: float, baseline: float) -> float:
-    if baseline == 0:
-        if rl == 0:
-            return 0.0
-        raise SystemExit("relative regression is undefined against zero baseline")
-    return rl / baseline - 1.0
+    return relative_difference(rl, baseline)
 
 
 def main() -> int:
@@ -40,33 +38,55 @@ def main() -> int:
     parser.add_argument("--minimum-pairs", type=int, default=10)
     parser.add_argument(
         "--safety-only", action="store_true",
-        help="check only 2% space/latency bounds and no stall increase",
+        help="check frozen constraints without requiring point-read improvement",
     )
     parser.add_argument(
         "--scan-objective",
-        choices=("amplification", "sorted_run_seeks", "nonregression"),
+        choices=("sorted_run_seeks",),
         default="sorted_run_seeks",
-        help="preregistered objective; scan amplification remains non-regression",
+        help="compatibility flag; P0 freezes sorted-run seeks non-inferiority",
     )
+    parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
+    parser.add_argument("--space-margin", type=float, required=True,
+                        help="one frozen relative space budget: 0, .02, .05, .10")
+    parser.add_argument("--pilot", action="store_true",
+                        help="retrospective evaluation; never formal acceptance")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.minimum_pairs < 2:
+        parser.error("minimum-pairs must be at least two")
+    contract, contract_hash = load_contract(args.contract)
+    specs = metric_specs(contract, args.space_margin, args.safety_only)
+    if args.baseline_arm != contract["baseline_arm"]:
+        parser.error("baseline arm differs from frozen contract")
 
     grouped = defaultdict(dict)
     with args.summary.open(newline="") as handle:
         for row in csv.DictReader(handle):
             if (int(row["size_millions"]) == args.size_millions and
                     int(row["size_ratio"]) == args.size_ratio):
-                grouped[int(row.get("repeat", 1))][row["arm"]] = row
+                repeat = int(row.get("repeat", 1))
+                if row["arm"] in grouped[repeat]:
+                    raise SystemExit(f"duplicate arm/repeat {row['arm']}/{repeat}")
+                grouped[repeat][row["arm"]] = row
     pairs = []
     for repeat, arms in sorted(grouped.items()):
         if args.baseline_arm in arms and args.rl_arm in arms:
             pairs.append((repeat, arms[args.baseline_arm], arms[args.rl_arm]))
-    if len(pairs) < args.minimum_pairs:
-        raise SystemExit(f"need {args.minimum_pairs} pairs; found {len(pairs)}")
+        elif args.baseline_arm in arms or args.rl_arm in arms:
+            raise SystemExit(f"repeat {repeat}: incomplete pair")
+    if not pairs:
+        raise SystemExit("no paired measurements")
 
     cell_fingerprints = set()
     cell_manifest_hashes = set()
     for repeat, baseline, rl in pairs:
+        if not args.pilot:
+            for row in (baseline, rl):
+                if row.get("research_objective_sha256") != contract_hash:
+                    raise SystemExit(f"repeat {repeat}: research objective mismatch")
+                if f(row, "space_relative_margin") != args.space_margin:
+                    raise SystemExit(f"repeat {repeat}: space budget mismatch")
         if baseline.get("workload_profile") != rl.get("workload_profile"):
             raise SystemExit(f"repeat {repeat}: workload profile mismatch")
         if (not baseline.get("experiment_fingerprint") or
@@ -90,70 +110,31 @@ def main() -> int:
     if len(cell_manifest_hashes) != 1:
         raise SystemExit("paired cell mixes baseline SLO manifests across repeats")
 
-    strict = {} if args.safety_only else {
-        "write_amplification": "write_amplification",
-        "point_read_amplification": "point_read_amplification",
-    }
-    scan_key = ("scan_amplification" if args.scan_objective != "sorted_run_seeks"
-                else "sorted_run_seeks_per_scan")
-    if not args.safety_only and args.scan_objective != "nonregression":
-        strict["scan_objective"] = scan_key
-
     checks = {}
-    passed = True
-    for name, key in strict.items():
-        baseline_values = [f(base, key) for _, base, _ in pairs]
-        if name == "scan_objective" and key == "scan_amplification" and all(
-                value <= 1.0 + 1e-12 for value in baseline_values):
-            raise SystemExit(
-                "scan amplification is at its physical floor; preregister "
-                "a workload with headroom or another section-14.5 objective")
-        differences = [f(rl, key) - f(base, key) for _, base, rl in pairs]
-        interval = ci95(differences)
-        ok = interval["upper"] is not None and interval["upper"] < 0.0
-        checks[name] = {"kind": "strict_improvement", "metric": key,
-                        "ci95_rl_minus_baseline": interval, "passed": ok}
-        passed &= ok
-
-    nonregression = [
-        "space_amplification",
-        "get_latency_avg_us", "get_latency_p95_us",
-        "scan_latency_avg_us", "scan_latency_p95_us",
-        "write_latency_avg_us", "write_latency_p95_us",
-    ]
-    if not args.safety_only and args.scan_objective in (
-        "sorted_run_seeks", "nonregression"
-    ):
-        nonregression.append("scan_amplification")
-    for key in nonregression:
-        regressions = [relative(f(rl, key), f(base, key))
-                       for _, base, rl in pairs]
-        interval = ci95(regressions)
-        ok = interval["upper"] is not None and interval["upper"] <= 0.02
-        checks[key] = {"kind": "upper_relative_regression",
-                       "limit": 0.02, "ci95": interval, "passed": ok}
-        passed &= ok
-
-    stall_deltas = [f(rl, "stall_seconds") - f(base, "stall_seconds")
-                    for _, base, rl in pairs]
-    stall_ok = all(delta <= 0.0 for delta in stall_deltas)
-    checks["stall_seconds"] = {
-        "kind": "no_paired_increase", "deltas": stall_deltas,
-        "ci95": ci95(stall_deltas), "passed": stall_ok,
-    }
-    passed &= stall_ok
-
-    stall_event_deltas = [f(rl, "stall_events") - f(base, "stall_events")
-                          for _, base, rl in pairs]
-    stall_event_ok = all(delta <= 0.0 for delta in stall_event_deltas)
-    checks["stall_events"] = {
-        "kind": "no_paired_increase", "deltas": stall_event_deltas,
-        "ci95": ci95(stall_event_deltas), "passed": stall_event_ok,
-    }
-    passed &= stall_event_ok
+    for key, margin, strict in specs:
+        try:
+            differences = [relative(f(rl, key), f(base, key))
+                           for _, base, rl in pairs]
+        except ValueError as error:
+            checks[key] = {"verdict": "undecidable", "passed": None,
+                           "reason": str(error), "metric": key}
+            continue
+        checks[key] = {"metric": key, **objective_verdict(
+            differences, margin, args.minimum_pairs, strict=strict)}
+    failed = [key for key, check in checks.items()
+              if check["verdict"] == "failed"]
+    undecidable = [key for key, check in checks.items()
+                   if check["verdict"] == "undecidable"]
+    verdict = "failed" if failed else "undecidable" if undecidable else "passed"
+    diagnostics = {}
+    for key in ("stall_events", "scan_amplification", "write_latency_p95_us"):
+        if all(base.get(key) not in (None, "") and rl.get(key) not in (None, "")
+               for _, base, rl in pairs):
+            diagnostics[key] = {"ci95_absolute_difference": ci95([
+                f(rl, key) - f(base, key) for _, base, rl in pairs])}
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "size_millions": args.size_millions,
         "size_ratio": args.size_ratio,
         "pairs": len(pairs),
@@ -161,15 +142,22 @@ def main() -> int:
         "baseline_slo_sha256": next(iter(cell_manifest_hashes)),
         "scan_objective": args.scan_objective,
         "safety_only": args.safety_only,
+        "research_objective_sha256": contract_hash,
+        "space_relative_margin": args.space_margin,
+        "pilot": args.pilot,
+        "formal_acceptance": (not args.pilot and len(pairs) >= 10 and
+                              verdict == "passed"),
         "checks": checks,
-        "passed": passed,
+        "diagnostics": diagnostics,
+        "verdict": verdict, "failed": failed, "undecidable": undecidable,
+        "passed": {"passed": True, "failed": False}.get(verdict),
     }
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered)
     print(rendered, end="")
-    return 0 if passed else 1
+    return {"passed": 0, "failed": 1, "undecidable": 3}[verdict]
 
 
 if __name__ == "__main__":

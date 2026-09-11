@@ -53,6 +53,8 @@ def critical_value(n: int) -> float:
 
 def ci95(values: list[float]) -> dict:
     n = len(values)
+    if not values or any(not math.isfinite(value) for value in values):
+        raise ValueError("confidence intervals require finite, nonempty samples")
     mean = statistics.fmean(values)
     if n < 2:
         return {"n": n, "mean": mean, "lower": None, "upper": None}
@@ -60,6 +62,35 @@ def ci95(values: list[float]) -> dict:
     half = critical * statistics.stdev(values) / math.sqrt(n)
     return {"n": n, "mean": mean, "lower": mean - half,
             "upper": mean + half}
+
+
+def objective_verdict(values: list[float], margin: float, minimum_pairs: int,
+                      *, strict: bool = False) -> dict:
+    """Frozen P0 decision rule; power estimates are diagnostic, not a gate.
+
+    Samples are relative differences, not percentage points or raw WAF units.
+    An interval crossing the boundary is undecidable in either direction.
+    """
+    if minimum_pairs < 2 or not math.isfinite(margin) or margin < 0:
+        raise ValueError("invalid objective margin or minimum pair count")
+    if strict and margin != 0:
+        raise ValueError("strict improvement uses a zero boundary")
+    interval = ci95(values)
+    needed, reason = required_pairs(values, margin)
+    verdict = "undecidable"
+    if len(values) >= minimum_pairs:
+        if interval["upper"] < margin if strict else interval["upper"] <= margin:
+            verdict = "passed"
+        elif interval["lower"] >= margin if strict else interval["lower"] > margin:
+            verdict = "failed"
+    return {
+        "kind": "strict_improvement" if strict else "noninferiority",
+        "difference_form": "paired_relative", "limit": margin,
+        "ci95": interval, "per_repeat": values, "verdict": verdict,
+        "passed": {"passed": True, "failed": False}.get(verdict),
+        "minimum_pairs": minimum_pairs, "required_pairs": needed,
+        "required_pairs_reason": reason,
+    }
 
 
 def required_pairs(values: list[float], limit: float,

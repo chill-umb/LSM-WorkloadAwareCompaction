@@ -42,13 +42,21 @@ fi
   exit 1
 }
 [[ -x "$PYTHON" ]] || {
-  echo "Missing $PYTHON; run step 00 first." >&2
-  exit 1
+  if [[ "$EXPERIMENT_ARMS" == "regular" ]]; then
+    PYTHON="$(command -v python3)"
+  else
+    echo "Missing $PYTHON; run step 00 first." >&2
+    exit 1
+  fi
 }
+if [[ "$EXPERIMENT_ARMS" != "regular" ]]; then
 "$PYTHON" -c 'import numpy, torch' >/dev/null || {
   echo "The pipeline Python environment does not contain numpy and torch." >&2
   exit 1
 }
+fi
+DBBENCH_SHA256="$(sha256sum "$DB_BENCH" | awk '{print $1}')"
+RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.v1.json | awk '{print $1}')"
 
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS "$REPEATS"; do
   [[ "$integer" =~ ^[0-9]+$ ]] || {
@@ -240,6 +248,7 @@ COMMON=(
   --write_buffer_size="$WRITE_BUFFER_SIZE"
   --target_file_size_base="$TARGET_FILE_SIZE"
   --max_bytes_for_level_base="$MAX_BYTES_FOR_LEVEL_BASE"
+  --level_compaction_dynamic_level_bytes=false
   --num_levels="$NUM_LEVELS"
   --max_background_jobs="$MAX_BACKGROUND_JOBS"
   --open_files="$OPEN_FILES"
@@ -481,7 +490,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -537,6 +546,12 @@ PY
     printf 'rl_file_picker=rocksdb_native\n'
     printf 'rl_exploration_decay_steps=%s\n' "$decay_steps"
     printf 'experiment_fingerprint=%s\n' "$fingerprint"
+    printf 'dbbench_sha256=%s\n' "$DBBENCH_SHA256"
+    printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
+    printf 'level_compaction_dynamic_level_bytes=false\n'
+    printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
+    printf 'baseline_level_base_scale=%s\n' "${BASELINE_LEVEL_BASE_SCALE:-1}"
+    printf 'num_levels=%s\n' "$NUM_LEVELS"
     printf 'level0_file_num_compaction_trigger=%s\n' "$effective_l0_compaction"
     printf 'level0_slowdown_writes_trigger=%s\n' "$effective_l0_slowdown"
     printf 'level0_stop_writes_trigger=%s\n' "$effective_l0_stop"
@@ -652,6 +667,12 @@ PY
   printf 'elapsed_seconds=%.6f\n' "$(( end_ns - start_ns ))e-9" \
     >> "$result_dir/metadata.env"
   cp "$db_dir/LOG" "$result_dir/rocksdb_LOG.txt" 2>/dev/null || true
+  "$PYTHON" "$PIPELINE_DIR/compaction_measurements.py" \
+    "$result_dir/rocksdb_LOG.txt" --num-levels "$NUM_LEVELS" \
+    --output "$result_dir/compaction_measurements.json" || {
+      echo "Incomplete Gate-0 measurements; keeping database and logs: $result_dir" >&2
+      exit 6
+    }
   local before after
   before="$(sst_bytes "$db_dir")"
 

@@ -12,7 +12,6 @@ import statistics
 from pathlib import Path
 from typing import Iterable, Optional
 
-import matplotlib.pyplot as plt
 
 
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -90,9 +89,17 @@ def parse_histograms(text: str) -> dict[str, dict[str, float]]:
             "p50": float(match.group(2)),
             "p95": float(match.group(3)),
             "p99": float(match.group(4)),
+            "p100": float(match.group(5)),
             "count": count,
+            "sum": total,
             "avg": divide(total, count),
         }
+        quantiles = [float(match.group(i)) for i in range(2, 6)]
+        if (any(not math.isfinite(v) or v < 0
+                for v in [*quantiles, count, total]) or
+                quantiles != sorted(quantiles) or
+                count != int(count) or (count == 0 and total != 0)):
+            raise ValueError(f"invalid histogram: {match.group(1)}")
     return result
 
 
@@ -227,6 +234,8 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         "policy_seed": metadata.get("policy_seed", "null"),
         "experiment_fingerprint": metadata.get("experiment_fingerprint", ""),
         "baseline_slo_sha256": metadata.get("baseline_slo_sha256", ""),
+        "research_objective_sha256": metadata.get("research_objective_sha256", ""),
+        "space_relative_margin": metadata.get("space_relative_margin", ""),
         "elapsed_seconds": number(metadata.get("elapsed_seconds")),
         **amplification,
         "stall_seconds": tickers.get("rocksdb.stall.micros", 0.0) / 1e6,
@@ -241,6 +250,17 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         "write_latency_avg_us": write_latency.get("avg", math.nan),
         "write_latency_p95_us": write_latency.get("p95", math.nan),
         "write_latency_p99_us": write_latency.get("p99", math.nan),
+        **{f"{operation}_latency_{field}" +
+           ("_us" if field in ("p50", "p100", "sum") else ""):
+           histogram.get(field, math.nan)
+           for operation, histogram in (("get", get_latency),
+                                        ("scan", scan_latency),
+                                        ("write", write_latency))
+           for field in ("p50", "p100", "count", "sum")},
+        "write_p95_below_mean": (
+            write_latency.get("p95", math.nan) <
+            write_latency.get("avg", math.nan)),
+        "write_stall_histogram_sum_us": write_stall.get("sum", math.nan),
         "get_operations": gets,
         "put_operations": puts,
         "scan_operations": scans,
@@ -331,6 +351,7 @@ def plot_metric(ax: plt.Axes, rows: list[dict[str, object]], metric: str,
 
 
 def finish_figure(fig: plt.Figure, axes: Iterable[plt.Axes], path: Path) -> None:
+    import matplotlib.pyplot as plt
     handles, labels = next(iter(axes)).get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, loc="upper center", ncol=3,
@@ -343,6 +364,7 @@ def finish_figure(fig: plt.Figure, axes: Iterable[plt.Axes], path: Path) -> None
 def graph_grid(rows: list[dict[str, object]], output: Path,
                specifications: list[tuple[str, str, str]], filename: str,
                dimensions: tuple[int, int]) -> None:
+    import matplotlib.pyplot as plt
     fig, axes_array = plt.subplots(*dimensions, figsize=(15, 8), squeeze=False)
     axes = list(axes_array.flat)
     for axis, (metric, title, ylabel) in zip(axes, specifications):
@@ -356,6 +378,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
     results = args.results.resolve()
     output = (args.output or results / "graphs").resolve()
@@ -370,6 +393,10 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(rows)
 
+    if args.summary_only:
+        print(f"rows: {len(rows)}; csv: {output / 'summary.csv'}")
+        return 0
+
     graph_grid(rows, output, [
         ("write_amplification", "Write amplification", "Physical / logical bytes"),
         ("point_read_amplification", "Point-read amplification", "SST probes / Get"),
@@ -383,9 +410,9 @@ def main() -> int:
         ("get_latency_avg_us", "Get average", "Microseconds"),
         ("scan_latency_avg_us", "Scan average", "Microseconds"),
         ("write_latency_avg_us", "Write average", "Microseconds"),
-        ("get_latency_p95_us", "Get p95", "Microseconds"),
-        ("scan_latency_p95_us", "Scan p95", "Microseconds"),
-        ("write_latency_p95_us", "Write p95", "Microseconds"),
+        ("get_latency_p99_us", "Get p99", "Microseconds"),
+        ("scan_latency_p99_us", "Scan p99", "Microseconds"),
+        ("write_latency_p99_us", "Write p99", "Microseconds"),
     ], "latency.png", (2, 3))
 
     graph_grid(rows, output, [

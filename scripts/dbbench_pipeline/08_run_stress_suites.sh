@@ -95,6 +95,7 @@ run_profile() {  # profile, get ratio, put ratio, seek ratio
         "$final_results/graphs/summary.csv" \
         --size-millions "$size_m" --size-ratio "$ratio" \
         --minimum-pairs "$STRESS_FINAL_REPEATS" --safety-only \
+        --space-margin 0.02 \
         --output "$final_results/graphs/acceptance-${size_m}M-T${ratio}.json"
     done
   done

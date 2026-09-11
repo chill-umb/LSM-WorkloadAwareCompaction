@@ -79,11 +79,14 @@ results/*
 # a fresh machine cannot regenerate the workloads at all.
 *.txt
 *.json
+!config/research_objective_contract.v1.json
 !workload_specs/**/*.json
 !workload_specs/**/*.md
 
 # Documentations
-/docs/
+/docs/*
+!/docs/RESEARCH_OBJECTIVE_CONTRACT.md
+!/docs/PATHWAY_IMPLEMENTATION_STATUS.md
 
 # Some sketchy executable file
 linux-x64
@@ -94,3 +97,6 @@ build-bench/
 # partition rather than /tmp, which is tmpfs here — a multi-GB db_bench run
 # there would sit in RAM and measure page-cache speed instead of disk.
 .dbbench/
+
+# graphify
+graphify-out/
