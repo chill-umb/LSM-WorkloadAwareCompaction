@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "contract_status": "frozen",
+  "frozen_date": "2026-09-10",
+  "baseline_arm": "regular",
+  "pairing_unit": "matched_repeat",
+  "confidence_level": 0.95,
+  "difference_form": "paired_relative",
+  "decision_rules": {
+    "noninferiority": {
+      "pass": "upper_ci_le_margin",
+      "fail": "lower_ci_gt_margin",
+      "otherwise": "undecidable"
+    },
+    "strict_improvement": {
+      "pass": "upper_ci_lt_zero",
+      "fail": "lower_ci_ge_zero",
+      "otherwise": "undecidable"
+    },
+    "missing_objective_data": "fail_closed"
+  },
+  "primary_objective": {
+    "metric": "point_read_amplification",
+    "direction": "minimize",
+    "test": "strict_improvement"
+  },
+  "constraints": {
+    "write": {
+      "metric": "write_amplification",
+      "test": "noninferiority",
+      "relative_margin": 0.02
+    },
+    "space": {
+      "metric": "space_amplification",
+      "test": "noninferiority",
+      "mode": "sweep",
+      "relative_margin_axis": [0.0, 0.02, 0.05, 0.1]
+    },
+    "scan": {
+      "metric": "sorted_run_seeks_per_scan",
+      "test": "noninferiority",
+      "relative_margin": 0.02,
+      "diagnostic_metrics": ["scan_amplification"]
+    },
+    "latency": {
+      "test": "noninferiority",
+      "relative_margin": 0.02,
+      "acceptance_metrics": [
+        "get_latency_avg_us",
+        "get_latency_p99_us",
+        "scan_latency_avg_us",
+        "scan_latency_p99_us",
+        "write_latency_avg_us",
+        "write_latency_p99_us"
+      ],
+      "preserved_diagnostics": ["p50", "p95", "p100", "count", "sum"]
+    },
+    "stalls": {
+      "metric": "stall_seconds",
+      "test": "noninferiority",
+      "relative_margin": 0.0,
+      "diagnostic_metrics": ["stall_events"]
+    }
+  },
+  "phase_cost": {
+    "formula": "point_read_amplification/regular_point_read_amplification",
+    "infeasible_value": "positive_infinity",
+    "no_feasible_configuration": "undefined"
+  },
+  "analytical_write_model": {
+    "name": "M3",
+    "formula": "0.5*(fanout+1)",
+    "empirical_metric": "rocksdb_physical_write_bytes/user_logical_write_bytes",
+    "corollary_a4_quantity": "write_amplification_minus_one"
+  },
+  "capacity": {
+    "level_compaction_dynamic_level_bytes": false,
+    "expandable_levels": "1_through_L_minus_1",
+    "initial_expansion_step": 1.25,
+    "maximum_scale_source": "gate1_measured_space_curve",
+    "forced_contraction": {
+      "classification": "override",
+      "separate_requested_and_effective_action": true,
+      "include_in_q_replay": false,
+      "retain_telemetry": true,
+      "retain_realized_reward": true
+    },
+    "rate_limited_debt_release": "deferred_until_before_P8_acceptance"
+  },
+  "delete_sweep": {
+    "distribution": "Assoc",
+    "rates": [0.0, 0.03, 0.06],
+    "provenance_label": "synthetic"
+  },
+  "prior_only_artifacts": {
+    "existing_suite_role": "pilot_only",
+    "formal_source": "rerun_with_new_binary_manifest_and_fingerprint"
+  },
+  "revisions": {
+    "project": "7ddc7d308fbe83d7fe3118959ce798ac756fe3fd",
+    "rocksdb": "7ea2d73655025332855864f0b8d6d2dbdad3f336"
+  },
+  "kappa": {
+    "definition": "occupancy_bytes/nominal_target_bytes_at_outward_release",
+    "source": "compatible_capacity_off_learned_policy",
+    "granularity": "per_level_per_repeat",
+    "value_stage": "P17a"
+  }
+}

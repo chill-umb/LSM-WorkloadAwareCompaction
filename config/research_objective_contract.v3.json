@@ -1,0 +1,208 @@
+{
+  "schema_version": 3,
+  "contract_status": "frozen",
+  "frozen_date": "2026-09-12",
+  "baseline_arm": "regular",
+  "pairing_unit": "matched_repeat",
+  "confidence_level": 0.95,
+  "difference_form": "paired_relative",
+  "decision_rules": {
+    "noninferiority": {
+      "pass": "upper_ci_le_margin",
+      "fail": "lower_ci_gt_margin",
+      "otherwise": "undecidable"
+    },
+    "strict_improvement": {
+      "pass": "upper_ci_lt_zero",
+      "fail": "lower_ci_ge_zero",
+      "otherwise": "undecidable"
+    },
+    "missing_objective_data": "fail_closed"
+  },
+  "primary_objective": {
+    "metric": "point_read_amplification",
+    "direction": "minimize",
+    "test": "strict_improvement"
+  },
+  "constraints": {
+    "write": {
+      "metric": "write_amplification",
+      "test": "noninferiority",
+      "relative_margin": 0.02
+    },
+    "space": {
+      "metric": "space_amplification",
+      "test": "noninferiority",
+      "mode": "sweep",
+      "relative_margin_axis": [
+        0.0,
+        0.02,
+        0.05,
+        0.1
+      ]
+    },
+    "scan": {
+      "metric": "sorted_run_seeks_per_scan",
+      "test": "noninferiority",
+      "relative_margin": 0.02,
+      "diagnostic_metrics": [
+        "scan_amplification"
+      ]
+    },
+    "latency": {
+      "test": "noninferiority",
+      "relative_margin": 0.02,
+      "acceptance_metrics": [
+        "get_latency_avg_us",
+        "get_latency_p99_us",
+        "scan_latency_avg_us",
+        "scan_latency_p99_us",
+        "write_latency_avg_us",
+        "write_latency_p99_us"
+      ],
+      "preserved_diagnostics": [
+        "p50",
+        "p95",
+        "p100",
+        "count",
+        "sum"
+      ]
+    },
+    "stalls": {
+      "metric": "stall_seconds",
+      "test": "noninferiority",
+      "relative_margin": 0.0,
+      "diagnostic_metrics": [
+        "stall_events"
+      ]
+    }
+  },
+  "phase_cost": {
+    "formula": "point_read_amplification/regular_point_read_amplification",
+    "infeasible_value": "positive_infinity",
+    "no_feasible_configuration": "undefined"
+  },
+  "analytical_write_model": {
+    "name": "M3",
+    "formula": "0.5*(fanout+1)",
+    "empirical_metric": "rocksdb_physical_write_bytes/user_logical_write_bytes",
+    "corollary_a4_quantity": "write_amplification_minus_one"
+  },
+  "capacity": {
+    "level_compaction_dynamic_level_bytes": false,
+    "expandable_levels": "1_through_L_minus_1",
+    "initial_expansion_step": 1.25,
+    "maximum_scale_source": "gate1_measured_space_curve",
+    "forced_contraction": {
+      "classification": "override",
+      "separate_requested_and_effective_action": true,
+      "include_in_q_replay": false,
+      "retain_telemetry": true,
+      "retain_realized_reward": true
+    },
+    "rate_limited_debt_release": "deferred_until_before_P8_acceptance"
+  },
+  "delete_sweep": {
+    "distribution": "Assoc",
+    "rates": [
+      0.0,
+      0.03,
+      0.06
+    ],
+    "provenance_label": "synthetic"
+  },
+  "prior_only_artifacts": {
+    "existing_suite_role": "pilot_only",
+    "formal_source": "rerun_with_new_binary_manifest_and_fingerprint"
+  },
+  "revisions": {
+    "project": "6b482e316f17281e9365872f6e8b11cf6ae8e494",
+    "rocksdb": "81d2742bf05883fa9978a9e984e32f709409444f",
+    "rocksdb_parent": "7ea2d73655025332855864f0b8d6d2dbdad3f336",
+    "rocksdb_base": "7ea2d73655025332855864f0b8d6d2dbdad3f336",
+    "rocksdb_base_preserved": true
+  },
+  "kappa": {
+    "definition": "occupancy_bytes/nominal_target_bytes_at_outward_release",
+    "source": "compatible_capacity_off_learned_policy",
+    "granularity": "per_level_per_repeat",
+    "value_stage": "P17a"
+  },
+  "supersedes": {
+    "contract": "research_objective_contract.v2.json",
+    "sha256": "d8e1d0fbb152c061ccedc1e78a5b19eb25bae225c431f4865459efad883ddc00",
+    "frozen_date": "2026-09-12",
+    "runs_executed_under_it": 0,
+    "reason": "v2 pinned the build architecture but left the host page cache uncontrolled, so measured read latency would have reflected free RAM rather than the storage device. Amended before Gate 1 because the choice changes the baseline and cannot be made after the hull is measured.",
+    "prior": {
+      "contract": "research_objective_contract.v1.json",
+      "sha256": "0cdc1fd13e230762be0ba519f11ef74baca3d79068a1956374183a0559787c90",
+      "frozen_date": "2026-09-10"
+    }
+  },
+  "p1_amendments": {
+    "a0_write_excess_decomposition": {
+      "required_for": "research_track",
+      "rule": "attribution of any W change to capacity expansion is limited to the D_depth share"
+    },
+    "a2_is_joint_a_plus_d": true,
+    "elision_floor": "1/S_flow",
+    "b1_ceiling_source": "measured S_flow and populated depth at Gate 0",
+    "c6_cross_t_nondomination": {
+      "size_ratios": [
+        2,
+        6,
+        10,
+        14,
+        20
+      ],
+      "required_for": [
+        "research_track",
+        "experiments_and_analysis_track"
+      ]
+    },
+    "gate3b_rung_ladder": {
+      "rungs": [
+        0.0,
+        0.02,
+        0.05,
+        0.1
+      ],
+      "report_all_rungs": true,
+      "post_hoc_widening": false,
+      "headline_rung": 0.02
+    },
+    "pathway_d_hinge_target": "W_base + delta_W at the arm's own T; not moved to the hull"
+  },
+  "build": {
+    "march_target": "znver5",
+    "mechanism": "RocksDB PORTABLE cache variable; PORTABLE=0 would emit -march=native",
+    "why_not_native": "native silently degrades to a generic microarchitecture on a compiler that does not know the host CPU",
+    "minimum_toolchain": "GCC 14.1 or Clang 19",
+    "measurement_node": "single-socket AMD EPYC 4545P, 16 cores, SMT off, one NUMA node",
+    "binary_sha256_in_experiment_fingerprint": true,
+    "level_compaction_dynamic_level_bytes": false,
+    "io": {
+      "use_direct_reads": true,
+      "use_direct_io_for_flush_and_compaction": true,
+      "compaction_readahead_size_bytes": 2097152,
+      "swept": false,
+      "reason": "reads reach the drive, so the block cache is the only cache and the latency constraints measure the storage path",
+      "rejected_alternative": "a cgroup memory cap on the benchmark process. Equally defensible, but it is external state that is not carried in the experiment fingerprint and is silently lost on a new lease.",
+      "recorded_in": [
+        "experiment_fingerprint: dio field",
+        "metadata.env: use_direct_io"
+      ]
+    }
+  },
+  "measurement_environment": {
+    "cpu_pinning": "db_bench and the Python controller run on disjoint cores that share no last-level cache",
+    "applies_to_every_arm": true,
+    "recorded_in": [
+      "metadata.env: dbbench_cpus",
+      "metadata.env: controller_cpus"
+    ],
+    "enforced_by_experiment_fingerprint": false,
+    "note": "recorded for provenance; a differently pinned arm is not yet refused by the paired evaluator"
+  }
+}
