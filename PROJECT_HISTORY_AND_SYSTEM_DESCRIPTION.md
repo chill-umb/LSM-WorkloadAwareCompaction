@@ -2257,6 +2257,25 @@ The pairs are recorded in `gate1/hull_indistinguishable.tsv`. This is a
 measured property of the static configuration class, not an experiment failure,
 but it does mean the criterion as written is unsatisfiable here.
 
+The cause was checked rather than assumed. The two T=6 points at level-base
+scale 0.5, L0 triggers 16 and 8, contain no outlier run: across 14 and 5
+repeats their stall time spans 52 to 60 seconds and their sorted-run seeks 6.95
+to 7.09. The two configurations differ by 0.0067 in write amplification, 0.080%
+of the mean, against per-run standard deviations of 0.145% and 0.120%. The gap
+between two distinct hull points is therefore 0.55 and 0.66 of a single
+standard deviation, and resolving it to C-2's standard would take 207 and 143
+repeats. The frontier is denser than the measurement resolves.
+
+That same reproducibility is what gives the acceptance criteria their power,
+since C-2 is the only criterion comparing hull points with one another. At five
+repeats the full 95% interval is 0.30 to 0.36% of the mean on write
+amplification and 1.30 to 2.85% on point-read; at ten repeats, 0.17 to 0.21%
+and 0.75 to 1.64%. Against the frozen 2% margins, write amplification has about
+six times the headroom at five repeats, while point-read is the binding axis:
+the worse configuration exceeds a 2% margin at five repeats and falls inside it
+at ten. This is the first measured justification for the preregistered ten
+repeats, which until now rested on convention.
+
 **C-5 is not satisfied.** The capacity-space curves are measured at every
 ratio, but `capacity_s_max` is `None` throughout: the sweep varies
 `max_bytes_for_level_base`, which moves L0's target as well as the deep-level

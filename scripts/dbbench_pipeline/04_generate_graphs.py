@@ -280,7 +280,10 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
 
 def collect(results: Path) -> list[dict[str, object]]:
     rows = []
-    for completed in results.glob("*M/T*/**/COMPLETED"):
+    # The leading **/ lets one results root cover a whole sweep, whose arms sit
+    # under a per-configuration directory (<root>/<config_id>/10M/T2/...). It
+    # still matches a single arm root, where ** contracts to nothing.
+    for completed in results.glob("**/*M/T*/**/COMPLETED"):
         row = collect_arm(completed.parent)
         if row is not None:
             rows.append(row)
