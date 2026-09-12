@@ -88,11 +88,48 @@ def analyze_points(configs: dict[str, dict[int, dict]]) -> dict:
             decidable &= count <= len(values)
         top_up[name] = {"suggested_total_repeats": needed,
                         "width_criterion_passed": decidable,
+                        "repeats_present": len(point["seeds"]),
+                        "knobs": config_knobs(name),
                         "reason": "C-2 full CI width < half inter-point spacing"}
     return {"points": points, "empirical_hull": hull,
             "paired_dominance": comparisons, "repeat_top_up": top_up,
             "c1_sampled": len(points) >= 12 and len(hull) >= 4,
             "c2_widths_passed": all(v["width_criterion_passed"] for v in top_up.values())}
+
+
+def run_digest(measurements: dict) -> dict:
+    """Per-run Gate-0 summary for the report. Deliberately omits the releases
+    array: it carries one record per compaction with three per-level arrays,
+    which makes the embedded payload gigabytes. Full detail stays in each run's
+    compaction_measurements.json, referenced by path."""
+    digest = {}
+    for directory, entry in measurements.items():
+        views = entry["measurement"]["views"]
+        releases = entry["measurement"]["releases"]
+        depths = [r["populated_levels"] for r in releases]
+        digest[directory] = {
+            "per_level_survival": {level: bucket["eta"] for level, bucket
+                                   in views["whole_run"]["levels"].items()
+                                   if bucket["jobs"]},
+            "global_survival": {phase: views[phase]["global"]["eta"]
+                                for phase in ("workload", "drain", "whole_run")},
+            "populated_levels_max": max(depths, default=None),
+            "populated_levels_final": depths[-1] if depths else None,
+            "releases": len(releases),
+            "excluded_trivial_moves": entry["measurement"]["excluded_trivial_moves"],
+        }
+    return digest
+
+
+def config_knobs(fingerprint: str) -> dict:
+    """The swept knobs, so a top-up can target one configuration instead of
+    re-running the grid."""
+    ratio = re.search(r":T(\d+):", fingerprint)
+    base = re.search(r":l1(\d+):", fingerprint)
+    l0 = re.search(r":l0-(\d+)-(\d+)-(\d+):", fingerprint)
+    return {"size_ratio": int(ratio.group(1)) if ratio else None,
+            "max_bytes_for_level_base": int(base.group(1)) if base else None,
+            "level0_file_num_compaction_trigger": int(l0.group(1)) if l0 else None}
 
 
 def policy_positions(policy: dict[str, dict[int, dict]], configs: dict,
@@ -172,8 +209,20 @@ def space_curves(configs: dict, measurements: dict, margins: list[float]) -> lis
         groups[group][scale] = config
     curves = []
     for group, scales in groups.items():
+        # The cross-T cells (T=14, T=20) are run at scale 1x only: they exist to
+        # bound the pooled hull, not to calibrate the capacity-space curve.
+        # Record them as carrying no curve rather than failing the analysis.
+        if set(scales) == {1.0}:
+            curves.append({"size_ratio": int(group[0]),
+                           "l0_priority_options": group[1:], "points": [],
+                           "capacity_curve": "absent",
+                           "reason": "single base scale; hull cell, not a "
+                                     "capacity calibration curve"})
+            continue
         if not {0.5, 1., 2.}.issubset(scales):
-            raise ValueError("incomplete 0.5/1/2 base-scale curve")
+            raise ValueError(
+                f"incomplete 0.5/1/2 base-scale curve for {group}: "
+                f"have {sorted(scales)}")
         baseline = configs[scales[1.]]
         points = []
         for scale, name in sorted(scales.items()):
@@ -190,6 +239,7 @@ def space_curves(configs: dict, measurements: dict, margins: list[float]) -> lis
                                              for m in margins}})
         curves.append({"size_ratio": int(group[0]),
                        "l0_priority_options": group[1:], "points": points,
+                       "capacity_curve": "measured",
                        "measured_feasible_base_scales": {
                            str(m): [p["scale"] for p in points if p["scale"] >= 1 and
                                     p["budget_checks"][str(m)]["passed"] is True]
@@ -217,6 +267,15 @@ def main() -> int:
         args.results, args.size_millions, args.size_ratio)
     contract, fingerprint = load_contract()
     analysis = analyze_points(configs)
+    # Carry the swept base scale itself, so a targeted top-up does not have to
+    # divide byte counts by the configured L1 base to recover it.
+    scale_by_fingerprint = {
+        entry["metadata"]["experiment_fingerprint"]:
+            float(entry["metadata"]["baseline_level_base_scale"])
+        for entry in measurements.values()
+        if entry["metadata"].get("experiment_fingerprint")}
+    for name, entry in analysis["repeat_top_up"].items():
+        entry["knobs"]["baseline_level_base_scale"] = scale_by_fingerprint.get(name)
     policy = {}
     if args.policy_results:
         policy_configs, _ = collect_grid(
@@ -233,7 +292,7 @@ def main() -> int:
               **analysis,
               "space_curves": space_curves(configs, measurements,
                   contract["constraints"]["space"]["relative_margin_axis"]),
-              "per_run_measurements": measurements,
+              "per_run_gate0_digest": run_digest(measurements),
               "formal_gate1_passed": False,
               "remaining_gates": ["fresh_prior_only_comparison", "matched_capacity_bound"]}
     args.output.parent.mkdir(parents=True, exist_ok=True)
