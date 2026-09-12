@@ -2232,6 +2232,55 @@ These replace the resident-S table in PATHWAYS Theorem B.1, which was a lower
 bound on the ceiling. They are strict upper bounds, not expectations; B-2 and
 D-4 use them against the post-Gate-3b deficit.
 
+### 14.7 Gate 1 executed, 2026-09-12
+
+The first Hull-0 sweep ran on the Chameleon EPYC 4545P node: 12 static
+configurations per size ratio (L0 trigger 2/4/8/16 x level-base scale
+0.5/1/2, `compaction_pri` pinned to 3) at 10M for T = 2, 6 and 10, plus
+`regular` cells at T = 14 and 20, three repeats to locate the hull and a
+targeted top-up on retained points.
+
+**C-1 passes.** Per-ratio hulls hold 12, 9 and 9 of 12 configurations. The
+pooled cross-T hull holds 18 of 38, contributed T=2 9/12, T=6 6/12, T=10 2/12,
+T=14 1/1, T=20 0/1. Extending the ratio axis above 10 adds no frontier, which
+settles the question P1-14 added the cross-T cells to answer.
+
+**C-2 verdict: fail, deferred.** It is recorded as failed rather than
+reinterpreted, because the criterion had already been seen to fail; the reading
+is revisited before the acceptance table is fixed, not now.
+Two T=2 hull points, both at level-base scale 0.5, are unresolvable at any
+repeat count up to 200: no achievable n fits the 95% interval inside half the
+gap to the nearest hull neighbour. Three further points need 32, 70 and 126
+repeats against 14, 14 and 3 present, which exceeds the spend limit of ten
+additional arms per configuration. All hull points meet the five-repeat floor.
+The pairs are recorded in `gate1/hull_indistinguishable.tsv`. This is a
+measured property of the static configuration class, not an experiment failure,
+but it does mean the criterion as written is unsatisfiable here.
+
+**C-5 is not satisfied.** The capacity-space curves are measured at every
+ratio, but `capacity_s_max` is `None` throughout: the sweep varies
+`max_bytes_for_level_base`, which moves L0's target as well as the deep-level
+targets, so the curve cannot bound a per-level capacity actuator. C-5 selects
+the (cell, rung) pairs for Gate 3b and must be closed before it.
+
+**C-3 and C-6 are not evaluable.** Both require `prior_only`, which requires a
+guard-calibrated manifest, which is the Pathway E-1 gate still failing.
+
+**Three defects were found and fixed while running this gate**, all in
+analysis rather than in the controller. `compaction_measurements.py` tested
+`merge_success is not True`, but RocksDB's `JSONWriter` has no boolean
+overload, so `status.ok()` reaches the log as the integer 1 and every
+compaction was read as failed; the same defect silently misfiled drain-phase
+compactions as workload phase. `frontier_analysis.py` embedded every run's full
+Gate-0 payload in the hull report, producing 1.8 GB files, and demanded the
+full 0.5/1/2 base-scale ladder from the cross-T cells, which are deliberately
+run at scale 1 only. Stage 06's fingerprint parser also rejected the current
+fingerprint outright, which would have blocked every manifest.
+
+**The cost model is stale.** PATHWAYS budgets Gate 1 at 48 hours from the
+2026-09-03 Zen 3 measurements. The per-arm `db_bench` phase here is 173.6 s at
+10M T=2. The whole cost table and the lease split need recalibrating.
+
 ## 15. Current limitations and next work
 
 **Superseded 2026-09-05.** Steps 1 through 3 of the 2026-08-26 list below were

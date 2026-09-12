@@ -67,6 +67,24 @@ if [[ -f "$BUILD_PROVENANCE" ]]; then
 fi
 RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.v3.json | awk '{print $1}')"
 
+# Inherited by every db_bench launch. The C++ side aborts if it is set but
+# unusable, so a typo stops the run instead of quietly measuring an unexpanded
+# tree.
+export RL_STATIC_CAPACITY_SCALES="$STATIC_CAPACITY_SCALES"
+# The fingerprint gains a cap segment only when expansion is on, so an
+# unexpanded run keeps the identity it had before this knob existed and stays
+# poolable with the arms already measured.
+CAPACITY_TAG="off"
+CAPACITY_FINGERPRINT=""
+if [[ -n "$STATIC_CAPACITY_SCALES" ]]; then
+  CAPACITY_TAG="${STATIC_CAPACITY_SCALES//,/x}"
+  [[ "$CAPACITY_TAG" =~ ^[0-9.x]+$ ]] || {
+    echo "STATIC_CAPACITY_SCALES must be comma-separated numbers." >&2
+    exit 1
+  }
+  CAPACITY_FINGERPRINT=":cap${CAPACITY_TAG}"
+fi
+
 # Expand a taskset -c list ("0-7,12") into one CPU number per line.
 expand_cpu_list() {
   local part start end
@@ -610,7 +628,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -675,6 +693,7 @@ PY
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
     printf 'level_compaction_dynamic_level_bytes=false\n'
     printf 'use_direct_io=%s\n' "$USE_DIRECT_IO"
+    printf 'static_capacity_scales=%s\n' "${STATIC_CAPACITY_SCALES:-none}"
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
     printf 'baseline_level_base_scale=%s\n' "${BASELINE_LEVEL_BASE_SCALE:-1}"
     printf 'num_levels=%s\n' "$NUM_LEVELS"

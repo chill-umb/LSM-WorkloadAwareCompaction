@@ -50,6 +50,13 @@ DISABLE_WAL="${DISABLE_WAL:-1}"
 # cannot be pooled with dio0 runs. compaction_readahead_size stays at the
 # pinned tree's 2 MB default either way.
 USE_DIRECT_IO="${USE_DIRECT_IO:-0}"
+# Static per-level capacity expansion, comma separated, one entry per level,
+# first and last pinned to 1.0 because A-Impl-1 keeps expansion out of L0's byte
+# branch and off the output-only final level. Empty means no expansion, which is
+# every arm except the open-loop calibration that measures s_max for A-Impl-7.
+# Example at num_levels=13, expanding L1 and L2 by 1.5:
+#   STATIC_CAPACITY_SCALES="1,1.5,1.5,1,1,1,1,1,1,1,1,1,1"
+STATIC_CAPACITY_SCALES="${STATIC_CAPACITY_SCALES:-}"
 L0_COMPACTION_TRIGGER="${L0_COMPACTION_TRIGGER:-4}"
 L0_SLOWDOWN_TRIGGER="${L0_SLOWDOWN_TRIGGER:-20}"
 L0_STOP_TRIGGER="${L0_STOP_TRIGGER:-36}"

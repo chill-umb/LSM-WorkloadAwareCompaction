@@ -128,7 +128,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"l0-(\d+)-(\d+)-(\d+):pri(\d+):load(\d+):"
         r"mix([0-9.]+)-([0-9.]+)-([0-9.]+):scan(\d+)-(\d+):"
         r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
-        r"dio([01]):dynamic([01]):soft(\d+):hard(\d+):"
+        r"dio([01])(?::cap([0-9.x]+))?:dynamic([01]):soft(\d+):hard(\d+):"
         r"binary([0-9a-f]{64}):objective([0-9a-f]{64})$"
     )
     match = pattern.fullmatch(fingerprint)
@@ -144,14 +144,20 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "mix_put_ratio", "mix_seek_ratio", "scan_length",
         "mix_max_scan_length", "block_cache_size", "bloom_bits",
         "max_background_jobs", "threads", "disable_wal", "use_direct_io",
+        "static_capacity_scales",
         "level_compaction_dynamic_level_bytes",
         "soft_pending_compaction_bytes_limit",
         "hard_pending_compaction_bytes_limit",
         "dbbench_sha256", "research_objective_sha256",
     )
-    OPAQUE = ("workload_profile", "dbbench_sha256", "research_objective_sha256")
+    OPAQUE = ("workload_profile", "static_capacity_scales", "dbbench_sha256",
+              "research_objective_sha256")
     values: list[object] = list(match.groups())
     for index, name in enumerate(names):
+        if name == "static_capacity_scales":
+            # Absent means the run predates the knob, which is no expansion.
+            values[index] = values[index] or "off"
+            continue
         if name in OPAQUE:
             continue
         if name in ("mix_get_ratio", "mix_put_ratio", "mix_seek_ratio"):
