@@ -309,7 +309,7 @@ def main() -> int:
         # CompactionPressureObserver::FlushOpenEpisodes is expected to emit,
         # and goes uncalibrated only when censoring is heavy enough to reach
         # the rank the bound needs.
-        due_bound, pressure_bound = frame_limits[level]
+        due_bound, pressure_bound, score_bound = frame_limits[level]
         due_frames = frame_meta["due_frames_per_level"][level]
         frame_level_meta = {
             "method": frame_meta["method"],
@@ -318,15 +318,12 @@ def main() -> int:
         }
         due_meta = dict(frame_level_meta, bound_micros=due_bound)
         pressure_meta = dict(frame_level_meta, bound_score_micros=pressure_bound)
-        score_bound, score_meta = censored_tolerance_bound(
-            [float(item["max_score"]) for item in complete],
-            [float(item["max_score"]) for item in censored])
-        # A level is calibrated only if every limit it exports rests on a real
-        # estimate: a replayed due frame for the two frame-based limits and a
-        # tolerance bound for the score. Mixing an estimated limit with a
-        # bootstrap cap and labelling the level "calibrated" is the failure
-        # mode the plan warns about, so the weakest of the three decides.
-        calibrated = due_frames > 0 and score_bound is not None
+        score_meta = dict(frame_level_meta, bound_score=score_bound,
+                          score_model=frame_meta["score_model"])
+        # Every episode-derived quantity here is reported for continuity only.
+        # The exported limits come from the frame replay, so a level is
+        # calibrated exactly when the replay saw it due at least once.
+        calibrated = due_frames > 0
         if calibrated:
             due_limit = max(1, round(MARGIN * due_bound))
             pressure_limit = max(1.0, MARGIN * pressure_bound)

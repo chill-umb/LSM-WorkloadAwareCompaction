@@ -167,15 +167,29 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
     none. Limits set at the episode p99 therefore fire on far more than 1% of
     frames (the inspection paradox), and that is the statistic E-1 scores.
 
-    This replays every baseline run at the controller's cadence. For each
-    frame and each level with an open episode, the due age is exact from the
-    episode start. Pressure is the episode's integrated excess score scaled
-    by elapsed fraction -- exact under a constant score, a first-order model
-    otherwise, since the trajectory inside an episode is not logged. Each
-    level's limit is the frame quantile at a common per-level exceedance k/N,
-    and k is the largest count at which the fraction of frames where ANY level
-    exceeds either limit is still at or below target_fraction. Levels with no
-    due frame keep limit 0 and are left to the caller's floors.
+    This replays every baseline run at the controller's cadence and calibrates
+    all three per-level terms of that condition together, because a frame
+    overrides if ANY of them trips: calibrating a subset only moves the firing
+    onto the terms left out.
+
+    For each frame and each level with an open episode, the due age is exact
+    from the episode start. The score trajectory inside an episode is not
+    logged, so score is modelled as constant at its episode mean,
+    ``1 + integrated_excess / duration``, and pressure as the integral of that
+    same constant, ``total * age / duration``. The two models are consistent
+    with each other and exact when the score holds steady within an episode.
+    They understate brief peaks: ``predicted_override_fraction_score_upper``
+    re-scores the chosen limits with ``max_score`` held for the whole episode,
+    which overstates them. The true holdout fraction lies between the two.
+
+    Each level's limits are the frame quantiles at a common per-level
+    exceedance k/N, and k is the largest count at which the fraction of frames
+    where any level trips any term is still at or below target_fraction. Levels
+    with no due frame keep limit 0 and are left to the caller's floors.
+
+    Not modelled, because no per-frame record exists: ``global_debt_breach``,
+    ``slo_force_due`` and ``l0_slowdown``. All three are global rather than
+    per-level, so no per-level limit can offset them.
 
     `runs` holds one episode list per baseline run; frames are laid on the
     span from that run's first episode start to its last episode end, which
@@ -184,6 +198,8 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
     """
     ages: list[list[int]] = [[] for _ in range(levels)]
     pressures: list[list[float]] = [[] for _ in range(levels)]
+    scores: list[list[float]] = [[] for _ in range(levels)]
+    peaks: list[list[float]] = [[] for _ in range(levels)]
     frame_count = 0
     for run in runs:
         if not run:
@@ -195,6 +211,8 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         for level in range(levels):
             ages[level].extend([-1] * n)
             pressures[level].extend([-1.0] * n)
+            scores[level].extend([-1.0] * n)
+            peaks[level].extend([-1.0] * n)
         for e in run:
             level = e["level"]
             duration = e["duration_micros"]
@@ -202,6 +220,8 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
                 continue
             start = e["start_micros"]
             total = e["integrated_excess_score_micros"]
+            mean_score = 1.0 + total / duration
+            peak_score = e["max_score"]
             k = -(-(start - t0) // interval_micros)
             while k < n:
                 age = t0 + k * interval_micros - start
@@ -209,6 +229,8 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
                     break
                 ages[level][base + k] = age
                 pressures[level][base + k] = total * age / duration
+                scores[level][base + k] = mean_score
+                peaks[level][base + k] = peak_score
                 k += 1
         frame_count += n
     meta = {
@@ -219,25 +241,32 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         "target_override_fraction": target_fraction,
         "exceedance_per_level": None,
         "predicted_override_fraction": None,
+        "predicted_override_fraction_score_upper": None,
+        "score_model": "episode_mean_excess_held_constant",
     }
     if frame_count == 0:
         return None, meta
     sorted_ages = [sorted(a) for a in ages]
     sorted_pressures = [sorted(p) for p in pressures]
+    sorted_scores = [sorted(s) for s in scores]
 
     def limits_at(k: int):
         return [(max(0, sorted_ages[level][frame_count - k]),
-                 max(0.0, sorted_pressures[level][frame_count - k]))
+                 max(0.0, sorted_pressures[level][frame_count - k]),
+                 max(1.0, sorted_scores[level][frame_count - k]))
                 for level in range(levels)]
 
-    def joint_fraction(limits) -> float:
+    def joint_fraction(limits, score_source=scores) -> float:
         hits = 0
         for i in range(frame_count):
             for level in range(levels):
                 age = ages[level][i]
                 if age < 0:
                     continue
-                if age >= limits[level][0] or pressures[level][i] >= limits[level][1]:
+                age_limit, pressure_limit, score_limit = limits[level]
+                if (age >= age_limit
+                        or pressures[level][i] >= pressure_limit
+                        or score_source[level][i] >= score_limit):
                     hits += 1
                     break
         return hits / frame_count
@@ -258,13 +287,15 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         # strictest limits (above every observed frame) and let the caller
         # decide whether a zero-exceedance manifest is acceptable.
         limits = [(max(0, sorted_ages[level][-1]) + 1,
-                   max(0.0, sorted_pressures[level][-1]) + 1.0)
+                   max(0.0, sorted_pressures[level][-1]) + 1.0,
+                   max(1.0, sorted_scores[level][-1]) + 1.0)
                   for level in range(levels)]
         meta["exceedance_per_level"] = 0.0
     else:
         limits = limits_at(best)
         meta["exceedance_per_level"] = best / frame_count
     meta["predicted_override_fraction"] = joint_fraction(limits)
+    meta["predicted_override_fraction_score_upper"] = joint_fraction(limits, peaks)
     meta["due_frames_per_level"] = [
         sum(1 for a in ages[level] if a >= 0) for level in range(levels)]
     return limits, meta
