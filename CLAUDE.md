@@ -17,7 +17,7 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 | Pipeline operation | `scripts/dbbench_pipeline/README.md` |
 
 - **`docs/PATHWAYS.md` is the only forward plan.** Pathways A–F, their proofs, per-pathway acceptance criteria and the gated execution order. Its vocabulary is `A-Impl-N`, `C-N`, `Gate N`, `P0`/`P1` preregistration items. Nothing else defines what to do next.
-- **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record of what happened. §5–6 architecture and the learning/safety system, §11 the pipeline, §13 test status, §14 the dated gate records (§14.7 is Gate 1), §15–16 what is open.
+- **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record of what happened. §5–6 architecture and the learning/safety system (§5.7 is the six bypass reasons), §11 the pipeline, §14 the dated gate records (§14.7 is Gate 1), §15–16 what is open. It was trimmed on 2026-09-13: §12 is gone and the number is not reused, so §§13–18 keep their numbers and every external citation still resolves.
 - **The objective contract is frozen** (v3, 2026-09-12). **Never create a new version — edit `config/research_objective_contract.v3.json` in place**, with a written reason. v1 and v2 remain in the tree only as superseded records; no run was ever executed under either. Never change the contract after seeing a gate's outcome.
 - **`TRIGGER_CONTROLLER_REPAIR_PLAN.md` is historical.** Its audited deviations were closed on 2026-08-16 and the controller design it describes is built. Read it for the per-level state machine and the deferral math, not for what to do next.
 

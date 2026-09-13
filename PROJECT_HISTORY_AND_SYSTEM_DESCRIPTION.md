@@ -461,74 +461,18 @@ entry point once. The pipeline pins protocol v2 and the C++ producer is
 hard-coded to v2, so setting a protocol-v3 environment variable cannot restore
 exact-file selection.
 
-### 5.4–5.8 Historical protocol-v3 prototype (retired)
+### 5.4 Historical protocol-v3 prototype (retired)
 
-The subsections below preserve the exact-candidate prototype implemented on
-2026-08-12. They are not descriptions of active code after the 2026-08-15 scope
-correction.
-
-### 5.4 Historical protocol-v3 observation
-
-One request contains global tree/foreground measurements, per-level state, and
-up to eight previewed candidates for each pickable level. The candidate fields
-include:
-
-- snapshot epoch and source file number;
-- source and output level;
-- source bytes and expanded clean-cut bytes;
-- exact expanded source file numbers;
-- exact next-level overlap file numbers and bytes;
-- estimated total read and write bytes;
-- overlap ratio;
-- entry, deletion, and compensated-size statistics;
-- projected source and output fullness;
-- whether the source level becomes empty;
-- RocksDB priority rank;
-- current compaction-conflict status.
-
-Global and level state also carry physical/live bytes, logical read and scan
-work, foreground latency summaries and sample counts, pending debt, stall time,
-due/default state, deferral count, and attribution for the previous scheduling
-and completed compaction outcome.
-
-The snapshot epoch is a structural hash of the version's levels, files, sizes,
-and conflict state. Protocol-v3 parsing preserves it as an integer. This matters
-because an earlier Python conversion through a floating-point value could round
-large 64-bit epochs, making every otherwise valid action appear stale.
-
-### 5.5 Historical non-mutating candidate preview
-
-`LevelCompactionPicker::PreviewCompactionCandidates` evaluates real candidate
-files without registering or scheduling a compaction. It uses the same clean-cut
-expansion and overlap rules as the exact picker and exposes conflicts. Preview
-data is thus actionable, not an approximate level aggregate.
-
-The corresponding C++ test constructs a same-user-key boundary that forces
-clean-cut expansion, previews the candidate, performs the exact-file pick, and
-checks that expanded source files, overlap files, source bytes, and overlap
-bytes match. This verifies picker construction, although a full experimental
-comparison of estimated bytes with bytes reported by completed background
-compactions is still required.
-
-### 5.6 Historical response and exact-file action lease
-
-The response contains `decision_id`, the unchanged `snapshot_epoch`, and arrays
-of per-level actions and candidate file numbers in request order. Protocol v3
-permits at most one candidate compaction in a decision.
-
-An affirmative action becomes a single-use `ActionLease` containing:
-
-- decision ID;
-- snapshot epoch;
-- selected source file number;
-- level and score;
-- action/override reason.
-
-The lease is consumed before validation and cannot actuate twice. It expires on
-successful scheduling, validation failure, or the next actuation. At pick time,
-RocksDB recomputes the epoch and validates the file identity and conflicts. A
-stale or missing candidate returns no compaction and never retargets another
-file.
+A protocol-v3 prototype briefly let the controller name exact SST candidates: a
+24-feature state, 18 features per candidate, up to eight candidates plus a defer
+pseudo-candidate, validity masks, shared state/candidate encoders, per-level
+scoring heads, and an exact-file action lease with its own completion
+attribution. It was rejected on 2026-08-15 and removed from both the Python
+controller and the RocksDB picker; the reasoning is in the 2026-08-15 timeline
+entry and Section 10.5. None of those tensors, candidate actions, exact-file
+validators, or model paths exist. **Do not reintroduce candidate or file-level
+control** — RocksDB's sole authority over file selection is the project's
+central invariant (Section 3.3).
 
 ### 5.7 Authority and bypass reasons
 
@@ -552,18 +496,6 @@ level/candidate path. Only explicit maintenance and drain work may use the
 ordinary parent picker. Cumulative fallback counters remain visible, and any
 transition affected by fallback, a stale action, a scheduling failure, or
 unattributable execution is excluded from replay.
-
-### 5.8 Historical exact-file completion attribution
-
-RocksDB stores decision ID, snapshot epoch, source file, and override reason on
-the `Compaction` object. Per-level state in the next observation reports the
-previous scheduling result and completion result, including the completed
-decision/file identity. This separates four facts that older code conflated:
-
-1. what Python requested;
-2. what the picker attempted;
-3. whether scheduling succeeded;
-4. what compaction actually completed.
 
 ## 6. Current protocol-v2 learning and safety system
 
@@ -673,44 +605,7 @@ also disables it so bridge parity is measured against native triggering. The
 mask reduces online violations but is not a mathematical latency guarantee;
 the paired acceptance test remains authoritative.
 
-### 6.5 Retired candidate-model note
-
-The protocol-v3 prototype used 24 state features, 18 features per candidate,
-up to eight SST candidates plus a defer pseudo-candidate, validity masks, shared
-state/candidate encoders, and separate per-level scoring heads. Replay stored
-chosen and next candidate sets. Those details are retained in sections 5.4–5.8
-solely as history. None of those
-tensors, candidate actions, exact-file validators, or model paths are active.
-
 ## 7. Measurement and observability added to the project
-
-### 7.1 Wrapper experiment output
-
-`src/run_workload.cc` now emits:
-
-- separate insert, update, delete, range-delete, Get, and scan count, average,
-  p95, and diagnostic p99 latency;
-- combined write and read latency summaries;
-- measured and executed operation counts, warmup count, measured time, and
-  total wall time;
-- user logical write bytes;
-- flush and compaction read/write bytes;
-- point SST probes;
-- scan returned entries, internal skips, empty scans, and sorted-run seeks;
-- settled SST bytes, live logical bytes, and live entry count;
-- write, point-read, scan, and space amplification using the definitions in
-  section 2.3;
-- stall events, stop events, RocksDB stall microseconds, and listener-measured
-  stall duration;
-- selected size ratio, all three independent L0 thresholds, and compaction
-  priority;
-- drain duration, pending bytes before/after drain, and drain compaction bytes;
-- embedded textual metric definitions.
-
-Warmup operations execute and may train the controller but are excluded from
-the measured foreground summaries. Final amplification accounts for drained
-compaction work so a policy cannot look efficient merely by ending with
-unsettled debt.
 
 ### 7.2 RocksDB statistics added
 
@@ -745,27 +640,6 @@ The commit log is sparse and contains several generic WIP messages, so this
 timeline combines commit dates, document dates, file history, and the explicit
 rework changelogs. Working-tree work after the current Git `HEAD` is labeled as
 such.
-
-### 2024: wrapper foundation
-
-- **2024-03-17:** the repository was initialized around the RocksDB wrapper.
-- **2024-10-24:** submodule/project structure and argument parsing were repaired
-  and the README was updated.
-- **2024-11-08:** RocksDB statistics output was added for `--stat 1`.
-
-At this stage the project was a workload/measurement wrapper, not an RL
-compaction controller.
-
-### 2025: maintenance and research substrate
-
-- **2025-03-01:** a new initial/maintenance sequence and minor follow-ups were
-  committed. The repository continued to provide the wrapper and Tectonic-based
-  workload substrate.
-
-### February 2026: wrapper update
-
-- **2026-02-14:** the wrapper was updated with a minor follow-up. This is the
-  immediate code lineage on which the RL work was built.
 
 ### June 2026: L0 proof of concept
 
@@ -1766,149 +1640,18 @@ for T=2 at 20M, and L0-L3/L4 for T=10 -- which is why `num_levels` is pinned at
 available depth. Any entry point other than db_bench would inherit the library
 default of `true` and a different level ladder.
 
-## 12. Tectonic workload system and lessons
+## 13. Verification
 
-Tectonic is a Rust workload generator embedded under `lib/tectonic`. A JSON spec
-contains sections and ordered/concurrent groups, operation counts, key/value
-expressions, and distributions. It can generate an operation file, execute
-against supported databases, or benchmark generation. Supported operations
-include inserts, updates/merges, point queries/deletes (including intentionally
-empty variants), range queries/deletes, and sorted or mostly sorted inserts.
-
-The current `workload_specs/README.md` is more than a syntax note; it preserves
-constraints discovered through failed experiments:
-
-- time balance matters more than operation-count balance;
-- short-range scan output must be audited directly;
-- `selectivity` is safer than the crashing `scan_length` expression but changes
-  with dataset size;
-- a delete phase must share a populated section/keyspace;
-- Zipf point queries require a populated keyspace;
-- the generator infers names from path and operation mix, so moving a spec can
-  change allow-list behavior.
-
-The wrapper accepts Tectonic operations, records warmup/measured phases, and can
-produce the custom metrics unavailable from stock `db_bench`. The numbered
-scaled pipeline intentionally avoids this generator to reduce operational
-complexity for the current 10M–50M sweep.
-
-## 13. Test and verification status
-
-### 13.1 Tests present in the tree
-
-Current Python tests cover:
-
-- synthetic metric formulas, including Bloom outcomes, scans, writes/deletes,
-  and empty scans;
-- v2 analytic-prior physics, read-path signals, reward scaling, lifecycle,
-  executed-action credit, SMDP discount, shared trunks, exploration, target
-  updates, checkpoints, and evaluation mode;
-- protocol-v2 response ordering, parser shape, reconnect, and terminal credit;
-- a socket assertion that the response never contains candidate file numbers.
-
-The RocksDB compaction picker test file contains targeted trigger tests for:
-
-1. an RL level trigger selects the same first source file as RocksDB's native
-   `FilesByCompactionPri` order;
-2. a level authorization grants no authority to another level;
-3. a held due permit can schedule repeated native compactions;
-4. actuation selects against current RocksDB state rather than an SST identity;
-5. maintenance bypass is explicitly attributed;
-6. unavailable-server fallback is level-scoped;
-7. a below-threshold optional authorization actuates exactly once;
-8. pressure integration uses a zero-order hold; and
-9. worker ticks reuse the immutable structural snapshot;
-10. observations use the current independently tuned L0 trigger/slow/stop
-    options, including before the first pick;
-11. required/missing manifests fail conservatively;
-12. latency/space masks require three entry and three recovery windows;
-13. L0 slowdown opens independently due supporting levels;
-14. dirty structural deadlines are edge-counted; and
-15. stale eligibility and decision generations cannot mutate a superseding
-    response's gate, optional token, or outcome attribution.
-
-### 13.2 Verification performed for the 2026-08-15 scope correction
-
-- all shell files in `scripts/dbbench_pipeline/` passed `bash -n`;
-- the graph script, agent, and Python tests passed bytecode compilation;
-- 69 non-socket Python tests passed in the restricted environment;
-- all 7 Unix-socket end-to-end protocol-v2 tests passed when rerun with local
-  socket binding permitted, for 76 passing Python tests in total;
-- the modified RocksDB library and `db_bench` rebuilt successfully after the
-  exact-file APIs and candidate wire fields were removed;
-- all 7 focused C++ trigger/native-picker tests passed in a Debug test build;
-- the resulting production `librocksdb.so` exports the level-trigger picker
-  and no exact-file or candidate-preview picker symbol.
-
-### 13.3 Static verification for the 2026-08-16 repair pass
-
-At the user's request, this pass did not build RocksDB or `db_bench` and did
-not execute any C++, Python, socket, or experiment test. The non-executing
-checks performed after the final edits were:
-
-- AST parsing of all 11 changed/new Python source and test files;
-- `bash -n` parsing of all eight numbered/configured pipeline shell scripts;
-- root and RocksDB-submodule `git diff --check`;
-- declaration/call-site searches for the generation-aware scheduling and
-  completion signatures;
-- source-registration checks for every new C++ translation unit; and
-- absence checks for active protocol-v3, exact-file, candidate-picker, sticky
-  parent-bypass, and decision-count deferral symbols.
-
-These checks establish source consistency only. They are not evidence of C++
-compilation, runtime correctness, oracle parity, or research acceptance.
-
-### 13.4 End-to-end proofs still required
-
-The current design also calls for deterministic short runs proving that:
-
-- one held due decision can schedule multiple native compactions from its own
-  level, while an optional decision schedules at most one;
-- no deferred level compacts through another level's authorization;
-- every completed compaction maps to a decision or explicit bypass reason;
-- reconnect works under the real C++/Python process pair;
-- the files in every RL-triggered compaction match RocksDB's native picker,
-  with no file identity supplied by Python.
-
-Source-level tests cover the core permit, native-priority, pressure-clock,
-snapshot-cache, safety-manifest, and reward mechanics. The plan's complete
-fake-clock, forced-interleaving, multi-CF lifecycle, TSan, and deterministic
-end-to-end matrix is not yet fully implemented or executed; a fresh
-trigger-only end-to-end report remains required.
-
-### 13.5 Verification performed 2026-08-19 to 2026-08-26
-
-Static, before the cloud build:
-
-- every modified C++ translation unit passes `-fsyntax-only` under the exact
-  flags in `build/compile_commands.json`;
-- all pipeline shell scripts pass `bash -n`; all changed Python byte-compiles;
-- `09_evaluate_oracle_parity.py` was run end to end against a synthetic fixture
-  built to reproduce the reported symptoms. **D1's falsifiability condition
-  holds**: the L5 entries disappear while the L2 repeat-3 entry survives at
-  exactly the recorded numbers (oracle 5.66636, regular 5.25032, limit
-  5.512836). D7 correctly excludes both trap episodes -- one authorized only by a
-  gate held open under an earlier decision, one never authorized inside its own
-  window -- and reports them as denominators rather than letting them contribute
-  0 us and 1,020,000 us respectively;
-- `censored_tolerance_bound` was checked to move a limit only upward;
-- `06_select_baseline_slo.py` was executed end to end against a fixture after a
-  `NameError` and an `OverflowError` were found by running it rather than
-  compiling it.
-
-Executed on the cloud machine:
-
-- RocksDB and `db_bench` built; the binary was confirmed to contain the D3a
-  instrumentation before any experiment ran;
-- ten paired 1M/T2 oracle repeats, gate verdict `undecided` with no failures;
-- the 6-configuration tuned sweep at four sizes and three repeats, and twelve
-  manifests generated from it;
-- the 144-arm paired matrix.
-
-Still not executed: the C++ picker tests, the socket tests, and the `rl_agent`
-Python suite. The last could not run locally either -- the system interpreter has
-no `torch` and the project venv has no `pytest` -- so the "exactly two
-pre-existing failures" condition remains unchecked for this pass.
+The project had Python and C++ test suites through 2026-09-13, when they were
+removed: `rl_agent/tests/`, `scripts/dbbench_pipeline/tests/`, and the RL cases
+inside the submodule's `compaction_picker_test.cc` and `version_set_test.cc`.
+No test suite should be written. Correctness is established by the gates in
+`docs/PATHWAYS.md` — oracle parity, the guard holdout, the hull criteria and the
+paired acceptance evaluators — re-run on the measurement node, plus a local
+`-fsyntax-only` check. The detailed verification records for the 2026-08-15
+scope correction, the 2026-08-16 repair pass and the 2026-08-19 to 2026-08-26
+window were removed with the suites; what survives is the coverage status in the
+Section 14 tables and the dated Section 8 timeline entries.
 
 ## 14. Implementation status after restoring trigger-only scope
 
@@ -2324,12 +2067,13 @@ fingerprint outright, which would have blocked every manifest.
 
 ## 15. Current limitations and next work
 
-**Superseded 2026-09-05.** Steps 1 through 3 of the 2026-08-26 list below were
+**Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,
+which supersedes this list.** The earlier 2026-08-26 and pre-gate next-work
+lists were removed on 2026-09-13 as dead planning. Their first steps had been
 executed and passed: the learner reaches replay, the optimizer moves the
 residual, accounting is exact, no hard-invalid interval contaminates a run, and
 the 10M checkpoint produced learned action flips. The matrix in Section 10.7
-then ran and failed. The ordering has therefore changed again, and the immediate
-work is no longer validation.
+then ran and failed, which is why the work below is no longer validation.
 
 1. ~~**Decide the objective.**~~ **Done, 2026-09-05.** The strict three-way
    criterion is withdrawn and replaced by the constrained objective and Pareto-hull
@@ -2358,74 +2102,6 @@ work is no longer validation.
    learner repair and still failing its preregistered threshold.
 6. Only then re-run the matrix at the preregistered ten repeats, and only then
    the stress suites and the full frontier.
-
-**Superseded 2026-08-26.** Steps 1 through 4 of the list below were executed;
-the gate passed and the matrix ran. What that produced was not a policy result
-but the discovery that the learner never trained, so the ordering has changed.
-
-The immediate work is staged validation, not model tuning and not a full
-performance matrix:
-
-1. **Rebuild the startup-state repair only on the cloud machine and run a fresh
-   5M/T2
-   `unconstrained_rl` diagnostic with workload seed 20001.** Do not resume the
-   failed old-credit or startup-contaminated run. Require schema/credit version
-   2, zero hard-invalid
-   intervals, balanced accounting, at least 320 full-horizon transitions, 100
-   optimizer steps, and a nonzero residual.
-2. **Run the matching constrained 5M/T2 diagnostic as mechanical validation.**
-   It cannot establish guard readiness while the independent holdout remains
-   above the 1% predicted-override limit.
-3. **Generate the small learning-analysis JSONs and then run one 10M/T2
-   checkpoint.** Require TD losses, nonzero residuals, uncontaminated protocol
-   accounting, and at least one prior-versus-learned greedy-action flip at 10M.
-4. **Repair and revalidate guard calibration separately.** The existing
-   3.8--6.0% predicted intervention rate is still a methodology failure, even
-   though those known interventions no longer starve replay.
-5. **Only after learner health and guard readiness both pass, re-run the
-   matrix** at the preregistered ten repeats and apply the paired evaluator.
-6. Resolve the remaining preregistered methodology choices: the stall allowance
-   and the final scan objective. The stop-warning check has been retired as an
-   invalid instrument, and `per_level_maximum_score` is now a paired worst-level
-   envelope rather than an all-repeat invariant.
-7. Only after a learned policy is shown to act at all, revisit D3b (the due-edge
-   wake), the stress suites, and the full frontier.
-
-The original ordering, retained because steps 5 and 6 remain valid once learning
-works:
-
-1. build RocksDB and `db_bench` on the cloud machine and execute focused Python,
-   C++, socket, lifecycle, and forced-interleaving tests;
-2. run ten paired 1M/T2 regular/oracle repeats and require the oracle
-   parity evaluator to pass;
-3. generate each workload-specific tuned leveled frontier without examining RL
-   trigger outcomes, then export and review its manifest;
-4. run the balanced ten-pair prior-only, unconstrained, and constrained matrix;
-5. audit compaction attribution and native inputs, then apply the formal paired
-   evaluator and metric-feasibility gate;
-6. only after balanced acceptance, run the separately calibrated read-heavy and
-   write-heavy safety suites and report the complete frontier and ablations.
-
-Other current caveats are:
-
-- it substitutes Put operations for explicit deletes;
-- it has one workload seed/repeat by default for operational safety, although
-  the runner and evaluators support the required paired repeats;
-- baseline scan amplification was exactly its mathematical floor of 1.0 in the
-  motivating 1M/T2 evidence, so the preregistered scan-sensitivity decision in
-  the repair plan must be resolved before claiming strict scan improvement;
-- the shared foreground telemetry accumulator is process-wide; the supported
-  `db_bench` experiment uses one user column family, while a multi-RL-CF
-  experiment needs an additional attribution audit;
-- the full 33-case repair-plan concurrency/fake-clock suite is not yet present;
-  source-level coverage is not a substitute for the missing forced interleaving
-  and end-to-end tests;
-- the old deleted scripts remain visible only as Git history and compiled
-  `__pycache__` remnants; bytecode files are not a supported experiment path;
-- the repository and RocksDB submodule contain uncommitted working-tree changes,
-  so every experiment must record both revisions and preferably a patch or clean
-  commit identifying the exact code;
-- current trigger-only performance is unvalidated at the 10M–50M scale.
 
 ## 16. Guide to the existing documentation
 
@@ -2495,10 +2171,6 @@ timeline.
 
 ## 18. Bottom line
 
-**Updated 2026-09-05. The paragraphs below this block predate the first
-trained-learner result and are retained as the record of what was true before
-it.**
-
 The blocker that defined this project from 2026-08-24 to 2026-09-01 is gone. The
 learner reaches replay, the optimizer moves the residual, the accounting
 balances exactly, and the C++ and Python sides agree to the decision. Every
@@ -2562,37 +2234,3 @@ amplifications, the workload parser produces the intended scans, the controller
 does not block under the DB mutex, authority is level-scoped, due actions are
 held gates rather than undersupplied pulses, fallbacks and maintenance are
 explicit, and RocksDB retains sole file-selection authority.
-
-For the 2026-08-26 revision, that claim was no longer only an argument: ten
-paired 1M/T2 repeats passed every then-decidable oracle-parity check, including
-due-to-admission latency at 511 us against a 5000 us limit. The 2026-08-30 audit
-subsequently corrected the two-sided power calculation, the stochastic
-maximum-score test form, and several safety-shadow transitions. The older run
-remains useful evidence for its binary, but **the current revision is not yet
-gate-verified**. It must be rebuilt and rerun on the cloud machine before a
-no-op policy can again be described as behaviourally transparent.
-
-**The most important remaining fact has changed again.** The learner still has
-no gate-valid cloud result, but learner liveness is now demonstrated. The first
-schema-2 5M/T2 preflight reached 39,960 replay entries and 57,160 optimizer
-steps with nonzero residuals and action flips. Its one formal failure was a
-single startup compaction admitted before the first asynchronous control frame,
-not replay starvation. The explicit bootstrap/active/fallback state repair now
-closes that ownership gap in source; a fresh 5M rerun must confirm zero hard
-invalid intervals before proceeding.
-
-So the project now has three historical results and two independent validation
-blockers. The results remain: the bridge was transparent for the older binary;
-the analytic prior was directionally biased toward over-compaction, buying 12%
-of reads with 19% of writes across all twelve cells; and the live SLO mask
-substantially replaced that policy rather than trimming it. The blockers are a
-fresh schema-v2 cloud learner-health run and guard holdout readiness below the
-preregistered 1% predicted-override threshold. Passing one does not waive the
-other.
-
-The next credible milestone is the staged 5M/10M cloud validation, not the
-multi-day matrix: prove that full-horizon transitions reach replay, optimizer
-steps move the residual, accounting remains exact, no hard-invalid interval
-contaminates the run, and a 10M checkpoint produces at least one learned action
-flip. Only then, and only after the separate guard criterion passes, is another
-performance experiment methodologically meaningful.
