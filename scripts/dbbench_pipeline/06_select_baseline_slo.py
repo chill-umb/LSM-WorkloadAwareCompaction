@@ -15,7 +15,6 @@ from pathlib import Path
 
 from slo_statistics import (
     GUARD_TARGET_OVERRIDE_FRACTION,
-    TOLERANCE_CONFIDENCE,
     censored_tolerance_bound,
     frame_simulated_limits,
 )
@@ -198,6 +197,23 @@ def main() -> int:
     run_dirs: dict[str, list[Path]] = defaultdict(list)
     for completed in args.baseline_results.glob("**/COMPLETED"):
         directory = completed.parent
+        # collect_arm reads run.log and rocksdb_LOG.txt in full, so calling it
+        # on every arm made one invocation scan the whole sweep and three size
+        # ratios scan it three times. metadata.env is a few lines and carries
+        # the same identity, so reject non-matching arms before that cost.
+        # Absent keys fall through rather than filter, so nothing the previous
+        # ordering would have kept is dropped here.
+        marker = directory / "metadata.env"
+        if marker.exists():
+            preview = read_env(marker)
+            if (preview.get("arm", "regular") != "regular"
+                    or preview.get("size", f"{args.size_millions}M")
+                    != f"{args.size_millions}M"
+                    or preview.get("size_ratio", str(args.size_ratio))
+                    != str(args.size_ratio)
+                    or preview.get("workload_profile", args.workload_profile)
+                    != args.workload_profile):
+                continue
         row = graph.collect_arm(directory)
         if row is None or row["arm"] != "regular":
             continue
@@ -274,9 +290,14 @@ def main() -> int:
     # for why the two differ by an order of magnitude). max_score keeps the
     # episode-maximum tolerance bound: the score trajectory inside an episode
     # is not logged, so it cannot be replayed per frame.
+    # The exported floors go in here, not after: k is then chosen against the
+    # limits the manifest actually carries, and predicted_override_fraction
+    # describes those same limits. MARGIN is deliberately not passed -- the
+    # target fraction already specifies how often the guard may fire, and a
+    # margin on top is re-absorbed by the search (see frame_simulated_limits).
     frame_limits, frame_meta = frame_simulated_limits(
         episode_runs, expected_source_levels, args.frame_interval_micros,
-        GUARD_TARGET_OVERRIDE_FRACTION)
+        GUARD_TARGET_OVERRIDE_FRACTION, floors=(1, 1.0, 1.10))
     if frame_limits is None:
         raise SystemExit("no pressure episodes to replay; cannot calibrate")
 
@@ -325,9 +346,10 @@ def main() -> int:
         # calibrated exactly when the replay saw it due at least once.
         calibrated = due_frames > 0
         if calibrated:
-            due_limit = max(1, round(MARGIN * due_bound))
-            pressure_limit = max(1.0, MARGIN * pressure_bound)
-            score_limit = max(1.10, MARGIN * score_bound)
+            # Already margined and floored by frame_simulated_limits.
+            due_limit = int(due_bound)
+            pressure_limit = pressure_bound
+            score_limit = score_bound
         elif level == 0:
             due_limit, pressure_limit, score_limit = 1, 1.0, 1.0
         else:
@@ -362,8 +384,13 @@ def main() -> int:
                 "integrated_pressure": pressure_meta,
                 "max_score": score_meta,
                 "uncalibrated_bootstrap": not calibrated,
-                "confidence_target": TOLERANCE_CONFIDENCE,
-                "margin": MARGIN,
+                # All three level limits now come from the frame replay, which
+                # targets an override fraction directly and applies no margin.
+                # TOLERANCE_CONFIDENCE and MARGIN still govern the debt bound
+                # and the latency limits, so they are reported where they act,
+                # not here where they would misdescribe these three.
+                "target_override_fraction": GUARD_TARGET_OVERRIDE_FRACTION,
+                "frame_interval_micros": args.frame_interval_micros,
             },
         })
 

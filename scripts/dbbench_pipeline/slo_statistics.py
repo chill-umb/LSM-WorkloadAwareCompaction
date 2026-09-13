@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import math
 
 
@@ -156,7 +157,8 @@ def censored_tolerance_bound(completed: list[float], censored: list[float]):
 
 
 def frame_simulated_limits(runs: list[list[dict]], levels: int,
-                           interval_micros: int, target_fraction: float):
+                           interval_micros: int, target_fraction: float,
+                           floors: tuple[int, float, float] = (1, 1.0, 1.0)):
     """Per-level due-age and pressure limits calibrated on the frame fraction.
 
     The force condition in the picker compares a level's *current* due age
@@ -195,11 +197,34 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
     span from that run's first episode start to its last episode end, which
     under-counts the run's actuation frames slightly and so over-estimates
     the fraction. Truncated episodes contribute their observed span.
+
+    The returned limits are the ones to export verbatim: ``floors`` (due age,
+    pressure, score) are applied *inside* the search, so ``k`` is chosen
+    against, and ``predicted_override_fraction`` describes, exactly the values
+    the manifest will carry. Applying them afterwards in the caller would
+    leave the prediction describing limits nothing enforces.
+
+    No safety margin is applied, deliberately, unlike the tolerance bounds
+    elsewhere in this module. ``target_fraction`` already specifies how often
+    the guard may fire, and a margin on top is not a cushion: loosening every
+    limit at a fixed ``k`` lowers the joint fraction, which lets the search
+    accept a larger ``k``, which tightens the raw quantile until the target
+    binds again. Measured, a 1.02 margin produced limits 0.67-0.85x the
+    unmargined ones. Two knobs, one quantity; the target is the preregistered
+    one, so it is the one that survives.
+
+    One known difference from the holdout: it scores only frames after
+    ``guard_ready``, while this replay scores every frame. The warm-up window
+    is the more forced one, so the prediction errs high.
     """
     ages: list[list[int]] = [[] for _ in range(levels)]
     pressures: list[list[float]] = [[] for _ in range(levels)]
     scores: list[list[float]] = [[] for _ in range(levels)]
     peaks: list[list[float]] = [[] for _ in range(levels)]
+    # (offset, length) of each run inside the concatenated frame arrays. A due
+    # run is only meaningful within one run, and its severity is relative to
+    # that run's own length, not to the pooled total.
+    spans: list[tuple[int, int]] = []
     frame_count = 0
     for run in runs:
         if not run:
@@ -232,6 +257,7 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
                 scores[level][base + k] = mean_score
                 peaks[level][base + k] = peak_score
                 k += 1
+        spans.append((base, n))
         frame_count += n
     meta = {
         "method": "frame_simulated_quantile",
@@ -250,11 +276,41 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
     sorted_pressures = [sorted(p) for p in pressures]
     sorted_scores = [sorted(s) for s in scores]
 
+    def limit_for_count(values: list[float], k: int, floor: float):
+        """Smallest limit v with count(x >= v) <= k, else one above the max.
+
+        The picker compares with >=, and score is constant inside an episode,
+        so the k-th largest value is shared by every frame of that episode.
+        Indexing by rank alone would therefore admit a whole episode when it
+        meant to admit k frames. Walk up to the next distinct value until the
+        tail count actually fits.
+        """
+        n = len(values)
+        above_max = max(floor, values[-1]) + 1.0
+        if k <= 0 or n == 0:
+            return above_max
+        v = values[max(0, n - k)]
+        while True:
+            if n - bisect.bisect_left(values, v) <= k:
+                return max(floor, v)
+            j = bisect.bisect_right(values, v)
+            if j >= n:
+                return above_max
+            v = values[j]
+
+    age_floor, pressure_floor, score_floor = floors
+
     def limits_at(k: int):
-        return [(max(0, sorted_ages[level][frame_count - k]),
-                 max(0.0, sorted_pressures[level][frame_count - k]),
-                 max(1.0, sorted_scores[level][frame_count - k]))
-                for level in range(levels)]
+        """Exported limits at exceedance k: margin and floors already applied."""
+        out = []
+        for level in range(levels):
+            age = limit_for_count(sorted_ages[level], k, 0.0)
+            pressure = limit_for_count(sorted_pressures[level], k, 0.0)
+            score = limit_for_count(sorted_scores[level], k, 1.0)
+            out.append((max(age_floor, round(age)),
+                        max(pressure_floor, pressure),
+                        max(score_floor, score)))
+        return out
 
     def joint_fraction(limits, score_source=scores) -> float:
         hits = 0
@@ -283,19 +339,44 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         else:
             hi = mid - 1
     if best is None:
-        # Even one permitted exceedance per level overshoots: return the
-        # strictest limits (above every observed frame) and let the caller
-        # decide whether a zero-exceedance manifest is acceptable.
-        limits = [(max(0, sorted_ages[level][-1]) + 1,
-                   max(0.0, sorted_pressures[level][-1]) + 1.0,
-                   max(1.0, sorted_scores[level][-1]) + 1.0)
-                  for level in range(levels)]
+        # No per-level exceedance fits the target: every limit lands above its
+        # own maximum. That means a single sustained event covers more than
+        # target_fraction of the run, and no per-frame threshold can both
+        # tolerate that event and fire inside it.
+        limits = limits_at(0)
         meta["exceedance_per_level"] = 0.0
     else:
         limits = limits_at(best)
         meta["exceedance_per_level"] = best / frame_count
     meta["predicted_override_fraction"] = joint_fraction(limits)
+    # Measure inertness from the outcome, not from the search path: a floor can
+    # lift a limit above everything observed while the search still reports a
+    # feasible k. A guard that would never fire on baseline-like behaviour
+    # satisfies the target vacuously and is not a calibration success;
+    # longest_due_run_fraction names the event driving it.
+    meta["degenerate_inert_guard"] = (
+        meta["predicted_override_fraction"] == 0.0
+        and any(a >= 0 for level in range(levels) for a in ages[level]))
     meta["predicted_override_fraction_score_upper"] = joint_fraction(limits, peaks)
     meta["due_frames_per_level"] = [
         sum(1 for a in ages[level] if a >= 0) for level in range(levels)]
+    # The longest unbroken stretch of frames in which one level stays due. A
+    # per-frame criterion counts such a stretch as that many violations, so
+    # when it exceeds target_fraction * frame_count no limit can pass without
+    # disabling the guard, however the limits are estimated.
+    longest = 0
+    longest_fraction = 0.0
+    for level in range(levels):
+        for base, n in spans:
+            current = 0
+            for i in range(base, base + n):
+                current = current + 1 if ages[level][i] >= 0 else 0
+                if current > longest:
+                    longest = current
+                longest_fraction = max(longest_fraction, current / n)
+    meta["longest_due_run_frames"] = longest
+    # Fraction of the run that contains it, not of the pooled frame count:
+    # five runs each carrying one long backlog would otherwise each look five
+    # times milder than they are.
+    meta["longest_due_run_fraction"] = longest_fraction
     return limits, meta
