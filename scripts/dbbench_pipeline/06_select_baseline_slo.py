@@ -14,8 +14,10 @@ from collections import defaultdict
 from pathlib import Path
 
 from slo_statistics import (
+    GUARD_TARGET_OVERRIDE_FRACTION,
     TOLERANCE_CONFIDENCE,
     censored_tolerance_bound,
+    frame_simulated_limits,
 )
 
 
@@ -66,12 +68,15 @@ def read_env(path: Path) -> dict[str, str]:
     return result
 
 
-def collect_episodes(run_dirs: list[Path]) -> list[dict]:
-    episodes = []
+def collect_episodes(run_dirs: list[Path]) -> list[list[dict]]:
+    """One episode list per run; the frame replay needs runs kept apart."""
+    runs = []
     for run_dir in run_dirs:
         path = run_dir / "pressure_episodes.jsonl"
         if not path.exists():
             continue
+        episodes: list[dict] = []
+        runs.append(episodes)
         for line_number, line in enumerate(path.read_text().splitlines(), 1):
             try:
                 record = json.loads(line)
@@ -110,7 +115,7 @@ def collect_episodes(run_dirs: list[Path]) -> list[dict]:
                     raise SystemExit(
                         f"{path}:{line_number}: invalid episode {name}")
             episodes.append(record)
-    return episodes
+    return runs
 
 
 def parse_levels(fingerprint: str) -> int:
@@ -180,6 +185,11 @@ def main() -> int:
              "The level-base scale axis exists to calibrate the capacity-space "
              "curve; it is not a comparator axis, and letting the selection "
              "range over it would silently redefine the tuned baseline.")
+    parser.add_argument(
+        "--frame-interval-micros", type=int, default=50_000,
+        help="controller observation cadence the due-age and pressure limits "
+             "are replayed at; must equal RL_OBSERVE_INTERVAL_MS of the runs "
+             "the manifest will guard (protocol v2 pins it to 50 ms).")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -247,7 +257,8 @@ def main() -> int:
     if selected_options["workload_profile"] != args.workload_profile:
         raise SystemExit("selected baseline workload profile mismatch")
     selected_rows = grouped[fingerprint]
-    episodes = collect_episodes(run_dirs[fingerprint])
+    episode_runs = collect_episodes(run_dirs[fingerprint])
+    episodes = [episode for run in episode_runs for episode in run]
     by_level: dict[int, list[dict]] = defaultdict(list)
     expected_source_levels = max(1, parse_levels(fingerprint) - 1)
     for episode in episodes:
@@ -256,6 +267,18 @@ def main() -> int:
             raise SystemExit(
                 f"episode level {level} is outside the selected geometry")
         by_level[level].append(episode)
+
+    # Due age and pressure are compared against their limits on every
+    # observation frame, so their limits are calibrated on the frame fraction
+    # E-1 scores, not on the episode distribution (see frame_simulated_limits
+    # for why the two differ by an order of magnitude). max_score keeps the
+    # episode-maximum tolerance bound: the score trajectory inside an episode
+    # is not logged, so it cannot be replayed per frame.
+    frame_limits, frame_meta = frame_simulated_limits(
+        episode_runs, expected_source_levels, args.frame_interval_micros,
+        GUARD_TARGET_OVERRIDE_FRACTION)
+    if frame_limits is None:
+        raise SystemExit("no pressure episodes to replay; cannot calibrate")
 
     level_limits = []
     distributions = []
@@ -286,20 +309,24 @@ def main() -> int:
         # CompactionPressureObserver::FlushOpenEpisodes is expected to emit,
         # and goes uncalibrated only when censoring is heavy enough to reach
         # the rank the bound needs.
-        due_bound, due_meta = censored_tolerance_bound(
-            [float(item["duration_micros"]) for item in complete],
-            [float(item["duration_micros"]) for item in censored])
-        pressure_bound, pressure_meta = censored_tolerance_bound(
-            [float(item["integrated_excess_score_micros"]) for item in complete],
-            [float(item["integrated_excess_score_micros"]) for item in censored])
+        due_bound, pressure_bound = frame_limits[level]
+        due_frames = frame_meta["due_frames_per_level"][level]
+        frame_level_meta = {
+            "method": frame_meta["method"],
+            "due_frame_count": due_frames,
+            "exceedance_per_level": frame_meta["exceedance_per_level"],
+        }
+        due_meta = dict(frame_level_meta, bound_micros=due_bound)
+        pressure_meta = dict(frame_level_meta, bound_score_micros=pressure_bound)
         score_bound, score_meta = censored_tolerance_bound(
             [float(item["max_score"]) for item in complete],
             [float(item["max_score"]) for item in censored])
         # A level is calibrated only if every limit it exports rests on a real
-        # tolerance bound. Mixing one estimated limit with two bootstrap caps
-        # and labelling the level "calibrated" is the failure mode the plan
-        # warns about, so the weakest of the three decides.
-        calibrated = None not in (due_bound, pressure_bound, score_bound)
+        # estimate: a replayed due frame for the two frame-based limits and a
+        # tolerance bound for the score. Mixing an estimated limit with a
+        # bootstrap cap and labelling the level "calibrated" is the failure
+        # mode the plan warns about, so the weakest of the three decides.
+        calibrated = due_frames > 0 and score_bound is not None
         if calibrated:
             due_limit = max(1, round(MARGIN * due_bound))
             pressure_limit = max(1.0, MARGIN * pressure_bound)
@@ -412,6 +439,9 @@ def main() -> int:
         },
         "level_limits": level_limits,
         "episode_distributions": distributions,
+        # Predicted E-1 statistic on the calibration runs themselves. Read
+        # predicted_override_fraction before spending node time on a holdout.
+        "guard_frame_simulation": frame_meta,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

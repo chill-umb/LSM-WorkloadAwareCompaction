@@ -10,8 +10,7 @@ import os
 import tempfile
 from pathlib import Path
 
-
-MAX_OVERRIDE_FRACTION = 0.01
+from slo_statistics import GUARD_TARGET_OVERRIDE_FRACTION as MAX_OVERRIDE_FRACTION
 
 
 def json_boolean(record: dict, name: str, context: str) -> bool:
