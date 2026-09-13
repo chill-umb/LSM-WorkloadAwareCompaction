@@ -331,7 +331,7 @@ cannot select a source SST. It does not replace:
 
 ### 3.4 Structural ideas that are not implemented
 
-The `Refined spec Claude.md` plan and the RusKey paper motivate an FLSM tree
+The retired FLSM structural plan and the RusKey paper motivate an FLSM tree
 with multiple variable-sized runs per level and bounded horizontal expansion.
 The Vertiorizon paper motivates adaptive combinations of vertical and horizontal
 growth. This repository currently modifies RocksDB's leveled picker; it does not
@@ -679,7 +679,7 @@ The protocol-v3 prototype used 24 state features, 18 features per candidate,
 up to eight SST candidates plus a defer pseudo-candidate, validity masks, shared
 state/candidate encoders, and separate per-level scoring heads. Replay stored
 chosen and next candidate sets. Those details are retained in sections 5.4–5.8
-and `docs/candidate_aware_protocol_v3.md` solely as history. None of those
+solely as history. None of those
 tensors, candidate actions, exact-file validators, or model paths are active.
 
 ## 7. Measurement and observability added to the project
@@ -2282,6 +2282,28 @@ ratio, but `capacity_s_max` is `None` throughout: the sweep varies
 targets, so the curve cannot bound a per-level capacity actuator. C-5 selects
 the (cell, rung) pairs for Gate 3b and must be closed before it.
 
+**C-5 closed on 2026-09-13.** The per-level actuator was exposed statically
+through `RL_STATIC_CAPACITY_SCALES`, applied in `PrepareForVersionAppend` after
+the base ladder exists, with L0 and the output-only final level pinned to 1.0
+and a controller-set vector always winning. Three repeats per (ratio, scale) at
+10M, each arm's applied vector verified against its request from the Gate-0
+release events. Measured against a garbage-free denominator, expansion to
+s = 2.0 costs at most 1.9% of settled space and is negative at T = 2 and
+T = 10, giving s_max = 2.0 at the 2% rung in all three cells. T = 6 is
+genuinely non-monotone, +0.72% then +0.15% with non-overlapping intervals,
+which does not affect the bound because s_max already requires every scale
+below it to be affordable.
+
+The calibration also exposed a defect in the space metric. The frozen
+definition divides settled bytes by `estimate-live-data-size`, and that
+estimate moved by up to 4.8% across nine configurations whose true live data
+was identical at 3.02 GB, while settled bytes moved under 2%. The estimate is
+sensitive to how data is distributed across levels, which is what the capacity
+actuator changes and what the learner changes. Every space amplification number
+in this project carries that sensitivity, including the frozen acceptance
+constraint. Replacing the denominator with the measured garbage-free size is a
+contract amendment and has not been taken.
+
 **C-3 and C-6 are not evaluable.** Both require `prior_only`, which requires a
 guard-calibrated manifest, which is the Pathway E-1 gate still failing.
 
@@ -2414,22 +2436,9 @@ as follows.
 | --- | --- | --- |
 | `README.md` | Trigger-only synopsis, build entry points, geometry, and scaled-pipeline link. | Current entry page. |
 | `docs/PATHWAYS.md` | Improvement pathways A-E, their proofs, per-pathway acceptance criteria, and the gated execution order. | **Current forward plan.** Authoritative for the post-2026-09-05 objective, the two-hull comparator, and gate costs. Nothing in it has been executed. |
-| `docs/rl_l0_compaction_technical_spec.md` | Original L0 acceptance/fix specification. | Historical requirements; most mechanics were implemented and later superseded. |
-| `docs/rl_l0_compaction_change_summary.md` | First working L0 implementation and early observations. | Historical v1 record. |
-| `docs/project_technical_overview.md` | Detailed June L0 architecture, files, parameters, artifacts, and early results. | Historical L0-only implementation; its non-file-selection boundary remains current. |
-| `docs/rl_agent_structure.md` | Original 14-feature, two-action DQN and protocol. | Historical v1 internals. |
-| `docs/poc_validity_review.md` | Four major validity risks. | Historical audit whose concerns drove the rework. |
-| `docs/l0_reward_attribution_plan.md` | Proposed n-step/Double-DQN attribution correction. | Historical plan; wall-clock and executed-action attribution later went further. |
 | `docs/multilevel_rl_design.md` | Protocol v2, multi-level architecture, parser failure, and 2026-08-01 rework. | Authoritative trigger-protocol reference. |
 | `docs/physics_informed_rl_architecture.md` | Analytic prior plus learned residual rationale and equations. | Current trigger-model lineage. |
-| `docs/research_overview_and_roadmap.md` | Research landscape, history through July, and six future directions. | Mix of history and proposals; file-selection proposals are outside current scope. |
-| `docs/Refined spec Claude.md` | FLSM/bounded horizontal expansion phased plan. | Proposed long-term structural program, not present code. |
-| `docs/REWORK_CHANGELOG.md` | Detailed Aug. 1–5 audit, fixes, measurements, and corrections. | Essential historical evidence; tick-latency and some conclusions are explicitly retracted/disabled. |
-| `docs/context.md` | Aug. 5 session handoff and then-current diagnosis. | Historical snapshot superseded in part by the Aug. 6 reward diagnosis. |
-| `docs/system_guide.md` | Most complete v2 system explanation, valid ten-pair result, and hard-won rules. | Primary trigger-only system reference. |
-| `docs/candidate_aware_protocol_v3.md` | Concise record of the rejected v3 exact-file prototype and its smoke result. | Historical only; explicitly not an experiment guide. |
 | `workload_specs/README.md` | Balanced-workload timing and generator/parser pitfalls. | Current workload-authoring evidence. |
-| `ORACLE_GATE_FIX_PLAN.md` | Revision 3. The D1-D7 defect analysis, the fixes as built, two recorded deviations from the plan as written, the preregistered experiment-design decisions, and what the evidence does not establish. | Current; the authoritative record for everything after 2026-08-18. |
 | `scripts/dbbench_pipeline/README.md` | Oracle gate, tuned sweep/manifest, paired 10M–50M workflow, evaluators, stress suites, geometry, and caveats. | Current operational path. |
 | `lib/tectonic/README.md`, `lib/tectonic/USAGE.md` | Upstream Tectonic build, commands, spec grammar, expressions, and operations. | Generator reference. |
 | bundled RusKey PDF | Online RL and FLSM motivation. | Research inspiration, not implementation documentation. |

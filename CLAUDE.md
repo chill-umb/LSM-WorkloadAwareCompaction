@@ -6,24 +6,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is research code for a **trigger-only RL compaction controller for RocksDB**. For every observed level, a Python DQN returns `0 = defer` or `1 = compact`. RocksDB's native leveled picker still chooses every input SST and runs the compaction. The goal is point-read improvement with write non-inferiority. The other amplifications and the latencies are held as constraints.
 
-Read these before making non-trivial changes:
-- **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record.
-  - §5–6: architecture and the learning/safety system.
-  - §11: the pipeline.
-  - §13: test status.
-  - §14–15: what is implemented and what is still open.
-- **`TRIGGER_CONTROLLER_REPAIR_PLAN.md`** is the current controller design plan. It covers the per-level state machine, the deferral math, the required tests and the phases.
-- **`docs/RESEARCH_OBJECTIVE_CONTRACT.md`** and **`config/research_objective_contract.v3.json`** hold the research objective, frozen on 2026-09-12. v3 supersedes v2, which superseded v1 (frozen 2026-09-10); v2 added the P1 amendments and the build/architecture pin, v3 added the direct-I/O pin. No run was executed under v1 or v2; both stay in the tree as superseded records.
-  - Changing either needs a version bump and a written reason.
-  - Never change them after seeing a gate's outcome.
-- **`docs/EXPERIMENTAL_SETUP.md`** records every experimental control in one place: node, build and architecture pin, source commits, engine options, workload, controller settings, CPU pinning, metric definitions, statistical protocol, declared deviations from RocksDB defaults. It is the source text for the paper's setup section. Update it whenever a control changes.
-- **`docs/rl_l0_compaction_technical_spec.md`** is tracked, but it describes the old L0-only, 3-action proof of concept. Don't treat it as current.
+### Where authority lives
+
+| Topic | File |
+| --- | --- |
+| Forward plan, gates, acceptance criteria | `docs/PATHWAYS.md` |
+| Frozen research objective | `docs/RESEARCH_OBJECTIVE_CONTRACT.md` + `config/research_objective_contract.v3.json` |
+| Every experimental control, paper setup text | `docs/EXPERIMENTAL_SETUP.md` |
+| Historical record | `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` |
+| Pipeline operation | `scripts/dbbench_pipeline/README.md` |
+
+- **`docs/PATHWAYS.md` is the only forward plan.** Pathways A–F, their proofs, per-pathway acceptance criteria and the gated execution order. Its vocabulary is `A-Impl-N`, `C-N`, `Gate N`, `P0`/`P1` preregistration items. Nothing else defines what to do next.
+- **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record of what happened. §5–6 architecture and the learning/safety system, §11 the pipeline, §13 test status, §14 the dated gate records (§14.7 is Gate 1), §15–16 what is open.
+- **The objective contract is frozen** (v3, 2026-09-12). **Never create a new version — edit `config/research_objective_contract.v3.json` in place**, with a written reason. v1 and v2 remain in the tree only as superseded records; no run was ever executed under either. Never change the contract after seeing a gate's outcome.
+- **`TRIGGER_CONTROLLER_REPAIR_PLAN.md` is historical.** Its audited deviations were closed on 2026-08-16 and the controller design it describes is built. Read it for the per-level state machine and the deferral math, not for what to do next.
+
+### docs/ is gitignored on purpose
+
+`.gitignore` ignores `/docs/*` and re-includes only `docs/RESEARCH_OBJECTIVE_CONTRACT.md`. So `docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` — both current authority — **exist only on disk and would not survive a clean checkout**. Don't silently change this; raise it.
 
 ## Commands
 
 ### Build
 
-The supported path is the numbered db_bench pipeline. Run it from the repo root; it supports Ubuntu/Debian only.
+**Do not build RocksDB on this machine.** Builds happen on the Chameleon node (CHI@NCAR, Zen 5). The sanctioned local check is syntax-only against the legacy build tree's compile database, which also covers the RL C++ sources:
+
+```bash
+g++ -fsyntax-only $(...flags from build/compile_commands.json...) lib/rocksdb/db/compaction/compaction_picker_rl.cc
+```
+
+The numbered pipeline is the supported build path when you are on the node (Ubuntu/Debian only, run from the repo root):
 
 ```bash
 git submodule update --init --recursive
@@ -32,46 +44,39 @@ scripts/dbbench_pipeline/01_build_rocksdb.sh         # CMake-configure lib/rocks
 scripts/dbbench_pipeline/02_build_db_bench.sh        # build db_bench in the same build dir
 ```
 
-**Config and this checkout.** `scripts/dbbench_pipeline/config.sh` holds every default, and any of them can be overridden from the environment.
-- The defaults are `DBBENCH_BUILD_DIR=build-dbbench` and `PYTHON_VENV=.venv-dbbench`.
-- This checkout has `.venv/` instead, with torch installed.
-- It also has `build-bench/` instead, a CMake tree of `lib/rocksdb` that contains `db_bench`.
+**Config and this checkout.** `scripts/dbbench_pipeline/config.sh` holds every default; all are overridable from the environment.
+- Defaults are `DBBENCH_BUILD_DIR=build-dbbench` and `PYTHON_VENV=.venv-dbbench`. **This checkout has `.venv/` and `build-bench/` instead** — a CMake tree of `lib/rocksdb` containing `db_bench`.
+- `ROCKSDB_PORTABLE=znver5` pins the march; it needs GCC 14.1+ or Clang 19+ and has a toolchain preflight.
+- `DBBENCH_CPUS=0-7` and `CONTROLLER_CPUS=8` pin the engine and the controller to disjoint cores.
+- `STATIC_CAPACITY_SCALES` drives the per-level capacity actuator (empty = off).
 
 **Rebuilding.** The experiment runners never build anything. `scripts/run_full_experiment.sh` refuses to start if `db_bench` is older than `compaction_picker_rl.cc` or `rl_agent/agent.py`, so rebuild after editing either one.
 
-**The root CMake build is legacy.** The root `CMakeLists.txt` builds the old `db_runner` wrapper (`src/`, `include/`) and `tectonic-cli` (Rust nightly) into `bin/`. Its build tree, `build/`, has a `compile_commands.json` that also covers the RocksDB RL sources. Use it for `-fsyntax-only` checks without doing a full build.
+**The root CMake build is legacy.** The root `CMakeLists.txt` builds the old `db_runner` wrapper (`src/`, `include/`) and `tectonic-cli` (Rust nightly) into `bin/`. Its build tree `build/` carries the `compile_commands.json` used for the syntax check above.
 
-### Python tests
+RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`: registering new `.cc` files in `src.mk`, `CMakeLists.txt`, `Makefile` and BUCK; make targets; `make format-auto`. Its test-writing guidance does not apply here — see below.
 
-The tests use `unittest`; the venv has no pytest.
+### No tests
 
-```bash
-.venv/bin/python -m unittest discover -s rl_agent/tests                  # needs torch; test_socket_e2e.py binds Unix sockets
-.venv/bin/python -m unittest discover -s scripts/dbbench_pipeline/tests
-.venv/bin/python -m unittest discover -s rl_agent/tests -p test_config.py -k test_reward_keeps_formal_limits_separate_from_live_guard  # single test
-```
+**This repository has no test suite, and none should be written.** The Python
+`rl_agent/tests/` and `scripts/dbbench_pipeline/tests/` directories and the RL
+cases inside the submodule's `compaction_picker_test.cc` and `version_set_test.cc`
+were removed on 2026-09-13. Do not add `test_*.py` files, `TEST_F` cases, a
+`__main__` self-check, or a test dependency, and do not re-add them as part of
+some other change.
 
-As of 2026-09-11, `rl_agent` has exactly two failing tests. They are the "pre-existing failures" baseline referred to in the project history:
-- `TestPotentialReward.test_cost_half_scales_with_the_interval_it_covers`
-- `TestReadPathSignals.test_deep_level_read_cost_scales_with_how_full_the_level_is`
+This is research code. The deliverable is a measurement, and correctness is
+established by the gates in `docs/PATHWAYS.md` — the oracle parity gate, the
+guard holdout, the hull criteria and the paired acceptance evaluators — not by
+unit tests. When you change the controller, the proof is the relevant gate
+re-run on the node, and a `-fsyntax-only` check locally.
 
-### C++ RL tests
-
-The C++ RL tests are in `lib/rocksdb/db/compaction/compaction_picker_test.cc`. They are `CompactionPickerTest.RL*` plus `PressureObserverUsesZeroOrderHold`. Build them with RocksDB's make, which gives a debug build:
-
-```bash
-make -C lib/rocksdb -j"$(nproc)" compaction_picker_test
-lib/rocksdb/compaction_picker_test --gtest_filter='CompactionPickerTest.RL*:CompactionPickerTest.PressureObserver*'
-```
-
-RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`. That file covers:
-- registering new `.cc` files in `src.mk`, `CMakeLists.txt`, `Makefile` and BUCK;
-- make targets;
-- formatting with `make format-auto`.
+RocksDB's own upstream tests in the submodule are untouched and stay that way;
+do not delete or extend them.
 
 ## Running experiments
 
-`scripts/dbbench_pipeline/README.md` gives the exact command for each stage. Run the stages in this order:
+`scripts/dbbench_pipeline/README.md` gives the exact command per stage. Order:
 1. Oracle parity gate: 1M operations at T=2, arms `regular oracle`, then `09_evaluate_oracle_parity.py`.
 2. Tuned baseline sweep (`05`).
 3. SLO manifest selection (`06_select_baseline_slo.py`).
@@ -84,13 +89,18 @@ RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`. That file covers:
 
 `scripts/run_full_experiment.sh` runs the whole suite. To resume, pass the same `SUITE_ROOT` again.
 
+Gate-specific stages, added for the PATHWAYS programme:
+- `14_gate0_reanalysis.py` — Gate 0 against existing artifacts.
+- `15_top_up_hull.{py,sh}` — decide which hull points still need repeats, and record those unresolvable at any affordable cost.
+- `16_capacity_calibration.py` — measure ΔS(s) and derive `s_max`, verifying each arm's applied capacity vector against its request.
+
 **Starting and resuming**
 - Every runner requires `CONFIRM_*=YES` before it will start.
 - `RESUME=1` skips only arms that have a `COMPLETED` marker. Partial result directories are never deleted automatically.
 - `03` refuses to start while a stray `db_bench` or `rl_agent/server.py` process is running.
 
 **Disk**
-- A failed learner gate keeps its database, which takes roughly 1 GB per million operations.
+- A failed learner gate keeps its database, roughly 1 GB per million operations.
 - Put `DB_ROOT` on the device you are measuring, never on tmpfs `/tmp`.
 
 **Arms and manifests**
@@ -101,6 +111,7 @@ RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`. That file covers:
 **Protocol settings**
 - Protocol v2 is pinned and can't be overridden.
 - `RL_OBSERVE_INTERVAL_MS` must equal `RL_DECISION_INTERVAL_MS`. The default for both is 50 ms.
+- Direct I/O is pinned **off** (`use_direct_reads`, `use_direct_io_for_flush_and_compaction`). Measured on the node at 10M/T=2: 2,750 ops/s direct against 58,332 buffered, a 21× penalty. Contract v3 records the reversal and retracts an earlier cross-machine 2.6× claim.
 
 ## Architecture
 
@@ -125,6 +136,7 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
 - **Nothing slow runs under the DB mutex.** No socket I/O and no Python inference happen there. While holding the mutex, the picker only publishes a snapshot and reads a response that was computed earlier.
 - **Messages carry `interval_micros`.** Rates and the SMDP discount use the real elapsed time, not a nominal interval.
 - **Forced actions are recorded as overrides.** For safety, drain, maintenance and fallback actions, the requested action and the effective action are kept separate. Those intervals stay out of Q replay, but their telemetry is kept.
+- **Capacity expansion is applied in `PrepareForVersionAppend`.** L0 and the final level are pinned per A-Impl-1; a controller-set vector always beats the static one.
 
 ### The Python agent (`rl_agent/`)
 
@@ -140,7 +152,8 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
 - `pipeline_stats.py` has the paired Student-t helpers.
 - `slo_statistics.py` has the tolerance bounds used by stage 06.
 - `research_objective.py` loads the frozen contract.
-- Formal space amplification is the SST bytes measured before compaction divided by `estimate-live-data-size`.
+- `frontier_analysis.py` builds the empirical hulls the Gate 1 criteria are evaluated against.
+- Formal space amplification is the SST bytes measured before compaction divided by `estimate-live-data-size`. The pipeline also records `sst_bytes_after_full_compaction` as the measured alternative denominator; switching to it would be a contract amendment.
 - The scan objective is sorted-run seeks, because scan amplification is already at its floor.
 
 ### Legacy code
@@ -155,6 +168,12 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
   - Commit inside the submodule first, then bump the submodule pointer in the root repo.
   - The research contract pins the RocksDB base at `7ea2d73`, and later commits must record their parent.
   - The `*.cc.d` files next to the sources are make dependency outputs.
+- **The fingerprint string in `03` and the regex in `06_select_baseline_slo.py` must stay in lockstep.** `parse_fingerprint_options` is anchored with `fullmatch` and rejects unknown trailing fields. Any new fingerprint field needs the parser updated; emit the segment conditionally if existing runs must stay poolable (this is why the `cap` segment appears only when capacity expansion is on).
+- **RocksDB's `JSONWriter` has no bool overload**, so `status.ok()` and `rl_drain` reach the event log as `1`/`0`. Never test `is True` against an event-log field; use the tolerant form `in (True, 1, "true", "1")` that `04_generate_graphs.py` already uses.
+- **Result layout has a `repeat-NN/` level only when `REPEATS > 1`.**
+- **Stage 06 must exclude the level-base scale axis** from comparator selection (`--level-base-bytes`), or a 0.5× configuration can win minimum-space and silently redefine the baseline.
+- **The hull is bound to its binary.** The evaluator refuses to pool across `dbbench_sha256`. Any criterion comparing a policy against the hull needs the hull re-measured on whatever binary finally runs that policy.
+- **Put repeated pipeline logic in a numbered stage, not a pasted heredoc.** That is what `15` and `16` are.
 
 ## graphify
 
@@ -164,4 +183,5 @@ Rules:
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- `docs/` is gitignored, so nothing under it is in the graph. Read those files directly.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
