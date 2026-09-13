@@ -77,23 +77,41 @@ def tolerance_bound(values: list[float]):
 
 
 def censored_tolerance_bound(completed: list[float], censored: list[float]):
-    """Return a bound only when every episode used by it is complete.
+    """Upper tolerance bound that stays valid under right censoring.
 
     A truncated episode reports a lower bound on its eventual duration,
-    integrated pressure, and maximum. Raising a completed-sample order
-    statistic to the largest observed lower bound does not produce a valid
-    distribution-free tolerance bound: the unknown tail beyond the censoring
-    point can still be arbitrarily large. Without a preregistered censoring
-    model, the conservative result is therefore uncalibrated.
+    integrated pressure, and maximum, so its true value is unknown. Ranking it
+    beside completed episodes understates the tail, and raising the bound to
+    the largest observed lower bound carries no distribution-free guarantee
+    either, because the unseen tail past the censoring point can be arbitrarily
+    large.
+
+    Charging every censored episode to that tail does carry one. The worst case
+    for an upper bound is that all of them exceed every completed observation;
+    then the combined sample's r-th smallest value *is* the completed sample's
+    r-th smallest, for any rank r <= len(completed). So the rank is chosen over
+    the full sample size and read off the completed sample, and the guarantee
+    holds however large the unseen tail turns out to be.
+
+    Returning no bound at all is not the conservative alternative: callers fall
+    back to hard-coded caps far tighter than any calibrated limit, which makes
+    the safety guard fire more, not less.
+
+    With no censoring at all this reduces exactly to ``tolerance_bound``. As
+    censoring grows it walks the same TOLERANCE_COVERAGES ladder that a small
+    sample does: once the 0.99 rank runs past the end of the completed sample
+    it falls back to 0.90 coverage, and it returns no bound only when even the
+    weakest rung is out of reach. Read ``achieved_coverage`` before comparing
+    two limits -- a 0.90 bound sits materially lower than a 0.99 one, so a
+    heavily censored level yields a *tighter* limit rather than a missing one.
     """
-    bound, completed_meta = tolerance_bound(completed)
+    _, completed_meta = tolerance_bound(completed)
     finite_censored = [v for v in censored if math.isfinite(v)]
     invalid_censored = len(censored) - len(finite_censored)
     meta = dict(completed_meta)
     meta["completed_count"] = len(completed)
     meta["censored_count"] = len(finite_censored)
     meta["invalid_censored_count"] = invalid_censored
-    meta["bound_raised_by_censored"] = False
     if invalid_censored:
         meta["method"] = "invalid_non_finite_censored_samples"
         meta["achieved_coverage"] = None
@@ -104,13 +122,29 @@ def censored_tolerance_bound(completed: list[float], censored: list[float]):
         # Preserve the more specific completed-sample parse failure instead of
         # relabelling it as ordinary right censoring below.
         return None, meta
-    if finite_censored:
-        meta["completed_sample_estimator"] = completed_meta
-        meta["method"] = "right_censored_bound_unavailable"
-        meta["achieved_coverage"] = None
-        meta["achieved_confidence"] = None
-        meta["order_statistic_rank"] = None
+    ordered = sorted(completed)
+    if not ordered:
         return None, meta
-    if bound is None:
-        return None, meta
-    return bound, meta
+    ranked_over = len(ordered) + len(finite_censored)
+    for coverage in TOLERANCE_COVERAGES:
+        rank, confidence = smallest_valid_rank(
+            ranked_over, coverage, TOLERANCE_CONFIDENCE
+        )
+        if rank is None or rank > len(ordered):
+            continue
+        meta.update(
+            {
+                "method": "censored_order_statistic_tolerance_bound",
+                "achieved_coverage": coverage,
+                "achieved_confidence": confidence,
+                "order_statistic_rank": rank,
+                "ranked_over_count": ranked_over,
+            }
+        )
+        return ordered[rank - 1], meta
+    meta["method"] = "censoring_exceeds_tail_budget"
+    meta["achieved_coverage"] = None
+    meta["achieved_confidence"] = None
+    meta["order_statistic_rank"] = None
+    meta["ranked_over_count"] = ranked_over
+    return None, meta

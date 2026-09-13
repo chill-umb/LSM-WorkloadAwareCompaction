@@ -279,9 +279,13 @@ def main() -> int:
             float(item["max_pending_debt_ratio"]) for item in censored)
         # All three episode maxima are lower bounds when an episode is
         # truncated: duration and integrated pressure can keep accumulating,
-        # and a later score can exceed the maximum observed so far. No
-        # distribution-free upper tolerance bound follows from such a lower
-        # bound, so censored_tolerance_bound marks that level uncalibrated.
+        # and a later score can exceed the maximum observed so far.
+        # censored_tolerance_bound charges every such episode to the tail when
+        # choosing its order-statistic rank, so a level stays calibrated
+        # through the one truncated record per phase that
+        # CompactionPressureObserver::FlushOpenEpisodes is expected to emit,
+        # and goes uncalibrated only when censoring is heavy enough to reach
+        # the rank the bound needs.
         due_bound, due_meta = censored_tolerance_bound(
             [float(item["duration_micros"]) for item in complete],
             [float(item["duration_micros"]) for item in censored])
