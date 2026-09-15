@@ -2065,6 +2065,83 @@ fingerprint outright, which would have blocked every manifest.
 2026-09-03 Zen 3 measurements. The per-arm `db_bench` phase here is 173.6 s at
 10M T=2. The whole cost table and the lease split need recalibrating.
 
+### 14.8 Guard calibration repaired, E-1 recorded failed, 2026-09-14
+
+The guard holdout was diagnosed, three defects in the calibration chain were
+fixed, and the gate still failed. E-1 is recorded as **failed**. The
+consequence PATHWAYS attaches to that — cutting the guard from the paper — is
+deferred pending a design decision. Full evidence is in `docs/PATHWAYS.md`
+under Pathway E; this is the summary and what it costs.
+
+**Three defects were real and are fixed.**
+
+1. `censored_tolerance_bound` returned no bound whenever a single truncated
+   episode appeared in a sample, which forced the hard-coded bootstrap caps
+   Pathway E's implementation item 2 exists to remove. The behaviour was
+   introduced by commit `f77bfb8`; an older manifest on the same workload shows
+   the previous code calibrating through one truncated episode per level. The
+   C++ side documents one truncated record per level per phase as *expected*
+   (`compaction_pressure_observer.h:68`), so the rule fired on a condition the
+   producer guarantees. It now charges each censored episode to the tail when
+   choosing its order-statistic rank, which is distribution-free valid without a
+   censoring model. Every populated level recalibrated: 8/8, 4/4 and 4/4 at
+   T = 2, 6 and 10, against 5 of 12 before. `allowed_pending_debt_ratio` moved
+   from the hard-coded 0.50 floor to a measured 4.141.
+2. The per-level limits were calibrated on the wrong statistic. A tolerance
+   bound over episode durations answers how many *episodes* are long; the
+   picker tests a level's current due age on every 50 ms frame, and frames
+   sample due time, so a rare long episode covers hundreds of consecutive
+   frames. Due age, integrated pressure and score are now calibrated jointly by
+   replaying every baseline run at the observation cadence, at the same
+   override fraction E-1 scores. They must be joint because the force condition
+   is a disjunction: an interim revision that converted only due age and
+   pressure would have handed the entire override rate to the untouched score
+   term.
+3. Stage 06 called `collect_arm`, which reads each `run.log` and
+   `rocksdb_LOG.txt` in full, on every arm before filtering by size ratio, so
+   each of three invocations rescanned the whole sweep. It now pre-filters on
+   `metadata.env`.
+
+**The gate still fails, and the cause is measured.** At 10M/T=2, seeds
+10001–10003, the override fraction is 0.363, 0.377 and 0.342 against a 0.01
+limit and a 0.0099 prediction. Of 2,345 scored frames in the first run, 851
+overrode and 850 had whole-tree debt at or above its limit; none overrode
+without a level being due. Debt is a *global* term — one breach forces every
+due level — and it was the only term left on an episode-derived bound after the
+frame conversion.
+
+**Recalibrating debt does not fix it.** The debt ratio does not have a tail to
+place a quantile in; during the backlog it sits on a plateau, its p50 over due
+frames 4.849 and its p90 through maximum all 4.899. Cross-validation across
+seeds of the identical configuration — fitted on the three `oracle` calibration
+runs, evaluated on the three `oracle` holdout runs — gives 0.0098 and 0.1804, an
+18× transfer gap, both computed as upper bounds so no within-episode model can
+rescue them. An interim diagnosis blaming the `regular`-to-`oracle` transfer is
+wrong and is retracted.
+
+**What the number measures.** Decomposed into maximal consecutive stretches the
+override frames form exactly **one** event in each of the three runs, of 851,
+891 and 806 frames. The guard engages once per run and stays engaged for about
+36% of it, because the tree enters a single sustained backlog — debt plateaued
+near 4.88, a deep level continuously due, consistent with the
+`longest_due_run_fraction` of roughly 50% per run that the calibration reports,
+and the same event behind the debt p99 of 4.141 and maximum of 9.485. How often
+the guard engages is 1 and is exactly stable; how long it stays engaged is the
+quantity E-1 thresholds, and it swings 0.342–0.377 between seeds and 18× under
+cross-validation.
+
+**Recorded as failed rather than reinterpreted.** An amendment to count override
+events was considered and refused: the criterion had already been seen to fail,
+one event per run was observed, and any bound set now would be fitted to that
+observation. This follows the C-2 precedent in Section 14.7. Two instruments on
+this gate were already amended after failures — E-2's denominator, and the
+limits' unit — which argues for more caution here, not less.
+
+**Gate 1 standing after this entry.** C-1 passes, C-5 is closed, **C-2 and E-1
+are recorded failed**, and E-2 passes under an amended denominator. C-3 and C-6
+remain unevaluable, because both need `prior_only`, which needs a
+guard-calibrated manifest.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,

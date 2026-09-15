@@ -214,8 +214,8 @@ def main() -> int:
         color, label = SERIES[arm]
         means, los, his, names = [], [], [], []
         for metric in [m for m in args.metrics.split(",") if m]:
-            values = [v for _, v in paired(index, sizes, ratios, arm, metric,
-                                           args.baseline)]
+            tagged = paired(index, sizes, ratios, arm, metric, args.baseline)
+            values = [v for _, v in tagged]
             if not values:
                 continue
             interval = ci95(values)
@@ -225,7 +225,7 @@ def main() -> int:
             his.append(((interval["upper"] or 0) - interval["mean"]) * 100)
             names.append(PRETTY.get(metric, metric))
             report.append((label, PRETTY.get(metric, metric), interval,
-                           need, len(values)))
+                           need, len(values), tagged))
         axis.axvline(0, color=GRID, lw=1)
         axis.errorbar(means, range(len(names)), xerr=[los, his], fmt="o", ms=6,
                       color=color, ecolor=color, elinewidth=2, capsize=0,
@@ -249,14 +249,40 @@ def main() -> int:
     summary_path = args.outdir / "paired_difference.txt"
     with summary_path.open("w") as handle:
         handle.write(f"paired differences vs {SERIES[args.baseline][1]}\n")
+        handle.write("pooled over every cell; read the per-cell block below "
+                     "before quoting these\n\n")
         handle.write(f"{'arm':20s}{'metric':28s}{'mean%':>9s}{'lo%':>9s}"
                      f"{'hi%':>9s}{'n':>5s}{'need':>7s}\n")
-        for label, metric, interval, need, n in report:
+        for label, metric, interval, need, n, _ in report:
             handle.write(
                 f"{label:20s}{metric:28s}{interval['mean']*100:+9.2f}"
                 f"{(interval['lower'] or 0)*100:+9.2f}"
                 f"{(interval['upper'] or 0)*100:+9.2f}{n:5d}"
                 f"{(need or '>200'):>7}\n")
+
+        # Pooling averages cells whose differences point in opposite
+        # directions, so a pooled mean can carry a sign no cell exhibits.
+        # Per-cell is the quotable view; the pooled block above matches the
+        # PNG, which pools for legibility.
+        handle.write("\n\nper cell\n")
+        handle.write(f"{'arm':20s}{'metric':28s}{'cell':>10s}{'mean%':>9s}"
+                     f"{'lo%':>9s}{'hi%':>9s}{'n':>5s}\n")
+        for label, metric, _, _, _, tagged in report:
+            by_cell: dict[tuple[int, int], list[float]] = {}
+            for cell, value in tagged:
+                by_cell.setdefault(cell, []).append(value)
+            for cell in sorted(by_cell):
+                cell_values = by_cell[cell]
+                cell_interval = ci95(cell_values)
+                lower, upper = cell_interval["lower"], cell_interval["upper"]
+                bounds = (f"{lower*100:+9.2f}{upper*100:+9.2f}"
+                          if lower is not None and upper is not None
+                          else f"{'—':>9s}{'—':>9s}")
+                handle.write(
+                    f"{label:20s}{metric:28s}"
+                    f"{f'{cell[0]}M T={cell[1]}':>10s}"
+                    f"{cell_interval['mean']*100:+9.2f}{bounds}"
+                    f"{len(cell_values):5d}\n")
     written.append(summary_path)
 
     for path in written:

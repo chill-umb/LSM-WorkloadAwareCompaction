@@ -176,13 +176,23 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
 
     For each frame and each level with an open episode, the due age is exact
     from the episode start. The score trajectory inside an episode is not
-    logged, so score is modelled as constant at its episode mean,
-    ``1 + integrated_excess / duration``, and pressure as the integral of that
-    same constant, ``total * age / duration``. The two models are consistent
-    with each other and exact when the score holds steady within an episode.
-    They understate brief peaks: ``predicted_override_fraction_score_upper``
-    re-scores the chosen limits with ``max_score`` held for the whole episode,
-    which overstates them. The true holdout fraction lies between the two.
+    logged and is modelled as a linear ramp from 1 to the episode's observed
+    ``max_score``, with pressure the integral of that ramp,
+    ``total * (age / duration) ** 2``, which reaches exactly the measured
+    ``integrated_excess_score_micros`` at the episode's end.
+
+    The ramp is measured, not assumed. For a linear ramp the peak excess is
+    twice the mean, so ``(max_score - 1) / (integrated_excess / duration)``
+    should be 2. Over 429,115 baseline episodes that ratio, weighted by the
+    frames each episode covers, is 1.93 to 2.50 on every level of the tree.
+    Short episodes read 1.0 because peak and mean coincide within one
+    observation; the long episodes that carry the frames ramp.
+
+    Two alternative models are reported but never used to choose limits:
+    ``..._score_flat`` holds each episode at its mean excess, a lower bound,
+    and ``..._score_upper`` holds it at ``max_score`` throughout, an upper
+    bound. They bracket the ramp and their spread is the residual modelling
+    risk in the prediction.
 
     Each level's limits are the frame quantiles at a common per-level
     exceedance k/N, and k is the largest count at which the fraction of frames
@@ -221,6 +231,7 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
     pressures: list[list[float]] = [[] for _ in range(levels)]
     scores: list[list[float]] = [[] for _ in range(levels)]
     peaks: list[list[float]] = [[] for _ in range(levels)]
+    flats: list[list[float]] = [[] for _ in range(levels)]
     # (offset, length) of each run inside the concatenated frame arrays. A due
     # run is only meaningful within one run, and its severity is relative to
     # that run's own length, not to the pooled total.
@@ -238,6 +249,7 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
             pressures[level].extend([-1.0] * n)
             scores[level].extend([-1.0] * n)
             peaks[level].extend([-1.0] * n)
+            flats[level].extend([-1.0] * n)
         for e in run:
             level = e["level"]
             duration = e["duration_micros"]
@@ -245,17 +257,20 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
                 continue
             start = e["start_micros"]
             total = e["integrated_excess_score_micros"]
-            mean_score = 1.0 + total / duration
+            flat_score = 1.0 + total / duration
             peak_score = e["max_score"]
             k = -(-(start - t0) // interval_micros)
             while k < n:
                 age = t0 + k * interval_micros - start
                 if age > duration:
                     break
+                elapsed = age / duration
                 ages[level][base + k] = age
-                pressures[level][base + k] = total * age / duration
-                scores[level][base + k] = mean_score
+                # Integral of the ramp, hitting `total` exactly at age=duration.
+                pressures[level][base + k] = total * elapsed * elapsed
+                scores[level][base + k] = 1.0 + (peak_score - 1.0) * elapsed
                 peaks[level][base + k] = peak_score
+                flats[level][base + k] = flat_score
                 k += 1
         spans.append((base, n))
         frame_count += n
@@ -268,7 +283,8 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         "exceedance_per_level": None,
         "predicted_override_fraction": None,
         "predicted_override_fraction_score_upper": None,
-        "score_model": "episode_mean_excess_held_constant",
+        "predicted_override_fraction_score_flat": None,
+        "score_model": "linear_ramp_to_observed_max_score",
     }
     if frame_count == 0:
         return None, meta
@@ -358,6 +374,7 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         meta["predicted_override_fraction"] == 0.0
         and any(a >= 0 for level in range(levels) for a in ages[level]))
     meta["predicted_override_fraction_score_upper"] = joint_fraction(limits, peaks)
+    meta["predicted_override_fraction_score_flat"] = joint_fraction(limits, flats)
     meta["due_frames_per_level"] = [
         sum(1 for a in ages[level] if a >= 0) for level in range(levels)]
     # The longest unbroken stretch of frames in which one level stays due. A

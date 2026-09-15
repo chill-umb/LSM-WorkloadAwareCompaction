@@ -185,3 +185,13 @@ Rules:
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - `docs/` is gitignored, so nothing under it is in the graph. Read those files directly.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+
+## Talking Guidelines
+
+Rules: 
+- Talk in plain simple English, rather than using jargons
+- Assumne the person you are talking to is a CS student who only has a basic grasp of LSM Tree concepts, so frame your responses so that the person can       understand your responses properly
+- If Jargons are necessary, provide a short explanation in simpler terms
+- For each response, outline the next immediate task to perform. If some command needs to be executed in the cloud machine, provide the command.
+- For each result, provide a verdict whether the result is good or bad according to the corresponding acceptance criteria in PATHWAYS
