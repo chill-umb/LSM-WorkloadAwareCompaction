@@ -45,7 +45,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--summary", required=True, type=Path)
     parser.add_argument(
-        "--arm", required=True, choices=("prior_only", "rl", "unconstrained_rl")
+        "--arm", required=True,
+        choices=("prior_only", "rl", "unconstrained_rl",
+                 "unconstrained_prior_only"),
     )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -88,7 +90,10 @@ def main() -> int:
         checks["trainer_error"] = (
             "trainer_error" in summary and summary["trainer_error"] is None
         )
-        if args.arm == "prior_only":
+        # Both prior arms freeze the learner, matching the *prior_only glob
+        # 03_run_experiments.sh uses to set eval_mode. An exact-equality
+        # test here would demand training of unconstrained_prior_only.
+        if args.arm.endswith("prior_only"):
             checks.update({
                 "eval_mode": summary.get("eval_mode") is True,
                 "zero_train_steps": integer(summary, "train_steps", -1) == 0,
