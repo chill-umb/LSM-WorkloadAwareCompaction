@@ -16,7 +16,14 @@ Usage:
 
 Configuration is read from scripts/dbbench_pipeline/config.sh and can be
 overridden with environment variables. Supported arms are regular, oracle,
-prior_only, rl, and unconstrained_rl.
+prior_only, rl, unconstrained_rl, and unconstrained_prior_only.
+
+unconstrained_prior_only runs the analytic prior with the live guard classifying
+but not enforcing, and writes safety_shadow.jsonl. It is the only arm on which
+the guard's influence is measurable: the oracle compacts every due level, and
+the guard only forces due levels, so on an oracle holdout the guard can never
+disagree with the policy and its override rate measures agreement rather than
+interference.
 USAGE
   exit 0
 fi
@@ -205,7 +212,7 @@ done
 }
 for arm in $EXPERIMENT_ARMS; do
   case "$arm" in
-    regular|oracle|prior_only|rl|unconstrained_rl) ;;
+    regular|oracle|prior_only|rl|unconstrained_rl|unconstrained_prior_only) ;;
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
 done
@@ -222,7 +229,8 @@ esac
 SLO_DRIVEN_MATRIX=0
 for arm in $EXPERIMENT_ARMS; do
   if [[ "$arm" == "prior_only" || "$arm" == "rl" ||
-        "$arm" == "unconstrained_rl" ]]; then
+        "$arm" == "unconstrained_rl" ||
+        "$arm" == "unconstrained_prior_only" ]]; then
     SLO_DRIVEN_MATRIX=1
   fi
 done
@@ -527,9 +535,12 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     oracle=1
     safety_enforcement=0
   elif [[ "$arm" == "prior_only" || "$arm" == "rl" ||
-          "$arm" == "unconstrained_rl" ]]; then
+          "$arm" == "unconstrained_rl" ||
+          "$arm" == "unconstrained_prior_only" ]]; then
     uses_server=1
-    [[ "$arm" != "unconstrained_rl" ]] || safety_enforcement=0
+    # Both unconstrained arms disable the live mask; the manifest is still
+    # loaded so the guard can classify what it would have masked.
+    [[ "$arm" != unconstrained_* ]] || safety_enforcement=0
     policy_seed=$(( POLICY_SEED_BASE + repeat * 100000 + size_m * 100 + ratio ))
     # D6. Exploration anneals on wall time, not decision count.
     #
@@ -637,7 +648,8 @@ PY
   fi
   if (( uses_server )); then
     local eval_mode=0
-    [[ "$arm" != "prior_only" ]] || eval_mode=1
+    # Both prior arms run the analytic prior with the learner frozen.
+    [[ "$arm" != *prior_only ]] || eval_mode=1
     start_server "$result_dir" "$policy_seed" "$decay_steps" "$eval_mode" \
       "$manifest_env_path" "$fingerprint" "$anneal_seconds"
   fi
@@ -743,6 +755,15 @@ PY
     trigger_trace_path=""
     safety_shadow_log="$result_dir/safety_shadow.jsonl"
     oracle_manifest_env_path="$manifest_env_path"
+  fi
+  # The guard classifies whenever enforcement is on OR a shadow log is open, so
+  # this is what makes an unenforced arm measurable. Pairing it with io.jsonl,
+  # which records the policy's own per-level action, is the only way to get the
+  # conditional override rate of Corollary E.2 -- how often the guard would
+  # actually CHANGE a decision, rather than how often it would fire. Left off
+  # for unconstrained_rl so that arm's existing results stay comparable.
+  if [[ "$arm" == "unconstrained_prior_only" ]]; then
+    safety_shadow_log="$result_dir/safety_shadow.jsonl"
   fi
   start_ns="$(date +%s%N)"
   set +e

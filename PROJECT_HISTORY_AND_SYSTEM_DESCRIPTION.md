@@ -2137,6 +2137,91 @@ observation. This follows the C-2 precedent in Section 14.7. Two instruments on
 this gate were already amended after failures — E-2's denominator, and the
 limits' unit — which argues for more caution here, not less.
 
+**All three cells scored, 2026-09-17.** The T=6 and T=10 holdout runs had
+completed but were never scored, because the validator exits non-zero on T=2 and
+`set -Eeuo pipefail` aborts the loop. Scored from the existing artifacts:
+
+| cell | override fraction | over limit | debt term | replay agreement |
+| --- | --- | ---: | ---: | ---: |
+| T=2 | 0.363, 0.377, 0.342 | 36x | 0.362 | 1.000 |
+| T=6 | 0.142, 0.154, 0.149 | 15x | 0.142 | 0.908 |
+| T=10 | 0.193, 0.189, 0.191 | 19x | **0.000** | 0.857 |
+
+**The debt diagnosis above holds only at T=2 and T=6.** At T=10 the debt term
+never fires — the tree is shallow and pending work never reaches the limit — yet
+19% of frames still override, and the offline replay misses 14.4% of them, so
+the cause is a term with no per-frame record. `l0_slowdown` is the leading
+candidate and is unconfirmed, because L0 file counts are not logged anywhere.
+Reason composition also varies by ratio: `kSLO` is roughly 2% of overrides at
+T=2, 56% at T=6 and 25% at T=10. Three cells, three mechanisms, one of them
+unidentified.
+
+**Distortion of the arm under test is zero, measured.** Across all nine runs,
+the number of override frames with no due level is zero. The holdout arm is
+`oracle`, whose action is `score >= 1.0 ? compact : defer`, and the guard forces
+only when `item.due`, which is the same predicate on the same snapshot. So every
+override lands on a level the oracle had already chosen to compact, and
+`revoke_optional` cannot fire because it requires the level not to be due. The
+conditional override rate of Corollary E.2 is identically zero, which means
+E-1's 0.14-0.38 measures agreement between the guard and its holdout arm rather
+than the shield's influence on a policy.
+
+**The pre-ready window is exactly the bulk load.** `filluniquerandom` reports
+58.801 s and `guard_ready` arrives at +58.8 s; the load phase issues no Gets or
+scans, so the latency histograms never reach the minimum sample count. E-1
+already scores ready frames only, so the statistic is unaffected — but forcing
+is not gated on readiness. `due_age`, `pressure`, `score` and `debt` evaluate
+throughout, so a `prior_only` or `rl` arm running with enforcement enabled would
+have its policy overridden for the first 29% of every run under no criterion.
+That is a live behaviour of the learned arms and needs a ruling independently of
+this gate.
+
+**Retraction: the offline replay is reliable only for the debt term.** The
+per-frame replay used to attribute overrides to individual terms of the force
+condition was validated at T=2, where it reproduced the guard's classification
+on all 2,345 scored frames with no false positives or negatives. That test
+proved far less than it appeared to. At T=2 the debt term was true on 850 of the
+851 override frames, and debt is read straight out of each episode's
+`max_pending_debt_ratio` with no modelling at all. The exact agreement therefore
+tested the one path that involves no inference, while the modelled per-level
+paths -- due age, the linear-ramp score, and the ramp-integral pressure -- were
+never exercised.
+
+They fail once debt goes quiet. At T=6 the replay claims a per-level breach on
+163 frames carrying `reason_mask: 0`, meaning the guard did not override at all;
+at T=10 it misses 250 override frames, of which 182 carry `reason_mask: 2`
+(`kBudget`, and therefore due age, pressure or score, since debt is zero there
+and `l0_slowdown` never fires) and 68 carry `reason_mask: 64` (an SLO breach the
+replay does not model). Wrong in both directions on the same terms, so this is
+not a one-sided modelling error that a corrected exponent would fix. A sticky-
+retention variant was tested and changed nothing, because the per-level
+conditions fire at the end of due episodes and the level goes healthy
+immediately after.
+
+**Consequently, no per-level attribution from this replay should be used.** That
+includes the due-age/pressure/score breakdown reported above and the
+cross-validated figures for a score-only guard (0.0085-0.0195 held out). The
+proposal to disable the time-based terms and rest the guard on `score` was built
+on those figures and **is withdrawn** pending measurement from the guard's own
+state.
+
+What survives is everything read directly rather than reconstructed: the debt
+values themselves; `l0_slowdown` never firing, established from the `lsm_state`
+array that every `flush_finished` and `compaction_finished` event already
+carries; every override landing on an already-due level in all nine runs; and
+the `guard_ready` boundary coinciding with the end of `filluniquerandom`.
+
+**Resolution path.** `rl_agent/server.py` writes `io.jsonl` per frame with
+`"input": raw_state` -- the guard's own per-level view, including file counts --
+and `"output": {"action": ...}`, the policy's chosen action. Replaying against
+that removes the reconstruction from the loop and simultaneously supplies the
+conditional override rate. The `oracle` arm does not query the server and so has
+no such log, which is why the reconstruction existed. An
+`unconstrained_prior_only` arm was added to `03_run_experiments.sh` on
+2026-09-17 to close this: the analytic prior with the guard classifying but not
+enforcing, writing `safety_shadow.jsonl` alongside `io.jsonl`. It is a shell
+change only, so `dbbench_sha256` is unchanged and the Gate 1 hull stands.
+
 **Gate 1 standing after this entry.** C-1 passes, C-5 is closed, **C-2 and E-1
 are recorded failed**, and E-2 passes under an amended denominator. C-3 and C-6
 remain unevaluable, because both need `prior_only`, which needs a
