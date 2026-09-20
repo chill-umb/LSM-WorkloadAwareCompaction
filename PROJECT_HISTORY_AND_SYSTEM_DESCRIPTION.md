@@ -2633,6 +2633,137 @@ kept; the `Assoc` re-run is scored on E-5's conditional rate, with E-1's
 marginal rate reported. Decision, evidence tables and predictions are
 `docs/PREREGISTRATION.md` D-2. E-1's 2026-09-14 verdict stands.
 
+### 14.15 Geometry probe passed; a suspension-diagnostics defect, and the `Assoc` oracle parity gate, 2026-09-21
+
+Two runs on the new Chameleon node (EPYC 4545P, GCC 14.3.0, `-march=znver5`,
+SMT off at nproc 16, `performance` governor, THP `[madvise]`), both at 1M/T=2.
+
+**The geometry probe passed** (`results/probe-assoc-1m`). L0-L5 populated at
+2/15/30/62/127/64 MB, 316 MB settled against 302 MB garbage-free, about 1042
+bytes per record on disk. This is the check D-1's first deliberate departure
+from the published fit was staked on: `value_theta` of 925.5 holds the mean
+value at about 960 bytes, the level ladder therefore keeps the geometry every
+other constant is calibrated for, and the populated depth scales to the L8-L9
+expected at 10M, so the T sweep keeps its meaning. Had the probe come back
+shallow, the departure would have been unjustified and the fit would have had
+to be revisited before any gate ran.
+
+**The first parity run failed one check, and the check was the defect.**
+`results/oracle-parity-assoc`, ten pairs. Every behavioural check reproduced
+the shape of the 2026-08-22 record -- write, point-read and seek envelopes
+within about 1%, held gates serving 62-90 jobs -- and p50 due-to-admission
+latency came in at 127 us against the 511 us of that record. What failed was
+`observation_health`, which requires `skipped_ticks <= 1` per run: every run
+reported 25 or 26.
+
+The controller had not missed a tick. `WorkerLoop`'s suspended branch counted
+each tick taken between `rlsuspend` and `rlresume` as a skipped tick, and those
+ticks are idle by design -- the native picker owns compaction across the bulk
+load and no frame is sent. The invariant reads `skipped_ticks` as the worker
+failing to take a tick it should have taken, so the two meanings had been
+conflated into one counter and the check failed by construction on every run
+that used a bulk load, which since the 2026-09-20 rebuild is every run.
+
+The same boundary produced a second artifact. `RecordDueAdmission` had no way
+to tell a due episode that began under suspension from one the controller
+itself was responsible for, so the first admission after `rlresume` recorded
+the tail of the load as its own latency: a maximum near 950 ms on every run,
+and `never_admitted` of 0-2. The two symptoms measure one window -- 25 ticks at
+the 50 ms cadence is about 1.3 s, and the 950 ms maximum falls inside it.
+
+**The fix** (submodule `25468bbaa`) draws the boundary explicitly.
+`SetRLControlSuspended(false)` stamps `RLControlResumedMicros()` before the
+flag drops, so any reader that sees control live also sees when it became
+live; `RecordDueAdmission` and `ObserveDueEpisodeTransitions` ignore episodes
+older than that instant; and suspended ticks go to their own
+`rl_suspended_ticks_` counter, exported as `suspended_ticks=` in the
+diagnostics line. Stage 09's `DIAGNOSTICS` regex spans the new field without
+modification, and the field doubles as the cheapest proof of which binary
+produced a run.
+
+**The re-run passes.** `results/oracle-parity-assoc-2`, ten pairs on the
+rebuilt binary (`binary9b9321b1...`, which pools with nothing earlier).
+`failed_checks: []`, every decided check passed.
+
+| Check | Result |
+| --- | --- |
+| `observation_health` | **passed** -- `skipped_ticks` 0 on all ten, `watchdog_expiries` 0 |
+| write amp / point-read amp | **passed** as paired envelopes: +0.31% [-0.54, +1.16], +0.88% [-1.17, +2.92] |
+| `mean_l0_l1_input_size` | **passed**, +0.16% [-0.34, +0.67] |
+| `maximum_pending_debt` | **passed**, -0.33% [-0.89, +0.23] |
+| `per_level_maximum_score` | **passed**, +0.35 normalized [0.06, 0.64] against a limit of 1.0 |
+| decision rate, held-gate service, due-level authorization, workload identity | passed |
+| `due_to_admission_latency` | p50 **127 us** on all ten runs; see the flag note below |
+| `sorted_run_seeks_per_scan` | **insufficient_pairs** -- 18 required, 10 available |
+| `stall_duration` | **no_allowance_configured**, as in 2026-08-22 |
+
+Verdict `undecided` with `failed_checks: []`, which is the same shape the
+2026-08-22 gate was recorded as passing under, and is the acceptance condition
+the pipeline itself encodes: `run_full_experiment.sh:193` and
+`13_run_preflight_verification.sh:154` both accept exit 0 and exit 2 and treat
+anything else as a bridge that is not transparent.
+
+The admission-latency result is the substantive one. Maximum fell from about
+950 ms to 0.23-6.3 ms, a factor of roughly 150, while p50 held at 127 us -- the
+p50 was always sound, because one contaminated sample per run cannot move a
+median over fifty episodes, which is why the defect showed up in the maximum
+and in `never_admitted` rather than in the statistic the gate scores.
+
+`never_admitted` did not reach zero as predicted; it is 0-2 per run, seven
+episodes across ten runs. This is not the controller holding a level closed.
+The same report records `episodes_unmeasurable_between_ticks` of 43-65 per run
+and `oracle_levels_due_only_in_episodes: [4]` in five of ten runs: most due
+episodes open and close inside a single 50 ms tick, so the worker never samples
+them. Stage 09 already separates that population deliberately -- demanding
+authorization for a condition the controller never observed is not a defensible
+check -- and the count sits inside `due_to_admission_latency`, which carries no
+limit unless one is passed.
+
+**A flag note that belongs in the record.** The gate was first invoked without
+`--admission-latency-limit-micros 5000`, which `run_full_experiment.sh:191` and
+`13_run_preflight_verification.sh:147` both pass, so
+`due_to_admission_latency` returned `no_limit_configured` and was left
+unscored. Supplying it decides the check at 127 us against a 5000 us limit.
+That is not a threshold chosen after seeing the outcome: 5000 us is hard-coded
+in both callers and is the limit the 2026-08-22 gate was scored under. Stage 09
+run by hand must be given the flags the suite gives it, or it silently scores
+less than the suite would.
+
+**`decision_rate` is 16.6-17.0/s** against a 20/s target inside a +/-20% band,
+down from the roughly 19.95/s this project has measured before. It passes with
+4% of headroom. The rate is `queries / elapsed_seconds` and the controller
+sends nothing across the suspended load, so a denominator that spans the whole
+run dilutes it by about that much; the check is evaluated only by stage 09 and
+cannot block the sweeps behind it. Noted, not chased.
+
+With the numbers above recorded, `results/oracle-parity-assoc`'s twenty arm
+directories are redundant. Unlike D-2's evidence, which is per-frame state that
+cannot be summarised, this finding is the handful of summary numbers in
+`oracle_parity.json` plus one `suspended_ticks=` token, all of which are here.
+The deprecated tree under `deprecated/pre-gate2-2026-09-20/` is a separate
+matter and stays.
+
+**Two repairs made alongside.** `docs/PREREGISTRATION.md` was untracked through
+four commits -- the `!` rule recorded in 14.13 had been written and lost, and
+`.gitignore` carried a bare `/docs/*` with no re-includes, contradicting
+`CLAUDE.md` -- so D-1 and D-2 had no commit date and therefore no claim to
+being preregistrations at all. The rule is restored with a comment saying why
+it must not be dropped again. **The commit proves the file existed on
+2026-09-21, not on the 2026-09-20 its entries are dated**; the one-day gap is
+not provable by git and is not claimed to be. It costs D-1 and D-2 nothing,
+because the commit still precedes every run either governs -- the Hull-0 sweep,
+the capacity calibration, the guard calibration and holdout, and every learned
+arm are all still to run, and the oracle parity gate is an instrument check
+rather than a predicted outcome -- but a reader who checks the dates should
+find the discrepancy already noted here rather than discover it. And
+`03_run_experiments.sh` opened
+`safety_shadow.jsonl` only for `unconstrained_prior_only` and the holdout
+phase, while D-2 scores E-5 on every learned arm; `prior_only` and `rl` now
+open it too. Enforcement already runs the classifier on those arms, so this
+records what the guard did rather than adding work to the decision path.
+`docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` remain untracked and would
+still not survive a clean checkout.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,

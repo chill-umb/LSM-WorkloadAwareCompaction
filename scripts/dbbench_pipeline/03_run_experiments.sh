@@ -815,7 +815,11 @@ PY
   # conditional override rate of Corollary E.2 -- how often the guard would
   # actually CHANGE a decision, rather than how often it would fire. Left off
   # for unconstrained_rl so that arm's existing results stay comparable.
-  if [[ "$arm" == "unconstrained_prior_only" ]]; then
+  # D-2 scores E-5 on every learned arm, so prior_only and rl open it too.
+  # Enforcement already runs the classifier on those arms, so this records what
+  # the guard did rather than adding work to the decision path.
+  if [[ "$arm" == "unconstrained_prior_only" || "$arm" == "prior_only" \
+        || "$arm" == "rl" ]]; then
     safety_shadow_log="$result_dir/safety_shadow.jsonl"
   fi
   start_ns="$(date +%s%N)"
