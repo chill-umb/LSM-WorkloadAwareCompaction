@@ -90,11 +90,9 @@ gate1
 !workload_specs/**/*.json
 !workload_specs/**/*.md
 
-# Documentations
-# Re-included 2026-09-20. A preregistration record's whole value is a
-# commit date proving it predates the runs it governs, so this one file
-# is tracked. The rule was written once and lost; if it goes missing
-# again, D-1 and D-2 silently stop being preregistrations.
+# docs/ is deliberately NOT ignored (b253e85, 2026-09-21). PREREGISTRATION.md
+# must keep its commit date to be worth anything, and PATHWAYS.md and
+# EXPERIMENTAL_SETUP.md are current authority. Do not re-add a /docs/* rule.
 
 # Some sketchy executable file
 linux-x64

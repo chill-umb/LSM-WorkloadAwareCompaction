@@ -2791,14 +2791,21 @@ on 2026-09-21 (`b253e85`), so `git ls-files docs/` now lists them alongside
 `PREREGISTRATION.md`, the two design notes and the two PDFs, and the warning in
 `CLAUDE.md` should lose its "Unresolved" flag.
 
-The mechanism is worth keeping, because it decides what happens next.
-`.gitignore` has no effect on a path already in the index, so a file added once
-stays tracked however broad the ignore rule above it. The rule's only reach is
-files *created after it*, which is exactly why `PREREGISTRATION.md` -- new on
-2026-09-20 -- went untracked while nothing else in `docs/` did, and it is why
-the `!` rule added today is still required for it and for any future document.
-A new file under `docs/` is silently invisible to `git add` until someone
-notices; that is the standing hazard, not the files already in.
+It was closed twice over, and the second supersedes the first. The `!` rule
+restored earlier the same day re-included that one file under a still-standing
+`/docs/*`; `b253e85` then removed both the blanket rule and the re-include and
+committed the directory, so nothing under `docs/` is ignored at all and no `!`
+rule is needed. `CLAUDE.md` and `.gitignore` were updated to say so.
+
+The mechanism is worth keeping, because it still governs `*.json`, `*.txt` and
+`scripts/*`. `.gitignore` has no effect on a path already in the index, so a
+file added once stays tracked however broad the rule above it; the rule's only
+reach is files *created after it*. That is exactly why `PREREGISTRATION.md` --
+new on 2026-09-20 -- went untracked through four commits while its older
+neighbours, added before the rule, did not. A blanket ignore with `!`
+re-includes makes new files invisible to `git add` with no warning, and the
+only reliable signal is that a file you expect to see never appears in
+`git status`.
 
 ## 15. Current limitations and next work
 

@@ -31,9 +31,13 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 - **The objective contract is frozen** (v3, 2026-09-12). **Never create a new version — edit `config/research_objective_contract.v3.json` in place**, with a written reason. v1 and v2 remain in the tree only as superseded records; no run was ever executed under either. Never change the contract after seeing a gate's outcome.
 - **`TRIGGER_CONTROLLER_REPAIR_PLAN.md` is historical.** Its audited deviations were closed on 2026-08-16 and the controller design it describes is built. Read it for the per-level state machine and the deferral math, not for what to do next.
 
-### docs/ is gitignored on purpose
+### docs/ is tracked
 
-`.gitignore` ignores `/docs/*`. `docs/PREREGISTRATION.md` was re-included on 2026-09-20 because a preregistration record needs a commit date to be worth anything. The two other re-include rules name files that no longer exist (`docs/RESEARCH_OBJECTIVE_CONTRACT.md`, removed 2026-09-20; `docs/PATHWAY_IMPLEMENTATION_STATUS.md`). So `docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` — both current authority — **still exist only on disk and would not survive a clean checkout**. Unresolved. Don't silently change this; raise it.
+**Resolved 2026-09-21 (`b253e85`).** `.gitignore` no longer has any rule covering `docs/`: the blanket `/docs/*` and the `!/docs/PREREGISTRATION.md` re-include were both removed and the directory was committed. `PATHWAYS.md`, `EXPERIMENTAL_SETUP.md`, `PREREGISTRATION.md` and the two design notes all survive a clean checkout, and a new file under `docs/` is picked up by `git add` like any other source file — no `!` rule needed.
+
+`PREREGISTRATION.md` in particular must stay tracked: a preregistration's whole value is a commit date proving it predates the runs it governs. If it ever appears as untracked again, that is a defect, not a convention.
+
+The failure mode that produced the old warning has not gone away for other paths — see "Repo gotchas" below. A blanket ignore plus `!` re-includes silently hides *new* files, which is how `PREREGISTRATION.md` went untracked through four commits while its older neighbours did not. That pattern still governs `*.json`, `*.txt` and `scripts/*`.
 
 ## Commands
 
@@ -174,7 +178,7 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
 
 ## Repo gotchas
 
-- **`.gitignore` hides new files.** It ignores whole categories (`*.json`, `*.txt`, `/docs/*`, `scripts/*`) and then re-includes specific paths with `!` rules. New JSON configs, new docs, and scripts in new directories end up untracked without warning. Add a `!` rule for them.
+- **`.gitignore` hides new files.** It ignores whole categories (`*.json`, `*.txt`, `scripts/*`) and then re-includes specific paths with `!` rules. New JSON configs and scripts in new directories end up untracked without warning — add a `!` rule for them. Already-tracked paths are unaffected, so the hazard is invisible until a file you expect never shows up in `git status`; `docs/PREREGISTRATION.md` went missing through four commits that way. `docs/` itself is no longer ignored (2026-09-21) and needs no `!` rule.
 - **Some tools skip all the RL C++.** The root rule `**/db/**` is meant for database working directories. Git doesn't apply it inside the submodule. Tools that apply the root `.gitignore` recursively, such as graphify, skip `lib/rocksdb/db/`, which is where all the RL C++ lives. If a search comes back empty, search `lib/rocksdb/db/compaction/` explicitly.
 - **All C++ changes are in the `lib/rocksdb` submodule.** It is the fork `chill-umb/rocksdb`, and the working branch is `rl-compaction-policy-new`.
   - Commit inside the submodule first, then bump the submodule pointer in the root repo.
