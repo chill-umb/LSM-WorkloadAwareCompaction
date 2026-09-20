@@ -91,12 +91,10 @@ gate1
 !workload_specs/**/*.md
 
 # Documentations
-/docs/*
 # Re-included 2026-09-20. A preregistration record's whole value is a
 # commit date proving it predates the runs it governs, so this one file
 # is tracked. The rule was written once and lost; if it goes missing
 # again, D-1 and D-2 silently stop being preregistrations.
-!/docs/PREREGISTRATION.md
 
 # Some sketchy executable file
 linux-x64
