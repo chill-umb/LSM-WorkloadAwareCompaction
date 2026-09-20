@@ -105,5 +105,11 @@ build-bench/
 # there would sit in RAM and measure page-cache speed instead of disk.
 .dbbench/
 
+# Artifacts from before the Gate 2 rebuild (2026-09-20). Invalidated by three
+# simultaneous changes: a new db_bench binary, the in-place contract amendment,
+# and a measured phase that now excludes the bulk load. Structure is preserved,
+# so any path the project record cites resolves by prefixing this directory.
+deprecated/
+
 # graphify
 graphify-out/

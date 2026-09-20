@@ -2515,6 +2515,36 @@ moves to `6ad9f6b79` (parent `71627a1cd`, base `7ea2d73` preserved). No gate
 was re-scored; Gate 1's recorded verdicts stand as history and are
 superseded by the re-run.
 
+### 14.12 Pre-Gate-2 artifacts deprecated, 2026-09-20
+
+A lockstep defect left from the Gate 2 pass: `rl_safety_manifest.cc` still
+required `metric_definitions_version` `trigger-v2-logical-v2` while
+`03_run_experiments.sh`, both stage-06 generators and `rl_agent/config.py` had
+moved to `v3`. The C++ `Parse` rejects the manifest, `Load` sets `invalid_`, and
+`MarkRewardInvalid(kRejectedManifest)` follows, so every learned arm would have
+completed its run and then failed `no_reward_invalid_intervals`. The `regular`
+and experiment-phase `oracle` arms load no manifest and would have passed, so
+the whole Hull-0 sweep could have finished before the defect surfaced. Fixed to
+`v3`; both RL translation units pass `-fsyntax-only` against the legacy compile
+database.
+
+Every artifact produced before this rebuild is invalidated, by three changes at
+once: a new `db_bench` binary, the in-place contract amendment, and a measured
+phase that now excludes the bulk load. The first two change the experiment
+fingerprint outright; the third changes what every byte ratio means, since the
+`filluniquerandom` traffic is no longer counted. `SORTED_RUN_SEEK` also changed
+units, and the latency constraint moved from p95 to p99.
+
+`results/`, `gate1/`, `baseline_selection/` and the six `baseline_slo*` trees —
+91 GB — were therefore moved to `deprecated/pre-gate2-2026-09-20/`, which
+`.gitignore` excludes. **Structure is preserved**, so every path cited in this
+document resolves by prefixing that directory: the Section 14.9 and 14.10
+evidence is `deprecated/pre-gate2-2026-09-20/results/prior_shadow/`, and the
+Section 14.7 hull is `deprecated/pre-gate2-2026-09-20/gate1/`. Nothing was
+deleted. The Gate 1 hull, the guard calibration and the C-3 verdict all stand
+as records of the binary that produced them and must be re-measured before any
+criterion is evaluated against the rebuilt one.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,
