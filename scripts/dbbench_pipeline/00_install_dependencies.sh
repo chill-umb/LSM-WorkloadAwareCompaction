@@ -171,14 +171,21 @@ python3 -m venv "$PYTHON_VENV"
 "$PYTHON_VENV/bin/python" -m pip install -r rl_agent/requirements.txt matplotlib
 
 echo
-echo "[topology] $(nproc) logical CPUs; L3 domains:"
-lscpu -p=CPU,L3 2>/dev/null | grep -v '^#' | awk -F, '{d[$2]=d[$2] (d[$2]?",":"") $1} END {for (k in d) print "  L3 " k ": CPUs " d[k]}' | sort
+echo "[topology] $(nproc) logical CPUs; L3 domains (from sysfs, as 03 reads them):"
+for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+  for index in "$cpu"/cache/index*; do
+    [[ -r "$index/level" && "$(<"$index/level")" == 3 ]] || continue
+    cat "$index/shared_cpu_list"; break
+  done
+done | sort -u | sed 's/^/  L3 domain: CPUs /'
+
 echo "[topology] pinned: db_bench=${DBBENCH_CPUS:-unpinned} controller=${CONTROLLER_CPUS:-unpinned}"
 if [[ -n "$DB_ROOT" ]]; then
-  mkdir -p "$DB_ROOT"
-  fs="$(df --output=fstype "$DB_ROOT" | tail -1)"
+  db_parent="$(dirname "$DB_ROOT")"
+  mkdir -p "$db_parent"
+  fs="$(df --output=fstype "$db_parent" | tail -1)"
   [[ "$fs" != "tmpfs" ]] || echo "[disk] WARNING: DB_ROOT=$DB_ROOT is on tmpfs; put it on the device under test" >&2
-  echo "[disk] DB_ROOT=$DB_ROOT ($fs, $(df -h --output=avail "$DB_ROOT" | tail -1 | tr -d ' ') free)"
+  echo "[disk] DB_ROOT parent $db_parent ($fs, $(df -h --output=avail "$db_parent" | tail -1 | tr -d ' ') free)"
 fi
 
 echo
