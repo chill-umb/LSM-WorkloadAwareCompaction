@@ -57,6 +57,12 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
     override_frames = 0
     actual_interventions = 0
     reason_counts: dict[str, int] = {}
+    # Override frames on which each global force term held. They are logged
+    # per frame since shadow schema 3 because the calibration cannot model
+    # them (slo_statistics.frame_simulated_limits) and E-1's decomposition
+    # otherwise needs a join against io.jsonl, which oracle runs do not write.
+    global_term_counts = {"slo_force_due": 0, "global_debt_breach": 0,
+                          "l0_slowdown": 0}
     previous_time = None
 
     with path.open(errors="strict") as handle:
@@ -67,7 +73,7 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_number}: invalid JSON") from exc
-            if record.get("schema_version") != 2:
+            if record.get("schema_version") != 3:
                 raise ValueError(f"{path}:{line_number}: unsupported schema")
             if record.get("experiment_fingerprint") != fingerprint:
                 raise ValueError(f"{path}:{line_number}: fingerprint mismatch")
@@ -111,6 +117,9 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
             if would_override:
                 override_frames += 1
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                for term in global_term_counts:
+                    if json_boolean(record, term, context):
+                        global_term_counts[term] += 1
     override_fraction = (
         override_frames / actuation_frames if actuation_frames else None
     )
@@ -130,6 +139,7 @@ def validate_run(path: Path, fingerprint: str, manifest_sha256: str) -> dict:
         "would_override_fraction": override_fraction,
         "actual_interventions": actual_interventions,
         "reason_mask_counts": reason_counts,
+        "global_term_override_frames": global_term_counts,
         "checks": checks,
         "passed": all(checks.values()),
     }

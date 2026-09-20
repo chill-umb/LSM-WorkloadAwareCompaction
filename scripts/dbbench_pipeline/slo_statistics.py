@@ -201,7 +201,22 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
 
     Not modelled, because no per-frame record exists: ``global_debt_breach``,
     ``slo_force_due`` and ``l0_slowdown``. All three are global rather than
-    per-level, so no per-level limit can offset them.
+    per-level, so no per-level limit can offset them. Since shadow schema 3
+    they are logged per frame on every guarded run, so the holdout report
+    attributes them; the baseline sweep that feeds this replay still carries
+    no per-frame record of them.
+
+    The replay assumes the guard is memoryless: a frame overrides iff a term
+    holds on that frame. That is the mechanism since PREREGISTRATION D-2
+    (2026-09-20). Before it, a budget force was retained until the level was
+    healthy, which this replay never modelled and which alone carried about
+    half of E-1's measured rate.
+
+    ``predicted_override_fraction`` is in-sample. Every limit here is a top
+    order statistic of the training runs, so it describes those runs better
+    than the next seed; ``predicted_override_fraction_leave_one_out`` refits
+    k on all runs but one and scores the one left out, per run, and its mean
+    is the number to compare with a holdout.
 
     `runs` holds one episode list per baseline run; frames are laid on the
     span from that run's first episode start to its last episode end, which
@@ -282,15 +297,19 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
         "target_override_fraction": target_fraction,
         "exceedance_per_level": None,
         "predicted_override_fraction": None,
+        "predicted_override_fraction_leave_one_out": [],
+        "predicted_override_fraction_leave_one_out_mean": None,
         "predicted_override_fraction_score_upper": None,
         "predicted_override_fraction_score_flat": None,
         "score_model": "linear_ramp_to_observed_max_score",
     }
     if frame_count == 0:
         return None, meta
-    sorted_ages = [sorted(a) for a in ages]
-    sorted_pressures = [sorted(p) for p in pressures]
-    sorted_scores = [sorted(s) for s in scores]
+    def sorted_sets(ranges):
+        idx = [i for base, n in ranges for i in range(base, base + n)]
+        return ([sorted(ages[l][i] for i in idx) for l in range(levels)],
+                [sorted(pressures[l][i] for i in idx) for l in range(levels)],
+                [sorted(scores[l][i] for i in idx) for l in range(levels)])
 
     def limit_for_count(values: list[float], k: int, floor: float):
         """Smallest limit v with count(x >= v) <= k, else one above the max.
@@ -316,8 +335,9 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
 
     age_floor, pressure_floor, score_floor = floors
 
-    def limits_at(k: int):
+    def limits_at(k: int, sets):
         """Exported limits at exceedance k: margin and floors already applied."""
+        sorted_ages, sorted_pressures, sorted_scores = sets
         out = []
         for level in range(levels):
             age = limit_for_count(sorted_ages[level], k, 0.0)
@@ -328,43 +348,59 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
                         max(score_floor, score)))
         return out
 
-    def joint_fraction(limits, score_source=scores) -> float:
+    def joint_fraction(limits, ranges, score_source=scores) -> float:
         hits = 0
-        for i in range(frame_count):
-            for level in range(levels):
-                age = ages[level][i]
-                if age < 0:
-                    continue
-                age_limit, pressure_limit, score_limit = limits[level]
-                if (age >= age_limit
-                        or pressures[level][i] >= pressure_limit
-                        or score_source[level][i] >= score_limit):
-                    hits += 1
-                    break
-        return hits / frame_count
+        total = 0
+        for base, n in ranges:
+            total += n
+            for i in range(base, base + n):
+                for level in range(levels):
+                    age = ages[level][i]
+                    if age < 0:
+                        continue
+                    age_limit, pressure_limit, score_limit = limits[level]
+                    if (age >= age_limit
+                            or pressures[level][i] >= pressure_limit
+                            or score_source[level][i] >= score_limit):
+                        hits += 1
+                        break
+        return hits / total if total else 0.0
 
-    # Larger k lowers every limit and can only raise the joint fraction, so
-    # bisect for the largest k that still meets the target.
-    lo, hi = 0, int(target_fraction * frame_count)
-    best = None
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if joint_fraction(limits_at(mid)) <= target_fraction:
-            lo = mid
-            best = mid
-        else:
-            hi = mid - 1
-    if best is None:
-        # No per-level exceedance fits the target: every limit lands above its
-        # own maximum. That means a single sustained event covers more than
-        # target_fraction of the run, and no per-frame threshold can both
-        # tolerate that event and fire inside it.
-        limits = limits_at(0)
-        meta["exceedance_per_level"] = 0.0
-    else:
-        limits = limits_at(best)
-        meta["exceedance_per_level"] = best / frame_count
-    meta["predicted_override_fraction"] = joint_fraction(limits)
+    def search(ranges):
+        """Largest k whose joint fraction over `ranges` meets the target.
+
+        Larger k lowers every limit and can only raise the joint fraction, so
+        bisect. Returns (limits, k); k is None when no per-level exceedance
+        fits the target, i.e. every limit lands above its own maximum
+        because a single sustained event covers more than target_fraction of
+        the run and no per-frame threshold can both tolerate that event and
+        fire inside it.
+        """
+        sets = sorted_sets(ranges)
+        lo, hi = 0, int(target_fraction * sum(n for _, n in ranges))
+        best = None
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if joint_fraction(limits_at(mid, sets), ranges) <= target_fraction:
+                lo = mid
+                best = mid
+            else:
+                hi = mid - 1
+        return limits_at(best or 0, sets), best
+
+    limits, best = search(spans)
+    meta["exceedance_per_level"] = (
+        0.0 if best is None else best / frame_count)
+    meta["predicted_override_fraction"] = joint_fraction(limits, spans)
+    loo = []
+    if len(spans) >= 2:
+        for i, held_out in enumerate(spans):
+            train = spans[:i] + spans[i + 1:]
+            fold_limits, _ = search(train)
+            loo.append(joint_fraction(fold_limits, [held_out]))
+    meta["predicted_override_fraction_leave_one_out"] = loo
+    meta["predicted_override_fraction_leave_one_out_mean"] = (
+        sum(loo) / len(loo) if loo else None)
     # Measure inertness from the outcome, not from the search path: a floor can
     # lift a limit above everything observed while the search still reports a
     # feasible k. A guard that would never fire on baseline-like behaviour
@@ -373,8 +409,10 @@ def frame_simulated_limits(runs: list[list[dict]], levels: int,
     meta["degenerate_inert_guard"] = (
         meta["predicted_override_fraction"] == 0.0
         and any(a >= 0 for level in range(levels) for a in ages[level]))
-    meta["predicted_override_fraction_score_upper"] = joint_fraction(limits, peaks)
-    meta["predicted_override_fraction_score_flat"] = joint_fraction(limits, flats)
+    meta["predicted_override_fraction_score_upper"] = joint_fraction(
+        limits, spans, peaks)
+    meta["predicted_override_fraction_score_flat"] = joint_fraction(
+        limits, spans, flats)
     meta["due_frames_per_level"] = [
         sum(1 for a in ages[level] if a >= 0) for level in range(levels)]
     # The longest unbroken stretch of frames in which one level stays due. A

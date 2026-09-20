@@ -2608,6 +2608,31 @@ only durable proof of that is the commit. `docs/PATHWAYS.md` and
 clean checkout; that is unresolved and is flagged in `CLAUDE.md` rather than
 worked around.
 
+### 14.14 E-1 traced to a force latch; guard kept on the conditional rate, 2026-09-20
+
+The guard's force condition was replayed offline from the per-frame level
+state in `io.jsonl` over the thirty `unconstrained_prior_only` arms of Section
+14.9, using the manifest the holdout ran under. At T=2 the replay reproduces
+`safety_shadow.jsonl` on 99.8% of frames. Of the 0.32–0.35 override fraction,
+0.15–0.16 in every run comes from frames on which **no force term holds**: the
+`retain` rule in `ClassifyWorkerSafety` held a budget force until the level
+was healthy, so L2 exceeding its score limit by 0.1% on one frame latched L2
+open for its whole 40 s due run. The frame-simulated calibration has no
+memory, which is why it predicted 0.99% for a mechanism producing 33%. About
+half of the T=6 and T=10 overrides are `kSLO`, a global term with no per-frame
+record. A split-half refit on real frames shows that without the latch a 1%
+per-frame limit lands at 0.005–0.14 on held-out seeds, depending on whether
+the held-out backlog is longer than the fitting seeds': a maximum statistic,
+as Corollary E.2 said.
+
+The latch is removed in both the shadow and enforcement paths, the shadow log
+moves to schema 3 with the three global terms and the debt ratio per frame,
+the holdout validator decomposes overrides by them, and the calibration
+reports a leave-one-run-out prediction beside the in-sample one. The guard is
+kept; the `Assoc` re-run is scored on E-5's conditional rate, with E-1's
+marginal rate reported. Decision, evidence tables and predictions are
+`docs/PREREGISTRATION.md` D-2. E-1's 2026-09-14 verdict stands.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,
