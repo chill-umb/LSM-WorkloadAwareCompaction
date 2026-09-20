@@ -1219,6 +1219,7 @@ context, system guide, workload notes, and current code.
 | Binomial overflow in the tolerance bound | `math.comb(n, i)` reaches ~1e600 for n in the low thousands; multiplying by a float raises `OverflowError`. The search was also O(n^2) over candidate ranks. | Log-space PMF plus a single incremental pass (`smallest_valid_rank`). | Pre-existing; exposed at 5M and fixed 2026-08-24. n=299 remains exactly where the maximum becomes a 99%/95% bound. |
 | Graph generator coupling | `06_select_baseline_slo.py` loads `04_generate_graphs.py` only for `collect_arm`, but that module imported matplotlib at top level, so manifest generation failed on any interpreter without it. | Import matplotlib lazily inside the two functions that draw. | Fixed 2026-08-24. |
 | **Learner never trained** | Zero gradient steps and an identically zero residual across the earlier matrix. A later 5M/T2 unconstrained diagnostic produced 89,652 decisions and zero replay transitions because one rejected interval cleared every overlapping four-second window. | Credit-assignment schema v2 separates C++ installation acknowledgement from reward validity, retains known overrides off-policy, terminalizes valid prefixes only at a hard attribution boundary, and enforces explicit accounting. | Root cause diagnosed and repaired in source 2026-08-31; fresh cloud learner-health validation remains blocking. |
+| Gate launcher exited 0 after the first stage | A Gate 1 launcher wrapped stage 09 as `if ! cmd; then rc=$?`, to accept exit 2 ("undecided") as a pass. Inside that block `$?` is the status of the *negation*, always 0, so the guard read `rc=0`, failed its `-eq 2` test and ran `exit 0`. The script wrote `oracle_parity.json` and stopped silently before the sweep, with a success status. | Capture the status outside the negation: `rc=0; cmd \|\| rc=$?; [[ $rc -eq 0 \|\| $rc -eq 2 ]] \|\| exit $rc`. | Fixed 2026-09-21 before any sweep ran. The class matters more than the instance: a three-valued gate exit read through `if !` fails open, and a gate that never ran is indistinguishable from one that passed. |
 | **Proactive band is relative, its value is absolute** | `RL_OPTIONAL_MIN_SCORE` is fixed at 0.10 against a score of `files / level0_file_num_compaction_trigger`. At a trigger of 2 the only below-threshold state is one file at score 0.5, permanently inside the band, so the prior fires a full L0-L1 merge on a single file (910 of 1,102 below-threshold compacts at 10M/T=2) for one run of relief it would have received one flush later anyway. | **None yet.** The change belongs in the prior's benefit term, not the threshold: a proactive action should require a minimum absolute run reduction. Pathway D, Gate 2. | Diagnosed 2026-09-20 (Section 14.10); causal confirmation run still owed. |
 
 ## 10. Experimental record and interpretation
@@ -2638,6 +2639,23 @@ marginal rate reported. Decision, evidence tables and predictions are
 Two runs on the new Chameleon node (EPYC 4545P, GCC 14.3.0, `-march=znver5`,
 SMT off at nproc 16, `performance` governor, THP `[madvise]`), both at 1M/T=2.
 
+**The node was prepared, and the preparation is part of the pipeline.**
+`00_install_dependencies.sh` was rewritten to establish the measurement
+environment rather than assume it: GCC 14 from `ppa:ubuntu-toolchain-r/test`
+because 24.04 ships GCC 13 and `-march=znver5` needs 14.1+, SMT switched off so
+that `DBBENCH_CPUS=0-7` names cores rather than sibling threads, the frequency
+governor set to `performance`, transparent huge pages set to `madvise`, and an
+opt-in `ISOLATE_OS_CPUS=1` cpuset confining systemd's `system.slice` to the
+cores neither measured process uses. The cpuset is off by default and is not
+recorded per arm, so it must not be enabled for part of a pooled set.
+`02_build_db_bench.sh` now disassembles the binary and fails the build if it
+contains no AVX-512 opcodes, because the preflight in `01` proves only that the
+compiler *accepts* `-march=znver5`, not that the flag reached the object code --
+a silent fallback to a generic target would move every measurement with no other
+signal. `03_run_experiments.sh` records `cpu_governor` and `thp_enabled` per
+arm, since both are runtime settings that a reboot resets. The controls are
+written up in `docs/EXPERIMENTAL_SETUP.md` §1, §2 and §7.
+
 **The geometry probe passed** (`results/probe-assoc-1m`). L0-L5 populated at
 2/15/30/62/127/64 MB, 316 MB settled against 302 MB garbage-free, about 1042
 bytes per record on disk. This is the check D-1's first deliberate departure
@@ -2723,11 +2741,15 @@ limit unless one is passed.
 `--admission-latency-limit-micros 5000`, which `run_full_experiment.sh:191` and
 `13_run_preflight_verification.sh:147` both pass, so
 `due_to_admission_latency` returned `no_limit_configured` and was left
-unscored. Supplying it decides the check at 127 us against a 5000 us limit.
+unscored, and `--minimum-pairs`/`--minimum-envelope-pairs` fell back to 5
+rather than the suite's 10. The artifact was regenerated under the suite's
+flags, which decides the check at 127 us against a 5000 us limit and leaves
+`sorted_run_seeks_per_scan` and `stall_duration` as the only undecided ones.
 That is not a threshold chosen after seeing the outcome: 5000 us is hard-coded
-in both callers and is the limit the 2026-08-22 gate was scored under. Stage 09
-run by hand must be given the flags the suite gives it, or it silently scores
-less than the suite would.
+in both callers and is the limit the 2026-08-22 gate was scored under. The
+verdict is unchanged either way -- `failed_checks` is empty under both
+invocations -- but stage 09 run by hand must be given the flags the suite gives
+it, or it silently scores less than the suite would.
 
 **`decision_rate` is 16.6-17.0/s** against a 20/s target inside a +/-20% band,
 down from the roughly 19.95/s this project has measured before. It passes with
@@ -2761,8 +2783,22 @@ find the discrepancy already noted here rather than discover it. And
 phase, while D-2 scores E-5 on every learned arm; `prior_only` and `rl` now
 open it too. Enforcement already runs the classifier on those arms, so this
 records what the guard did rather than adding work to the decision path.
-`docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` remain untracked and would
-still not survive a clean checkout.
+
+**The `docs/` tracking gap is closed.** 14.13 and `CLAUDE.md` both record that
+`docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` were untracked and would
+not survive a clean checkout. That was true when written. Both were committed
+on 2026-09-21 (`b253e85`), so `git ls-files docs/` now lists them alongside
+`PREREGISTRATION.md`, the two design notes and the two PDFs, and the warning in
+`CLAUDE.md` should lose its "Unresolved" flag.
+
+The mechanism is worth keeping, because it decides what happens next.
+`.gitignore` has no effect on a path already in the index, so a file added once
+stays tracked however broad the ignore rule above it. The rule's only reach is
+files *created after it*, which is exactly why `PREREGISTRATION.md` -- new on
+2026-09-20 -- went untracked while nothing else in `docs/` did, and it is why
+the `!` rule added today is still required for it and for any future document.
+A new file under `docs/` is silently invisible to `git add` until someone
+notices; that is the standing hazard, not the files already in.
 
 ## 15. Current limitations and next work
 

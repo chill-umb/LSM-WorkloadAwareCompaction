@@ -30,6 +30,17 @@ Every run is single-tenant on a dedicated bare-metal lease. Absolute runtimes
 are not comparable across leases or node families; all reported comparisons are
 paired within a lease.
 
+**These settings are established and recorded, not assumed.** On a fresh lease
+`00_install_dependencies.sh` switches SMT off through
+`/sys/devices/system/cpu/smt/control`, sets every CPU's frequency governor to
+`performance`, and sets transparent huge pages to `madvise`. The last two are
+runtime settings that do not survive a reboot, so `03_run_experiments.sh`
+records them per arm in `metadata.env` as `cpu_governor` and `thp_enabled`: an
+arm that ran under a drifted setting is identifiable afterwards rather than
+silently pooled with one that did not. SMT off is what the `DBBENCH_CPUS=0-7`
+and `CONTROLLER_CPUS=8` pinning assumes -- with SMT on, those names would
+select sibling threads rather than distinct cores.
+
 ## 2. Build and toolchain
 
 The measured RocksDB library and `db_bench` are compiled for a named
@@ -53,6 +64,17 @@ target, and names `znver4` as the fallback to record as a deviation.
 The resulting binary is not portable across node families. Its SHA-256 is part
 of the experiment fingerprint (§10), so a binary built with different flags
 cannot be paired with one built before it.
+
+**The target is verified in the binary, not just accepted by the compiler.**
+`01_build_rocksdb.sh`'s preflight proves only that the toolchain *accepts*
+`-march=znver5`; it cannot prove the flag survived into the object code.
+`02_build_db_bench.sh` therefore disassembles `db_bench` and counts opcodes
+that exist only in AVX-512 -- mask-register moves, compress and ternary logic
+(`kmov`, `vpcompress`, `vpternlog`). A count of zero under
+`ROCKSDB_PORTABLE=znver4` or `znver5` **fails the build**, because it means the
+build fell back to a generic target and every measurement behind it would be on
+the wrong microarchitecture with no other visible signal. The count is recorded
+as `avx512_instruction_count` in `build_provenance.env`.
 
 ## 3. Source provenance
 
@@ -243,6 +265,16 @@ is used rather than `numactl`: the node has one NUMA node, so memory binding is
 a no-op. The controller is single-threaded by construction
 (`OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `torch.set_num_threads(1)`), so one
 core does not induce thread contention.
+
+`taskset` pins the measured processes but does not keep kernel threads or
+system daemons off those cores. `ISOLATE_OS_CPUS=1` in
+`00_install_dependencies.sh` additionally confines systemd's `system.slice` to
+the CPUs that are neither `DBBENCH_CPUS` nor `CONTROLLER_CPUS`, at runtime and
+without a reboot. **It is off by default**, because the runs recorded up to
+2026-09-20 did not use it and enabling it silently would make later arms
+incomparable with them. **It is not currently recorded per arm**, so a run made
+with the cpuset cannot be distinguished after the fact from one made without
+it; any programme that turns it on must do so for every arm it intends to pool.
 
 ## 8. Metric definitions
 

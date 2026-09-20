@@ -203,6 +203,52 @@ against `deprecated/pre-gate2-2026-09-20/baseline_slo_frame5_guard/balanced-v1/1
 
 ## 2. Gate verdicts as measured
 
+### Oracle parity gate — `Assoc` re-execution, 2026-09-21
+
+**Verdict: PASS.** Ten paired 1M/T=2 `regular`/`oracle` repeats,
+`results/oracle-parity-assoc-2`, workload `assoc-v1`, binary
+`9b9321b117ad3566…`, objective `5857ad35…`. `failed_checks: []`; the reported
+verdict is `undecided` because three checks cannot be decided, which is the
+acceptance condition the pipeline itself encodes — `run_full_experiment.sh:193`
+and `13_run_preflight_verification.sh:154` both accept exit 0 and exit 2 and
+treat anything else as a bridge that is not transparent. It is the same shape
+the 2026-08-22 gate was recorded as passing under.
+
+| Check | Result |
+| --- | --- |
+| `observation_health` | passed — `skipped_ticks` 0 on all ten, `watchdog_expiries` 0 |
+| write amp / point-read amp | passed — +0.31% [−0.54, +1.16], +0.88% [−1.17, +2.92] |
+| `mean_l0_l1_input_size` | passed — +0.16% [−0.34, +0.67] |
+| `maximum_pending_debt` | passed — −0.33% [−0.89, +0.23] |
+| `per_level_maximum_score` | passed — +0.35 normalized [0.06, 0.64], limit 1.0 |
+| `due_to_admission_latency` | p50 **127 us** on all ten against the 5000 us limit |
+| decision rate, held-gate service, due-level authorization, workload identity | passed |
+| `sorted_run_seeks_per_scan` | **insufficient_pairs** — 18 required, 10 available |
+| `stall_duration` | **no_allowance_configured** — the allowance is still owed by the baseline sweep |
+
+`sorted_run_seeks_per_scan` is **undecidable, not failed**, per the frozen
+§3.1 subsidiary decision. Its interval is [−6.70%, +4.62%] against a ±5% limit,
+wider than the limit — the power loss D-1 predicted when the `Assoc` mix cut
+scans from 32% to 3.5% of operations. It is not re-scored, and no threshold is
+widened to accommodate it.
+
+**What this authorizes.** The bridge is transparent on the `Assoc` workload at
+this binary, so the Hull-0 sweep and everything behind it may run. **The hull
+is bound to this binary**: `frontier_analysis.py:196` keys identity on
+`(fingerprint, dbbench_sha256)` and refuses to pool across binaries, so every
+step through `prior_only` must run on `9b9321b1…`. A rebuild voids the hull.
+This is what invalidated the 2026-09-12 Gate 1 below.
+
+**Two prior conditions, recorded for completeness.** The first execution of this
+gate (`results/oracle-parity-assoc`) failed `observation_health` on an
+instrument defect, not the controller: suspended worker ticks were counted as
+skipped ticks and the first admission after `rlresume` recorded the tail of the
+bulk load. Fixed in submodule `25468bbaa`; the narrative is history Section
+14.15. And the gate was first invoked without
+`--admission-latency-limit-micros 5000`, which both callers pass, leaving
+`due_to_admission_latency` unscored; the artifact was regenerated under the
+suite's flags. The verdict is unchanged under either invocation.
+
 ### Gate 1 — Hull₀ and space calibration
 
 **Result, 2026-09-12.** Executed at 10M with buffered I/O (`dio0`), contract v3
