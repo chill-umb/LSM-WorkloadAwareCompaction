@@ -72,6 +72,11 @@ scripts/*
 
 # results
 results/*
+baseline_slo*
+baseline_selection
+gate1
+*.tex
+*.tgz
 
 # workloads
 # Generated workload files are large and reproducible from their specs, so they

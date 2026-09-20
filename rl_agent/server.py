@@ -24,9 +24,7 @@ from pathlib import Path
 
 import config
 import multilevel
-from agent import DQNAgent
 from metrics import MetricsTracker
-from reward import StateRewardProcessor
 
 
 _ACTION_NAMES = config.ACTION_NAMES
@@ -54,6 +52,7 @@ def _atomic_write_json(path: str, value: dict) -> None:
 
 def _server_health_summary(
     pool: "multilevel.AgentPool",
+    ml_processor: "multilevel.MultiLevelProcessor",
     clients_drained: bool,
     training_quiesced: bool,
 ) -> dict:
@@ -67,6 +66,8 @@ def _server_health_summary(
         "minimum_replay_size": config.MIN_REPLAY_SIZE,
         "clients_drained": clients_drained,
         "training_quiesced": training_quiesced,
+        # Final Lagrange multipliers and the bounds they enforced (D-3/D-4).
+        "constrained_reward": ml_processor.reward_state(),
     })
     summary["pending_windows_at_shutdown"] = summary.pop("pending_windows")
     summary["pending_confirmed_windows_at_shutdown"] = summary.pop(
@@ -202,18 +203,11 @@ def handle_multilevel_message(
         agent.request_training()
 
 
-def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker, io_log,
-                  pool: "multilevel.AgentPool" = None,
-                  ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
-    """Handle one persistent C++ client connection."""
+def handle_client(conn: socket.socket, tracker: MetricsTracker, io_log,
+                  pool: "multilevel.AgentPool",
+                  ml_processor: "multilevel.MultiLevelProcessor") -> None:
+    """Handle one persistent C++ client connection (protocol v2 only)."""
     buf = ""
-    processor = StateRewardProcessor()
-    if ml_processor is None:
-        ml_processor = multilevel.MultiLevelProcessor()
-    # Diagnostic: how many decisions elapse between a compact_now and the L0
-    # compaction completion it triggers. The distribution of this lag tells us
-    # how large N_STEP must be for the reward window to actually capture relief.
-    last_compact_now_step: int = None
     try:
         while True:
             chunk = conn.recv(4096)
@@ -229,90 +223,40 @@ def handle_client(conn: socket.socket, agent: DQNAgent, tracker: MetricsTracker,
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
-                    if pool is not None:
-                        pool.record_protocol_error()
+                    pool.record_protocol_error()
                     raise ValueError("malformed JSON request")
-
-                if pool is not None:
-                    if "levels" not in msg:
-                        pool.record_protocol_error()
-                        raise ValueError(
-                            "trigger protocol v2 with credit assignment v2 "
-                            "is required")
-                    try:
-                        handle_multilevel_message(
-                            conn, msg, ml_processor, pool, tracker, io_log
-                        )
-                    except (TypeError, ValueError):
-                        pool.record_protocol_error()
-                        raise
-                    continue
-
-                raw_state, state, reward, reward_components = processor.process(msg)
-                done: bool = bool(msg.get("done", False))
-
-                action = agent.observe(state, reward, done)
-                processor.advance(raw_state, action)
-
-                response = json.dumps({"action": action}, separators=(",", ":")) + "\n"
-                conn.sendall(response.encode("utf-8"))
-
-                # Track compact_now -> completion lag for the N_STEP diagnostic.
-                completion_lag = None
-                if raw_state.get("l0_compactions_completed", 0) > 0 and last_compact_now_step is not None:
-                    completion_lag = agent.step - last_compact_now_step
-                if action == 1:
-                    last_compact_now_step = agent.step
-                diagnostics = {
-                    "n_step": config.N_STEP,
-                    "finalized_returns": agent.last_returns,
-                    "completion_lag": completion_lag,
-                }
-
-                _write_io_log(
-                    io_log, agent.step, raw_state, reward, reward_components, action, diagnostics
-                )
-
-                q_vals = agent.last_q_values.tolist() if agent.last_q_values is not None else None
-                tracker.record(
-                    step=agent.step,
-                    state=state.tolist(),
-                    action=action,
-                    reward=reward,
-                    epsilon=agent.epsilon,
-                    loss=agent.last_loss,
-                    q_values=q_vals,
-                    raw_state=raw_state,
-                    reward_components=reward_components,
-                    done=done,
-                )
-
-                agent.request_training()
-
-                print(f"[server] step={agent.step} action={_ACTION_NAMES.get(action, action)}")
+                if "levels" not in msg:
+                    pool.record_protocol_error()
+                    raise ValueError(
+                        "trigger protocol v2 with credit assignment v2 "
+                        "is required")
+                try:
+                    handle_multilevel_message(
+                        conn, msg, ml_processor, pool, tracker, io_log
+                    )
+                except (TypeError, ValueError):
+                    pool.record_protocol_error()
+                    raise
     except Exception as exc:
         print(f"[server] client error: {exc}", file=sys.stderr)
     finally:
         # A disconnect ends the episode. Without this, every agent's open
         # credit windows are dropped, which on a run this short is a
         # meaningful slice of the collected experience.
-        if pool is not None:
-            for level in pool.levels():
-                level_agent = pool.get(level)
-                if level_agent.flush_pending() > 0:
-                    # Make the final replay additions visible to at least one
-                    # optimizer cycle before shutdown's quiescence snapshot.
-                    # Previously health reported these as finalized even
-                    # though no training request followed their insertion.
-                    level_agent.request_training()
-        if agent.flush_pending() > 0:
-            agent.request_training()
+        for level in pool.levels():
+            level_agent = pool.get(level)
+            if level_agent.flush_pending() > 0:
+                # Make the final replay additions visible to at least one
+                # optimizer cycle before shutdown's quiescence snapshot.
+                # Previously health reported these as finalized even
+                # though no training request followed their insertion.
+                level_agent.request_training()
         conn.close()
 
 
-def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_log,
-               pool: "multilevel.AgentPool" = None,
-               ml_processor: "multilevel.MultiLevelProcessor" = None) -> None:
+def run_server(socket_path: str, tracker: MetricsTracker, io_log,
+               pool: "multilevel.AgentPool",
+               ml_processor: "multilevel.MultiLevelProcessor") -> None:
     if os.path.exists(socket_path):
         os.unlink(socket_path)
 
@@ -340,19 +284,15 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
         for thread in threads:
             thread.join(timeout=5.0)
         clients_drained = all(not thread.is_alive() for thread in threads)
-        if pool is not None:
-            training_quiesced = pool.quiesce_training(timeout=5.0)
-            _atomic_write_json(
-                config.SERVER_SUMMARY_PATH,
-                _server_health_summary(
-                    pool, clients_drained, training_quiesced
-                ),
-            )
-        agent.close()
-        agent.save(config.MODEL_SAVE_PATH)
-        if pool is not None:
-            pool.close_all()
-            pool.save_all()
+        training_quiesced = pool.quiesce_training(timeout=5.0)
+        _atomic_write_json(
+            config.SERVER_SUMMARY_PATH,
+            _server_health_summary(
+                pool, ml_processor, clients_drained, training_quiesced
+            ),
+        )
+        pool.close_all()
+        pool.save_all()
         tracker.close()
         io_log.close()
         try:
@@ -371,7 +311,7 @@ def run_server(socket_path: str, agent: DQNAgent, tracker: MetricsTracker, io_lo
             break
         t = threading.Thread(
             target=handle_client,
-            args=(conn, agent, tracker, io_log, pool, ml_processor),
+            args=(conn, tracker, io_log, pool, ml_processor),
             daemon=True,
             name="rl-client",
         )
@@ -390,24 +330,15 @@ def main() -> None:
         _torch.manual_seed(config.SEED)
         print(f"[server] seeded with RL_SEED={config.SEED}")
 
-    agent = DQNAgent()
-
-    # Resuming is opt-in. The headline experiment is a cold online run: the
-    # research claim is adaptation with no prior workload knowledge, so loading
-    # weights trained on the same workload would answer a different question.
-    if (config.RESUME or config.EVAL_MODE) and os.path.exists(config.MODEL_SAVE_PATH):
-        try:
-            agent.load(config.MODEL_SAVE_PATH)
-            print(f"[server] loaded checkpoint from {config.MODEL_SAVE_PATH} (step={agent.step})")
-        except Exception as exc:
-            print(f"[server] could not load checkpoint: {exc}", file=sys.stderr)
-
     print(f"[server] exploration={config.EXPLORATION} "
-          f"decay_steps={config.EXPLORATION_DECAY_STEPS} "
+          f"anneal_seconds={config.EXPLORATION_ANNEAL_SECONDS} "
           f"prior={'on' if config.ANALYTIC_PRIOR else 'off'} "
           f"credit_horizon_ms={config.CREDIT_HORIZON_MS} "
           f"gamma_per_sec={config.GAMMA_PER_SEC} "
-          f"eval_mode={config.EVAL_MODE}")
+          f"eval_mode={config.EVAL_MODE} "
+          f"write_bound={config.WRITE_BOUND:.4f} "
+          f"space_bound={config.SPACE_BOUND:.4f} "
+          f"scan_seeks_bound={config.SCAN_SEEKS_BOUND:.4f}")
 
     pool = multilevel.AgentPool()
     # One processor for the whole server lifetime: client reconnects must not
@@ -415,7 +346,7 @@ def main() -> None:
     ml_processor = multilevel.MultiLevelProcessor()
     tracker = MetricsTracker()
     io_log = open(config.IO_LOG_PATH, "a")
-    run_server(config.SOCKET_PATH, agent, tracker, io_log, pool, ml_processor)
+    run_server(config.SOCKET_PATH, tracker, io_log, pool, ml_processor)
 
 
 if __name__ == "__main__":

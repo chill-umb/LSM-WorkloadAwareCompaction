@@ -135,6 +135,12 @@ RL_EXPECTED_RUN_SECONDS_PER_MOP="${RL_EXPECTED_RUN_SECONDS_PER_MOP:-30}"
 # epsilon without failing on it; set a bound once a run has established the
 # distribution on the target machine.
 RL_EPSILON_BOUND_MS="${RL_EPSILON_BOUND_MS:-0}"
+# Space budget rung the run executes (P0-6 ladder 0 / 0.02 / 0.05 / 0.10).
+# Stamped into metadata.env so 07_evaluate_paired.py scores the cell at the
+# rung it ran, and passed to the learner so its space hinge is trained
+# against the bound it will be judged at. A rung is a separate run of the
+# learned arms; regular and prior_only are shared across rungs (Gate 3b).
+SPACE_RELATIVE_MARGIN="${SPACE_RELATIVE_MARGIN:-0.02}"
 POLICY_SEED_BASE="${POLICY_SEED_BASE:-10000}"
 BASELINE_SLO_DIR="${BASELINE_SLO_DIR:-baseline_slo}"
 RL_REQUIRE_BASELINE_SLO="${RL_REQUIRE_BASELINE_SLO:-1}"

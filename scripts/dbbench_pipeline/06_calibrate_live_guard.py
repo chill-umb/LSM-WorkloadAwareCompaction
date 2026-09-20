@@ -18,7 +18,7 @@ from slo_statistics import TOLERANCE_CONFIDENCE, tolerance_bound
 OPS = ("get", "scan", "write")
 BUCKETS = 64
 MARGIN = 1.02
-DEFINITIONS = "trigger-v2-logical-v2"
+DEFINITIONS = "trigger-v2-logical-v3"
 
 
 def nonnegative_json_integer(value, context: str) -> int:

@@ -65,12 +65,9 @@ class MetricsTracker:
                     1 if int(executed) != int(previous) else 0)
 
             action_name = config.ACTION_NAMES.get(action, "?")
-            field_names = (
-                config.ML_STATE_FIELDS if level is not None else config.STATE_FIELDS
-            )
             state_features = {
                 name: round(float(value), 6)
-                for name, value in zip(field_names, state)
+                for name, value in zip(config.ML_STATE_FIELDS, state)
             }
             record = {
                 "t": round(time.time() - self._start, 3),
@@ -100,6 +97,9 @@ class MetricsTracker:
                 "credit_lag_s": diagnostics.get("credit_lag_s"),
                 "analytic_advantage": diagnostics.get("analytic_advantage"),
                 "residual_advantage": diagnostics.get("residual_advantage"),
+                # Returns finalized at this decision, so 11_analyze_learning
+                # can put TD loss on the return scale (PATHWAYS D-2).
+                "finalized_returns": diagnostics.get("finalized_returns"),
             }
             self._log_file.write(json.dumps(record) + "\n")
             self._log_file.flush()

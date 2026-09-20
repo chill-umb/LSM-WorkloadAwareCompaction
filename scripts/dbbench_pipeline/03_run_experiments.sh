@@ -459,6 +459,7 @@ start_server() {  # result dir, policy seed, decay steps, eval, manifest, finger
     RL_BASELINE_SLO_PATH="$manifest_path" \
     RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
     RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
+    RL_SPACE_RELATIVE_MARGIN="$SPACE_RELATIVE_MARGIN" \
     OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     ${CONTROLLER_LAUNCHER[@]+"${CONTROLLER_LAUNCHER[@]}"} \
     "$PYTHON" "$PROJECT_ROOT/rl_agent/server.py" \
@@ -593,7 +594,7 @@ import sys
 path, expected_size, expected_ratio, phase = sys.argv[1:]
 manifest = json.load(open(path, encoding="utf-8"))
 if manifest.get("schema_version") != 2 or \
-        manifest.get("metric_definitions_version") != "trigger-v2-logical-v2":
+        manifest.get("metric_definitions_version") != "trigger-v2-logical-v3":
     raise SystemExit(f"unsupported baseline manifest schema: {path}")
 calibrated = manifest.get("guard_calibrated") is True
 if phase == "calibration" and calibrated:
@@ -657,7 +658,12 @@ PY
   command=(
     ${DBBENCH_LAUNCHER[@]+"${DBBENCH_LAUNCHER[@]}"}
     "$DB_BENCH"
-    --benchmarks=filluniquerandom,mixgraph,waitforcompaction,levelstats,stats
+    # rlsuspend/rlresume: the RL picker hands the bulk load to native leveled
+    # compaction, so every arm reaches mixgraph on the same tree and the
+    # controller's first frame is the first measured operation. resetstats:
+    # counters and histograms cover the measured phase (mixgraph + drain)
+    # only, so W, stalls and latency exclude the load (P1c, 2026-09-20).
+    --benchmarks=rlsuspend,filluniquerandom,resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats
     --num="$load_ops"
     --reads="$mixed_ops"
     --mix_get_ratio="$MIX_GET_RATIO"
@@ -703,6 +709,7 @@ PY
     printf 'dbbench_cpus=%s\n' "${DBBENCH_CPUS:-unpinned}"
     printf 'controller_cpus=%s\n' "${CONTROLLER_CPUS:-unpinned}"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
+    printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'
     printf 'use_direct_io=%s\n' "$USE_DIRECT_IO"
     printf 'static_capacity_scales=%s\n' "${STATIC_CAPACITY_SCALES:-none}"

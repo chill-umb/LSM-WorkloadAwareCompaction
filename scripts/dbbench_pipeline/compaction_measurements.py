@@ -74,9 +74,13 @@ def release_snapshot(event: dict, num_levels: int) -> dict:
 def analyze(path: Path, num_levels: int) -> dict:
     if num_levels < 2:
         raise ValueError("leveled measurements require at least two levels")
+    # "load": jobs completed while control was suspended for the bulk load
+    # (native leveled compaction, identical in every arm); they precede the
+    # measured phase and are excluded from "workload" exactly as resetstats
+    # excludes their bytes from the write-amplification tickers.
     views = {phase: {"global": empty(), "levels": {
         str(level): empty() for level in range(num_levels)}}
-        for phase in ("workload", "drain", "whole_run")}
+        for phase in ("load", "workload", "drain", "whole_run")}
     releases, started, completed = {}, {}, set()
     snapshots = []
     excluded_moves = missing_merges = 0
@@ -114,7 +118,12 @@ def analyze(path: Path, num_levels: int) -> dict:
             if not read:
                 raise ValueError("non-trivial merge has no input")
             # Do not clamp eta: compression/table metadata can make it exceed 1.
-            phase = "drain" if flag(event.get("rl_drain")) else "workload"
+            if flag(event.get("rl_suspended")):
+                phase = "load"
+            elif flag(event.get("rl_drain")):
+                phase = "drain"
+            else:
+                phase = "workload"
             for view in (phase, "whole_run"):
                 for bucket in (views[view]["global"], views[view]["levels"][str(level)]):
                     bucket["jobs"] += 1

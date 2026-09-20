@@ -82,7 +82,8 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
     """
     by_level: dict[int, dict[str, list]] = defaultdict(
         lambda: {"loss": [], "prior": [], "residual": [], "action": [],
-                 "epsilon": [], "override": [], "reward": []})
+                 "epsilon": [], "override": [], "reward": [],
+                 "returns": [], "lambda_write": [], "lambda_space": []})
     counted: dict[int, int] = defaultdict(int)
     per_level_seen: dict[int, int] = defaultdict(int)
     health = None
@@ -130,6 +131,18 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
             if record.get("override_rate_100") is not None:
                 bucket["override"].append(float(record["override_rate_100"]))
             bucket["reward"].append(float(record.get("reward", 0.0)))
+            # Finalized returns put the TD loss on the return scale (D-2);
+            # the multipliers show whether the constraints plateaued (D-3)
+            # or diverged (D-4).
+            for value in record.get("finalized_returns") or ():
+                try:
+                    bucket["returns"].append(abs(float(value)))
+                except (TypeError, ValueError):
+                    pass
+            components = record.get("reward_components") or {}
+            for name in ("lambda_write", "lambda_space"):
+                if components.get(name) is not None:
+                    bucket[name].append(float(components[name]))
 
     summary = {}
     for level, bucket in sorted(by_level.items()):
@@ -202,6 +215,17 @@ def read_arm(metrics_path: Path, stride: int = 1) -> dict[int, dict]:
                                     and prior_scale != 0 else math.nan),
             "argmax_flip_rate": flips / compared if compared else math.nan,
             "compact_rate": finite_mean(bucket["action"]),
+            # D-2: final TD loss < 2x the observed return scale.
+            "return_scale": finite_mean(tail(bucket["returns"])),
+            "d2_td_loss_under_2x_return_scale": (
+                last < 2.0 * finite_mean(tail(bucket["returns"]))
+                if bucket["returns"] and math.isfinite(last) else None),
+            # D-3/D-4: multiplier at the first and last quarter; a monotone
+            # rise to the clip is the infeasibility signal.
+            "lambda_write_first_quarter": finite_mean(head(bucket["lambda_write"])),
+            "lambda_write_last_quarter": finite_mean(tail(bucket["lambda_write"])),
+            "lambda_space_first_quarter": finite_mean(head(bucket["lambda_space"])),
+            "lambda_space_last_quarter": finite_mean(tail(bucket["lambda_space"])),
             "final_epsilon": bucket["epsilon"][-1] if bucket["epsilon"] else math.nan,
             "final_override_rate": (bucket["override"][-1]
                                     if bucket["override"] else math.nan),

@@ -55,8 +55,18 @@ IO_LOG_PATH = os.environ.get("RL_IO_LOG_PATH", os.path.expanduser("~/lsm_dqn/rl_
 SERVER_SUMMARY_PATH = os.environ.get("RL_SERVER_SUMMARY_PATH", "")
 
 
-def _load_latency_limits() -> dict[str, float]:
-    """Load formal reward budgets from the guard's shared manifest."""
+METRIC_DEFINITIONS_VERSION = "trigger-v2-logical-v3"
+
+
+def _load_baseline_manifest() -> dict[str, float]:
+    """Load the formal objective's bounds from the guard's shared manifest.
+
+    Returns the constraint targets the reward's hinge terms are measured
+    against (PATHWAYS Pathway D): the tuned baseline's write amplification,
+    space amplification, sorted-run seeks per scan and stall fraction, and
+    the average / p99 latency limits. Empty when no manifest is configured
+    (an unconstrained ablation), in which case every hinge is inactive.
+    """
     path = os.environ.get("RL_BASELINE_SLO_PATH", "")
     if not path:
         return {}
@@ -67,7 +77,7 @@ def _load_latency_limits() -> dict[str, float]:
         raise RuntimeError(f"cannot load RL baseline SLO manifest {path}: {exc}") from exc
     if manifest.get("schema_version") != 2:
         raise RuntimeError(f"unsupported RL baseline SLO schema in {path}")
-    if manifest.get("metric_definitions_version") != "trigger-v2-logical-v2":
+    if manifest.get("metric_definitions_version") != METRIC_DEFINITIONS_VERSION:
         raise RuntimeError(
             f"unsupported RL metric definitions in baseline SLO {path}")
     if manifest.get("guard_calibrated") is not True:
@@ -85,41 +95,49 @@ def _load_latency_limits() -> dict[str, float]:
     # instrument: a rolling, in-process classifier calibrated from compact
     # telemetry. Using guard_* here would make a safety tolerance the learning
     # target and silently relax the final whole-run latency objective.
+    #
+    # Average and p99, not p95: the acceptance metrics are avg + p99 (P0-4);
+    # write p95 is diagnostic only (P0-5).
     names = (
-        "get_latency_avg_ns_limit", "get_latency_p95_ns_limit",
-        "scan_latency_avg_ns_limit", "scan_latency_p95_ns_limit",
-        "write_latency_avg_ns_limit", "write_latency_p95_ns_limit",
+        "get_latency_avg_ns_limit", "get_latency_p99_ns_limit",
+        "scan_latency_avg_ns_limit", "scan_latency_p99_ns_limit",
+        "write_latency_avg_ns_limit", "write_latency_p99_ns_limit",
+        "write_amplification_reference", "space_amplification_reference",
+        "sorted_run_seeks_per_scan_reference", "stall_fraction_reference",
     )
     try:
         limits = {name: float(manifest[name]) for name in names}
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"baseline SLO manifest lacks latency limits: {path}") from exc
-    if any(not math.isfinite(value) or value <= 0.0
+        raise RuntimeError(
+            f"baseline SLO manifest lacks objective references: {path}") from exc
+    if any(not math.isfinite(value) or value < 0.0
            for value in limits.values()):
+        raise RuntimeError(
+            f"baseline SLO manifest has invalid objective references: {path}")
+    if any(limits[name] <= 0.0 for name in names[:6]):
         raise RuntimeError(
             f"baseline SLO manifest has invalid formal latency limits: {path}")
     return limits
 
 
-BASELINE_LATENCY_LIMITS = _load_latency_limits()
+BASELINE_LIMITS = _load_baseline_manifest()
 
-STATE_FIELDS = (
-    "l0_files_norm",
-    "l0_size_norm",
-    "l0_score_norm",
-    "l0_delay_norm",
-    "l0_compaction_trigger_pressure",
-    "l0_slowdown_pressure",
-    "l0_stop_pressure",
-    "pending_compaction_norm",
-    "flushed_bytes_norm",
-    "compaction_read_norm",
-    "compaction_write_norm",
-    "l0_compaction_event_norm",
-    "stall_norm",
-    "default_l0_compaction_needed",
-)
-STATE_DIM = len(STATE_FIELDS)
+# Constraint margins, exactly as the paired evaluator applies them: write and
+# scan at 2% paired relative non-inferiority (P0-3, P0-1), stall at zero
+# margin (P0-2). The space budget is the swept rung the run executes (P0-6);
+# the runner passes it so the learner is trained against the bound it will be
+# judged at. Bounds are absolute values of the whole-run metric.
+WRITE_RELATIVE_MARGIN = _env_float("RL_WRITE_RELATIVE_MARGIN", 0.02)
+SCAN_RELATIVE_MARGIN = _env_float("RL_SCAN_RELATIVE_MARGIN", 0.02)
+SPACE_RELATIVE_MARGIN = _env_float("RL_SPACE_RELATIVE_MARGIN", 0.02)
+WRITE_BOUND = (BASELINE_LIMITS.get("write_amplification_reference", 0.0)
+               * (1.0 + WRITE_RELATIVE_MARGIN))
+SPACE_BOUND = (BASELINE_LIMITS.get("space_amplification_reference", 0.0)
+               * (1.0 + SPACE_RELATIVE_MARGIN))
+SCAN_SEEKS_BOUND = (BASELINE_LIMITS.get("sorted_run_seeks_per_scan_reference", 0.0)
+                    * (1.0 + SCAN_RELATIVE_MARGIN))
+STALL_FRACTION_BOUND = BASELINE_LIMITS.get("stall_fraction_reference", 0.0)
+
 ACTION_DIM = 2  # 0=do_nothing, 1=compact_now
 ACTION_NAMES = {0: "do_nothing", 1: "compact_now"}
 
@@ -136,7 +154,7 @@ ML_STATE_FIELDS = (
     "arrival_rate_norm",       # bytes arriving in level, per second
     "compaction_io_rate_norm",  # compaction I/O from level, per second
     "compaction_event_rate_norm",
-    "steps_since_compaction",
+    "seconds_since_compaction",  # wall-clock, saturating at 30 s
     "due_age_norm",            # wall-clock age of the current due episode
     "pressure_integral_norm",  # integral of max(score - 1, 0)
     "gate_open",
@@ -171,18 +189,50 @@ ML_STATE_FIELDS = (
 )
 ML_STATE_DIM = len(ML_STATE_FIELDS)
 
-# Global cooperative reward. Every per-level action changes one tree, so every
-# head receives this same transition reward rather than an independently
-# manufactured per-level potential.
-GLOBAL_REWARD_TREE_POINT = _env_float("RL_GLOBAL_REWARD_TREE_POINT", 0.35)
-GLOBAL_REWARD_TREE_SCAN = _env_float("RL_GLOBAL_REWARD_TREE_SCAN", 0.25)
-GLOBAL_REWARD_TREE_SPACE = _env_float("RL_GLOBAL_REWARD_TREE_SPACE", 0.20)
-GLOBAL_REWARD_TREE_DEBT = _env_float("RL_GLOBAL_REWARD_TREE_DEBT", 0.15)
-GLOBAL_REWARD_TREE_STALL = _env_float("RL_GLOBAL_REWARD_TREE_STALL", 0.05)
-GLOBAL_REWARD_WAF = _env_float("RL_GLOBAL_REWARD_WAF", 0.20)
-GLOBAL_REWARD_POINT = _env_float("RL_GLOBAL_REWARD_POINT", 0.15)
-GLOBAL_REWARD_SCAN = _env_float("RL_GLOBAL_REWARD_SCAN", 0.10)
-GLOBAL_REWARD_LATENCY = _env_float("RL_GLOBAL_REWARD_LATENCY", 0.05)
+# ---------------------------------------------------------------------------
+# Reward: the constrained objective of PATHWAYS Pathway D
+# ---------------------------------------------------------------------------
+# Every per-level action changes one tree, so every head receives the same
+# whole-tree transition reward (multilevel.MultiLevelProcessor._global_reward):
+#
+#   r = shaping
+#       - dt * ( REWARD_READ * point_probes_per_get
+#              + lambda_W * [W_window  - W_bound]^+
+#              + lambda_S * [S         - S_bound]^+
+#              + lambda_L * latency_excess_over_avg_and_p99_limits
+#              + lambda_scan * [seeks_per_scan - seeks_bound]^+
+#              + lambda_stall * [stall_fraction - stall_bound]^+ )
+#
+# The objective is point-read amplification, charged as a rate; everything
+# else is a constraint and enters ONLY through a hinge above its bound
+# (Proposition D.2), so the learner earns nothing for space or write headroom
+# it is not judged on. Space is therefore not a minimand anywhere.
+#
+# shaping = Phi_prev - gamma^dt * Phi_now with Phi = -REWARD_STRUCTURAL_RUNS
+# * (L0 files + non-empty deeper levels): the absolute sorted-run count,
+# which is what a point lookup probes. Potential-based, so policy-invariant
+# (Proposition D.1, gamma^tau form). It is in absolute runs, not runs over
+# the L0 trigger, so removing one L0 file is worth the same at trigger 2 as
+# at trigger 16.
+#
+# The multipliers follow dual ascent on the slow timescale (Proposition D.3):
+# lambda <- clip(lambda + LAMBDA_LR * violation, 0, LAMBDA_MAX) once per
+# frame. A lambda that grows without plateauing is D-4's infeasibility
+# signal, so it is logged in every reward component record.
+REWARD_READ = _env_float("RL_REWARD_READ", 1.0)
+REWARD_STRUCTURAL_RUNS = _env_float("RL_REWARD_STRUCTURAL_RUNS", 0.5)
+LAMBDA_WRITE_INIT = _env_float("RL_LAMBDA_WRITE_INIT", 1.0)
+LAMBDA_SPACE_INIT = _env_float("RL_LAMBDA_SPACE_INIT", 1.0)
+LAMBDA_LATENCY_INIT = _env_float("RL_LAMBDA_LATENCY_INIT", 1.0)
+LAMBDA_SCAN_INIT = _env_float("RL_LAMBDA_SCAN_INIT", 1.0)
+LAMBDA_STALL_INIT = _env_float("RL_LAMBDA_STALL_INIT", 1.0)
+LAMBDA_LR = _env_float("RL_LAMBDA_LR", 0.01)
+LAMBDA_MAX = _env_float("RL_LAMBDA_MAX", 100.0)
+# Write amplification is a ratio of byte totals. Over one 50 ms window it is
+# undefined whenever no Put landed, and over the whole run it is a constant
+# that no single action can move. It is therefore measured over an
+# exponentially weighted window of this length, which is what the hinge sees.
+WAF_WINDOW_SECONDS = _env_float("RL_WAF_WINDOW_SECONDS", 10.0)
 
 # Score headroom. With deferral enabled a level's score legitimately exceeds
 # 1.0, so the feature needs range above the trigger point; the previous /2.0
@@ -194,26 +244,19 @@ SCORE_CLAMP = _env_float("RL_SCORE_CLAMP", 3.0)
 HIDDEN_DIM = _env_int("RL_HIDDEN_DIM", 64)
 LEARNING_RATE = _env_float("RL_LEARNING_RATE", 1e-3)
 GAMMA = _env_float("RL_GAMMA", 0.99)
-# MEASURED DECISION BUDGET (2026-08-02, this machine, default db_runner args):
-# a run produces about **0.19 decisions per 1000 operations per level agent**,
-# essentially independent of workload size:
-#
-#     ops        wall     decisions/agent
-#     60k        4.6s      ~13
-#     250k      27.3s      ~50
-#     1M       333.0s     ~185
-#
-# Decisions track flush/compaction scheduling events, not wall time and not the
-# decision tick (the 1M run skipped 6475 ticks and issued only 182 queries),
-# because RocksDB only calls NeedsCompaction when the column family is not
-# already queued for compaction. Every hyperparameter below is sized against
-# that budget: anything gated on a step count larger than ~185 simply never
-# happens on a 1M workload.
+# DECISION CADENCE. Protocol v2 pins the observation and decision interval at
+# 50 ms (RL_OBSERVE_INTERVAL_MS == RL_DECISION_INTERVAL_MS), so the controller
+# sees ~20 frames per second, each carrying one decision per populated level,
+# for the whole measured phase: on the order of 10^5 frames per 10M run. The
+# controller is suspended during the bulk load (db_bench `rlsuspend`), so the
+# first frame is the first measured operation. Any constant below that is
+# expressed in decisions is sized against that cadence; anything that must be
+# invariant to it is expressed in wall-clock seconds instead.
 BATCH_SIZE = _env_int("RL_BATCH_SIZE", 32)
 REPLAY_BUFFER_SIZE = _env_int("RL_REPLAY_BUFFER_SIZE", 100_000)
-# Was 200, which exceeded the entire per-agent decision budget of a 1M run —
-# the buffer never reached the threshold and **training never ran at all**.
-MIN_REPLAY_SIZE = _env_int("RL_MIN_REPLAY_SIZE", 32)
+# ~1000 finalized transitions arrive within the first minute across the
+# populated levels; training on fewer fits the first few seconds of a run.
+MIN_REPLAY_SIZE = _env_int("RL_MIN_REPLAY_SIZE", 1000)
 # A batch larger than the warmup threshold would make random.sample() raise on
 # the first training step, so the two are tied together here rather than left
 # to whoever edits one of them.
@@ -257,16 +300,16 @@ EPSILON_START = _env_float("RL_EPSILON_START", 1.0)
 EPSILON_END = _env_float("RL_EPSILON_END", 0.05)
 EPSILON_DECAY_STEPS = _env_int("RL_EPSILON_DECAY_STEPS", EXPLORATION_DECAY_STEPS)
 
-# Model persistence
-SAVE_INTERVAL = _env_int("RL_SAVE_INTERVAL", 500)
+# Model persistence. The save runs on the decision path; at ~20 decisions per
+# second per level this is roughly one checkpoint every fifteen minutes.
+SAVE_INTERVAL = _env_int("RL_SAVE_INTERVAL", 20_000)
 
 # Runtime behavior
 ASYNC_TRAINING = os.environ.get("RL_ASYNC_TRAINING", "1") != "0"
-# More gradient steps per observation: at ~185 decisions per agent on a 1M run,
-# each transition has to be reused heavily or the agent sees almost no gradient
-# signal at all. With the analytic prior carrying the policy, these steps are
-# fitting a residual rather than learning Q from scratch, which is what makes
-# such a small sample budget survivable.
+# Gradient steps per training request. With ASYNC_TRAINING the requests of
+# all levels in a frame coalesce into one event, so this bounds the trainer's
+# duty cycle rather than multiplying the frame rate. With the analytic prior
+# carrying the policy, these steps fit a residual rather than Q from scratch.
 TRAIN_STEPS_PER_OBSERVATION = _env_int("RL_TRAIN_STEPS_PER_OBSERVATION", 8)
 
 # Diagnostics only — NOT the evaluation protocol. The reported result must be a
@@ -349,58 +392,24 @@ NORMALIZER_DECAY = _env_float("RL_NORMALIZER_DECAY", 0.995)
 # ...but a scale that keeps moving means the same raw observation encodes to a
 # different vector over time, so replayed transitions were recorded against an
 # encoding that no longer exists. Freeze the scales once enough of the workload
-# has been seen. 0 disables freezing (legacy behaviour). Sized against the
-# measured budget: at 200 it never fired on a 1M run, so the scales drifted for
-# the entire run and the freeze was a no-op.
-NORM_FREEZE_AFTER = _env_int("RL_NORM_FREEZE_AFTER", 50)
+# has been seen. 0 disables freezing.
+#
+# Wall-clock, not a frame count: the previous 50-frame freeze fired 2.5 s
+# into the run, before any read-path scale (point probes per Get, seeks,
+# read rate) had seen a representative value, so those features saturated at
+# their floor for the whole measured phase and the state carried no
+# information about the primary objective. Thirty seconds of controlled time
+# spans hundreds of compactions at every populated level.
+NORM_FREEZE_SECONDS = _env_float("RL_NORM_FREEZE_SECONDS", 30.0)
 
 # ---------------------------------------------------------------------------
-# Reward
+# Legacy per-level reward (RL_REWARD_LEGACY=1), retained as a Gate 6 ablation
+# only. The live reward is the constrained whole-tree form above.
 # ---------------------------------------------------------------------------
-# The reward is a potential difference plus directly measured costs:
-#
-#   Phi(s) = W_STALL*stall_risk + W_READ*read_amp + W_SPACE*space_overshoot
-#   r      = -(Phi(s') - Phi(s)) - dt * (measured I/O, stall, read-amp costs)
-#
-# Potential-based shaping (Ng et al., 1999) leaves the optimal policy
-# unchanged, and the differential form centres the reward near zero. The
-# previous formulation summed eleven always-on penalties and clamped to
-# [-1, 1], so the signal was a near-constant negative offset whose clamp
-# saturated in exactly the high-pressure states that mattered.
-#
-# The `dt` factor makes a credit-window return independent of how many
-# decisions the window happened to contain; see _compute_reward for the
-# measurements that forced it.
 REWARD_LEGACY = _env_bool("RL_REWARD_LEGACY", False)
-# OFF by default. Standardizing divides the reward by a running standard
-# deviation, which makes the target scale arbitrary and workload-dependent —
-# exactly what the analytic prior needs it not to be. Q(s,a) = b(s,a) +
-# f_theta(s,a) is only meaningful while b and the return live on the same
-# scale: with standardization on, raw rewards averaging |0.083| were inflated
-# ~5x (the MIN_STD=0.05 floor binds on near-idle levels) before being summed
-# into returns averaging |9.46|, against a prior clamped to +-2.0.
-#
-# With the dt-integrated reward the natural scale is already right: a cost
-# rate of ~0.083 integrated over the 4s credit horizon lands at ~0.33, which
-# is the same order as the analytic advantage (mean |0.284|).
-#
-# RL_REWARD_STANDARDIZE=1 restores the old behaviour for ablation.
-REWARD_STANDARDIZE = _env_bool("RL_REWARD_STANDARDIZE", False)
 
 _REWARD_DEFAULTS = {
-    # Potential terms.
-    "POTENTIAL_STALL": 1.00,
-    "POTENTIAL_READ": 0.60,
-    "POTENTIAL_SPACE": 0.30,
-    # Directly measured costs.
-    "COST_IO": 0.30,
-    "COST_STALL": 0.70,
-    "COST_STOP": 1.00,
-    "COST_READ_AMP": 0.40,
-    # Retained safety signal, re-keyed to observed stalls rather than to
-    # RocksDB's own trigger (which made the agent imitate the baseline).
     "LATE_NO_COMPACTION": 0.30,
-    # Legacy weights, used only when REWARD_LEGACY is set.
     "L0_PRESSURE": 0.20,
     "SLOWDOWN_PRESSURE": 0.20,
     "STOP_PRESSURE": 0.30,
@@ -415,8 +424,8 @@ _REWARD_DEFAULTS = {
     "PRESSURE_RELIEF": 0.60,
 }
 
-# Module-level aliases kept so existing scripts and the legacy L0 reward path
-# (reward.py) keep working unchanged.
+# Module-level aliases for the legacy reward path
+# (multilevel._compute_reward_legacy).
 REWARD_L0_PRESSURE = reward_weight("L0_PRESSURE")
 REWARD_SLOWDOWN_PRESSURE = reward_weight("SLOWDOWN_PRESSURE")
 REWARD_STOP_PRESSURE = reward_weight("STOP_PRESSURE")
@@ -440,7 +449,20 @@ REWARD_PRESSURE_RELIEF = reward_weight("PRESSURE_RELIEF")
 # research claim (online adaptation, no prior workload knowledge) requires.
 ANALYTIC_PRIOR = _env_bool("RL_ANALYTIC_PRIOR", True)
 PRIOR_W_STALL = _env_float("RL_PRIOR_W_STALL", 1.0)
+# Deep levels: weight on the DEPTH cost of a compaction. A level below L0 is
+# one sorted run whatever its size, so compacting it removes no probe; what
+# it can do is populate an empty level below and add one probe to every
+# read that reaches it (Theorem A.1's cascade). That is the only read-side
+# term a deep level carries under the point-read objective. The previous
+# form priced bytes merged per scan, which is the withdrawn scan metric, and
+# grew with fullness -- the top-of-tree eagerness A-0 measured.
 PRIOR_W_READ = _env_float("RL_PRIOR_W_READ", 0.6)
+# L0: a proactive (below-trigger) compaction must remove at least this many
+# sorted runs beyond what native RocksDB would remove one flush later, or it
+# earns no read relief. Absolute runs, not a fraction of the trigger: at
+# trigger 2 the only below-threshold state is one file, which this leaves
+# with zero relief (history 14.10).
+PRIOR_MIN_RUN_REDUCTION = _env_float("RL_PRIOR_MIN_RUN_REDUCTION", 2.0)
 # L0 gets its own, much larger read weight. Its runs overlap, so every extra L0
 # file is probed by every lookup and flushes queue behind it; a deeper level is
 # one sorted run whatever its size. With a single shared weight the agent came

@@ -28,7 +28,8 @@
     "write": {
       "metric": "write_amplification",
       "test": "noninferiority",
-      "relative_margin": 0.02
+      "relative_margin": 0.02,
+      "measured_phase": "mixgraph plus drain; db_bench resetstats after the bulk load, during which the controller is suspended (rlsuspend/rlresume)"
     },
     "space": {
       "metric": "space_amplification",
@@ -39,7 +40,8 @@
         0.02,
         0.05,
         0.1
-      ]
+      ],
+      "hull_dominator_rule": "a hull point may dominate a policy on (W, R) only if its S is inside the policy's S bound at the rung being evaluated (C-6)"
     },
     "scan": {
       "metric": "sorted_run_seeks_per_scan",
@@ -47,7 +49,8 @@
       "relative_margin": 0.02,
       "diagnostic_metrics": [
         "scan_amplification"
-      ]
+      ],
+      "definition": "sorted runs opened per keyed scan seek: each L0 file and each non-empty deeper level once; a file-boundary crossing inside one level opens no further run"
     },
     "latency": {
       "test": "noninferiority",
@@ -74,7 +77,8 @@
       "relative_margin": 0.0,
       "diagnostic_metrics": [
         "stall_events"
-      ]
+      ],
+      "measured_phase": "mixgraph plus drain, after resetstats"
     }
   },
   "phase_cost": {
@@ -96,7 +100,7 @@
     "forced_contraction": {
       "classification": "override",
       "separate_requested_and_effective_action": true,
-      "include_in_q_replay": false,
+      "include_in_q_replay": true,
       "retain_telemetry": true,
       "retain_realized_reward": true
     },
@@ -117,8 +121,8 @@
   },
   "revisions": {
     "project": "6b482e316f17281e9365872f6e8b11cf6ae8e494",
-    "rocksdb": "81d2742bf05883fa9978a9e984e32f709409444f",
-    "rocksdb_parent": "7ea2d73655025332855864f0b8d6d2dbdad3f336",
+    "rocksdb": "6ad9f6b79b0d9daf0594fe8adbdff37fc642e41e",
+    "rocksdb_parent": "71627a1cd0ae39d54cdeac6cee836736456701cf",
     "rocksdb_base": "7ea2d73655025332855864f0b8d6d2dbdad3f336",
     "rocksdb_base_preserved": true
   },
@@ -223,5 +227,45 @@
     ],
     "enforced_by_experiment_fingerprint": false,
     "note": "recorded for provenance; a differently pinned arm is not yet refused by the paired evaluator"
+  },
+  "metric_definitions_version": "trigger-v2-logical-v3",
+  "overrides": {
+    "replay": "relabel_to_effective_action_and_keep",
+    "dropped_only_for": [
+      "socket_or_query_fallback",
+      "watchdog_native_fallback",
+      "malformed_protocol",
+      "rejected_manifest",
+      "unknown_control_ownership"
+    ]
+  },
+  "reward": {
+    "form": "PATHWAYS Pathway D: -read_rate - sum lambda_i [x_i - bound_i]^+, shaping over absolute sorted runs in the gamma^tau form",
+    "objective_rate": "point_sst_probes / keys_read per window",
+    "hinges": [
+      "write_amplification (10 s window) vs W_base*(1+0.02)",
+      "space_amplification vs S_base*(1+rung)",
+      "latency avg and p99 vs manifest limits",
+      "sorted_run_seeks_per_scan vs seeks_base*(1+0.02)",
+      "stall_fraction vs baseline stall fraction"
+    ],
+    "multipliers": "dual ascent, LAMBDA_LR per frame, clipped at LAMBDA_MAX, logged per frame",
+    "space_is_a_minimand": false,
+    "hinge_target": "W_base + delta_W at the arm's own T (P1-16)"
+  },
+  "amendments_in_place": {
+    "2026-09-20": {
+      "label": "P1c",
+      "recorded": "before any run of the re-executed programme; no gate outcome inspected",
+      "reason": "objective-consistency audit (history 14.11): the learner's reward and prior encoded a superseded objective, the controller acted during the bulk load, sorted-run seeks counted table seeks, and the hull comparison ignored the space bound",
+      "changes": [
+        "metric_definitions_version trigger-v2-logical-v3 (measured phase after resetstats; seeks per sorted run)",
+        "revisions.rocksdb -> 6ad9f6b79 (control suspension, p99 latency, per-run seek ticks); base 7ea2d73 preserved",
+        "capacity.forced_contraction.include_in_q_replay false -> true; overrides.replay relabel_to_effective_action_and_keep",
+        "constraints.write/stalls measured_phase, constraints.scan definition, constraints.space hull_dominator_rule",
+        "reward block: the constrained objective as trained"
+      ],
+      "prose_record": "docs/PATHWAYS.md, Frozen preregistered decisions, P1c items 19-25"
+    }
   }
 }

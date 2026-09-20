@@ -11,7 +11,7 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 | Topic | File |
 | --- | --- |
 | Forward plan, gates, acceptance criteria | `docs/PATHWAYS.md` |
-| Frozen research objective | `docs/RESEARCH_OBJECTIVE_CONTRACT.md` + `config/research_objective_contract.v3.json` |
+| Frozen research objective | `config/research_objective_contract.v3.json` (machine-readable; the prose lives in `docs/PATHWAYS.md` "Frozen preregistered decisions" — the former `docs/RESEARCH_OBJECTIVE_CONTRACT.md` was removed 2026-09-20 as stale) |
 | Every experimental control, paper setup text | `docs/EXPERIMENTAL_SETUP.md` |
 | Historical record | `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` |
 | Pipeline operation | `scripts/dbbench_pipeline/README.md` |
@@ -23,7 +23,7 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 
 ### docs/ is gitignored on purpose
 
-`.gitignore` ignores `/docs/*` and re-includes only `docs/RESEARCH_OBJECTIVE_CONTRACT.md`. So `docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` — both current authority — **exist only on disk and would not survive a clean checkout**. Don't silently change this; raise it.
+`.gitignore` ignores `/docs/*` and its only re-include rules name files that no longer exist (`docs/RESEARCH_OBJECTIVE_CONTRACT.md`, removed 2026-09-20; `docs/PATHWAY_IMPLEMENTATION_STATUS.md`). So `docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` — both current authority — **exist only on disk and would not survive a clean checkout**. Don't silently change this; raise it.
 
 ## Commands
 
@@ -135,7 +135,8 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
   - Protocol v3, which let the controller pick exact SSTs, was rejected and removed. Don't bring back candidate or file-level control.
 - **Nothing slow runs under the DB mutex.** No socket I/O and no Python inference happen there. While holding the mutex, the picker only publishes a snapshot and reads a response that was computed earlier.
 - **Messages carry `interval_micros`.** Rates and the SMDP discount use the real elapsed time, not a nominal interval.
-- **Forced actions are recorded as overrides.** For safety, drain, maintenance and fallback actions, the requested action and the effective action are kept separate. Those intervals stay out of Q replay, but their telemetry is kept.
+- **Forced actions are recorded as overrides.** For safety, drain, maintenance and fallback actions, the requested action and the effective action are kept separate. The sample is relabelled to the action that actually ran and **kept** in replay (Q-learning is off-policy; decided 2026-09-20, P1c). Only the five uncontrolled cases — socket fallback, watchdog fallback, malformed protocol, rejected manifest, unknown ownership — mark the interval invalid and drop it.
+- **The controller is suspended during the bulk load.** `db_bench` runs `rlsuspend` before `filluniquerandom` and `rlresume` before `mixgraph`; in between the native leveled picker runs under `ActionReason::kSuspended`, no frame is sent and no safety rule evaluates. `resetstats` between them makes every ticker and histogram cover the measured phase only. Event-log jobs from that window carry `rl_suspended`.
 - **Capacity expansion is applied in `PrepareForVersionAppend`.** L0 and the final level are pinned per A-Impl-1; a controller-set vector always beats the static one.
 
 ### The Python agent (`rl_agent/`)
@@ -145,7 +146,7 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
 - **Agent:** `agent.py` holds `DQNAgent`.
 - **Model:** `model.py` has a shared trunk with a separate two-action head for each level.
 - **Q-values:** Q is an analytic prior (`analytic_advantage`) plus a learned residual. The residual starts at zero, so a cold start behaves exactly like the prior.
-- **Reward:** `reward.py` gives every level decision in a frame the same reward, based on the potential of the whole tree.
+- **Reward:** `multilevel.MultiLevelProcessor._global_reward` gives every level decision in a frame the same reward: the constrained objective of PATHWAYS Pathway D — point-read probes per Get as a rate, hinge penalties above the manifest bounds for W (windowed), S (the rung), latency (avg + p99), sorted-run seeks and stall fraction with dual-ascended multipliers, and potential shaping over the absolute sorted-run count. Bounds come from the manifest's `*_reference` fields and `RL_SPACE_RELATIVE_MARGIN`. Nothing below a bound earns credit. `reward.py` was deleted 2026-09-20; it was the unreachable protocol-v1 path.
 
 ### Analysis code (`scripts/dbbench_pipeline/*.py`)
 

@@ -128,6 +128,10 @@ GLOBAL_DEFAULTS = {
     "write_latency_count": 0.0,
     "write_latency_avg_ns": 0.0,
     "write_latency_p95_ns": 0.0,
+    # p99 is the formal latency constraint (P0-4); p95 remains for the guard.
+    "get_latency_p99_ns": 0.0,
+    "scan_latency_p99_ns": 0.0,
+    "write_latency_p99_ns": 0.0,
     # Observation timing and generations. These are kept distinct on purpose:
     # `observation_micros` stamps when the overlay was built, the snapshot age
     # may legitimately be large on an idle tree, and only `dirty_age` bounds a
@@ -201,22 +205,14 @@ LEVEL_DEFAULTS = {
     "in_backoff": 0.0,
 }
 
-# Steps-since-compaction saturates at this many decisions.
-_STEPS_SINCE_SCALE = 50.0
+# Seconds-since-compaction saturates here. Wall-clock, not a frame count: a
+# compaction takes seconds and the frame cadence is 50 ms, so a 50-frame scale
+# saturated 2.5 s in and could not distinguish an idle level from a busy one.
+_SECONDS_SINCE_SCALE = 30.0
 # L0 run count at which extra files stop adding meaningful probe cost. Small,
 # because the first few overlapping runs are what hurt: going 1 -> 3 files
-# triples L0's probe cost, while 20 -> 22 barely changes it.
+# triples L0's probe cost, while 20 -> 22 barely changes it. Absolute runs.
 _PROBE_SATURATION = 4.0
-# Multiple of its own target at which a deep level's read cost saturates.
-#
-# Sized from the measured distribution (5M balanced, 5523 decisions): L1 runs
-# at p50 1.50x target, p90 2.91x, max 7.68x and is over target 63% of the time,
-# while L2/L3/L4 sit at 0.17x/0.10x/0.03x and never exceed target at all. A
-# saturation of 4.0 keeps a usable gradient across L1's whole working range —
-# clamping at 1.0 would flatten the term for the 63% of samples that matter
-# most — while still registering the deep levels' smaller contributions
-# instead of zeroing them.
-_DEEP_READ_SATURATION = 4.0
 # A score below this at decision time marks a triggered compaction as
 # "unnecessary" when it produced no relief (legacy reward only).
 _UNNECESSARY_SCORE_THRESHOLD = 0.75
@@ -240,32 +236,31 @@ def _as_float(value) -> float:
 
 
 class _AdaptiveScales:
-    """Generic decaying-max normalizer (same math as reward.AdaptiveNormalizer
-    but with caller-chosen keys, so per-level scales don't collide).
+    """Generic decaying-max normalizer with caller-chosen keys, so per-level
+    scales don't collide.
 
-    Scales freeze after `config.NORM_FREEZE_AFTER` observations. A scale that
-    keeps moving means the same raw observation encodes to a different feature
-    vector over time, so replayed transitions were recorded against an encoding
-    that no longer exists — fatal when the whole run supplies only a few
-    thousand samples.
+    Scales freeze after `config.NORM_FREEZE_SECONDS` of controlled wall
+    time. A scale that keeps moving means the same raw observation encodes to
+    a different feature vector over time, so replayed transitions were
+    recorded against an encoding that no longer exists.
     """
 
     def __init__(self, decay: float = config.NORMALIZER_DECAY,
-                 freeze_after: int = None):
+                 freeze_seconds: float = None):
         self.decay = decay
-        self.freeze_after = (config.NORM_FREEZE_AFTER if freeze_after is None
-                             else freeze_after)
+        self.freeze_seconds = (config.NORM_FREEZE_SECONDS
+                               if freeze_seconds is None else freeze_seconds)
         self.scales: Dict[str, float] = {}
-        self.observations = 0
+        self.observed_seconds = 0.0
         self.frozen = False
 
-    def tick(self) -> None:
-        """Advance the observation counter; freezes scales once past the
-        warmup budget. Called once per message, not once per key."""
+    def tick(self, dt: float) -> None:
+        """Advance the controlled-time clock by one telemetry window; freezes
+        scales once past the warmup. Called once per message, not per key."""
         if self.frozen:
             return
-        self.observations += 1
-        if self.freeze_after and self.observations >= self.freeze_after:
+        self.observed_seconds += max(0.0, dt)
+        if self.freeze_seconds and self.observed_seconds >= self.freeze_seconds:
             self.frozen = True
 
     def observe(self, key: str, value: float) -> None:
@@ -277,53 +272,6 @@ class _AdaptiveScales:
 
     def normalize(self, key: str, value: float) -> float:
         return _clamp(value / max(1.0, self.scales.get(key, 1.0)))
-
-
-class _RunningStandardizer:
-    """Welford mean/variance, frozen after a warmup.
-
-    Rewards are standardized so the learner sees a signal centred near zero
-    with unit-ish scale. Subtracting a constant and rescaling leaves the
-    optimal policy unchanged; freezing after warmup keeps the transformation
-    stationary so replayed transitions stay comparable.
-    """
-
-    # Standardizing too early, or against too small a spread, turns numerical
-    # noise into large rewards. An almost-idle deep level produces raw rewards
-    # around 1e-3; without these guards they were being blown up to O(1) and
-    # would have taught that level's agent from pure noise.
-    MIN_SAMPLES = 30
-    MIN_STD = 0.05
-
-    def __init__(self, freeze_after: int = None):
-        self.freeze_after = (config.NORM_FREEZE_AFTER if freeze_after is None
-                             else freeze_after)
-        self.count = 0
-        self.mean = 0.0
-        self._m2 = 0.0
-        self.frozen = False
-
-    def update(self, value: float) -> None:
-        if self.frozen:
-            return
-        self.count += 1
-        delta = value - self.mean
-        self.mean += delta / self.count
-        self._m2 += delta * (value - self.mean)
-        if self.freeze_after and self.count >= self.freeze_after:
-            self.frozen = True
-
-    @property
-    def std(self) -> float:
-        if self.count < 2:
-            return 1.0
-        return max(math.sqrt(self._m2 / (self.count - 1)), self.MIN_STD)
-
-    def apply(self, value: float) -> float:
-        self.update(value)
-        if self.count < self.MIN_SAMPLES:
-            return value
-        return (value - self.mean) / self.std
 
 
 def read_exposure(level: int, g: dict) -> float:
@@ -367,9 +315,14 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
       stall_urgency     queueing: projected proximity to the write-slowdown
                         threshold given current inflow (L0); superlinear
                         fullness for deeper levels (they trigger via score).
-      readamp_relief    probe count: compacting L0 removes `files` sorted runs
-                        from every lookup; a deeper level removes one run
-                        (partial credit, weighted by fullness).
+      readamp_relief    probe count, in ABSOLUTE sorted runs: compacting L0
+                        removes its files from every lookup's probe path, net
+                        of the run native RocksDB would remove one flush
+                        later and of the run the output creates if L1 was
+                        empty. A deeper level is one run whatever its size,
+                        so it earns no relief; it is charged instead when
+                        its output would populate an empty level below
+                        (depth, Theorem A.1's read cost of the cascade).
       work_now          merge I/O: (bytes + next-level overlap) normalized by
                         the two levels' capacities.
       premature_penalty Bentley-Saxe amortization: overlap is re-paid per
@@ -386,42 +339,42 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
     trigger = max(g["l0_compaction_trigger"], 1.0)
     slowdown = max(g["l0_slowdown_trigger"], 1.0)
 
-    # Natural capacity units. A flush file is ~one write-buffer, which equals
-    # L1's target (= max_bytes_for_level_base) — available as L0's
-    # next_level_target_bytes.
+    # Capacity units. A flush file is measured, not assumed: the pipeline runs
+    # a 2 MiB write buffer against a 16 MiB L1 target, so reading L1's target
+    # as the flush size (the previous form) made L0's capacity 8x too large,
+    # under-priced work_now ~3x and under-counted inflow 8x at exactly the
+    # cell where the prior over-compacted single-file L0 (history 14.10).
+    # The next level is empty when its file count is zero; compacting into it
+    # populates a new level.
+    creates_level = (not raw["is_last"]) and raw["next_level_files"] <= 0.0
     if level == 0:
-        flush_size = max(raw["next_level_target_bytes"],
-                         bytes_i / max(raw["files"], 1.0), 1.0)
+        flush_size = max(bytes_i / max(raw["files"], 1.0), 1.0)
         cap_i = trigger * flush_size
         fullness = _clamp(raw["files"] / trigger)
         inflow_files = raw["bytes_in"] / flush_size
         stall_urgency = _clamp((raw["files"] + inflow_files) / slowdown)
         # Each L0 file is an extra sorted run on every lookup's probe path, so
-        # relief scales with the run count rather than with fullness: at
+        # relief scales with the ABSOLUTE run count, never with fullness: at
         # trigger=10, two L0 files is 20% "full" but doubles L0's probe cost.
-        runs_removed = _clamp(raw["files"] / _PROBE_SATURATION)
+        # Net of what the action really changes: the output run itself when
+        # L1 was empty, and -- below the trigger -- the runs native RocksDB
+        # would remove one flush later anyway. A proactive compaction that
+        # cannot clear PRIOR_MIN_RUN_REDUCTION runs beyond that earns nothing.
+        net_runs = raw["files"] - (1.0 if creates_level else 0.0)
+        if raw["files"] < trigger:
+            net_runs = _positive(net_runs - (config.PRIOR_MIN_RUN_REDUCTION - 1.0))
+        runs_removed = _clamp(net_runs / _PROBE_SATURATION)
     else:
         cap_i = max(raw["target_bytes"], 1.0)
         raw_full = bytes_i / cap_i          # unclamped: deferral pushes past 1
         fullness = _clamp(raw_full)
         stall_urgency = fullness * fullness
-        # A level below L0 is one sorted run whatever its size, so compacting
-        # it removes at most one probe — but the relief is not just the probe,
-        # it is the DATA a traversing read no longer has to merge, and that
-        # keeps growing after the level passes its target.
-        #
-        # This previously read `0.25 * fullness` against a fullness clamped to
-        # 1.0, so it was pinned at 0.25 for every state above target. Measured
-        # on the 5M run, L1 is above target 63% of the time and reaches 7.68x,
-        # so the prior could not distinguish a just-full L1 from one carrying
-        # nearly eight times its budget — on the one axis that says compacting
-        # it would buy read amplification back. That matters more than the same
-        # flaw in Phi: the prior currently dominates Q (mean |0.300| against
-        # returns of |0.125|), so it is what the policy actually follows.
-        #
-        # Deliberately identical at fullness = 1 (both give 0.25), so behaviour
-        # at and below target is unchanged and only the overshoot range moves.
-        runs_removed = _clamp(raw_full / _DEEP_READ_SATURATION)
+        # A level below L0 is one sorted run whatever its size: compacting it
+        # removes no probe from any lookup, and the data a scan merges is the
+        # withdrawn scan metric, not the objective. Its only read-side effect
+        # is depth: output into an empty level below adds one probe to every
+        # read that reaches it. That is a cost, so it enters negative.
+        runs_removed = -1.0 if creates_level else 0.0
 
     # Relief is only worth what the reads that traverse this level are worth.
     # Without this the prior valued compaction identically on a write-only and
@@ -537,16 +490,26 @@ class MultiLevelProcessor:
     def __init__(self):
         self.scales = _AdaptiveScales()
         self._prev_raw: Dict[int, dict] = {}
-        self._prev_potential: Dict[int, float] = {}
-        self._steps_since_compaction: Dict[int, int] = {}
-        self._standardizers: Dict[int, _RunningStandardizer] = {}
+        self._seconds_since_compaction: Dict[int, float] = {}
         # Wall-clock of each level's last appearance, so a level that drops out
         # of the message (because it emptied) and comes back is discounted over
         # the real elapsed time rather than over one telemetry window.
         self._last_seen: Dict[int, float] = {}
         self._prev_tree_cost: Optional[float] = None
-        self._cumulative_physical_write_bytes = 0.0
-        self._cumulative_logical_write_bytes = 0.0
+        # Exponentially weighted byte totals behind the windowed write
+        # amplification the write hinge is measured on (config.WAF_WINDOW_SECONDS).
+        self._ewma_physical_write_bytes = 0.0
+        self._ewma_logical_write_bytes = 0.0
+        # Lagrange multipliers of the constrained reward, dual-ascended on
+        # the slow timescale (Proposition D.3) and logged per frame.
+        self._lambda = {
+            "write": config.LAMBDA_WRITE_INIT,
+            "space": config.LAMBDA_SPACE_INIT,
+            "latency": config.LAMBDA_LATENCY_INIT,
+            "scan": config.LAMBDA_SCAN_INIT,
+            "stall": config.LAMBDA_STALL_INIT,
+        }
+        self._frames = 0
 
     # -- parsing --------------------------------------------------------
 
@@ -675,7 +638,7 @@ class MultiLevelProcessor:
         s.observe("global.pending", g["pending_compaction_bytes"])
         s.observe("global.read_rate", read_rate)
 
-        steps_since = self._steps_since_compaction.get(level, 0)
+        seconds_since = self._seconds_since_compaction.get(level, 0.0)
         raw_fullness = self._raw_fullness(raw, g)
         l0_hit_fraction, file_reads_per_op = self._read_fractions(g)
         s.observe("global.file_reads_per_op", file_reads_per_op)
@@ -714,7 +677,7 @@ class MultiLevelProcessor:
             s.normalize(f"{key}.arrival_rate", arrival_rate),
             s.normalize(f"{key}.io_rate", io_rate),
             s.normalize(f"{key}.event_rate", event_rate),
-            _clamp(steps_since / _STEPS_SINCE_SCALE),
+            _clamp(seconds_since / _SECONDS_SINCE_SCALE),
             s.normalize(f"{key}.due_age", due_age_s),
             s.normalize(f"{key}.pressure", pressure_s),
             raw["gate_open"],
@@ -742,62 +705,72 @@ class MultiLevelProcessor:
         ]
         return np.array(values, dtype=np.float32)
 
+    @staticmethod
+    def _hinge(value: float, bound: float) -> float:
+        """Relative excess of `value` over `bound`, zero inside the bound and
+        zero when no bound is configured (unconstrained ablation)."""
+        if bound <= 0.0:
+            return 0.0
+        return _positive(value / bound - 1.0)
+
+    def _dual_ascent(self, name: str, violation: float) -> float:
+        """lambda <- clip(lambda + LAMBDA_LR * violation, 0, LAMBDA_MAX).
+
+        The slow timescale of Proposition D.3: one small step per frame
+        against thousands of gradient steps on Q. Unbounded growth is D-4's
+        infeasibility signal, so the trajectory is logged rather than hidden
+        by a tight clip.
+        """
+        value = self._lambda[name] + config.LAMBDA_LR * violation
+        value = _clamp(value, 0.0, config.LAMBDA_MAX)
+        self._lambda[name] = value
+        return value
+
+    def reward_state(self) -> dict:
+        """Multipliers and the bounds they enforce, for the health summary."""
+        return {
+            "lambda": dict(self._lambda),
+            "frames": self._frames,
+            "write_bound": config.WRITE_BOUND,
+            "space_bound": config.SPACE_BOUND,
+            "scan_seeks_bound": config.SCAN_SEEKS_BOUND,
+            "stall_fraction_bound": config.STALL_FRACTION_BOUND,
+            "space_relative_margin": config.SPACE_RELATIVE_MARGIN,
+            "constrained": bool(config.BASELINE_LIMITS),
+        }
+
     def _global_reward(self, g: dict, levels: List[dict],
                        dt: float) -> Tuple[float, dict]:
-        """One cooperative reward for the physical tree.
+        """One cooperative reward for the physical tree: the constrained
+        objective of PATHWAYS Pathway D (see config.py, "Reward").
 
-        Logical probes and iterator work are objectives. Physical cache-miss
-        reads remain observations only and do not enter this calculation.
+        The objective is point-read amplification, charged as a rate. Every
+        constraint enters only as a hinge above its bound (Proposition D.2),
+        so nothing below a bound earns credit: space and write headroom the
+        criteria do not reward are not rewarded here either. Shaping is the
+        potential difference over the absolute sorted-run count in the
+        gamma^tau form (Proposition D.1), so it is policy-invariant and gives
+        immediate credit for a run removed in a window with no reads.
         """
         if g["done"]:
             # The shutdown message contains synthetic zero level states, not a
             # newly empty physical tree. It finalizes pending credit only.
             return 0.0, {"terminal": 1.0}
-        # Structural terms remain in the potential so emptying a level gets
-        # immediate run-removal credit even when the current telemetry window
-        # happened to contain no foreground read. They do not replace the
-        # measured amplification costs below.
+        self._frames += 1
+
+        # -- objective: logical point probes per Get in this window ----------
+        point_amp = (g["point_sst_probes"] / g["keys_read"]
+                     if g["keys_read"] > 0 else 0.0)
+
+        # -- shaping: absolute sorted runs a lookup can probe -----------------
         l0_runs = sum(raw["files"] for raw in levels
                       if int(raw["level"]) == 0)
         deep_runs = sum(1.0 for raw in levels
                         if int(raw["level"]) > 0 and raw["files"] > 0)
         if g["output_only_level_files"] > 0:
             deep_runs += 1.0
-        # L0 files are independent overlapping runs, but scale the diagnostic
-        # prior by the configured native trigger. Otherwise a legal L0 burst
-        # can dominate every measured whole-tree cost solely because the
-        # absolute file count is larger than one. Non-empty deeper levels each
-        # remain one run.
-        l0_trigger = max(1.0, float(g["l0_compaction_trigger"]))
-        structural_probe_cost = l0_runs / l0_trigger + deep_runs
-        # Structural shaping may credit removing a searchable run, but not
-        # merely moving unchanged bytes into a deeper level with a larger
-        # capacity denominator. Actual iterator work is charged by the
-        # measured scan terms and bytes-on-disk by physical/live space.
-        structural_scan_cost = structural_probe_cost
-        measured_point_amp = (g["point_sst_probes"] / g["keys_read"]
-                              if g["keys_read"] > 0 else 0.0)
-        point_amp = measured_point_amp + structural_probe_cost
-        measured_scan_amp = (
-            (g["scan_returned_entries"] + g["scan_internal_skipped"])
-            / g["scan_returned_entries"]
-            if g["scan_returned_entries"] > 0 else 0.0)
-        scan_amp = measured_scan_amp + structural_scan_cost
-        scan_seeks = (g["scan_sorted_run_seeks"] / g["seeks"]
-                      if g["seeks"] > 0 else 0.0)
-        space_amp = (g["physical_sst_bytes"] / g["live_logical_bytes"]
-                     if g["live_logical_bytes"] > 0 else 0.0)
-        debt_ratio = (g["pending_compaction_bytes"] / g["live_logical_bytes"]
-                      if g["live_logical_bytes"] > 0 else 0.0)
-        stall_fraction = (g["stall_duration_micros"] / g["interval_micros"]
-                          if g["interval_micros"] > 0 else 0.0)
-        tree_cost = (
-            config.GLOBAL_REWARD_TREE_POINT * point_amp
-            + config.GLOBAL_REWARD_TREE_SCAN * (scan_amp + scan_seeks)
-            + config.GLOBAL_REWARD_TREE_SPACE * space_amp
-            + config.GLOBAL_REWARD_TREE_DEBT * debt_ratio
-            + config.GLOBAL_REWARD_TREE_STALL * stall_fraction
-        )
+        sorted_runs = l0_runs + deep_runs
+        tree_cost = config.REWARD_STRUCTURAL_RUNS * sorted_runs
         gamma_dt = (config.GAMMA_PER_SEC ** dt
                     if config.GAMMA_PER_SEC > 0.0 and dt > 0.0
                     else config.GAMMA)
@@ -807,289 +780,99 @@ class MultiLevelProcessor:
             shaping = self._prev_tree_cost - gamma_dt * tree_cost
         self._prev_tree_cost = tree_cost
 
-        # Use the formal run-to-date byte ratio. An interval-only ratio makes
-        # compaction writes appear free whenever they finish in a telemetry
-        # window with no foreground Put, despite those bytes contributing to
-        # the experiment's WAF numerator.
-        self._cumulative_physical_write_bytes += (
-            g["flushed_bytes"] + g["compaction_bytes_written"])
-        self._cumulative_logical_write_bytes += g["user_logical_write_bytes"]
-        waf = (self._cumulative_physical_write_bytes
-               / self._cumulative_logical_write_bytes
-               if self._cumulative_logical_write_bytes > 0 else 0.0)
-        latency_budget_cost = 0.0
+        # -- write constraint: windowed WAF against W_base (1 + delta_W) -------
+        # An interval-only ratio is undefined in a window with no Put and a
+        # run-to-date ratio is a constant no single action can move, so the
+        # hinge sees an exponentially weighted window (config.WAF_WINDOW_SECONDS).
+        decay = (math.exp(-dt / config.WAF_WINDOW_SECONDS)
+                 if config.WAF_WINDOW_SECONDS > 0.0 and dt > 0.0 else 1.0)
+        self._ewma_physical_write_bytes = (
+            self._ewma_physical_write_bytes * decay
+            + g["flushed_bytes"] + g["compaction_bytes_written"])
+        self._ewma_logical_write_bytes = (
+            self._ewma_logical_write_bytes * decay
+            + g["user_logical_write_bytes"])
+        waf = (self._ewma_physical_write_bytes / self._ewma_logical_write_bytes
+               if self._ewma_logical_write_bytes > 0 else 0.0)
+        write_excess = self._hinge(waf, config.WRITE_BOUND)
+
+        # -- space constraint: settled-snapshot S against the rung's bound ----
+        space_amp = (g["physical_sst_bytes"] / g["live_logical_bytes"]
+                     if g["live_logical_bytes"] > 0 else 0.0)
+        space_excess = self._hinge(space_amp, config.SPACE_BOUND)
+
+        # -- scan constraint: sorted-run seeks per scan (P0-1) ----------------
+        scan_seeks = (g["scan_sorted_run_seeks"] / g["seeks"]
+                      if g["seeks"] > 0 else 0.0)
+        scan_excess = (self._hinge(scan_seeks, config.SCAN_SEEKS_BOUND)
+                       if g["seeks"] > 0 else 0.0)
+
+        # -- latency constraint: average and p99 against the manifest limits --
+        latency_excess = 0.0
         for operation in ("get", "scan", "write"):
             if g[f"{operation}_latency_count"] <= 0:
                 continue
-            avg_limit = config.BASELINE_LATENCY_LIMITS.get(
-                f"{operation}_latency_avg_ns_limit", 0.0)
-            p95_limit = config.BASELINE_LATENCY_LIMITS.get(
-                f"{operation}_latency_p95_ns_limit", 0.0)
-            if avg_limit > 0.0:
-                latency_budget_cost += max(
-                    0.0, g[f"{operation}_latency_avg_ns"] / avg_limit - 1.0)
-            if p95_limit > 0.0:
-                latency_budget_cost += max(
-                    0.0, g[f"{operation}_latency_p95_ns"] / p95_limit - 1.0)
-        integrated_cost_rate = (
-            config.GLOBAL_REWARD_WAF * waf
-            + config.GLOBAL_REWARD_POINT * measured_point_amp
-            + config.GLOBAL_REWARD_SCAN * (measured_scan_amp + scan_seeks)
-            + config.GLOBAL_REWARD_LATENCY * latency_budget_cost
+            for quantile in ("avg", "p99"):
+                limit = config.BASELINE_LIMITS.get(
+                    f"{operation}_latency_{quantile}_ns_limit", 0.0)
+                latency_excess += self._hinge(
+                    g[f"{operation}_latency_{quantile}_ns"], limit)
+
+        # -- stall constraint: zero-margin non-inferiority (P0-2) -------------
+        stall_fraction = (g["stall_duration_micros"] / g["interval_micros"]
+                          if g["interval_micros"] > 0 else 0.0)
+        if config.BASELINE_LIMITS:
+            stall_excess = _positive(
+                stall_fraction - config.STALL_FRACTION_BOUND)
+        else:
+            stall_excess = 0.0
+
+        lambda_write = self._dual_ascent("write", write_excess)
+        lambda_space = self._dual_ascent("space", space_excess)
+        lambda_latency = self._dual_ascent("latency", latency_excess)
+        lambda_scan = self._dual_ascent("scan", scan_excess)
+        lambda_stall = self._dual_ascent("stall", stall_excess)
+
+        cost_rate = (
+            config.REWARD_READ * point_amp
+            + lambda_write * write_excess
+            + lambda_space * space_excess
+            + lambda_latency * latency_excess
+            + lambda_scan * scan_excess
+            + lambda_stall * stall_excess
         )
-        late = 1.0 if (g["stall_count"] > 0 or g["stop_count"] > 0) and any(
-            raw["due_age_micros"] > 0 and not raw["gate_open"]
-            for raw in levels) else 0.0
-        reward = shaping - integrated_cost_rate * dt
+        reward = shaping - cost_rate * dt
+        l0_hit_fraction, file_reads_per_op = self._read_fractions(g)
         return reward, {
             "global_tree_cost": tree_cost,
             "global_shaping": shaping,
             "global_gamma_dt": gamma_dt,
-            "write_amplification": waf,
-            "point_probe_amplification": measured_point_amp,
-            "scan_work_amplification": measured_scan_amp,
-            "structural_probe_cost": structural_probe_cost,
-            "structural_scan_cost": structural_scan_cost,
-            "sorted_run_seeks_per_scan": scan_seeks,
+            "sorted_runs": sorted_runs,
+            "point_probe_amplification": point_amp,
+            "write_amplification_window": waf,
+            "write_excess": write_excess,
             "space_amplification": space_amp,
-            "pending_debt_ratio": debt_ratio,
+            "space_excess": space_excess,
+            "sorted_run_seeks_per_scan": scan_seeks,
+            "scan_excess": scan_excess,
+            "latency_excess": latency_excess,
             "stall_fraction": stall_fraction,
-            "latency_budget_cost": latency_budget_cost,
-            "latency_budget_calibrated": bool(config.BASELINE_LATENCY_LIMITS),
-            # Compatibility alias for historical diagnostic consumers. The
-            # value is now dimensionless excess over the baseline budgets.
-            "latency_cost_ms": latency_budget_cost,
-            "integrated_cost_rate": integrated_cost_rate,
-            # Compatibility aliases retained for historical diagnostic plots.
-            "shaping": shaping,
-            "cost_rate": integrated_cost_rate,
-            "cost_integrated": integrated_cost_rate * dt,
-            "read_amp_cost": (measured_point_amp + measured_scan_amp
-                              + structural_probe_cost + structural_scan_cost),
-            "late_no_compaction": late,
-            "read_gets": g["keys_read"],
-            "read_seeks": g["seeks"],
-            "read_l0_hit_fraction": self._read_fractions(g)[0],
-            "read_file_reads_per_op": self._read_fractions(g)[1],
-            "read_exposure_level": 1.0,
-            "reward_dt": dt,
-            "reward_raw": reward,
-        }
-
-    # -- reward -----------------------------------------------------------
-
-    def _potential(self, raw: dict, g: dict) -> Tuple[float, dict]:
-        """Cost potential Phi(s) for one level: what this level currently costs
-        the system, in stall risk, read amplification, and space.
-
-        The L0 / deeper-level asymmetry is the physically important part. L0
-        holds overlapping sorted runs, so every extra L0 file is probed by
-        every lookup. A level below L0 is a single sorted run whatever its
-        size, so holding it back does not add a probe.
-
-        It does, however, add BYTES to a probe that already happens. A range
-        scan opens a merging iterator across every level and has to merge
-        whatever each one holds inside its key range, so a level sitting at
-        3x its target makes every overlapping scan do roughly 3x that level's
-        share of the work. That is a read cost, it is proportional to how full
-        the level is, and it was previously priced at exactly zero for every
-        level below L0.
-
-        Measured consequence (5M balanced, 10 repeats): against leveled, the
-        RL arm carried 0.70 vs 0.52 L0 runs and 3.23 vs 2.80 non-empty deep
-        levels — 3.93 vs 3.33 probe units, +18%, against a measured +27% scan
-        latency. Only the +0.18 at L0 was priced; the +0.43 at depth, which is
-        72% of the excess, was invisible to the reward.
-
-        Read cost is weighted by `read_exposure` at every level, so it is the
-        term that vanishes on a write-only phase while stall and space remain.
-        That weighting is what keeps it distinct from `space_overshoot`, which
-        charges for bytes on disk whether or not anybody reads them, and only
-        past the level's target.
-        """
-        level = int(raw["level"])
-        raw_fullness = self._raw_fullness(raw, g)
-        exposure = read_exposure(level, g)
-
-        if level == 0:
-            stall_risk = _clamp(
-                (raw["files"] / max(1.0, g["l0_slowdown_trigger"])) ** 2)
-            # Overlapping runs: the cost is the run count itself.
-            read_amp = exposure * _clamp(
-                raw["files"] / max(1.0, g["l0_compaction_trigger"]))
-        else:
-            stall_risk = _clamp(raw_fullness ** 2 / 4.0)
-            # One sorted run, so the run count contributes nothing that varies
-            # with the action; what varies is how much data a traversing read
-            # has to merge.
-            read_amp = exposure * _clamp(raw_fullness / _DEEP_READ_SATURATION)
-        space_overshoot = _clamp(_positive(raw_fullness - 1.0))
-
-        phi = (
-            config.reward_weight("POTENTIAL_STALL", level) * stall_risk
-            + config.reward_weight("POTENTIAL_READ", level) * read_amp
-            + config.reward_weight("POTENTIAL_SPACE", level) * space_overshoot
-        )
-        return phi, {
-            "phi": phi,
-            "stall_risk": stall_risk,
-            "read_amp": read_amp,
-            "space_overshoot": space_overshoot,
-        }
-
-    def _compute_reward(self, raw: dict, g: dict,
-                        stall_share: float) -> Tuple[float, dict]:
-        """Potential difference plus time-integrated costs.
-
-        r = -(Phi(s') - Phi(s)) - dt * (io + stalls + realized read amp)
-
-        Potential-based shaping leaves the optimal policy unchanged while
-        centring the signal near zero, which is what the old formulation —
-        eleven always-on penalties summed and clamped to [-1, 1] — could not
-        do: it was a near-constant negative offset whose clamp saturated in
-        exactly the high-pressure states that mattered.
-
-        The `dt` factor on the cost half is what makes a return independent of
-        how fast decisions happen to arrive. The two halves are different kinds
-        of quantity:
-
-          * -(Phi(s') - Phi(s)) is a *difference*. Summed across a credit
-            window it telescopes to Phi(start) - Phi(end), so its magnitude is
-            bounded by the range of Phi no matter how many decisions the window
-            contains.
-          * io / stall / read-amp are *rates and state quantities* — they
-            describe the system at an instant, not an amount accrued. Summing
-            them over n decisions therefore grows linearly in n.
-
-        Decisions do not arrive at a fixed cadence: measured over a 5M run the
-        gap between them ranged 0.050s (p10) to 0.551s (p99) around a 0.129s
-        mean, so a fixed 4000ms credit window contained anywhere from 7 to 80
-        rewards. The cost half was being multiplied by that count, which made
-        the regression target vary more than 10x within a single run for
-        reasons that had nothing to do with the policy. Measured consequence:
-        finalized returns averaged |9.46| against an analytic prior of |0.284|,
-        so the prior contributed ~3% of Q, and the TD loss diverged within the
-        run on L0, L2 and L3.
-
-        SMDP discounting does not absorb this. GAMMA_PER_SEC=0.95 has a time
-        constant of ~19.5s, so across a 4s window the discount only reaches
-        0.81 and the sum still grows nearly linearly in the step count.
-
-        Multiplying by dt turns that sum into a Riemann approximation of
-        the integral of cost over the window, which depends on the window's
-        duration (fixed, 4s) rather than on how finely it was sampled.
-        """
-        level = int(raw["level"])
-        if config.REWARD_LEGACY:
-            return self._compute_reward_legacy(raw, g)
-
-        if g["done"]:
-            # The terminal message is a synthetic marker: the picker sends
-            # zeroed level states (it has no VersionStorageInfo to read in its
-            # destructor). Running the potential difference against it makes
-            # Phi collapse to zero, which reads as a huge burst of relief —
-            # measured at +2.1 on L1, larger than the 95th percentile of every
-            # real reward in the run. Because `done` finalises every open
-            # credit window, that fiction was being paid to the last few
-            # decisions of every agent. No interval elapsed, so no reward.
-            return 0.0, {"terminal": 1.0}
-
-        phi, phi_terms = self._potential(raw, g)
-        prev_phi = self._prev_potential.get(level)
-        if prev_phi is None:
-            self._prev_potential[level] = phi
-            return 0.0, {"initial_observation": 1.0, **phi_terms}
-        self._prev_potential[level] = phi
-
-        dt = self._dt_seconds(g)
-        io_rate = self._rate(raw["bytes_read_out"] + raw["bytes_written_out"], dt)
-        io = self.scales.normalize(f"l{level}.io_rate", io_rate)
-
-        stall = 1.0 if g["stall_count"] > 0 else 0.0
-        stop = 1.0 if g["stop_count"] > 0 else 0.0
-
-        # Realised read-amplification cost, charged only where deferring can
-        # actually create it.
-        #
-        # L0 holds overlapping runs, so every extra file is one more probe on
-        # every lookup: the cost is linear in the RUN COUNT, not in fullness.
-        # At trigger 10, two L0 files is 20% "full" but doubles L0's probe
-        # cost, which is why this uses the same saturation constant as the
-        # analytic prior rather than _fullness().
-        #
-        # A level below L0 is a single sorted run, so it adds no probe — but a
-        # read that reaches it still merges whatever it holds, so the charge
-        # scales with how full it is rather than being zero. Charging zero here
-        # is what left 72% of the measured excess probe cost unpriced.
-        #
-        # This is NOT the old `non_last_read_fraction * fullness`, which
-        # multiplied fullness by a quantity measured at a constant 0.978 and so
-        # was a second space penalty wearing a read-amp label. The exposure
-        # weighting is real and workload-dependent: it goes to zero on a
-        # write-only phase, where space and stall costs remain.
-        exposure = read_exposure(level, g)
-        if level == 0:
-            read_amp_cost = exposure * _clamp(raw["files"] / _PROBE_SATURATION)
-        else:
-            read_amp_cost = exposure * _clamp(
-                self._raw_fullness(raw, g) / _DEEP_READ_SATURATION)
-
-        # Retained safety signal, re-keyed from `default_needed` (RocksDB's own
-        # trigger, which made the agent imitate the baseline) to an observed
-        # stall while this level was being deferred.
-        late = 1.0 if (stall or stop) and raw["defer_count"] > 0 else 0.0
-
-        # Cost *rate*: what this level is costing the system per second, right
-        # now. Integrated over the interval it covers, below.
-        cost_rate = (
-            config.reward_weight("COST_IO", level) * io
-            + config.reward_weight("COST_STALL", level) * stall * stall_share
-            + config.reward_weight("COST_STOP", level) * stop * stall_share
-            + config.reward_weight("COST_READ_AMP", level) * read_amp_cost
-            + config.reward_weight("LATE_NO_COMPACTION", level) * late
-        )
-        # A zero interval (first sample, or telemetry without interval_micros)
-        # means no time passed, so no cost accrued — the shaping term still
-        # applies because a state change was observed.
-        shaping = -(phi - prev_phi)
-        reward = shaping - cost_rate * dt
-
-        # Read-path audit trail. The globals were never logged anywhere, so the
-        # fact that `non_last_read_fraction` had been pinned at 1.00 for entire
-        # runs was invisible until the state features were dumped and compared
-        # after the fact. These are the derived quantities the read side of the
-        # policy actually consumes, recorded next to the reward they produced.
-        l0_hit_fraction, file_reads_per_op = self._read_fractions(g)
-        read_audit = {
+            "stall_excess": stall_excess,
+            "lambda_write": lambda_write,
+            "lambda_space": lambda_space,
+            "lambda_latency": lambda_latency,
+            "lambda_scan": lambda_scan,
+            "lambda_stall": lambda_stall,
+            "constrained": bool(config.BASELINE_LIMITS),
+            "cost_rate": cost_rate,
+            "cost_integrated": cost_rate * dt,
             "read_gets": g["keys_read"],
             "read_seeks": g["seeks"],
             "read_l0_hit_fraction": l0_hit_fraction,
             "read_file_reads_per_op": file_reads_per_op,
-            "read_exposure_level": read_exposure(level, g),
-        }
-
-        components = {
-            **phi_terms,
-            **read_audit,
-            "delta_phi": phi - prev_phi,
-            "shaping": shaping,
-            "compaction_io": io,
-            "stall": stall,
-            "stop": stop,
-            "stall_share": stall_share,
-            "read_amp_cost": read_amp_cost,
-            "late_no_compaction": late,
-            "cost_rate": cost_rate,
-            "cost_integrated": cost_rate * dt,
             "reward_dt": dt,
             "reward_raw": reward,
         }
-
-        if config.REWARD_STANDARDIZE:
-            std = self._standardizers.setdefault(level, _RunningStandardizer())
-            reward = std.apply(reward)
-            components["reward_standardized"] = reward
-        return reward, components
 
     def _compute_reward_legacy(self, raw: dict, g: dict) -> Tuple[float, dict]:
         """The pre-redesign reward, kept for a single-knob ablation
@@ -1168,41 +951,14 @@ class MultiLevelProcessor:
             "late_no_compaction": late,
         }
 
-    @staticmethod
-    def _stall_shares(levels: List[dict], g: dict) -> Dict[int, float]:
-        """Split the global stall/stop penalty across levels.
-
-        A stall is caused by whoever deferred; charging every agent the full
-        global penalty (the previous behaviour) means each level's reward is
-        dominated by a term its own action barely influences. Levels that
-        deferred take the blame in proportion; with no deferrals at all, fall
-        back to fullness weighting.
-        """
-        defers = {int(r["level"]): _positive(r["defer_count"]) for r in levels}
-        total = sum(defers.values())
-        if total > 0:
-            return {lvl: d / total for lvl, d in defers.items()}
-
-        fullness = {
-            int(r["level"]): _positive(
-                MultiLevelProcessor._raw_fullness(r, g)) for r in levels
-        }
-        total_fullness = sum(fullness.values())
-        if total_fullness <= 0:
-            # Nothing is under pressure anywhere, so no level is to blame.
-            # Splitting the penalty equally would charge idle levels for a
-            # stall they could not have caused.
-            return {lvl: 0.0 for lvl in fullness}
-        return {lvl: f / total_fullness for lvl, f in fullness.items()}
-
     # -- public API -------------------------------------------------------
 
     def process(self, msg: dict) -> List[LevelDecision]:
         """Parse a v2 message into per-level decisions, in request order."""
         decision_id, invalid_mask = validate_protocol_message(msg)
         g = self._parse_globals(msg)
-        self.scales.tick()
         dt = self._dt_seconds(g)
+        self.scales.tick(dt)
         now = time.monotonic()
 
         parsed = []
@@ -1215,8 +971,6 @@ class MultiLevelProcessor:
             # the excluded interval must never appear as a potential delta in
             # the following valid reward.
             self._prev_tree_cost = None
-            self._prev_potential.clear()
-        shares = self._stall_shares(parsed, g)
         global_reward, global_components = self._global_reward(g, parsed, dt)
 
         decisions: List[LevelDecision] = []
@@ -1231,10 +985,10 @@ class MultiLevelProcessor:
                 reward, components = global_reward, dict(global_components)
 
             if raw["compactions_from"] > 0 or raw["compactions_scheduled"] > 0:
-                self._steps_since_compaction[level] = 0
+                self._seconds_since_compaction[level] = 0.0
             else:
-                self._steps_since_compaction[level] = (
-                    self._steps_since_compaction.get(level, 0) + 1)
+                self._seconds_since_compaction[level] = (
+                    self._seconds_since_compaction.get(level, 0.0) + dt)
 
             # compact_now stays available for a level RocksDB considers due,
             # even below the exploration floor — otherwise the mask would
