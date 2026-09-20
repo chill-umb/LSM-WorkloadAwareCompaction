@@ -200,6 +200,41 @@ if [[ -n "$DBBENCH_CPUS" || -n "$CONTROLLER_CPUS" ]]; then
   echo "[pinning] db_bench CPUs $DBBENCH_CPUS, controller CPUs $CONTROLLER_CPUS"
 fi
 
+# Pathway B1. mixgraph builds hot key ranges only when at least one
+# keyrange_dist_* is nonzero; all-zero is uniform random keys. keyrange_num
+# alone does nothing without them, so the two travel together.
+[[ "$WORKLOAD_SKEW" =~ ^[01]$ ]] || {
+  echo "WORKLOAD_SKEW must be 0 or 1; got: $WORKLOAD_SKEW" >&2
+  exit 1
+}
+SKEW_FLAGS=()
+SKEW_FINGERPRINT=""
+if [[ "$WORKLOAD_SKEW" == "1" ]]; then
+  [[ "$KEYRANGE_NUM" =~ ^[1-9][0-9]*$ ]] || {
+    echo "KEYRANGE_NUM must be a positive integer; got: $KEYRANGE_NUM" >&2
+    exit 1
+  }
+  SKEW_FLAGS=(
+    --keyrange_num="$KEYRANGE_NUM"
+    --keyrange_dist_a="$KEYRANGE_DIST_A"
+    --keyrange_dist_b="$KEYRANGE_DIST_B"
+    --keyrange_dist_c="$KEYRANGE_DIST_C"
+    --keyrange_dist_d="$KEYRANGE_DIST_D"
+    --key_dist_a="$KEY_DIST_A"
+    --key_dist_b="$KEY_DIST_B"
+  )
+  # Only the swept axis and the value floor go in the identity; every other
+  # constant of the fit is fixed by WORKLOAD_PROFILE. Conditional, like the cap
+  # segment, so a uniform control arm keeps the shorter identity.
+  SKEW_FINGERPRINT=":skew${KEYRANGE_NUM}-${VALUE_THETA}"
+else
+  SKEW_FLAGS=(--keyrange_num=1)
+fi
+[[ "$SKEW_FINGERPRINT" =~ ^(:skew[0-9]+-[0-9.]+)?$ ]] || {
+  echo "KEYRANGE_NUM and VALUE_THETA must be plain numbers." >&2
+  exit 1
+}
+
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS "$REPEATS"; do
   [[ "$integer" =~ ^[0-9]+$ ]] || {
     echo "Workload sizes and T values must be positive integers: $integer" >&2
@@ -640,7 +675,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -669,10 +704,11 @@ PY
     --mix_get_ratio="$MIX_GET_RATIO"
     --mix_put_ratio="$MIX_PUT_RATIO"
     --mix_seek_ratio="$MIX_SEEK_RATIO"
-    --value_theta="$VALUE_SIZE" --value_k=0 --value_sigma=0
-    --iter_theta="$SCAN_LENGTH" --iter_k=0 --iter_sigma=0
+    --value_theta="$VALUE_THETA" --value_k="$VALUE_K" --value_sigma="$VALUE_SIGMA"
+    --mix_max_value_size="$MIX_MAX_VALUE_SIZE"
+    --iter_theta="$SCAN_LENGTH" --iter_k="$ITER_K" --iter_sigma="$ITER_SIGMA"
     --mix_max_scan_len="$MIX_MAX_SCAN_LENGTH"
-    --keyrange_num=1
+    ${SKEW_FLAGS[@]+"${SKEW_FLAGS[@]}"}
     --max_bytes_for_level_multiplier="$ratio"
     --level0_file_num_compaction_trigger="$effective_l0_compaction"
     --level0_slowdown_writes_trigger="$effective_l0_slowdown"
@@ -712,6 +748,14 @@ PY
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'
     printf 'use_direct_io=%s\n' "$USE_DIRECT_IO"
+    printf 'workload_skew=%s\n' "$WORKLOAD_SKEW"
+    printf 'keyrange_num=%s\n' "$([[ "$WORKLOAD_SKEW" == 1 ]] && echo "$KEYRANGE_NUM" || echo 1)"
+    printf 'keyrange_dist=%s,%s,%s,%s\n' "$KEYRANGE_DIST_A" "$KEYRANGE_DIST_B" \
+      "$KEYRANGE_DIST_C" "$KEYRANGE_DIST_D"
+    printf 'key_dist=%s,%s\n' "$KEY_DIST_A" "$KEY_DIST_B"
+    printf 'value_pareto=%s,%s,%s\n' "$VALUE_THETA" "$VALUE_K" "$VALUE_SIGMA"
+    printf 'mix_max_value_size=%s\n' "$MIX_MAX_VALUE_SIZE"
+    printf 'iter_pareto=%s,%s,%s\n' "$SCAN_LENGTH" "$ITER_K" "$ITER_SIGMA"
     printf 'static_capacity_scales=%s\n' "${STATIC_CAPACITY_SCALES:-none}"
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
     printf 'baseline_level_base_scale=%s\n' "${BASELINE_LEVEL_BASE_SCALE:-1}"

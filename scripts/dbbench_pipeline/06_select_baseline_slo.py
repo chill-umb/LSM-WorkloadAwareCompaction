@@ -135,7 +135,8 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"^([A-Za-z0-9_.-]+):(\d+)M:T(\d+):k(\d+):v(\d+):wb(\d+):"
         r"sst(\d+):block(\d+):l1(\d+):levels(\d+):"
         r"l0-(\d+)-(\d+)-(\d+):pri(\d+):load(\d+):"
-        r"mix([0-9.]+)-([0-9.]+)-([0-9.]+):scan(\d+)-(\d+):"
+        r"mix([0-9.]+)-([0-9.]+)-([0-9.]+):scan(\d+)-(\d+)"
+        r"(?::skew(\d+)-([0-9.]+))?:"
         r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
         r"dio([01])(?::cap([0-9.x]+))?:dynamic([01]):soft(\d+):hard(\d+):"
         r"binary([0-9a-f]{64}):objective([0-9a-f]{64})$"
@@ -151,7 +152,8 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "level0_slowdown_writes_trigger", "level0_stop_writes_trigger",
         "compaction_priority", "load_percent", "mix_get_ratio",
         "mix_put_ratio", "mix_seek_ratio", "scan_length",
-        "mix_max_scan_length", "block_cache_size", "bloom_bits",
+        "mix_max_scan_length", "keyrange_num", "value_theta",
+        "block_cache_size", "bloom_bits",
         "max_background_jobs", "threads", "disable_wal", "use_direct_io",
         "static_capacity_scales",
         "level_compaction_dynamic_level_bytes",
@@ -161,11 +163,19 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
     )
     OPAQUE = ("workload_profile", "static_capacity_scales", "dbbench_sha256",
               "research_objective_sha256")
+    # Absent means the run predates the B1 skew knob, which is the uniform
+    # family at keyrange_num 1 and a fixed value size.
+    SKEW_DEFAULTS = {"keyrange_num": "1", "value_theta": None}
     values: list[object] = list(match.groups())
     for index, name in enumerate(names):
         if name == "static_capacity_scales":
             # Absent means the run predates the knob, which is no expansion.
             values[index] = values[index] or "off"
+            continue
+        if name in SKEW_DEFAULTS:
+            raw = values[index] or SKEW_DEFAULTS[name]
+            values[index] = None if raw is None else (
+                int(raw) if name == "keyrange_num" else float(raw))
             continue
         if name in OPAQUE:
             continue

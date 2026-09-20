@@ -92,8 +92,6 @@ gate1
 
 # Documentations
 /docs/*
-!/docs/RESEARCH_OBJECTIVE_CONTRACT.md
-!/docs/PATHWAY_IMPLEMENTATION_STATUS.md
 
 # Some sketchy executable file
 linux-x64

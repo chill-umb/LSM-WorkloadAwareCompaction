@@ -10,20 +10,26 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 
 | Topic | File |
 | --- | --- |
-| Forward plan, gates, acceptance criteria | `docs/PATHWAYS.md` |
+| Forward plan, gates, acceptance criteria, theory | `docs/PATHWAYS.md` |
+| Dated decisions, predictions made in advance, gate verdicts | `docs/PREREGISTRATION.md` |
 | Frozen research objective | `config/research_objective_contract.v3.json` (machine-readable; the prose lives in `docs/PATHWAYS.md` "Frozen preregistered decisions" — the former `docs/RESEARCH_OBJECTIVE_CONTRACT.md` was removed 2026-09-20 as stale) |
 | Every experimental control, paper setup text | `docs/EXPERIMENTAL_SETUP.md` |
 | Historical record | `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` |
 | Pipeline operation | `scripts/dbbench_pipeline/README.md` |
 
-- **`docs/PATHWAYS.md` is the only forward plan.** Pathways A–F, their proofs, per-pathway acceptance criteria and the gated execution order. Its vocabulary is `A-Impl-N`, `C-N`, `Gate N`, `P0`/`P1` preregistration items. Nothing else defines what to do next.
+- **`docs/PATHWAYS.md` is the only forward plan**, and since 2026-09-20 it holds
+  *only* theory, specification and done/not-done status. Dated verdicts and
+  preregistered decisions live in `docs/PREREGISTRATION.md`; put new ones there,
+  not in PATHWAYS. A decision recorded after the run it governs is worthless, so
+  that file is tracked by git — its commit date is the only proof it was written
+  in advance. Pathways A–F, their proofs, per-pathway acceptance criteria and the gated execution order. Its vocabulary is `A-Impl-N`, `C-N`, `Gate N`, `P0`/`P1` preregistration items. Nothing else defines what to do next.
 - **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record of what happened. §5–6 architecture and the learning/safety system (§5.7 is the six bypass reasons), §11 the pipeline, §14 the dated gate records (§14.7 is Gate 1), §15–16 what is open. It was trimmed on 2026-09-13: §12 is gone and the number is not reused, so §§13–18 keep their numbers and every external citation still resolves.
 - **The objective contract is frozen** (v3, 2026-09-12). **Never create a new version — edit `config/research_objective_contract.v3.json` in place**, with a written reason. v1 and v2 remain in the tree only as superseded records; no run was ever executed under either. Never change the contract after seeing a gate's outcome.
 - **`TRIGGER_CONTROLLER_REPAIR_PLAN.md` is historical.** Its audited deviations were closed on 2026-08-16 and the controller design it describes is built. Read it for the per-level state machine and the deferral math, not for what to do next.
 
 ### docs/ is gitignored on purpose
 
-`.gitignore` ignores `/docs/*` and its only re-include rules name files that no longer exist (`docs/RESEARCH_OBJECTIVE_CONTRACT.md`, removed 2026-09-20; `docs/PATHWAY_IMPLEMENTATION_STATUS.md`). So `docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` — both current authority — **exist only on disk and would not survive a clean checkout**. Don't silently change this; raise it.
+`.gitignore` ignores `/docs/*`. `docs/PREREGISTRATION.md` was re-included on 2026-09-20 because a preregistration record needs a commit date to be worth anything. The two other re-include rules name files that no longer exist (`docs/RESEARCH_OBJECTIVE_CONTRACT.md`, removed 2026-09-20; `docs/PATHWAY_IMPLEMENTATION_STATUS.md`). So `docs/PATHWAYS.md` and `docs/EXPERIMENTAL_SETUP.md` — both current authority — **still exist only on disk and would not survive a clean checkout**. Unresolved. Don't silently change this; raise it.
 
 ## Commands
 

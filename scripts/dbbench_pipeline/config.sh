@@ -3,7 +3,7 @@
 # All sizes are bytes unless the variable name says otherwise.
 
 # Workload matrix.
-WORKLOAD_PROFILE="${WORKLOAD_PROFILE:-balanced-v1}"
+WORKLOAD_PROFILE="${WORKLOAD_PROFILE:-assoc-v1}"
 WORKLOAD_SIZES_M="${WORKLOAD_SIZES_M:-10 20 30 40 50}"
 SIZE_RATIOS="${SIZE_RATIOS:-2 6 10}"
 EXPERIMENT_ARMS="${EXPERIMENT_ARMS:-regular rl}"
@@ -13,14 +13,59 @@ REPEATS="${REPEATS:-1}"
 # experiment: ordinary paired/smoke runs with mandatory learner-health gating
 RL_RUN_PHASE="${RL_RUN_PHASE:-experiment}"
 
-# The 5M balanced workload expressed as db_bench phases:
-#   29% initial unique inserts, followed by 71% mixed operations.
+# Pathway B1 --- the UDB `Assoc` column family of Cao et al., "Characterizing,
+# Modeling, and Benchmarking RocksDB Key-Value Workloads at Facebook", FAST
+# 2020. These are db_bench's own flag defaults for the same fit; the paper's
+# appendix, the RocksDB wiki and its section 7.4 disagree at the second decimal
+# and this picks the tool's values rather than silently choosing among them.
+#
+# 29% initial unique inserts, then 71% mixed operations. The load phase runs
+# under native compaction and outside the measured window (rlsuspend +
+# resetstats), so LOAD_PERCENT shapes the starting tree, not the measurement.
 LOAD_PERCENT="${LOAD_PERCENT:-29}"
-MIX_GET_RATIO="${MIX_GET_RATIO:-0.5211267606}"
-MIX_PUT_RATIO="${MIX_PUT_RATIO:-0.1549295775}"
-MIX_SEEK_RATIO="${MIX_SEEK_RATIO:-0.3239436620}"
-SCAN_LENGTH="${SCAN_LENGTH:-32}"
+MIX_GET_RATIO="${MIX_GET_RATIO:-0.806}"
+MIX_PUT_RATIO="${MIX_PUT_RATIO:-0.159}"
+MIX_SEEK_RATIO="${MIX_SEEK_RATIO:-0.035}"
+# Scan length is the generalized Pareto of ParetoCdfInversion, so SCAN_LENGTH is
+# its `theta` --- the floor, not the typical length. At the fit below the median
+# is ~27 entries and ~5% of draws exceed MIX_MAX_SCAN_LENGTH, which db_bench
+# applies as a modulo rather than a clamp (db_bench_tool.cc:7357). Identical for
+# every arm, so it cannot bias a paired difference.
+SCAN_LENGTH="${SCAN_LENGTH:-0}"
+ITER_K="${ITER_K:-2.517}"
+ITER_SIGMA="${ITER_SIGMA:-14.236}"
 MIX_MAX_SCAN_LENGTH="${MIX_MAX_SCAN_LENGTH:-10000}"
+
+# Key skew. mixgraph only builds hot key ranges when at least one
+# KEYRANGE_DIST_* is nonzero; all-zero yields uniform random keys, which is the
+# pre-2026-09-20 `balanced-v1` family and is what made the workload
+# near-garbage-free. Set WORKLOAD_SKEW=0 to restore it for the uniform control
+# arms that criterion B-1 compares against.
+WORKLOAD_SKEW="${WORKLOAD_SKEW:-1}"
+KEYRANGE_NUM="${KEYRANGE_NUM:-30}"          # skew-intensity axis; sweep {5, 30, 100}
+KEYRANGE_DIST_A="${KEYRANGE_DIST_A:-14.18}"
+KEYRANGE_DIST_B="${KEYRANGE_DIST_B:--2.917}"
+KEYRANGE_DIST_C="${KEYRANGE_DIST_C:-0.0164}"
+KEYRANGE_DIST_D="${KEYRANGE_DIST_D:--0.08082}"
+KEY_DIST_A="${KEY_DIST_A:-0.002312}"
+KEY_DIST_B="${KEY_DIST_B:-0.3467}"
+
+# Value size for the mixed phase, also a generalized Pareto. VALUE_THETA is the
+# floor and the distribution adds sigma/(1-k) = 34.5 bytes on top, so 925.5
+# gives a measured mean of 960.4 --- the project's record size, kept so the
+# level ladder, the populated depth and the T sweep stay comparable with the
+# geometry every other constant is calibrated for. The paper's own theta is 0
+# (mean ~34 bytes); departing from it is deliberate and must be reported as
+# "Assoc key distribution and operation mix at the project's record size",
+# never as the published value distribution.
+#
+# MIX_MAX_VALUE_SIZE is NOT cosmetic: db_bench applies it as `val_size %
+# value_max` (db_bench_tool.cc:7316), so the 1024 default wraps the 6.85% of
+# draws above it down to as little as 1 byte and pulls the mean to 890.2.
+VALUE_THETA="${VALUE_THETA:-925.5}"
+VALUE_K="${VALUE_K:-0.2615}"
+VALUE_SIGMA="${VALUE_SIGMA:-25.45}"
+MIX_MAX_VALUE_SIZE="${MIX_MAX_VALUE_SIZE:-65536}"
 
 # Record and LSM geometry, matching the parameters historically used by
 # run_vanilla_sweep.sh.
