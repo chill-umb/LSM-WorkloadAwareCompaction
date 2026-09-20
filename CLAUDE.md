@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Most important rule
+
+Before starting a conversation, always check the model being used and if the model is Fable 5.1, always confirm whether I want to use this model. 
+
 ## Project
 
 This is research code for a **trigger-only RL compaction controller for RocksDB**. For every observed level, a Python DQN returns `0 = defer` or `1 = compact`. RocksDB's native leveled picker still chooses every input SST and runs the compaction. The goal is point-read improvement with write non-inferiority. The other amplifications and the latencies are held as constraints.
@@ -197,7 +201,7 @@ Rules:
 
 ## Talking Guidelines
 
-Rules: 
+# Rules: 
 - Talk in plain simple English, rather than using jargons
 - Assumne the person you are talking to is a CS student who only has a basic grasp of LSM Tree concepts, so frame your responses so that the person can       understand your responses properly
 - If Jargons are necessary, provide a short explanation in simpler terms
