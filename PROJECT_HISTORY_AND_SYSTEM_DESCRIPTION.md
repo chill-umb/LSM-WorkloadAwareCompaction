@@ -2545,6 +2545,69 @@ deleted. The Gate 1 hull, the guard calibration and the C-3 verdict all stand
 as records of the binary that produced them and must be re-measured before any
 criterion is evaluated against the rebuilt one.
 
+### 14.13 Workload changed to UDB `Assoc`; PATHWAYS split, 2026-09-20
+
+**The programme's workload is no longer uniform.** Every arm of every gate now
+runs the skewed workload of Pathway B1 — the UDB `Assoc` column family of Cao et
+al., FAST 2020 — and the uniform family that produced every result up to
+2026-09-19 is retained as a named control (`WORKLOAD_SKEW=0`) rather than as the
+measurement workload. B1 is marked Done in `docs/PATHWAYS.md`. B2 (phases) and
+B3 (deletes) are not implemented and stay in Gate 2.
+
+The reason is not that C-3 failed. It is that **the published plan ran Gate 1 on
+`uniform` and Gate 4 on `skew`, which is an invalid comparison**: a hull measured
+on one workload is not a comparator for a policy measured on another. PATHWAYS
+already states the knob form of that rule and Gate 3c already concedes it for
+capacity by re-measuring Hull-s; nobody had written down the workload form. The
+second reason is that uniform random keys are not a workload anyone runs, which
+is why almost no garbage accumulates and why Section 14.9 had to scope its
+negative result as workload-specific. The C-3 failure is **not re-scored** and
+the uniform result is not withdrawn; what changes is which workload the next
+programme measures.
+
+The decision, the predictions recorded before the run — including that the
+uniform family will fail to reach write parity by Theorem B.1 at the Gate 0
+ceilings of 79.5%, 39.9% and 36.3% at T = 2, 6 and 10 — and the falsification
+condition are in `docs/PREREGISTRATION.md` as D-1.
+
+**Two deliberate departures from the published fit.** `value_theta` is 925.5,
+not the paper's 0, holding the mean value at 960 bytes so the level ladder, the
+populated depth and the T sweep stay comparable with the geometry every other
+constant is calibrated for; the paper's own fit means about 34 bytes and would
+shrink the database roughly tenfold. This must be reported as the Assoc key
+distribution and operation mix *at the project's record size*, never as the
+published value distribution. And `mix_max_value_size` is raised from db_bench's
+1024 default to 65536: db_bench applies it as `val_size % value_max`
+(`db_bench_tool.cc:7316`), a wraparound rather than a clamp, so at the default
+6.85% of draws wrap to as little as one byte and the measured mean falls to
+890.2 instead of 960.4. Simulated over 500,000 draws before the flag was set.
+
+Implementation is flags only — no C++. `WORKLOAD_SKEW`, `KEYRANGE_*`,
+`KEY_DIST_*`, `VALUE_*` and `ITER_*` in `config.sh`; the flags, a conditional
+`:skew<keyrange_num>-<value_theta>` fingerprint segment and the full fit in
+`metadata.env` in `03_run_experiments.sh`; `parse_fingerprint_options` updated
+in lockstep. The op mix moves from 0.521/0.155/0.324 to 0.806/0.159/0.035
+Get/Put/Seek, so scans fall from a third of operations to 3.5% — the scan
+objective rests on `sorted_run_seeks`, whose intervals should be expected to
+widen accordingly, and a check that becomes undecidable must be reported as
+undecidable rather than failed, per the Section 3.1 subsidiary decision.
+
+**`docs/PATHWAYS.md` was split.** It had grown to 1,950 lines by accumulating
+dated verdicts inside the pathway specifications — Pathway E carried 170 lines
+of E-1 and E-5 results, Gate 1 carried 123 lines of its own outcome, and the
+frozen-decisions register another 131. Those 424 lines moved to
+`docs/PREREGISTRATION.md`, each leaving a one-line status and a pointer, and
+PATHWAYS now holds theory, specification and done/not-done status only. The two
+have different lifetimes: theory is amended when the theory changes, whereas a
+dated decision is never edited after the run it governs.
+
+`docs/PREREGISTRATION.md` is **tracked by git**, unlike the rest of `docs/`. A
+preregistration record's whole value is that it is dated and unedited, and the
+only durable proof of that is the commit. `docs/PATHWAYS.md` and
+`docs/EXPERIMENTAL_SETUP.md` remain untracked and would still not survive a
+clean checkout; that is unresolved and is flagged in `CLAUDE.md` rather than
+worked around.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,
@@ -2594,7 +2657,8 @@ as follows.
 | Document | What it contains | How to interpret it now |
 | --- | --- | --- |
 | `README.md` | Trigger-only synopsis, build entry points, geometry, and scaled-pipeline link. | Current entry page. |
-| `docs/PATHWAYS.md` | Improvement pathways A-E, their proofs, per-pathway acceptance criteria, and the gated execution order. | **Current forward plan.** Authoritative for the post-2026-09-05 objective, the two-hull comparator, and gate costs. Nothing in it has been executed. |
+| `docs/PATHWAYS.md` | Improvement pathways A-F, their proofs, per-pathway acceptance criteria, and the gated execution order. Theory and specification only since the 2026-09-20 split. | **Current forward plan.** Authoritative for the post-2026-09-05 objective, the two-hull comparator, and gate costs. Carries a `(Done)` marker per completed item. Untracked by git. |
+| `docs/PREREGISTRATION.md` | The dated companion: decisions recorded before the runs they govern, the predictions made in advance, and the gate verdicts as measured. | **Tracked by git**, because a preregistration record is worth nothing without a commit date. New dated decisions go here, not in PATHWAYS. |
 | `docs/multilevel_rl_design.md` | Protocol v2, multi-level architecture, parser failure, and 2026-08-01 rework. | Authoritative trigger-protocol reference. |
 | `docs/physics_informed_rl_architecture.md` | Analytic prior plus learned residual rationale and equations. | Current trigger-model lineage. |
 | `workload_specs/README.md` | Balanced-workload timing and generator/parser pitfalls. | Current workload-authoring evidence. |

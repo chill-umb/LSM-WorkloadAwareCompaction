@@ -12,7 +12,7 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 | --- | --- |
 | Forward plan, gates, acceptance criteria, theory | `docs/PATHWAYS.md` |
 | Dated decisions, predictions made in advance, gate verdicts | `docs/PREREGISTRATION.md` |
-| Frozen research objective | `config/research_objective_contract.v3.json` (machine-readable; the prose lives in `docs/PATHWAYS.md` "Frozen preregistered decisions" — the former `docs/RESEARCH_OBJECTIVE_CONTRACT.md` was removed 2026-09-20 as stale) |
+| Frozen research objective | `config/research_objective_contract.v3.json` (machine-readable; the prose is `docs/PREREGISTRATION.md` §4 "Frozen preregistered decisions", moved there from PATHWAYS on 2026-09-20 — the former `docs/RESEARCH_OBJECTIVE_CONTRACT.md` was removed the same day as stale) |
 | Every experimental control, paper setup text | `docs/EXPERIMENTAL_SETUP.md` |
 | Historical record | `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` |
 | Pipeline operation | `scripts/dbbench_pipeline/README.md` |
@@ -110,7 +110,8 @@ Gate-specific stages, added for the PATHWAYS programme:
 - Put `DB_ROOT` on the device you are measuring, never on tmpfs `/tmp`.
 
 **Arms and manifests**
-- The arms are `regular`, `oracle`, `prior_only`, `rl` and `unconstrained_rl`.
+- The arms are `regular`, `oracle`, `prior_only`, `rl`, `unconstrained_rl` and `unconstrained_prior_only`.
+- **The workload is UDB `Assoc` (Pathway B1) since 2026-09-20**, not the old uniform `balanced-v1`. `WORKLOAD_SKEW=0` restores the uniform family for the B-1 control arms. The decision and its two deliberate departures from the published fit are `docs/PREREGISTRATION.md` D-1.
 - `unconstrained_rl` turns off the live SLO mask. It is an ablation only.
 - Learned and `prior_only` arms need a schema-v2, calibrated `baseline_slo.json`. Its workload and geometry fingerprint must match the run, or the runner stops.
 
