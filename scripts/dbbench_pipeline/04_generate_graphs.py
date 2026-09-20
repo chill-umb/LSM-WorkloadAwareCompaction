@@ -135,6 +135,15 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
         r"^RL_DRAIN_DB_PENDING_AFTER_BYTES (\d+)$", text, re.M)]
     drain_seconds = (max(0, ends[-1] - starts[0]) / 1e6
                      if starts and ends else math.nan)
+    # Measured phase: from the controller's resume after the bulk load
+    # (db_bench `rlresume`, printed for every arm) to the end of the drain.
+    # It is the wall-time denominator of the stall fraction the learner's
+    # stall hinge is trained against, so it must match the phase the reset
+    # statistics cover.
+    resumed = [int(value) for value in re.findall(
+        r"^RL_CONTROL_RESUMED_MICROS (\d+)$", text, re.M)]
+    measured_phase_seconds = (max(0, ends[-1] - resumed[-1]) / 1e6
+                              if resumed and ends else math.nan)
     drain_compaction_bytes = 0.0
     workload_compaction_bytes = 0.0
     drain_compaction_seconds = 0.0
@@ -173,11 +182,16 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
             if finished_in_drain or int(item["job"]) in drain_jobs:
                 drain_compaction_bytes += output
                 drain_compaction_seconds += seconds
+            elif item.get("rl_suspended") in (True, 1, "true", "1"):
+                # Bulk-load jobs under suspended control: outside the
+                # measured phase, like the reset tickers.
+                continue
             else:
                 workload_compaction_bytes += output
                 workload_compaction_seconds += seconds
     return {
         "drain_seconds": drain_seconds,
+        "measured_phase_seconds": measured_phase_seconds,
         "drain_pending_bytes_before": float(sum(before)) if before else math.nan,
         "drain_pending_bytes_after": float(sum(after)) if after else math.nan,
         "drain_compaction_write_bytes": drain_compaction_bytes,

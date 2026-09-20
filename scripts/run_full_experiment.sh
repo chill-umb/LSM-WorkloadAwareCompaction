@@ -162,9 +162,12 @@ cell(){
 
   stage "graphs-$tag" "graphs-$tag.log" \
     bash "$P/04_generate_graphs.sh" --results "$SR/experiment" || return 6
+  # Scored at the rung the arms ran (metadata.env space_relative_margin);
+  # 07 refuses a mismatched rung. Other rungs are separate learned-arm runs.
   stage "paired-$tag" "paired-$tag.log" "$PY" "$P/07_evaluate_paired.py" \
     "$SR/experiment/graphs/summary.csv" --size-millions "$sz" --size-ratio "$T" \
     --minimum-pairs "$SUITE_REPEATS" --scan-objective sorted_run_seeks \
+    --space-margin "${SPACE_RELATIVE_MARGIN:-0.02}" \
     --output "$SR/acceptance-$tag.json"
   stage "learn-$tag" "learn-$tag.log" "$PY" "$P/11_analyze_learning.py" \
     "$SR/experiment" --arm rl --stride 10 --output "$SR/learning-rl-$tag.json"

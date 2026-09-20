@@ -2464,6 +2464,57 @@ per cell, and a minority of frames report `files` and `score` inconsistently
 between the two reads and too small to move the counts but means the per-frame
 join is not exact.
 
+### 14.11 Objective-consistency audit and Gate 2 repairs, 2026-09-20
+
+Every line of the control and measurement chains was audited against
+`docs/PATHWAYS.md` before the programme is re-run from the start. The
+measurement chain (tickers, `db_bench`, `04`, `07`) was contract-consistent;
+the control chain was not. Findings and the repairs made the same day, all
+recorded in PATHWAYS as P1c before any run:
+
+- **The learner optimised the wrong function.** The live reward
+  (`multilevel._global_reward`; `reward.py` was an unreachable v1 path)
+  charged write amplification as a run-to-date ratio with no action
+  gradient and no `W_base`, minimised space linearly (Finding 3), priced
+  reads in trigger-relative units, and carried the withdrawn scan metric.
+  Replaced by the Pathway D form: point probes per Get as a rate; hinges
+  above the manifest references for W (10 s window), S (the rung), latency
+  (avg and p99, previously p95), sorted-run seeks and stall fraction; dual
+  ascent on the multipliers, logged per frame; shaping over absolute runs.
+- **The prior's deep-level read term grew with fullness** — bytes merged per
+  scan, the withdrawn metric — while `work_now` stayed flat, which is the
+  top-of-tree eagerness A-0 attributes the whole prior write excess to. Deep
+  relief is now zero, with a depth charge for output into an empty level. L0
+  relief is net of what native would remove one flush later (minimum
+  reduction two runs; the 14.10 mechanism), and the flush size is measured
+  rather than read from the 16 MiB L1 target against a 2 MiB write buffer.
+- **The controller acted during the bulk load** under an uncalibrated safety
+  envelope; its load-phase bytes entered the paired W. `db_bench` now
+  suspends control across the load (`rlsuspend`/`rlresume`,
+  `ActionReason::kSuspended`) and resets statistics before `mixgraph`.
+- **`sorted_run_seeks` counted table seeks**, so a level cut into more files
+  read as more runs. It now counts one per L0 file and one per deeper level.
+- **Cadence constants were sized for a dead 185-decision budget.** The
+  normalizer froze 2.5 s in, before any read-path feature had a value, so
+  the state carried no information about R. Freeze and seconds-since are
+  wall-clock now.
+- **Evaluator gaps.** `frontier_analysis` compared on (W, R) with no space
+  bound, so a static point infeasible at the rung could dominate; a
+  dominator must now be inside the policy's space bound (C-6 as written).
+  `run_full_experiment.sh` never passed `--space-margin`, and `03` never
+  stamped `space_relative_margin`, so the paired stage could not run.
+  `11_analyze_learning` gains the D-2 return scale and the λ trajectories.
+- **Dead code removed:** `reward.py`, `metric_formulas.py`, the v1 socket
+  path and its stray `DQNAgent`, the per-level `_potential`/`_compute_reward`
+  formula and its weights. Override replay wording reconciled: relabel and
+  keep (P1c-21).
+
+`docs/RESEARCH_OBJECTIVE_CONTRACT.md` was removed as stale; the JSON contract
+remains the machine-readable block and was amended in place (P1c). RocksDB
+moves to `6ad9f6b79` (parent `71627a1cd`, base `7ea2d73` preserved). No gate
+was re-scored; Gate 1's recorded verdicts stand as history and are
+superseded by the re-run.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,

@@ -22,7 +22,12 @@ from slo_statistics import (
 
 MIN_EPISODES = 299
 MARGIN = 1.02
-METRIC_VERSION = "trigger-v2-logical-v2"
+# v3 (2026-09-20): write amplification and stalls cover the measured phase
+# only (db_bench resets statistics after the bulk load), sorted-run seeks
+# count runs rather than table seeks, and the manifest carries the formal
+# objective references (W, S, seeks, stall fraction, avg/p99 latency) the
+# learner's constrained reward is trained against. Not poolable with v2.
+METRIC_VERSION = "trigger-v2-logical-v3"
 
 
 def load_graph_module(script: Path):
@@ -265,9 +270,11 @@ def main() -> int:
     fastest = min(item["elapsed_seconds"] for item in eligible)
     runtime_ties = [item for item in eligible
                     if item["elapsed_seconds"] <= 1.01 * fastest]
+    # scan_amplification is withdrawn (P0-1, at its 1.0 floor); the scan
+    # tie-break is sorted-run seeks.
     selected = min(runtime_ties, key=lambda item: (
-        item["write_amplification"], item["scan_amplification"],
-        item["sorted_run_seeks_per_scan"], item["fingerprint"]))
+        item["write_amplification"], item["sorted_run_seeks_per_scan"],
+        item["fingerprint"]))
     fingerprint = selected["fingerprint"]
     selected_options = parse_fingerprint_options(fingerprint)
     if selected_options["workload_profile"] != args.workload_profile:
@@ -400,12 +407,28 @@ def main() -> int:
         completed_debt_values, censored_debt_values)
     refs = {
         metric: finite_mean(selected_rows, metric) for metric in (
-            "get_latency_avg_us", "get_latency_p95_us",
-            "scan_latency_avg_us", "scan_latency_p95_us",
+            "get_latency_avg_us", "get_latency_p95_us", "get_latency_p99_us",
+            "scan_latency_avg_us", "scan_latency_p95_us", "scan_latency_p99_us",
             "write_latency_avg_us", "write_latency_p95_us",
+            "write_latency_p99_us",
         )
     }
     physical_reference = finite_mean(selected_rows, "sst_bytes_before")
+    # Formal objective references (PATHWAYS Pathway D): the tuned baseline's
+    # whole-run constraint metrics, which the learner's hinge terms are
+    # measured against at the arm's own T (P1-16). The stall reference is a
+    # fraction of measured-phase wall time, the unit the controller observes.
+    objective_refs = {
+        "write_amplification_reference": finite_mean(
+            selected_rows, "write_amplification"),
+        "space_amplification_reference": finite_mean(
+            selected_rows, "space_amplification"),
+        "sorted_run_seeks_per_scan_reference": finite_mean(
+            selected_rows, "sorted_run_seeks_per_scan"),
+        "stall_fraction_reference": statistics.fmean(
+            float(row["stall_seconds"]) / float(row["measured_phase_seconds"])
+            for row in selected_rows),
+    }
     manifest = {
         "schema_version": 2,
         "metric_definitions_version": METRIC_VERSION,
@@ -413,7 +436,7 @@ def main() -> int:
         "selection_rule": {
             "space_filter": "mean space amplification <= 1.02 * minimum",
             "primary": "lowest mean runtime",
-            "runtime_tie": "within 1%; lower WAF, then lower scan amplification",
+            "runtime_tie": "within 1%; lower WAF, then lower sorted-run seeks per scan",
             "inspected_rl_results": False,
         },
         # These are executable options, not merely a prose record. The final
@@ -449,16 +472,27 @@ def main() -> int:
         "write_latency_avg_ns_limit": MARGIN * refs["write_latency_avg_us"] * 1000,
         "write_latency_p95_ns_reference": round(refs["write_latency_p95_us"] * 1000),
         "write_latency_p95_ns_limit": round(MARGIN * refs["write_latency_p95_us"] * 1000),
+        # p99 is the acceptance quantile (P0-4); p95 above stays for the guard.
+        "get_latency_p99_ns_reference": round(refs["get_latency_p99_us"] * 1000),
+        "get_latency_p99_ns_limit": round(MARGIN * refs["get_latency_p99_us"] * 1000),
+        "scan_latency_p99_ns_reference": round(refs["scan_latency_p99_us"] * 1000),
+        "scan_latency_p99_ns_limit": round(MARGIN * refs["scan_latency_p99_us"] * 1000),
+        "write_latency_p99_ns_reference": round(refs["write_latency_p99_us"] * 1000),
+        "write_latency_p99_ns_limit": round(MARGIN * refs["write_latency_p99_us"] * 1000),
+        **objective_refs,
         "operation_progress_envelopes": {
             key: {"minimum": min(float(row[key]) for row in selected_rows),
                   "maximum": max(float(row[key]) for row in selected_rows)}
             for key in ("get_operations", "put_operations", "scan_operations")
         },
         "metric_definitions": {
-            "write_amplification": "(flush bytes + compaction bytes written) / user logical bytes written",
+            "measured_phase": "statistics reset after the bulk load (db_bench resetstats); byte and stall totals cover mixgraph plus the drain",
+            "write_amplification": "(flush bytes + compaction bytes written) / user logical bytes written, measured phase",
             "point_read_amplification": "logical SST probes / point Get",
-            "scan_amplification": "(returned entries + internal skipped entries) / returned entries",
-            "space_amplification": "physical SST bytes / live logical bytes",
+            "sorted_run_seeks_per_scan": "sorted runs opened per keyed scan seek (each L0 file, each non-empty deeper level once) / scans",
+            "scan_amplification": "diagnostic only (P0-1): (returned entries + internal skipped entries) / returned entries",
+            "space_amplification": "physical SST bytes / live logical bytes, settled after the drain",
+            "stall_fraction": "stall seconds / measured-phase wall seconds",
             "rolling_p95": "p95 of the merged 64-bucket log2 histogram over the rolling window",
         },
         "level_limits": level_limits,

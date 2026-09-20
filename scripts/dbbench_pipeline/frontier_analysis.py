@@ -133,16 +133,32 @@ def config_knobs(fingerprint: str) -> dict:
 
 
 def policy_positions(policy: dict[str, dict[int, dict]], configs: dict,
-                     points: dict, hull: list[str]) -> dict:
-    """C-3/C-4: classify each policy arm against the static hull."""
+                     points: dict, hull: list[str],
+                     space_margin: float) -> dict:
+    """C-3/C-4/C-6: classify each policy arm against the static hull.
+
+    Non-domination is on (W, R) "with S inside the cell's bound" (C-6): a
+    hull point may dominate the policy only if its own space amplification
+    is inside the policy's space budget, S_policy * (1 + margin). A static
+    configuration that buys its W-R position with space the rung does not
+    allow is not a legal competitor at that rung, so it is reported
+    separately as `dominated_by_outside_space_bound` and does not decide.
+    """
     positions = {}
     for name, samples in policy.items():
         means = {key: statistics.fmean(r[key] for r in samples.values())
                  for key in (*AXES, "space_amplification")}
-        dominators = [h for h in hull if dominates(points[h]["means"], means)]
+        space_bound = means["space_amplification"] * (1.0 + space_margin)
+        candidates = [h for h in hull if dominates(points[h]["means"], means)]
+        dominators = [h for h in candidates
+                      if points[h]["means"]["space_amplification"] <= space_bound]
+        outside = [h for h in candidates if h not in dominators]
         positions[name] = {
             "means": means, "seeds": sorted(samples),
+            "space_relative_margin": space_margin,
+            "space_bound": space_bound,
             "dominated_by": dominators,
+            "dominated_by_outside_space_bound": outside,
             "verdict": "dominated" if dominators else "non_dominated",
             "against_hull_points": {h: paired_comparison(configs[h], samples)
                                     for h in hull}}
@@ -279,11 +295,17 @@ def main() -> int:
                         help="results root holding a policy arm to place "
                              "against the hull (C-3)")
     parser.add_argument("--policy-arm", default="prior_only")
+    parser.add_argument("--space-margin", type=float, default=0.02,
+                        help="space budget rung (0, .02, .05, .10) the policy "
+                             "is placed at; a hull point outside the policy's "
+                             "space bound cannot dominate it (C-6)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     configs, measurements = collect_grid(
         args.results, args.size_millions, args.size_ratio)
     contract, fingerprint = load_contract()
+    if args.space_margin not in contract["constraints"]["space"]["relative_margin_axis"]:
+        parser.error("space margin must be a frozen W-R-S sweep point")
     analysis = analyze_points(configs)
     # Carry the swept base scale itself, so a targeted top-up does not have to
     # divide byte counts by the configured L1 base to recover it.
@@ -300,8 +322,9 @@ def main() -> int:
             args.policy_results, args.size_millions, args.size_ratio,
             arm=args.policy_arm)
         policy = policy_positions(policy_configs, configs, analysis["points"],
-                                  analysis["empirical_hull"])
+                                  analysis["empirical_hull"], args.space_margin)
     report = {"schema_version": 1, "research_objective_sha256": fingerprint,
+              "space_relative_margin": args.space_margin,
               "size_millions": args.size_millions,
               "size_ratios": args.size_ratio,
               "cross_t": len(args.size_ratio) > 1,
