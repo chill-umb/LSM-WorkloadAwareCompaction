@@ -188,7 +188,25 @@ def collect_grid(root: Path, size: int, ratios: list[int],
         if len(levels) != int(metadata["num_levels"]):
             raise ValueError(f"{directory}: missing per-level survival")
         configs[fingerprint][seed] = row
-        measurements[str(directory)] = {"metadata": metadata, "measurement": measurement}
+        # Keep only what run_digest and space_curves read. The releases array
+        # carries one record per compaction with three per-level arrays; the
+        # sweep's payloads total 7.5 GB, so retaining them parsed exhausts
+        # memory on a cross-T run (three ratios at once). This is the same
+        # payload that once made the emitted report 1.8 GB -- trimmed there,
+        # still held here.
+        views = measurement["views"]
+        measurements[str(directory)] = {"metadata": metadata, "measurement": {
+            "views": {phase: ({"global": {"eta": views[phase]["global"]["eta"]}}
+                              | ({"levels": {level: {"eta": bucket["eta"],
+                                                     "jobs": bucket["jobs"]}
+                                             for level, bucket in levels.items()}}
+                                 if phase == "whole_run" else {}))
+                      for phase in ("workload", "drain", "whole_run")},
+            "releases": [{"populated_levels": r["populated_levels"]}
+                         for r in measurement["releases"]],
+            "excluded_trivial_moves": measurement["excluded_trivial_moves"],
+        }}
+        del measurement
     if not configs or len(identities) != 1:
         raise ValueError("empty sweep or incompatible workload/binary fingerprints")
     return dict(configs), measurements

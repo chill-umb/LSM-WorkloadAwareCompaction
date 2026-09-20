@@ -209,6 +209,15 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
     after = number(sizes.get("sst_bytes_after_full_compaction"))
     live_logical_bytes = properties.get(
         "rocksdb.estimate-live-data-size", math.nan)
+    if not math.isfinite(before):
+        # sizes.env is written after the measured phase, so it is the one
+        # artifact an interrupted or partially archived arm can lack. The
+        # settled SST total is already in run.log as a property, and it is the
+        # same number: checked against the node-computed value on all 36
+        # Gate-1 configurations, relative error 0. The full-compaction figure
+        # has no such fallback, but the frozen space definition does not use
+        # it -- switching to that denominator is a contract amendment.
+        before = properties.get("rocksdb.total-sst-files-size", math.nan)
     amplification = amplification_metrics(
         flush_bytes=flush_bytes, compact_bytes=compact_bytes,
         user_write_bytes=user_write_bytes, point_probes=point_probes,

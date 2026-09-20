@@ -1219,6 +1219,7 @@ context, system guide, workload notes, and current code.
 | Binomial overflow in the tolerance bound | `math.comb(n, i)` reaches ~1e600 for n in the low thousands; multiplying by a float raises `OverflowError`. The search was also O(n^2) over candidate ranks. | Log-space PMF plus a single incremental pass (`smallest_valid_rank`). | Pre-existing; exposed at 5M and fixed 2026-08-24. n=299 remains exactly where the maximum becomes a 99%/95% bound. |
 | Graph generator coupling | `06_select_baseline_slo.py` loads `04_generate_graphs.py` only for `collect_arm`, but that module imported matplotlib at top level, so manifest generation failed on any interpreter without it. | Import matplotlib lazily inside the two functions that draw. | Fixed 2026-08-24. |
 | **Learner never trained** | Zero gradient steps and an identically zero residual across the earlier matrix. A later 5M/T2 unconstrained diagnostic produced 89,652 decisions and zero replay transitions because one rejected interval cleared every overlapping four-second window. | Credit-assignment schema v2 separates C++ installation acknowledgement from reward validity, retains known overrides off-policy, terminalizes valid prefixes only at a hard attribution boundary, and enforces explicit accounting. | Root cause diagnosed and repaired in source 2026-08-31; fresh cloud learner-health validation remains blocking. |
+| **Proactive band is relative, its value is absolute** | `RL_OPTIONAL_MIN_SCORE` is fixed at 0.10 against a score of `files / level0_file_num_compaction_trigger`. At a trigger of 2 the only below-threshold state is one file at score 0.5, permanently inside the band, so the prior fires a full L0-L1 merge on a single file (910 of 1,102 below-threshold compacts at 10M/T=2) for one run of relief it would have received one flush later anyway. | **None yet.** The change belongs in the prior's benefit term, not the threshold: a proactive action should require a minimum absolute run reduction. Pathway D, Gate 2. | Diagnosed 2026-09-20 (Section 14.10); causal confirmation run still owed. |
 
 ## 10. Experimental record and interpretation
 
@@ -1419,7 +1420,13 @@ above zero everywhere, for every arm, at every size ratio. No other criterion
 matters until this one moves.
 
 **Finding 2: the analytic prior is the strongest read policy, and it improves
-with T.** Relative to `regular`, `prior_only` delivers -12.5%, -17.3% and
+with T.** **Withdrawn 2026-09-19 (Section 14.9).** The comparison below is
+against the `regular` arm alone. Measured against the Pareto hull of the static
+configuration class, as C-3 requires, the prior is *dominated* at every ratio —
+a single static configuration is better on write and point-read amplification
+simultaneously. The figures below stand as measured; the conclusion drawn from
+them does not. The paragraph is retained because it is what the 2026-09-03
+matrix showed, and because the gap between the two readings is the point. Relative to `regular`, `prior_only` delivers -12.5%, -17.3% and
 -19.3% point-read amplification and -11.7%, -17.0% and -21.1% sorted-run seeks
 at T=2, 6 and 10, while its write penalty *shrinks* from +18.3% to +13.9%. At
 T=10 that is roughly 20% fewer probes and seeks for roughly 14% more write
@@ -2227,6 +2234,236 @@ are recorded failed**, and E-2 passes under an amended denominator. C-3 and C-6
 remain unevaluable, because both need `prior_only`, which needs a
 guard-calibrated manifest.
 
+### 14.9 Gate 1 completed; E-1's conditional rate measured, 2026-09-19
+
+The `unconstrained_prior_only` arm added on 2026-09-17 was run at 10M for
+T = 2, 6 and 10, ten repeats per cell, thirty arms. It is the analytic prior
+with the guard classifying but not enforcing, writing `safety_shadow.jsonl`
+alongside `io.jsonl`. All thirty passed the learning-health gate, including
+`eval_mode`, `zero_train_steps` and `zero_residual`, so the logged actions are
+the frozen prior, and `no_reward_invalid_intervals` rules out fallback
+contamination. Nothing was perturbed: `enforcement_enabled` is false and
+`intervention_applied` is zero on every frame of every run.
+
+**The guard changes almost nothing, and E-1 measures the wrong quantity.**
+
+| cell | marginal override (E-1) | force changes an action | revoke changes an action |
+| --- | ---: | ---: | ---: |
+| T=2 | 0.3356 [0.321, 0.351] | 0.0009 | 0 |
+| T=6 | 0.1567 [0.144, 0.173] | 0.0000 | 0 |
+| T=10 | 0.1983 [0.189, 0.206] | 0.0000 | 0 |
+
+E-1 fails by 34x, 16x and 20x. The conditional rate that Corollary E.2 asks
+for instead passes its 1% limit by more than an order of magnitude in every
+cell. Same guard, same frames, same runs.
+
+The force branch can only change an action where the policy deferred a level
+that was already due, and the prior defers a due level on 0.8% to 1.3% of due
+decisions. **`revoke_optional` never fired at all**, which is established
+rather than bounded: between 40% and 67% of ready frames contain no due level,
+force requires a due level, so on those frames a revoke is the only thing that
+could raise an override — and across roughly thirty thousand such frames in
+thirty runs, not one did. The write trip is sticky at three windows in and
+three out, so it could not have fired and avoided all of them. The latency
+margins agree: the guard's write limits are 139.7 us average and 2.14 ms p95,
+against a measured Put average of 12.8 us and a P99.99 of 433 us.
+
+**The shield's write-side sensor reads the wrong variable.** Its only lever
+against the prior is `revoke_optional`, gated by `prohibit_optional`, which is
+driven by write *latency* (`rl_safety_manifest.cc:336`). The prior's write
+latency has eleven times its headroom. The prior's actual problem is write
+amplification at roughly +15%, which is the binding constraint of the whole
+objective, and for which the shield has no input. It sits idle through exactly
+the behaviour it exists to restrain. This is sharper than Pathway E's own
+complaint, which is about the action set being asymmetric; the measurement says
+the sensor is asymmetric too, and it connects Pathway E to Pathway D.
+
+**Two corrections to Section 14.8.** Both came from generalising three T=2
+runs.
+
+1. *"Exactly one event per run" holds only at T=2.* Decomposed into maximal
+   consecutive stretches, override frames form 1.3 events per run at T=2, but
+   **22.2 at T=6 and 14.9 at T=10**. The single-sustained-backlog account of
+   the statistic does not survive the other two ratios.
+2. *Debt is not the dominant term.* Section 14.8 attributed T=2 almost entirely
+   to the debt term, 850 of 851 frames. That figure came from each episode's
+   `max_pending_debt_ratio`, a per-episode maximum. Read per frame, from the
+   quantity `DebtRatioBreach` actually compares, debt is true on **11%** of
+   override frames at T=2 and does not reach the top five at T=6 or T=10.
+   `pressure` dominates in every cell. Between 42% and 53% of override frames
+   have no instantaneous term true at all, which is consistent with the guard's
+   sticky retention branch carrying the force.
+
+**E-5 is satisfied** — the conditional override rate is now reported per cell.
+**E-1 remains recorded as failed.** Nothing here changes that, and the
+amendment question is unchanged: the criterion was seen to fail before any of
+this was measured, which is the objection that kept C-2 and E-1 recorded as
+failed in the first place.
+
+**C-3 and C-6, and with them Gate 1, are now decided — both fail.**
+
+Because the guard changes at most 0.09% of frames, `unconstrained_prior_only`
+and `prior_only` are the same policy on this workload, so these runs stand in
+for the `prior_only` arm the two criteria require. That substitution is now
+evidenced rather than assumed, and it is what unblocks criteria that Section
+14.7 recorded as unevaluable.
+
+| cell | W | R | S | C-3 | dominator CI, hull minus policy |
+| --- | ---: | ---: | ---: | --- | --- |
+| T=2 | 9.5621 | 7.4761 | 2.1798 | **dominated** | W [-7.02%, -6.38%], R [-4.34%, -3.66%] |
+| T=6 | 9.8464 | 5.2476 | 1.3370 | **dominated** | W [-9.05%, -8.57%], R [-3.72%, -0.92%] |
+| T=10 | 10.4058 | 4.8861 | 1.2125 | **dominated** | W [-6.49%, -5.58%], R [-5.74%, -3.81%] |
+
+One static configuration in each cell is better than the analytic prior on
+write amplification **and** point-read amplification simultaneously, with both
+paired intervals strictly below zero. **C-6 fails the same way**: the cross-T
+pooled hull over T in {2, 6, 10, 14, 20} holds 18 of 38 points, reproducing
+Section 14.7's figure exactly, and the policy is dominated within it.
+
+**Consequently Finding 2 is withdrawn**, which is the consequence Pathway C
+attaches to C-3. The prior's -12.5%, -17.3% and -19.3% point-read improvements
+were measured against a single tuned baseline. Against the configuration class
+they buy nothing: tuning the L0 trigger and the level base reaches a better
+point on both axes at once. This is precisely what Pathway C and Proposition
+C.1 were built to test, and it is the first quantitative demonstration in this
+project that the single-baseline comparator overstates a result.
+
+**What this implies for C-4.** Hull-s is built from the static class plus
+capacity-expanded configurations, so its configuration set contains Hull-0's.
+If a point of Hull-0 dominates a policy then either that point is in Hull-s or
+something in Hull-s dominates it, and domination is transitive — so anything
+dominated by Hull-0 is dominated by Hull-s. That applies to the prior directly.
+It does not transfer to `rl`, which is a different policy once it carries a
+capacity action, but it does fix the bar: Gate 3b must close a gap of 6 to 9%
+on write and 4 to 6% on point-read, on both axes at once, against a comparator
+at least as strong as the one the prior lost to.
+
+**Scope.** This workload has almost no resident garbage, and Gate 0 measured
+what that costs: the Theorem B.1 ceiling on W-1 is 79.5%, 39.9% and 36.3% at
+T = 2, 6 and 10. Compaction's write-side benefit is dropping stale versions, so
+where there are none, compacting more can only add write bytes. The negative
+result above is specific to a near-garbage-free workload and should be reported
+with that scope, not without it. Pathway B and Gate 4 are the test of whether
+it generalises.
+
+**Gate 1 standing.** C-1 passes. C-5 is closed at s_max = 2.0. **C-2, C-3 and
+C-6 are recorded failed.** E-2 passes under the amended denominator, E-5 is
+satisfied, and E-1 is recorded failed. Gate 1 is complete and not passed.
+
+**Three instrument defects were found and fixed, all in analysis.**
+
+1. `10_validate_learning_health.py` selected the frozen-learner arm family with
+   an exact equality on `prior_only`, while `03_run_experiments.sh` selects it
+   with a `*prior_only` glob. The new arm was rejected by `argparse`, and
+   merely adding it to the choices would have routed it into the training
+   branch and failed every run on `training_mode`. Both now use the glob.
+2. `04_generate_graphs.py` read the settled SST total only from `sizes.env`,
+   which `03` writes after the measured phase and which is therefore the one
+   artifact an interrupted or partially archived arm can lack. It now falls
+   back to `rocksdb.total-sst-files-size`, already parsed out of `run.log`.
+   The two are the same number: checked across all 36 Gate-1 configurations
+   against the node-computed values, relative error 0. There is no fallback for
+   `sst_bytes_after_full_compaction`, and none is needed, because the frozen
+   space definition does not use it.
+3. `frontier_analysis.py` retained every run's parsed Gate-0 payload in order
+   to read three small fields from it. The sweep's payloads total 7.5 GB across
+   240 files, so a cross-T run exhausted memory and was killed. It now reduces
+   each payload at load. Cross-T peak resident memory is 1.1 GB. This is the
+   same payload that Section 14.7 records as having made the emitted report
+   1.8 GB; that was trimmed in the output and left in memory.
+
+**Stage 17 added.** `17_analyze_shadow_overrides.py` computes the marginal and
+conditional override rates, the event decomposition, and the per-term
+breakdown, from `safety_shadow.jsonl` joined to `io.jsonl`. It does not
+reproduce the force condition — that is what the retracted replay did — and
+every quantity it reports is read from a log. Two properties are worth knowing.
+The join has no shared frame identifier, because the two logs carry different
+clocks, so it is recovered from the frame duration, which both record and which
+jitters per tick: the correct offset matches every frame and the next best
+matches 13%. An earlier revision keyed on `observed_levels`, which is constant
+for a whole run, so every offset scored perfectly and the search returned
+whichever it tried first; a checksum that cannot discriminate must not report
+confidence. And the counts of deferred-due and compacted-non-due decisions are
+computed from `io.jsonl` alone, so they bound both shield directions whatever
+the join does.
+
+### 14.10 Policy contribution isolated; the proactive-band defect, 2026-09-20
+
+Section 14.9 records `prior_only` as dominated by Hull-0 in all three cells.
+That verdict stands, but it conflates two different failures: a trigger policy
+that contributes nothing, and a trigger policy handed a base configuration
+chosen by a rule optimising for something else. Stage 06 selects minimum-space
+then lowest-runtime, a procedure `docs/PATHWAYS.md` Pathway C itself describes
+as one that "never explores trading write bandwidth for reads" — so the prior
+was placed at a point on the frontier that its own mechanism was not aimed at.
+
+**The static twin.** Every configuration in the Gate 1 sweep is plain RocksDB,
+including the exact configuration each prior arm ran on. Comparing the prior
+against that twin — same L0 trigger, same level base, controller versus no
+controller — measures the policy's contribution with the tuning question held
+fixed. It is a different question from C-3 and does not re-score it.
+
+Computed from the existing artifacts with `frontier_analysis.paired_comparison`,
+the same instrument the hull report uses; policy minus twin, so negative means
+the policy improved that axis.
+
+| cell | config | pairs | write amplification | point-read amplification |
+| --- | --- | ---: | ---: | ---: |
+| 10M T=2 | L0 trigger 2, base 16 MiB | 5 | **+7.18%** [+6.81, +7.55] | **+4.17%** [+3.80, +4.53] |
+| 10M T=6 | L0 trigger 4, base 16 MiB | 3 | +14.96% [+14.34, +15.58] | **-8.69%** [-11.35, -6.04] |
+| 10M T=10 | L0 trigger 4, base 16 MiB | 5 | +9.34% [+8.65, +10.04] | **-6.11%** [-6.86, -5.36] |
+
+Every interval excludes zero. At T=6 and T=10 the prior makes a real read/write
+trade and loses the hull comparison because the static class reaches a better
+trade without a controller. **At T=2 the prior is worse than doing nothing at
+its own configuration, on both axes**, which no re-basing can repair. T=6 rests
+on three pairs, the twin's repeat count, and is below the five-repeat floor.
+
+**The mechanism at T=2 is the proactive band.** A below-threshold `compact`
+action is offered whenever a level's score reaches `RL_OPTIONAL_MIN_SCORE`,
+fixed at 0.10. L0's score is `files / level0_file_num_compaction_trigger`. At
+T=2 the manifest selected trigger 2, so the only below-threshold state that
+exists is one file at score 0.5 — permanently inside the band. From `io.jsonl`
+at 10M/T=2, of 3,410 L0 decision frames the prior compacted 1,018 while due and
+1,102 while below threshold, 910 of the latter with exactly one file in L0.
+That is +58% more L0 compaction jobs than the twin (499 against 315) while
+every deeper level is statistically identical (L1 3855/3919, L2 2476/2567,
+L3 1470/1376).
+
+A proactive L0 compaction pays the same L1 overlap read and write whatever the
+L0 input, so its value is the number of sorted runs it removes. At trigger 4
+compacting at one file holds L0 at 1 instead of 4 and removes three runs, which
+is the measured read gain at T=6 and T=10. At trigger 2 it removes **one** run,
+on a tree already nine levels deep, and buys that run one flush earlier than
+native would have delivered it anyway — while paying a full L1 merge for half
+the input. The extra traffic also pushes the tree one level deeper, maximum
+populated depth 10 against the twin's 9, which adds probes. Both axes regress,
+in the direction and roughly the magnitude measured.
+
+**The defect is that the band is relative while its value is absolute.**
+`RL_OPTIONAL_MIN_SCORE` is one constant shared by the C++ admission gate and
+the Python action mask (closed 2026-08-16 as audited deviation 4), which keeps
+the two sides consistent but leaves the threshold expressed in units of the
+trigger. When the trigger is small the score band and the run reduction
+decouple entirely. The prior's own cost model does not catch it either:
+`multilevel.py` prices `work_now` as bytes rewritten per byte of progress,
+correctly high here, but `readamp_relief` scales with L0's overlapping file
+count without asking whether native RocksDB was about to remove the same run
+one flush later. **No fix has been made.** The corresponding change belongs in
+the prior's benefit term rather than the threshold — a proactive action should
+require a minimum absolute run reduction — and lands with the Pathway D reward
+work at Gate 2.
+
+**Confirmation still owed.** The band's causal role is inferred from the frame
+counts, not yet isolated. Re-running 10M/T=2 with `RL_OPTIONAL_MIN_SCORE` above
+0.5, which empties the proactive band at trigger 2, is three repeats and about
+fifteen minutes; if write and point-read both move toward the twin, the
+diagnosis is confirmed. Two caveats on the frame analysis: it rests on one run
+per cell, and a minority of frames report `files` and `score` inconsistently
+(25 files at score 0.5, about 20 frames per run), which is snapshot skew
+between the two reads and too small to move the counts but means the per-frame
+join is not exact.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,
@@ -2250,7 +2487,10 @@ then ran and failed, which is why the work below is no longer validation.
    beat the space bound by 28 percentage points of unusable headroom. Space
    should enter as a hinge penalty above the manifest limit. This is expected to
    recover most of the prior's read advantage; it will **not** fix write
-   amplification.
+   amplification. **Qualified 2026-09-19 (Section 14.9):** that read advantage
+   exists only against a single tuned baseline. Against the hull the prior is
+   dominated, so recovering its read behaviour recovers a dominated point.
+   Reward re-weighting alone can no longer produce an accepting result.
 3. **Address write amplification directly, or accept it as the cost.** No arm
    improves it in any cell. Deferring top-of-tree compaction relocates write
    work deeper rather than removing it, and adds level crossings. If the
@@ -2345,8 +2585,12 @@ any cell** — the analytic prior by +13.9% to +18.3%, the learned policy by +9.
 to +22.9%. Section 3.1 requires that interval strictly below zero, so every cell
 fails, and no reward re-weighting reaches it.
 
-Two findings survive and are worth stating on their own terms. The **analytic
-prior is a genuinely good read policy and improves as the size ratio grows**:
+Two findings survived that judgement. **One of them has since been withdrawn**
+— see Section 14.9: against the configuration class rather than a single tuned
+baseline, the prior is dominated at every ratio, and C-3 and C-6 both fail. The
+sentence below is retained as the reading that stood until 2026-09-19. The
+**analytic prior is a genuinely good read policy and improves as the size ratio
+grows**:
 -12.5%, -17.3% and -19.3% point-read amplification at T=2, 6 and 10, with its
 write penalty shrinking from +18.3% to +13.9%. At T=10 that is roughly a fifth
 of the probes and seeks removed for roughly a seventh more write bytes — a
