@@ -744,6 +744,8 @@ PY
     printf 'build_cxx=%s\n' "$BUILD_CXX_VERSION"
     printf 'dbbench_cpus=%s\n' "${DBBENCH_CPUS:-unpinned}"
     printf 'controller_cpus=%s\n' "${CONTROLLER_CPUS:-unpinned}"
+    printf 'cpu_governor=%s\n' "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | paste -sd, || echo unavailable)"
+    printf 'thp_enabled=%s\n' "$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo unavailable)"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'
