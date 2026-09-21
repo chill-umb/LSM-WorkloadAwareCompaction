@@ -128,7 +128,15 @@ def decompose(regular: dict[int, dict], arm: dict[int, dict], exact: bool) -> di
 
 def flow(row: dict, levels: dict[int, dict]) -> dict:
     written = float(row["user_write_bytes"])
-    live = float(row["live_logical_bytes"])
+    # S_flow shares the space metric's denominator, so it inherits the
+    # 2026-09-21 amendment: the garbage-free size the reference compaction
+    # measures, falling back to estimate-live-data-size only for an arm that
+    # never recorded one. Theorem B.1's ceiling is a function of S_flow, and
+    # the estimate understated the live bytes by 46% at T=2, which overstated
+    # both S_flow and the garbage fraction derived from it.
+    live = float(row.get("sst_bytes_after") or 0.0)
+    if live <= 0:
+        live = float(row["live_logical_bytes"])
     if not (written > 0 and live > 0):
         raise ValueError("flow ratio needs positive written and live bytes")
     s_flow = written / live
@@ -254,7 +262,7 @@ def main() -> int:
             "d_eager": "arm minus regular write bytes at levels regular populated",
             "populated": "files at settled end, or any bytes written or moved in",
             "write_bytes_source": "rocksdb_LOG.txt compaction_finished output bytes plus flush ticker when present; else final db_bench stats table at 0.1 GB resolution; flush at L0",
-            "s_flow": "rocksdb.bytes.written / rocksdb.estimate-live-data-size",
+            "s_flow": "rocksdb.bytes.written / sst_bytes_after_full_compaction (garbage-free; amended 2026-09-21, was rocksdb.estimate-live-data-size)",
             "b1_ceiling": "1 - (1 - eta^L)/(L (1 - eta)), eta = 1/S_flow, L = merge stages = populated levels - 1",
         },
         "cells": cells,

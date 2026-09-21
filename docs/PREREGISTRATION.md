@@ -199,6 +199,137 @@ change and is not taken here.
 **Evidence.** `deprecated/pre-gate2-2026-09-20/results/prior_shadow/results/10M/T{2,6,10}/repeat-*/unconstrained_prior_only/{io,safety_shadow}.jsonl`
 against `deprecated/pre-gate2-2026-09-20/baseline_slo_frame5_guard/balanced-v1/10M/T*/baseline_slo.json`.
 
+### D-3, 2026-09-21 — the space denominator becomes the measured garbage-free size
+
+**Recorded after the `Assoc` Hull-0 sweep was measured and the per-$T$ hulls
+extracted, and before stage 06, the guard protocol and every learned arm.**
+This document's rule is that a criterion is never reworded after its outcome
+has been seen, so the timing is stated first and plainly. **C-1 and C-2 do not
+use $S$** — the hull is built on $(W, R)$ and the C-2 width test runs over
+those two axes only (`frontier_analysis.py:22`) — and **no criterion that does
+use $S$ has been scored on `Assoc`**: the P1c-24 dominator filter inside
+C-3/C-4/C-6, C-5's $s_{\max}$, and stage 06's comparator selection are all
+unrun. The amendment therefore precedes every verdict it can influence. It does
+**not** re-score the 2026-09-12 or 2026-09-19 Gate 1 verdicts, which stand as
+history of the binary and workload that produced them.
+
+**Decision.** Space amplification is settled physical SST bytes divided by
+`sst_bytes_after_full_compaction`, the garbage-free size the reference
+compaction measures. The superseded denominator,
+`rocksdb.estimate-live-data-size`, is retained per run as
+`space_amplification_estimate`. No run is re-executed: both terms were
+already recorded for every arm.
+
+**The contract file is deliberately NOT edited, and this is load-bearing.**
+`constraints.space` freezes the metric, the test and the rung ladder; it has
+never named a denominator, which lives in `04_generate_graphs.py`. And the
+contract must not be edited here even to add one:
+`research_objective.py:27` hashes the raw contract bytes,
+`03_run_experiments.sh:75` stamps that hash into `metadata.env` and into the
+`experiment_fingerprint` as `:objective<hash>`, and
+`frontier_analysis.collect_grid` raises when a run's stamped hash differs from
+the contract's current hash. **Editing the file therefore changes the
+fingerprint of every future run and makes the evaluator refuse every past
+one** — the same consequence a rebuild has through `dbbench_sha256`, and by
+the same mechanism. An edit attempted on 2026-09-21 during the C-2 top-up was
+reverted byte-identical before any arm was stamped with it; all arms carry
+`5857ad35…`. If the definition is ever to be written into the contract, it
+must be done when re-running the affected sweep is acceptable, or the identity
+check must first be taught an explicit list of superseded-but-poolable hashes.
+This entry is the record of the decision, and `docs/PREREGISTRATION.md` is
+hashed into nothing.
+
+**Why, stated as a defect in the instrument rather than as a result.**
+`VersionStorageInfo::EstimateLiveDataSize` (`db/version_set.cc:5401`) sums a
+maximal set of files with no range overlap in a deeper level. A file holding
+live data that shadows the bottom level is dropped whole, so the estimate
+excludes garbage — which is its job — **and a large share of the live data,
+which is not**. The function's own comment states the failure mode: *"The less
+compacted, the more optimistic (smaller) this estimate is."* The denominator is
+therefore a function of tree depth, and the policy under test changes tree
+depth (history §10.7 Finding 3), so the error biases both the acceptance
+constraint and the P1c-22 reward hinge against the behaviour being measured.
+Both denominators are physical SST bytes, so the units are unchanged; only the
+estimate is replaced by a measurement.
+
+**Measured over the 108 `Assoc` Hull-0 runs, binary `9b9321b1…`.**
+
+| $T$ | garbage-free size | estimate | live data discarded | $S$ reported | $S$ measured |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 2.816 GiB | 1.494–1.668 GiB | **46%** | 1.80–2.05 | 1.066–1.090 |
+| 6 | 2.816 GiB | 2.277–2.506 GiB | 14% | 1.17–1.30 | 1.039–1.050 |
+| 10 | 2.816 GiB | 2.561–2.627 GiB | 8% | 1.11–1.14 | 1.031–1.043 |
+
+The garbage-free size is **3,023,603,980 to 3,023,786,278 bytes across all 108
+runs, a spread of 0.0060%**, as it must be: `filluniquerandom` writes 2.9M
+unique keys and `mixgraph` only overwrites them. The estimate spans 76% over
+those same runs. Data that is provably identical cannot have a live size that
+moves by 76%.
+
+**The independent check that settles it.** $S_{\text{flow}} =$ user bytes
+written $/$ live bytes is a property of the workload, not of the tree, so it
+must not vary with the size ratio. At the standard configuration it does not —
+under the measured denominator, and only under it:
+
+| denominator | $S_{\text{flow}}$ at $T=2$ | $T=6$ | $T=10$ |
+| --- | ---: | ---: | ---: |
+| estimate | 2.572 | 1.615 | 1.486 |
+| measured | **1.386** | **1.386** | **1.386** |
+
+Identical to three decimals across three ratios. The ratio-dependence under the
+estimate is an artifact of depth, not a property of the workload.
+
+**Predictions, recorded in advance.**
+
+1. **Stage 06's space filter stops binding.** Under the measured denominator
+   the four base-16 MiB configurations lie within 0.6–0.8% of one another at
+   every ratio, so the "discard configurations more than 2% above the minimum"
+   step admits all four and the comparator is decided by the runtime
+   tie-break. Under the estimate it admits 2 of 4 at $T=2$, 1 of 4 at $T=6$
+   and 3 of 4 at $T=10$, and the minimum-space winner differs at $T=2$
+   (trigger 2 → 8) and $T=6$ (trigger 2 → 4).
+2. **Theorem B.1's ceiling falls at $T=2$.** $g_{\text{flow}}$ moves from
+   0.611 to 0.278 there, and the ceiling recomputed at measured
+   $S_{\text{flow}}$ and $L$ falls with it. The Gate 0 ceilings of
+   79.5%/39.9%/36.3% were computed on the estimate and are expected to be
+   overstated, most severely at $T=2$.
+3. **B-1's direction is decided by the denominator, and must be scored on the
+   measured one.** Against the recorded uniform figures, resident garbage
+   appears to *fall* under the estimate and to *rise* under the measurement.
+   B-1 remains a Gate 4 criterion and is not scored here; when it is, it is
+   scored against a `WORKLOAD_SKEW=0` control re-run on this binary, not
+   against the deprecated uniform numbers.
+
+**Falsification.** If the garbage-free size is not stable within 0.5% across
+the arms of a future cell, or if $S_{\text{flow}}$ under the measured
+denominator varies with $T$ by more than 2% at a fixed configuration, then the
+reference compaction is not measuring what this entry claims and the amendment
+must be withdrawn and reported as withdrawn.
+
+**Not taken here, and why.** `metric_definitions_version` stays
+`trigger-v2-logical-v3`. `rl_safety_manifest.cc` compares that string for
+equality, so bumping it needs a C++ edit and a rebuild; a rebuild changes
+`dbbench_sha256`, which `frontier_analysis.py:196` refuses to pool across, and
+would void the 108-run Hull-0 sweep. There is no pooling hazard to prevent:
+every pre-`Assoc` run is already deprecated, and all 108 `Assoc` runs recompute
+under the amended definition from artifacts they already hold. And the live
+per-frame signal in `compaction_picker_rl.cc:345` still calls
+`EstimateLiveDataSize`, so the reward hinge and the guard still see the
+estimate; replacing that is a separate decision, recorded under its own date,
+and is only free if taken outside C++.
+
+**Implementation.** No contract file, binary or run is touched.
+`04_generate_graphs.amplification_metrics`
+(`space_amplification` on the measured denominator,
+`space_amplification_estimate` on the old one, the estimate as the fallback for
+an arm with no `sizes.env`); `14_gate0_reanalysis.flow` for $S_{\text{flow}}$
+and the B.1 ceiling; the manifest metric description in
+`06_select_baseline_slo.py`. `frontier_analysis.py` inherits the change through
+`collect_arm` and is not edited.
+
+**Evidence.** `results/baseline_sweep/*/10M/T*/repeat-*/regular/{sizes.env,run.log}`,
+108 runs, fingerprint `assoc-v1:…:binary9b9321b1…`.
+
 ---
 
 ## 2. Gate verdicts as measured

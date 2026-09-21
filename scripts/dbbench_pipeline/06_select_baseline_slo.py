@@ -501,7 +501,7 @@ def main() -> int:
             "point_read_amplification": "logical SST probes / point Get",
             "sorted_run_seeks_per_scan": "sorted runs opened per keyed scan seek (each L0 file, each non-empty deeper level once) / scans",
             "scan_amplification": "diagnostic only (P0-1): (returned entries + internal skipped entries) / returned entries",
-            "space_amplification": "physical SST bytes / live logical bytes, settled after the drain",
+            "space_amplification": "settled physical SST bytes / garbage-free SST bytes from the reference compaction, settled after the drain (amended 2026-09-21; was rocksdb.estimate-live-data-size)",
             "stall_fraction": "stall seconds / measured-phase wall seconds",
             "rolling_p95": "p95 of the merged 64-bucket log2 histogram over the rolling window",
         },

@@ -45,8 +45,26 @@ def amplification_metrics(*, flush_bytes: float, compact_bytes: float,
                           gets: float, scan_returned: float,
                           scan_skips: float, sorted_run_seeks: float,
                           scans: float, physical_sst_bytes: float,
-                          live_logical_bytes: float) -> dict[str, float]:
+                          live_logical_bytes: float,
+                          garbage_free_sst_bytes: float = math.nan
+                          ) -> dict[str, float]:
     """Formal metric definitions shared by collection and unit tests."""
+    # Space amplification divides settled SST bytes by the garbage-free size
+    # the reference compaction measures, not by estimate-live-data-size
+    # (contract amendment 2026-09-21, PREREGISTRATION D-3).
+    # VersionStorageInfo::EstimateLiveDataSize (db/version_set.cc:5401) sums a
+    # maximal set of files with no range overlap in a deeper level, so a file
+    # holding live data that shadows the bottom level is dropped whole. Its own
+    # comment says "the less compacted, the more optimistic (smaller) this
+    # estimate is": measured across the 108 Assoc Hull-0 runs it discards 46%
+    # of the live bytes at T=2 against 8% at T=10, while the garbage-free size
+    # is constant to 0.006%. Both denominators are physical SST bytes, so the
+    # units are unchanged and only the estimate is replaced. The old value
+    # stays as space_amplification_estimate, and is the fallback for an arm
+    # whose sizes.env never reached the archive.
+    settled_denominator = (garbage_free_sst_bytes
+                           if garbage_free_sst_bytes > 0
+                           else live_logical_bytes)
     return {
         "write_amplification": divide(
             flush_bytes + compact_bytes, user_write_bytes),
@@ -55,6 +73,8 @@ def amplification_metrics(*, flush_bytes: float, compact_bytes: float,
             scan_returned + scan_skips, scan_returned),
         "sorted_run_seeks_per_scan": divide(sorted_run_seeks, scans),
         "space_amplification": divide(
+            physical_sst_bytes, settled_denominator),
+        "space_amplification_estimate": divide(
             physical_sst_bytes, live_logical_bytes),
     }
 
@@ -229,15 +249,18 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         # settled SST total is already in run.log as a property, and it is the
         # same number: checked against the node-computed value on all 36
         # Gate-1 configurations, relative error 0. The full-compaction figure
-        # has no such fallback, but the frozen space definition does not use
-        # it -- switching to that denominator is a contract amendment.
+        # has no such fallback, and since 2026-09-21 it is the space
+        # denominator, so such an arm falls back to the estimate and reports
+        # the weaker number under both keys rather than dropping out of the
+        # hull on a non-finite S.
         before = properties.get("rocksdb.total-sst-files-size", math.nan)
     amplification = amplification_metrics(
         flush_bytes=flush_bytes, compact_bytes=compact_bytes,
         user_write_bytes=user_write_bytes, point_probes=point_probes,
         gets=gets, scan_returned=scan_returned, scan_skips=scan_skips,
         sorted_run_seeks=sorted_run_seeks, scans=scans,
-        physical_sst_bytes=before, live_logical_bytes=live_logical_bytes)
+        physical_sst_bytes=before, live_logical_bytes=live_logical_bytes,
+        garbage_free_sst_bytes=after)
 
     get_latency = histograms.get("rocksdb.db.get.micros", {})
     scan_latency = histograms.get("rocksdb.db.seek.micros", {})
@@ -427,7 +450,8 @@ def main() -> int:
         ("write_amplification", "Write amplification", "Physical / logical bytes"),
         ("point_read_amplification", "Point-read amplification", "SST probes / Get"),
         ("scan_amplification", "Scan amplification", "Visited / returned entries"),
-        ("space_amplification", "Space amplification", "SST / live logical bytes"),
+        ("space_amplification", "Space amplification",
+         "Settled SST / garbage-free SST bytes"),
         ("sorted_run_seeks_per_scan", "Sorted-run seeks", "Seeks / scan"),
         ("stall_seconds", "Write stalls", "Seconds"),
     ], "amplification_and_stalls.png", (2, 3))

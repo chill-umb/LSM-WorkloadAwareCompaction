@@ -102,7 +102,7 @@ build-bench/
 # Databases created by scripts/run_vanilla_sweep.sh. Kept on the project
 # partition rather than /tmp, which is tmpfs here — a multi-GB db_bench run
 # there would sit in RAM and measure page-cache speed instead of disk.
-.dbbench/
+.dbbench_*/
 
 # Artifacts from before the Gate 2 rebuild (2026-09-20). Invalidated by three
 # simultaneous changes: a new db_bench binary, the in-place contract amendment,
