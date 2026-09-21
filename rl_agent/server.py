@@ -338,7 +338,10 @@ def main() -> None:
           f"eval_mode={config.EVAL_MODE} "
           f"write_bound={config.WRITE_BOUND:.4f} "
           f"space_bound={config.SPACE_BOUND:.4f} "
-          f"scan_seeks_bound={config.SCAN_SEEKS_BOUND:.4f}")
+          f"scan_seeks_bound={config.SCAN_SEEKS_BOUND:.4f} "
+          f"objective_alpha={config.OBJECTIVE_ALPHA_INITIAL} "
+          f"alpha_control_file="
+          f"{config.ALPHA_CONTROL_FILE or '(fixed for the whole run)'}")
 
     pool = multilevel.AgentPool()
     # One processor for the whole server lifetime: client reconnects must not

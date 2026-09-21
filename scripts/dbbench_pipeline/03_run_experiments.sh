@@ -92,6 +92,23 @@ if [[ -n "$STATIC_CAPACITY_SCALES" ]]; then
   CAPACITY_FINGERPRINT=":cap${CAPACITY_TAG}"
 fi
 
+# The fingerprint gains an alpha segment only when the knob is off its
+# bit-identical default (1.0) or is live-controlled mid-run, so a default run
+# keeps the identity it had before this knob existed (RUNTIME_ALPHA_
+# OBJECTIVE_PLAN.md). Validated as a plain decimal in [0, 1] up front, so a
+# typo fails before any process starts rather than inside a malformed
+# fingerprint later.
+[[ "$OBJECTIVE_ALPHA" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || {
+  echo "OBJECTIVE_ALPHA must be a decimal in [0, 1]: $OBJECTIVE_ALPHA" >&2
+  exit 1
+}
+ALPHA_FINGERPRINT=""
+if [[ "$OBJECTIVE_ALPHA" != "1.0" && "$OBJECTIVE_ALPHA" != "1" \
+      || "$OBJECTIVE_ALPHA_LIVE" == "1" ]]; then
+  ALPHA_FINGERPRINT=":alpha${OBJECTIVE_ALPHA}"
+  [[ "$OBJECTIVE_ALPHA_LIVE" == "1" ]] && ALPHA_FINGERPRINT+="live"
+fi
+
 # Expand a taskset -c list ("0-7,12") into one CPU number per line.
 expand_cpu_list() {
   local part start end
@@ -477,6 +494,12 @@ trap 'stop_server; exit 130' INT TERM
 start_server() {  # result dir, policy seed, decay steps, eval, manifest, fingerprint
   local result_dir="$1" policy_seed="$2" decay_steps="$3" eval_mode="$4"
   local manifest_path="$5" fingerprint="$6" anneal_seconds="${7:-0}"
+  local alpha_control_file=""
+  # Only wired up when requested (OBJECTIVE_ALPHA_LIVE=1): an empty
+  # RL_ALPHA_CONTROL_FILE keeps the poller a no-op, matching config.py's
+  # documented default (RUNTIME_ALPHA_OBJECTIVE_PLAN.md).
+  [[ "$OBJECTIVE_ALPHA_LIVE" == "1" ]] && \
+    alpha_control_file="$result_dir/objective_alpha.json"
   SERVER_SOCKET="/tmp/dbbench_rl_${USER:-u}_$$_${policy_seed}.sock"
   rm -f "$SERVER_SOCKET"
   env \
@@ -495,6 +518,8 @@ start_server() {  # result dir, policy seed, decay steps, eval, manifest, finger
     RL_EXPERIMENT_FINGERPRINT="$fingerprint" \
     RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
     RL_SPACE_RELATIVE_MARGIN="$SPACE_RELATIVE_MARGIN" \
+    RL_OBJECTIVE_ALPHA="$OBJECTIVE_ALPHA" \
+    RL_ALPHA_CONTROL_FILE="$alpha_control_file" \
     OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     ${CONTROLLER_LAUNCHER[@]+"${CONTROLLER_LAUNCHER[@]}"} \
     "$PYTHON" "$PROJECT_ROOT/rl_agent/server.py" \
@@ -519,8 +544,19 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   if (( REPEATS > 1 )); then
     repeat_path="repeat-$(printf '%02d' "$repeat")/"
   fi
-  local result_dir="$RESULTS_ROOT/$size_label/T${ratio}/${repeat_path}${arm}"
-  local db_dir="$DB_ROOT/$size_label/T${ratio}/${repeat_path}${arm}"
+  # A non-default alpha (or a live-controlled one) gets its own arm-name
+  # suffix, or a frontier sweep's arms would all collide on the same
+  # result_dir/db_dir as the plain "rl"/"prior_only" arm and overwrite each
+  # other. The default (alpha=1.0, not live) is left unsuffixed so every
+  # arm directory this project has ever produced still resolves the same way.
+  local arm_dir_name="$arm"
+  if [[ "$OBJECTIVE_ALPHA" != "1.0" && "$OBJECTIVE_ALPHA" != "1" \
+        || "$OBJECTIVE_ALPHA_LIVE" == "1" ]]; then
+    arm_dir_name="${arm}-alpha${OBJECTIVE_ALPHA}"
+    [[ "$OBJECTIVE_ALPHA_LIVE" == "1" ]] && arm_dir_name+="live"
+  fi
+  local result_dir="$RESULTS_ROOT/$size_label/T${ratio}/${repeat_path}${arm_dir_name}"
+  local db_dir="$DB_ROOT/$size_label/T${ratio}/${repeat_path}${arm_dir_name}"
   local manifest_path="$BASELINE_SLO_DIR/$WORKLOAD_PROFILE/$size_label/T${ratio}/baseline_slo.json"
   local manifest_sha256=""
   if (( SLO_DRIVEN_MATRIX )); then
@@ -675,7 +711,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}${ALPHA_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -776,6 +812,10 @@ PY
     printf 'rl_exploration_anneal_seconds=%s\n' "$anneal_seconds"
     printf 'rl_exploration_anneal_source=%s\n' "$anneal_source"
     printf 'rl_epsilon_bound_ms=%s\n' "$RL_EPSILON_BOUND_MS"
+    printf 'objective_alpha=%s\n' "$OBJECTIVE_ALPHA"
+    printf 'objective_alpha_live=%s\n' "$OBJECTIVE_ALPHA_LIVE"
+    printf 'alpha_control_file=%s\n' \
+      "$([[ "$OBJECTIVE_ALPHA_LIVE" == "1" ]] && echo "$result_dir/objective_alpha.json" || echo none)"
   } > "$result_dir/metadata.env"
   git rev-parse HEAD > "$result_dir/git_revision.txt" 2>/dev/null || true
   git -C lib/rocksdb rev-parse HEAD > "$result_dir/rocksdb_revision.txt" 2>/dev/null || true

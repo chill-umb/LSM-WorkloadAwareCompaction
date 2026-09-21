@@ -16,6 +16,7 @@ Response (Python -> C++):
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
@@ -222,6 +223,71 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+class RuntimeAlpha:
+    """The runtime-tunable read/write objective weight (RUNTIME_ALPHA_
+    OBJECTIVE_PLAN.md), hot-reloaded from `config.ALPHA_CONTROL_FILE`.
+
+    alpha=1 (the default) is bit-identical to the pre-existing behaviour:
+    point-read amplification is the sole rate-priced reward term, and the
+    analytic prior's read-relief credit is unscaled. alpha=0 flips the
+    rate-priced reward term to write amplification and removes all read
+    credit from the prior, so compaction can only be justified by stall
+    urgency -- the maximally conservative, write-amp-minimizing posture.
+    Space/latency/scan/stall hinges are untouched at every setting; alpha
+    is not a safety knob.
+
+    `poll()` is cheap (one stat(), the poll cadence is the decision tick,
+    ~50ms) and self-contained: a missing file, a bad value, or an
+    out-of-range value all keep the last-known-good value rather than
+    raising, so a broken external write cannot crash the server.
+    """
+
+    def __init__(self, path: str, initial: float):
+        self._path = path
+        self._value = _clamp(initial)
+        self._mtime: Optional[float] = None
+        self.reload_events: List[dict] = []
+
+    @property
+    def value(self) -> float:
+        return self._value
+
+    def poll(self, frame: int) -> bool:
+        """Check the control file for a change. Returns True on reload."""
+        if not self._path:
+            return False
+        try:
+            mtime = os.stat(self._path).st_mtime
+        except OSError:
+            return False
+        if self._mtime is not None and mtime == self._mtime:
+            return False
+        self._mtime = mtime
+        try:
+            with open(self._path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            new_value = float(data["objective_alpha"])
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            # Bad read: keep the current value. `_mtime` is still updated
+            # above, so a persistently broken file is stat()'d but not
+            # re-parsed every tick; the next successful edit changes mtime
+            # again and triggers a fresh attempt.
+            return False
+        if not math.isfinite(new_value) or not (0.0 <= new_value <= 1.0):
+            return False
+        old_value = self._value
+        self._value = new_value
+        changed = old_value != new_value
+        if changed:
+            self.reload_events.append({
+                "frame": frame,
+                "ts": time.time(),
+                "old": old_value,
+                "new": new_value,
+            })
+        return changed
+
+
 def _positive(value: float) -> float:
     return max(0.0, value)
 
@@ -307,7 +373,7 @@ def read_exposure(level: int, g: dict) -> float:
     return _clamp((reaching + seeks) / total)
 
 
-def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
+def analytic_advantage(raw: dict, g: dict, alpha: float = 1.0) -> Tuple[float, dict]:
     """A_analytic(s): the physics-informed advantage of compact_now over
     do_nothing for one level, from raw observables. Each term maps to a named
     piece of LSM cost theory:
@@ -329,6 +395,17 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
                         compaction, so merging an underfull level with large
                         overlap wastes I/O vs waiting for it to fill
                         (overlap/bytes scaled by emptiness).
+
+    `alpha` (RUNTIME_ALPHA_OBJECTIVE_PLAN.md) scales ONLY the read-relief
+    credit's weight: alpha=1 reproduces the unscaled prior exactly (the
+    default, and the invariant the alpha=1 regression check relies on);
+    alpha=0 removes all read-side justification for compacting, leaving only
+    stall urgency as a benefit against the unchanged work/premature costs --
+    the maximally conservative, write-amp-minimizing posture. The work and
+    premature-penalty cost terms are deliberately NOT touched by alpha: they
+    already apply at full weight in today's default, and scaling a cost term
+    down as alpha falls would fight the very thing alpha=0 is supposed to
+    achieve.
 
     Returns (advantage, term_breakdown). Weights are the tunable "physics
     constants" (RL_PRIOR_W_*); the learned residual corrects what they miss.
@@ -412,7 +489,7 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
         work_now = _clamp((1.0 + overlap / bytes_i) / size_ratio)
     premature_penalty = _clamp(overlap / bytes_i / 4.0) * (1.0 - fullness)
 
-    w_read = config.PRIOR_W_READ_L0 if level == 0 else config.PRIOR_W_READ
+    w_read = (config.PRIOR_W_READ_L0 if level == 0 else config.PRIOR_W_READ) * alpha
     adv = (
         config.PRIOR_W_STALL * stall_urgency
         + w_read * readamp_relief
@@ -425,6 +502,7 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
         "prior_readamp_relief": readamp_relief,
         "prior_read_exposure": exposure,
         "prior_runs_removed": runs_removed,
+        "prior_w_read_effective": w_read,
         "prior_work_now": work_now,
         "prior_premature_penalty": premature_penalty,
         "analytic_advantage": adv,
@@ -510,6 +588,8 @@ class MultiLevelProcessor:
             "stall": config.LAMBDA_STALL_INIT,
         }
         self._frames = 0
+        self._alpha = RuntimeAlpha(config.ALPHA_CONTROL_FILE,
+                                    config.OBJECTIVE_ALPHA_INITIAL)
 
     # -- parsing --------------------------------------------------------
 
@@ -616,7 +696,7 @@ class MultiLevelProcessor:
 
     # -- encoding ---------------------------------------------------------
 
-    def _encode(self, raw: dict, g: dict) -> np.ndarray:
+    def _encode(self, raw: dict, g: dict, alpha: float) -> np.ndarray:
         level = int(raw["level"])
         key = f"l{level}"
         s = self.scales
@@ -702,6 +782,10 @@ class MultiLevelProcessor:
             s.normalize("global.space_amp", space_amp),
             1.0 if (g["structural_source_generation"]
                     != g["structural_built_generation"]) else 0.0,
+            # Already in [0, 1]; this is what lets the network condition on
+            # the live objective weight rather than being blindsided by a
+            # reward that moved without a visible cause in the state.
+            _clamp(alpha),
         ]
         return np.array(values, dtype=np.float32)
 
@@ -737,20 +821,27 @@ class MultiLevelProcessor:
             "stall_fraction_bound": config.STALL_FRACTION_BOUND,
             "space_relative_margin": config.SPACE_RELATIVE_MARGIN,
             "constrained": bool(config.BASELINE_LIMITS),
+            "objective_alpha": self._alpha.value,
+            "objective_alpha_reload_events": list(self._alpha.reload_events),
         }
 
     def _global_reward(self, g: dict, levels: List[dict],
-                       dt: float) -> Tuple[float, dict]:
+                       dt: float, alpha: float) -> Tuple[float, dict]:
         """One cooperative reward for the physical tree: the constrained
         objective of PATHWAYS Pathway D (see config.py, "Reward").
 
-        The objective is point-read amplification, charged as a rate. Every
-        constraint enters only as a hinge above its bound (Proposition D.2),
-        so nothing below a bound earns credit: space and write headroom the
-        criteria do not reward are not rewarded here either. Shaping is the
-        potential difference over the absolute sorted-run count in the
-        gamma^tau form (Proposition D.1), so it is policy-invariant and gives
-        immediate credit for a run removed in a window with no reads.
+        The rate-priced objective term blends point-read amplification and
+        write amplification by `alpha` (RUNTIME_ALPHA_OBJECTIVE_PLAN.md):
+        `alpha * REWARD_READ * point_amp + (1 - alpha) * REWARD_WRITE * waf`.
+        At the default alpha=1 this is exactly `REWARD_READ * point_amp` --
+        bit-identical to the reward before this knob existed. Every
+        constraint (write's own non-inferiority hinge included) still enters
+        only as a hinge above its bound (Proposition D.2), unconditionally on
+        alpha: alpha selects which quantity is being minimized, not which
+        bounds are enforced. Shaping is the potential difference over the
+        absolute sorted-run count in the gamma^tau form (Proposition D.1), so
+        it is policy-invariant and gives immediate credit for a run removed
+        in a window with no reads.
         """
         if g["done"]:
             # The shutdown message contains synthetic zero level states, not a
@@ -833,8 +924,11 @@ class MultiLevelProcessor:
         lambda_scan = self._dual_ascent("scan", scan_excess)
         lambda_stall = self._dual_ascent("stall", stall_excess)
 
+        read_term = alpha * config.REWARD_READ * point_amp
+        write_term = (1.0 - alpha) * config.REWARD_WRITE * waf
         cost_rate = (
-            config.REWARD_READ * point_amp
+            read_term
+            + write_term
             + lambda_write * write_excess
             + lambda_space * space_excess
             + lambda_latency * latency_excess
@@ -850,6 +944,9 @@ class MultiLevelProcessor:
             "sorted_runs": sorted_runs,
             "point_probe_amplification": point_amp,
             "write_amplification_window": waf,
+            "objective_alpha": alpha,
+            "objective_read_term": read_term,
+            "objective_write_term": write_term,
             "write_excess": write_excess,
             "space_amplification": space_amp,
             "space_excess": space_excess,
@@ -960,6 +1057,8 @@ class MultiLevelProcessor:
         dt = self._dt_seconds(g)
         self.scales.tick(dt)
         now = time.monotonic()
+        self._alpha.poll(self._frames)
+        alpha = self._alpha.value
 
         parsed = []
         for entry in msg.get("levels", []):
@@ -971,12 +1070,13 @@ class MultiLevelProcessor:
             # the excluded interval must never appear as a potential delta in
             # the following valid reward.
             self._prev_tree_cost = None
-        global_reward, global_components = self._global_reward(g, parsed, dt)
+        global_reward, global_components = self._global_reward(
+            g, parsed, dt, alpha)
 
         decisions: List[LevelDecision] = []
         for raw in parsed:
             level = int(raw["level"])
-            state = self._encode(raw, g)
+            state = self._encode(raw, g, alpha)
             if g["done"]:
                 reward, components = 0.0, {"terminal": 1.0}
             elif config.REWARD_LEGACY:
@@ -1001,7 +1101,7 @@ class MultiLevelProcessor:
 
             prior = None
             if config.ANALYTIC_PRIOR:
-                adv, prior_terms = analytic_advantage(raw, g)
+                adv, prior_terms = analytic_advantage(raw, g, alpha)
                 prior = np.array([0.0, adv], dtype=np.float32)
                 components.update(prior_terms)
 

@@ -186,6 +186,18 @@ RL_EPSILON_BOUND_MS="${RL_EPSILON_BOUND_MS:-0}"
 # against the bound it will be judged at. A rung is a separate run of the
 # learned arms; regular and prior_only are shared across rungs (Gate 3b).
 SPACE_RELATIVE_MARGIN="${SPACE_RELATIVE_MARGIN:-0.02}"
+# RUNTIME_ALPHA_OBJECTIVE_PLAN.md. 1.0 (the default) is bit-identical to the
+# reward before this knob existed and keeps the run's fingerprint unchanged,
+# so every arm measured before this knob existed stays poolable. A non-default
+# value adds an :alpha<value> fingerprint segment (03_run_experiments.sh) and
+# must NOT be changed mid-sweep without a fresh manifest/fingerprint.
+OBJECTIVE_ALPHA="${OBJECTIVE_ALPHA:-1.0}"
+# When 1, the arm also gets a per-result-dir control file
+# (RL_ALPHA_CONTROL_FILE) that scripts/dbbench_pipeline/set_objective_alpha.sh
+# can write to mid-run, for the runtime-switch-dynamics experiment (plan §7.2).
+# Static frontier-sweep arms (plan §7.1) leave this at 0: alpha is fixed for
+# the whole run and nothing polls a file that was never created.
+OBJECTIVE_ALPHA_LIVE="${OBJECTIVE_ALPHA_LIVE:-0}"
 POLICY_SEED_BASE="${POLICY_SEED_BASE:-10000}"
 BASELINE_SLO_DIR="${BASELINE_SLO_DIR:-baseline_slo}"
 RL_REQUIRE_BASELINE_SLO="${RL_REQUIRE_BASELINE_SLO:-1}"

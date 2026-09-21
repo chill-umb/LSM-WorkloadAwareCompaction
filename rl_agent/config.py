@@ -30,6 +30,10 @@ def _env_bool(name: str, default: bool) -> bool:
     return value != "0"
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
 def reward_weight(name: str, level: int = None) -> float:
     """Reward weight for `name`, with an optional per-level override.
 
@@ -56,6 +60,23 @@ SERVER_SUMMARY_PATH = os.environ.get("RL_SERVER_SUMMARY_PATH", "")
 
 
 METRIC_DEFINITIONS_VERSION = "trigger-v2-logical-v3"
+
+# ---------------------------------------------------------------------------
+# Runtime-tunable read/write objective weight (RUNTIME_ALPHA_OBJECTIVE_PLAN.md)
+# ---------------------------------------------------------------------------
+# objective_alpha in [0, 1] blends the reward's rate-priced objective term
+# between point-read amplification (alpha=1, the default -- bit-identical to
+# the pre-existing reward) and write amplification (alpha=0). It is also fed
+# to the analytic prior (scaling the read-relief credit only) and to the
+# state vector (ML_STATE_FIELDS, so the network is conditioned on it).
+#
+# RL_OBJECTIVE_ALPHA sets the starting value. RL_ALPHA_CONTROL_FILE, if set,
+# names a JSON file `{"objective_alpha": <float>}` polled once per decision
+# tick (~RL_DECISION_INTERVAL_MS) for a live update -- unset means the value
+# is fixed for the whole run. Write the file atomically (temp file + rename);
+# scripts/dbbench_pipeline/set_objective_alpha.sh does this.
+OBJECTIVE_ALPHA_INITIAL = _clamp01(_env_float("RL_OBJECTIVE_ALPHA", 1.0))
+ALPHA_CONTROL_FILE = os.environ.get("RL_ALPHA_CONTROL_FILE", "").strip()
 
 
 def _load_baseline_manifest() -> dict[str, float]:
@@ -186,6 +207,17 @@ ML_STATE_FIELDS = (
     "scan_work_amp_norm",      # (returned + internal skipped) / returned
     "space_amp_norm",          # physical SST bytes / live logical bytes
     "structural_dirty_flag",   # source generation is newer than built view
+    # -- objective ---------------------------------------------------------
+    # The live read/write priority weight (RUNTIME_ALPHA_OBJECTIVE_PLAN.md).
+    # Already in [0, 1]; no normalization. Conditioning the network on this
+    # is what lets a change in the knob shift behaviour without destabilizing
+    # training the way an unconditioned moving-target reward would -- the
+    # network can, in principle, tell "the objective changed" apart from
+    # "the tree state changed". It is deliberately NOT expected to
+    # generalize to alpha values far from whatever a run actually visits
+    # (the project's cold-start-every-run rule, PROJECT_HISTORY_AND_SYSTEM_
+    # DESCRIPTION.md section 3.2, leaves no room to pretrain that coverage).
+    "objective_alpha",
 )
 ML_STATE_DIM = len(ML_STATE_FIELDS)
 
@@ -220,6 +252,11 @@ ML_STATE_DIM = len(ML_STATE_FIELDS)
 # frame. A lambda that grows without plateauing is D-4's infeasibility
 # signal, so it is logged in every reward component record.
 REWARD_READ = _env_float("RL_REWARD_READ", 1.0)
+# Symmetric counterpart to REWARD_READ, priced on the same windowed WAF the
+# write hinge already computes. Only reachable through the objective_alpha
+# blend below: at the default alpha=1.0 this weight is never multiplied by
+# anything but zero, so it changes nothing on its own.
+REWARD_WRITE = _env_float("RL_REWARD_WRITE", 1.0)
 REWARD_STRUCTURAL_RUNS = _env_float("RL_REWARD_STRUCTURAL_RUNS", 0.5)
 LAMBDA_WRITE_INIT = _env_float("RL_LAMBDA_WRITE_INIT", 1.0)
 LAMBDA_SPACE_INIT = _env_float("RL_LAMBDA_SPACE_INIT", 1.0)

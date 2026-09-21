@@ -199,6 +199,82 @@ change and is not taken here.
 **Evidence.** `deprecated/pre-gate2-2026-09-20/results/prior_shadow/results/10M/T{2,6,10}/repeat-*/unconstrained_prior_only/{io,safety_shadow}.jsonl`
 against `deprecated/pre-gate2-2026-09-20/baseline_slo_frame5_guard/balanced-v1/10M/T*/baseline_slo.json`.
 
+### D-3, 2026-09-21 — `objective_alpha` runtime knob: exploratory scope, and the frontier-sweep predictions
+
+**Recorded before gates alpha-0 through alpha-4 or any frontier-sweep arm has
+run, and before the knob has executed on the measurement node at all.**
+
+**What this is.** `docs/RUNTIME_ALPHA_OBJECTIVE_PLAN.md` specifies a runtime-
+tunable weight, `objective_alpha in [0,1]`, blending the reward's rate-priced
+objective term between point-read amplification (`alpha=1`, bit-identical to
+the pre-existing reward) and write amplification (`alpha=0`), fed to the
+prior, the reward and the state vector. Implemented 2026-09-21 in
+`rl_agent/config.py`, `rl_agent/multilevel.py`, `rl_agent/server.py`, and
+wired through `scripts/dbbench_pipeline/config.sh`, `03_run_experiments.sh`,
+`04_generate_graphs.py`, `06_select_baseline_slo.py`, and the new
+`set_objective_alpha.sh`. Not built or executed on the measurement node.
+
+**Decision.** This knob and everything measured with it are **exploratory,
+off Programme 1's acceptance path**, per the plan's own §2 D2 recommendation.
+Nothing measured under a non-default `alpha` may be cited as evidence for
+Pathway A-E's acceptance criteria (`docs/PATHWAYS.md`) unless a separate,
+later decision explicitly promotes it — that promotion, if it happens, is a
+contract amendment in its own right and is not pre-authorized by this entry.
+
+**Scope, in two parts.**
+
+1. **Correctness gates alpha-0 through alpha-4** (plan §6): 1M/T=2, 3
+   repeats. Engineering verification only — no acceptance criterion, no
+   research claim, same status as a `-fsyntax-only` check.
+2. **Frontier sweep** (plan §7.1): `alpha` in `{0, 0.25, 0.5, 0.75, 1}`,
+   static per run, 10M x T in `{2, 6, 10}`, arm `rl`, paired repeats.
+
+**Dependency the frontier sweep cannot skip.** Its comparator is the
+Pareto hull from Gate 1 (`docs/PATHWAYS.md` Pathway C). Gate 1 has not yet
+been re-measured on the `Assoc` workload/binary as of this entry — the
+`Assoc` oracle-parity gate passed 2026-09-21 and explicitly authorized the
+Hull-0 sweep to run, but that sweep itself has not run. Comparing the alpha
+sweep against the old *uniform*-workload hull would repeat exactly the
+invalid cross-workload comparison D-1 was recorded to prevent. **The gates
+(alpha-0 to alpha-4) and the raw W/R measurement of the sweep have no such
+dependency and may run first; the hull-comparison step of the frontier sweep
+must wait for the `Assoc` Gate 1 hull to exist.**
+
+**Predictions, recorded in advance, at fixed T.**
+
+1. **Monotonicity.** As `alpha` falls from 1 to 0 on the `rl` arm, mean
+   write amplification does not increase and mean point-read amplification
+   does not decrease. This follows directly from the mechanism (plan §3):
+   `alpha=0` removes all read-side justification for compacting from the
+   prior's read-relief term, leaving only stall urgency as a benefit, so the
+   policy should compact less overall as `alpha` falls.
+2. **No claim of escaping domination.** No swept `alpha` point is predicted
+   to be non-dominated against the re-measured Hull-0/Hull_s on its own.
+   `alpha` re-weights an existing lever (compaction timing) the prior and
+   `rl` already had; unlike Pathway A's capacity action, it adds no new
+   capability, so it is not expected to change the C-3/C-6 domination
+   finding by itself. Predicting otherwise here would be an unearned claim
+   this entry deliberately does not make.
+3. **No claim about the magnitude of the `W` reduction at `alpha=0`**, only
+   its direction (non-increasing, per 1). The prior's write cost/premature
+   terms are unchanged by `alpha` (plan §3), so how much conservatism buys
+   is an empirical question this entry does not prejudge.
+
+**Falsification.** If write amplification does not move in a loosely
+monotone direction as `alpha` sweeps from 1 to 0, or if the `alpha=0` arm's
+`W` is not measurably different from the `alpha=1` arm's `W` at the same T,
+the read/write blend is not functioning as designed. Gates alpha-0/alpha-1
+should already catch a defect this basic before the sweep runs, but the
+sweep is the first at-scale check and a failure here is not to be
+reinterpreted as an "interesting result" without first re-auditing the
+mechanism.
+
+**Not included in this entry.** The runtime-switch-dynamics run and the
+non-stationarity stress test (plan §7.2-3) carry no predictions here; they
+were already deprioritized given the low expected change frequency and may
+be preregistered separately once the static sweep's behavior is confirmed
+sane.
+
 ---
 
 ## 2. Gate verdicts as measured

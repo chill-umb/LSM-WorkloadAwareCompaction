@@ -259,6 +259,10 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         "baseline_slo_sha256": metadata.get("baseline_slo_sha256", ""),
         "research_objective_sha256": metadata.get("research_objective_sha256", ""),
         "space_relative_margin": metadata.get("space_relative_margin", ""),
+        # RUNTIME_ALPHA_OBJECTIVE_PLAN.md. Absent (pre-existing arms) means
+        # the bit-identical default: alpha=1.0, not live-controlled.
+        "objective_alpha": metadata.get("objective_alpha", "1.0"),
+        "objective_alpha_live": metadata.get("objective_alpha_live", "0"),
         "elapsed_seconds": number(metadata.get("elapsed_seconds")),
         **amplification,
         "stall_seconds": tickers.get("rocksdb.stall.micros", 0.0) / 1e6,
