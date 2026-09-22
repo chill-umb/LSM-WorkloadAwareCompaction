@@ -1072,9 +1072,32 @@ turned out to decide the gate**; see the verdict below.
 
 **Execution record.** E-1 is **recorded failed** (2026-09-14, all three cells
 scored 2026-09-17); E-2 passes under an amended denominator; E-5 is satisfied
-(2026-09-19). The measurements, the retraction of the offline replay's
-per-level attribution, and the two corrections to the T=2 reading are in
-`docs/PREREGISTRATION.md`; the narrative is history Sections 14.8 and 14.9.
+on the *uniform* measurement (2026-09-19). The measurements, the retraction of
+the offline replay's per-level attribution, and the two corrections to the T=2
+reading are in `docs/PREREGISTRATION.md`; the narrative is history Sections 14.8
+and 14.9.
+
+**Status on `Assoc` (2026-09-22): guard protocol run, E-5 not yet measurable.**
+Nine calibration and nine holdout `oracle` arms at 10M × T=2/6/10. D-2's first
+prediction is confirmed (marginal rate below 0.20 in every cell, roughly halved
+against uniform); its second is **falsified** (leave-one-out misses by 7–12×, so
+the calibration's transfer claim is wrong). **E-5 remains unmeasured**: the
+holdout arm is `oracle`, force requires `due`, and the oracle compacts whenever
+due, so its conditional rate is zero by construction — a property of the holdout
+design, not a result about the guard. An arm that queries the server supplies
+both the conditional rate and the per-frame guard state the calibration lacks,
+with no rebuild.
+
+Audit, same date: the force condition has six terms and the calibration bounds
+three; discounting the three global terms still leaves the calibrated ones at
+3.5–10.7× their 1% budget; `due_age` and `pressure` latch by construction, so
+D-2's removal of the explicit latch was structurally partial; and the episode
+replay that would choose new limits spans 20× and matches none of its own score
+models. Limits were **not** re-fitted (measure-only). The remaining repairs —
+logging the per-frame score and pressure trajectory, `prohibit_optional`, a
+release-frame flag, and a ruling on the global terms — are C++ and are batched
+into Gate 2 with a hull re-measurement. Dated verdicts and the audit are in
+`docs/PREREGISTRATION.md`; the narrative is history Section 14.17.
 
 ## Pathway F — Dynamic SLO: phase-aware objective switching (Programme 2)
 
@@ -1305,12 +1328,24 @@ extract $\Delta S(\text{scale})$ per cell, per-level $\eta$, and populated $L$.
 - **Cost:** ≈ 48 h. Baseline-only. Sequence it to run *during* Gate 2's
   implementation — it is the one block that parallelises.
 
-**Status: complete, not passed (2026-09-19).** C-1 passes, C-5 is closed at
-$s_{\max} = 2.0$, and **C-2, C-3 and C-6 are recorded failed**. Measured on
-binary `deb6753c` under contract `87eaddbc`, so the hull is bound to a binary
-that no longer exists and must be re-measured. Evidence and the per-criterion
-reasoning are in `docs/PREREGISTRATION.md`; the narrative is history Sections
-14.7 and 14.9.
+**Status: re-measured on `Assoc` (2026-09-21); C-1 and E-2 pass, C-2 partial,
+C-3/C-4/C-6 not yet evaluable, C-5 open.** 182 `regular` arms at 10M on binary
+`9b9321b1…`: C-1 passes at 11/7/8 hull points of 12, C-2 reaches 18 of 26 points
+and **passes completely at $T{=}6$**, E-2 calibrates 100% of populated
+level-cells, and the cross-$T$ pooled hull holds 14 of 38 with $T{=}14$ and
+$T{=}20$ contributing none — the ratio axis is bounded above (P1-14). Two grid
+cells were found to be the *same* configuration: L0's byte branch (A3′) caps the
+effective trigger at roughly `max_bytes_for_level_base` / L0 file size, so
+triggers 8 and 16 at base 8 MiB are indistinguishable by construction. This
+should shape the Hull$_s$ grid at Gate 3c. C-3, C-4 and C-6 stay unevaluable
+until `prior_only` runs, which needs a guard-calibrated manifest; C-5 needs
+stage 16.
+
+**The superseded uniform measurement (2026-09-19)** recorded C-1 passing, C-5
+closed at $s_{\max} = 2.0$, and C-2, C-3 and C-6 failed, on binary `deb6753c`
+under contract `87eaddbc`. It is not re-scored. Dated verdicts and the
+per-criterion reasoning for both are in `docs/PREREGISTRATION.md`; the narratives
+are history Sections 14.7, 14.9 and 14.16.
 
 ### Gate 2 — Implementation (0 node-hours, longest calendar item)
 

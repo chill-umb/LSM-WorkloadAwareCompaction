@@ -380,6 +380,119 @@ bulk load. Fixed in submodule `25468bbaa`; the narrative is history Section
 `due_to_admission_latency` unscored; the artifact was regenerated under the
 suite's flags. The verdict is unchanged under either invocation.
 
+### Gate 1 — Hull₀ re-measured on `Assoc`, 2026-09-21
+
+**Verdict: C-1 passes, C-2 partial (18 of 26 points, complete at $T{=}6$), the
+cross-$T$ hull is measured, E-2 passes. C-3, C-4 and C-6 remain unevaluable
+pending `prior_only`; C-5 is open.** The 2026-09-12 record below is the uniform
+measurement on binary `deb6753c`; it is superseded as the programme's
+comparator and is not re-scored.
+
+**Execution.** 10M, workload `assoc-v1`, buffered I/O (`dio0`), binary
+`9b9321b1…`, objective `5857ad35…`. **182 `regular` arms**, one binary and one
+objective hash throughout: 36 configurations (L0 trigger 2/4/8/16 × level base
+8/16/32 MiB, `compaction_pri` pinned to 3) at 3 repeats = 108; a first top-up of
+62 arms over 26 hull points; a second of 6 arms over 4; and 6 cross-$T$ arms at
+$T = 14$ and $T = 20$, trigger 4, base 16 MiB, 3 repeats.
+
+**C-1 passes at every ratio**, needing 4 hull points of 12 and finding **11, 7
+and 8**. Membership is identical across all three extractions — at 108, 170 and
+182 arms — so 74 additional arms moved no point on or off the frontier.
+
+**C-2: 18 of 26 hull points, and $T{=}6$ passes completely (7 of 7).** That is
+the first complete C-2 pass in this project; the uniform gate failed C-2 at all
+three ratios. $T{=}2$ is 7 of 11 and $T{=}10$ is 4 of 8.
+
+C-2 reduces to one quantity — the gap to the nearest hull neighbour measured in
+units of run-to-run standard deviation, since $2t(n)\sigma/\sqrt{n} <
+\text{gap}/2$ is exactly $\text{gap}/\sigma > 4t(n)/\sqrt{n}$. That
+threshold is 4.97 at $n{=}5$, 2.86 at $n{=}10$ and **0.56 at $n{=}200$**, which
+is the wall. Across the 26 points the median is **5.75**, against **0.55** for
+the pair the 2026-09-12 gate was recorded failed on. The `Assoc` frontier is
+roughly ten times better separated relative to noise, which is why more than
+two thirds of the points are individually decidable where none were before.
+
+The eight failures have three distinct causes, and only one is about
+measurement:
+
+| cause | points | detail |
+| --- | ---: | --- |
+| duplicate configurations | **2** | $T{=}10$ trigger 8 and 16 at base 8 MiB, gap/σ **0.03 and 0.04** |
+| clustered at the low-$W$ end | 5 | gap/σ 1.59–2.33, needing 14–27 repeats, beyond the preregistered cap |
+| stopped by decision | 1 | $T{=}2$ trigger 16 / base 8 MiB, needs 10 and has 9 |
+
+**The duplicate pair is a collision in the grid, not a limit of the
+instrument.** L0's score is $\max(\text{files}/\text{trigger},\;
+\text{bytes}/\texttt{max\_bytes\_for\_level\_base})$ — assumption A3′ — so
+the byte branch caps the *effective* trigger at roughly
+$\texttt{base} / \text{L0 file size}$. At base 8 MiB against a 2 MiB write
+buffer that ceiling is about 4–5 files, and every configured trigger above it is
+dead. Measured directly, L0 compaction jobs in the measured phase are
+**107.7 / 107.7 at $T{=}2$, 113.0 / 113.0 at $T{=}6$ and 111.3 / 111.3 at
+$T{=}10$ — 0.00% apart** for triggers 8 and 16. No repeat count separates two
+identical configurations. This also explains the 2026-09-12 unresolvable pair,
+which was likewise at scale 0.5, i.e. base 8 MiB, and was recorded there as the
+frontier being denser than the instrument. A3′ was in the plan; nobody had
+connected it to the grid design. It should shape the Hull$_s$ grid at Gate 3c.
+
+**The point stopped by decision is recorded as such.** $T{=}2$ trigger 16 /
+base 8 MiB asked for 9 repeats, was given them, and came back asking for 10 —
+its gap/σ having *fallen* from 3.28 at $n{=}7$ to 2.97 at $n{=}9$. One further
+arm is inside the cumulative cap (it has spent 6 of 10), and it was not run.
+Running a criterion until it passes is how a preregistered criterion stops
+meaning anything, and a point that moves backwards on the deciding statistic
+after being given what it asked for is not under-sampled. Two top-up passes
+against a criterion recorded failed outright last time is already generous.
+
+**The cap was scored cumulatively, which the tool does not do.**
+`15_top_up_hull.py` compares `target - have` against `--add-cap`, so it
+enforces the limit *per pass*; PATHWAYS preregisters ten additional arms *per
+configuration*. The second pass was therefore selected to keep every
+configuration within ten cumulative additional arms, excluding $T{=}2$
+trigger 16 / base 16 MiB, which would have reached eleven.
+
+**C-6's input is measured: the cross-$T$ pooled hull holds 14 of 38 points**,
+contributed $T{=}2$ 8/12, $T{=}6$ 4/12, $T{=}10$ 2/12, **$T{=}14$ 0/1 and
+$T{=}20$ 0/1**. Both cross-$T$ cells are dominated by one $T{=}10$
+configuration — trigger 2 at base 8 MiB, $W = 9.0322$, $R = 3.4289$ — which is
+better on write *and* point-read simultaneously than $T{=}14$ (9.4225, 3.7713)
+and $T{=}20$ (10.1312, 3.5994). **The ratio axis is bounded above**, which is
+what P1-14 added these cells to establish, and the conclusion is slightly
+stronger than on uniform, where $T{=}14$ contributed one point. The cross-$T$
+cells carry 3 repeats against 5–9 elsewhere; this does not weaken the reading,
+because being dominated is easier to establish than being on the hull and
+neither point is marginal.
+
+**E-2 passes at 100%.** Calibrated populated level-cells are **8/8, 4/4 and
+4/4** at $T = 2/6/10$ against a 90% threshold on the populated denominator
+(amended 2026-09-14). Every populated level rests on a
+`censored_order_statistic_tolerance_bound` at 0.99 coverage and 0.95 achieved
+confidence, with **no bootstrap caps anywhere**. `allowed_pending_debt_ratio` is
+4.4284, 2.9641 and 2.2954, comparable to uniform's 4.141, 2.689 and 2.718.
+
+**Comparators selected by stage 06**, base 16 MiB at every ratio: **trigger 2 at
+$T{=}2$, trigger 4 at $T{=}6$, trigger 2 at $T{=}10$**.
+
+**D-3's first prediction is confirmed, and it changed a comparator.** Under the
+measured denominator the space filter admits **4 of 4** triggers at every ratio;
+under the superseded estimate it would have admitted 2 of 4 at $T{=}2$, **1 of
+4** at $T{=}6$ and 4 of 4 at $T{=}10$. At $T{=}6$ the estimate admitted a single
+configuration, so the comparator was forced to trigger 2; with the filter no
+longer binding, the runtime tie-break selected trigger 4. $T{=}2$ and $T{=}10$
+select trigger 2 either way. The prediction was recorded before stage 06 ran
+(commit `b5fd0ce`, 17:06 UTC, which also precedes the guard protocol and every
+learned arm).
+
+**Still open.** C-3, C-4 and C-6 need `prior_only`, which needs a
+guard-calibrated manifest — the Pathway E protocol, which has not run on
+`Assoc`. C-5 needs stage 16 and the `STATIC_CAPACITY_SCALES` vectors. **No
+policy arm has been run on this workload**, so nothing here bears on whether the
+controller contributes anything.
+
+**Evidence.** `results/baseline_sweep/` (182 arms), `gate1/hull-T{2,6,10}.json`,
+`gate1/hull-crossT.json`, `gate1/hull_indistinguishable.tsv`,
+`baseline_selection/assoc-v1/10M/T{2,6,10}/baseline_slo.json`.
+
 ### Gate 1 — Hull₀ and space calibration
 
 **Result, 2026-09-12.** Executed at 10M with buffered I/O (`dio0`), contract v3
@@ -678,6 +791,158 @@ dominates everywhere; 42-53% of override frames have no instantaneous term
 true, consistent with the sticky retention branch carrying the force.
 
 ---
+
+---
+
+### Guard protocol on `Assoc`, 2026-09-21/22: D-2 scored, and the calibration audited
+
+**Timing, stated first.** The runs completed 2026-09-21 19:51 UTC. T=2 was
+scored the same evening; T=6 and T=10 on 2026-09-22, after the defect below was
+found. The audit is 2026-09-22. **Nothing here amends a criterion.** D-2 fixed
+E-5 as the decider and recorded both of its predictions on 2026-09-20,
+committed ahead of these runs; this entry scores them as measured. No limit was
+re-fitted — see "Measure-only" below.
+
+**Execution.** Nine `oracle` calibration arms (seeds 1001–1003) and nine
+`oracle` holdout arms (seeds 11001–11003), 10M at T = 2, 6 and 10, three
+repeats per cell, binary `9b9321b1…`, manifest `0bb12249…`.
+`enforcement_enabled` is false and `actual_interventions` is **0 on every run**:
+this is shadow classification and nothing was perturbed.
+
+| cell | marginal override, per run | mean | leave-one-out prediction | ratio |
+| --- | --- | ---: | ---: | ---: |
+| T=2 | 0.1393, 0.1251, 0.1161 | 0.1268 | 0.0106 | **12.0×** |
+| T=6 | 0.0779, 0.0745, 0.0758 | **0.0760** | 0.0107 | **7.1×** |
+| T=10 | 0.1234, 0.1250, 0.1222 | 0.1235 | 0.0099 | **12.5×** |
+
+**D-2 prediction 1 — "the marginal rate falls below 0.20 in every cell" —
+CONFIRMED.** Against the uniform figures of 0.3356 / 0.1567 / 0.1983, the rate
+roughly halved in every cell. Attribution is not clean: the latch removal, the
+workload change and the recalibration all landed together, and this entry does
+not claim the latch alone.
+
+**D-2 prediction 2 — "the leave-one-out prediction brackets it within a factor
+of three" — FALSIFIED in all three cells**, at 7.1×, 12.0× and 12.5×. D-2's own
+falsification clause applies verbatim: *the calibration's transfer claim is
+wrong and must be reported as such.* Leave-one-out was the out-of-sample
+estimate the in-sample number was supposed to be checked against, and it
+under-predicts by an order of magnitude.
+
+**E-1 fails by 12.7×, 7.6× and 12.4×** at T = 2, 6 and 10. Reported without a
+pass/fail, per D-2, which retired it as a decider on 2026-09-20.
+
+**E-5 is NOT MEASURED, and this holdout cannot measure it.** The arm is
+`oracle`, whose rule is `score >= 1 → compact`, and `item.force` requires
+`item.due` (`compaction_picker_rl.cc:1322`). Force can therefore only land on a
+level the oracle was already compacting, so the conditional rate is zero by
+construction. This reproduces the 2026-09-17 finding and is a property of the
+holdout design, not a result about the guard.
+
+**The T=10 mechanism is identified, and it closes a question open since
+2026-09-17.** Schema 3 logs the three global terms per frame, so the
+attribution is read from a log rather than reconstructed:
+
+| cell | override frames | from a global term | `slo_force_due` | `l0_slowdown` | `global_debt_breach` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| T=2 | 1272 | 200 | 28 | 66 | 145 |
+| T=6 | 502 | 45 | 21 | 24 | 0 |
+| T=10 | 739 | **524** | **524** | 45 | 0 |
+
+At T=10 the global terms carry **71%** of all overrides, almost entirely
+`slo_force_due`. History 14.8 named `l0_slowdown` as the leading unconfirmed
+candidate for the 14.4% the offline replay could not attribute; that guess is
+**wrong and is retracted**. `l0_slowdown` is a minor term in every cell.
+
+---
+
+**Audit of the calibration, 2026-09-22.** Four findings, none previously
+recorded.
+
+1. **The force condition has six terms; the calibration bounds three.**
+   `compaction_picker_rl.cc:1322` forces on `due_age >= limit || pressure >=
+   limit || score >= limit || global_debt_breach || slo_force_due ||
+   l0_slowdown`. `frame_simulated_limits` fits its 1% joint target over the
+   first three only, and its own docstring states the other three are not
+   modelled because no per-frame record existed when it was written. The last
+   three are global: one breach forces every due level in that frame. **A
+   budget fitted to half a disjunction cannot bound the whole.**
+
+2. **Discounting the global terms does not rescue it.** Counting only override
+   frames on which no global term is true:
+
+   | cell | per-level-only override | vs the 1% budget |
+   | --- | --- | ---: |
+   | T=2 | 0.1050 – 0.1070 | **10.5× – 10.7×** |
+   | T=6 | 0.0669 – 0.0692 | **6.7× – 6.9×** |
+   | T=10 | 0.0346 – 0.0359 | **3.5× – 3.6×** |
+
+   The upper end is every frame with no global term true; the lower end
+   subtracts one release frame per override event. Even restricted to exactly
+   the terms it does calibrate, the guard misses its own budget by 3.5–10.7×.
+
+3. **`due_age` and `pressure` latch by construction, so D-2's `retain` removal
+   was structurally partial.** Both quantities only grow while a level is due,
+   so once either crosses its limit it stays crossed for the rest of the due
+   run whatever the retention rule does. Measured: the override frames form
+   only **20, 15 and 8 events** carrying 1272, 502 and 739 frames — a mean
+   engagement of 64, 34 and 92 frames (3.2 s, 1.7 s, 4.6 s). D-2 removed the
+   explicit latch; the implicit one in the monotone terms remains, and it is
+   why the rate halved rather than falling to the target.
+
+4. **The calibration instrument cannot predict what any limits would achieve.**
+   Replaying the exported limits against the holdout's *own* episodes under the
+   three score models the calibration publishes:
+
+   | cell | flat | ramp *(used to set limits)* | upper | measured per-level |
+   | --- | ---: | ---: | ---: | ---: |
+   | T=2 | 0.0195 | 0.0168 | 0.3397 | **0.105** |
+   | T=6 | 0.0174 | 0.0155 | 0.3869 | **0.069** |
+   | T=10 | 0.0168 | 0.0111 | 0.3958 | **0.035** |
+
+   The measurement lands inside the bracket and **matches none of the three
+   models**, and the bracket spans 20× at T=2. The decomposition rules out the
+   easy explanation: `due_age` needs no model — it is exact from the episode
+   start — and predicts only 0.0138 / 0.0124 / 0.0069. The missing information
+   is the per-frame *pressure* and *score* trajectory, which
+   `pressure_episodes.jsonl` does not carry; it stores episode summaries only.
+
+**Instrumentation gaps recorded, not closed.** Schema 3 added the three global
+terms but not `prohibit_optional` (the write-side trip behind
+`revoke_optional`), and there is no per-frame release-frame flag. An override
+frame with no global term true is therefore one of three things — a per-level
+force, a release frame, or a write-driven revoke — and the log cannot separate
+them. On uniform, 14.9 established `revoke_optional` never fired; on `Assoc`
+that is unverifiable rather than measured. Both are C++ changes and both are
+deferred to Gate 2, because a rebuild changes `dbbench_sha256` and
+`frontier_analysis.py:196` refuses to pool the 182-arm Hull₀ across binaries.
+
+**Measure-only, decided 2026-09-22 before any arm runs under a changed
+manifest.** The per-level limits live in `baseline_slo.json`, which is data: a
+manifest change alters no `experiment_fingerprint` (`03_run_experiments.sh:678`
+carries no manifest hash) and would not void the hull. They are nevertheless
+**not re-fitted**. Choosing new limits after observing 0.035–0.107 is fitting to
+the outcome, which is the objection that kept C-2 and E-1 recorded failed; and
+independently, finding 4 shows there is no instrument with which to predict what
+new limits would achieve. The next step is to *measure* the per-frame guard
+state — `rl_agent/server.py:92` logs `"input": raw_state` every frame and the
+protocol-v2 per-level state carries `due_age_micros`, `pressure_score_micros`,
+`score` and `files` (`multilevel.py:152–188`), which is exactly the missing
+quantity and needs no rebuild. The `oracle` arm does not query the server, which
+is why this holdout has no such log. If a re-fit is ever taken, it requires its
+own dated entry with a falsifiable prediction, recorded before the run it
+governs, on the D-3 precedent.
+
+**A defect in the scoring loop, fixed.** `06_run_guard_protocol.sh` scored the
+cells under `set -Eeuo pipefail`, so the validator's non-zero exit at T=2
+aborted the loop and left T=6 and T=10 unscored — the same failure as
+2026-09-14, which history 14.8 recorded and stated the fix for ("the validator
+is a scoring step, so a failing cell is a result, not an error") without the
+script ever being changed. It now scores every cell, reports each one, and exits
+on the worst status at the end.
+
+**Evidence.** `results/guard/assoc-v1/{calibration,holdout}/10M/T{2,6,10}/repeat-*/oracle/{safety_shadow,pressure_episodes}.jsonl`,
+`results/guard/assoc-v1/holdout/readiness-10M-T{2,6,10}.json`,
+`baseline_slo/assoc-v1/10M/T{2,6,10}/baseline_slo.json`.
 
 ---
 

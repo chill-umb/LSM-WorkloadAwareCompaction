@@ -56,14 +56,31 @@ DB_ROOT="$GUARD_DB_ROOT/$WORKLOAD_PROFILE/holdout" \
 RESUME="${RESUME:-0}" CONFIRM_EXPERIMENTS=YES \
 "$PIPELINE_DIR/03_run_experiments.sh"
 
+# The validator is a SCORING step, so a failing cell is a result, not an
+# error. Under `set -Eeuo pipefail` a non-zero exit here aborted the loop and
+# left the remaining cells unscored: that happened on 2026-09-14 (T=6 and T=10
+# scored only on 2026-09-17, by hand) and again on 2026-09-21, when only T=2
+# was scored. Score every cell, remember the worst status, and exit on it at
+# the end.
+holdout_rc=0
 for size_m in $WORKLOAD_SIZES_M; do
   for ratio in $SIZE_RATIOS; do
     manifest="$FINAL_SLO_ROOT/$WORKLOAD_PROFILE/${size_m}M/T${ratio}/baseline_slo.json"
     output="$holdout_results/readiness-${size_m}M-T${ratio}.json"
+    cell_rc=0
     "$PIPELINE_DIR/06_validate_guard_holdout.py" \
       --manifest "$manifest" --holdout-results "$holdout_results" \
-      --repeats "$HOLDOUT_REPEATS" --output "$output"
+      --repeats "$HOLDOUT_REPEATS" --output "$output" || cell_rc=$?
+    if (( cell_rc != 0 )); then
+      echo "[guard holdout] ${size_m}M T=${ratio} scored NOT PASSED (exit ${cell_rc}): $output" >&2
+      holdout_rc="$cell_rc"
+    fi
   done
 done
+
+if (( holdout_rc != 0 )); then
+  echo "Guard holdout scored every cell; at least one did not pass: $WORKLOAD_PROFILE" >&2
+  exit "$holdout_rc"
+fi
 
 echo "Guard calibration and independent holdout passed: $WORKLOAD_PROFILE"
