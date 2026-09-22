@@ -43,9 +43,9 @@ explicitly promotes it.
 | --- | --- | --- |
 | Build (RocksDB + db_bench on the node) | The code compiles on this hardware | done |
 | §3: 10M/T=2 baseline manifest | Prerequisite artifact for every gate below | **done** — `baseline_slo/assoc-v1/10M/T2/baseline_slo.json` |
-| §4: Gate α-0 (regression) | `alpha=1.0` changes nothing | not started |
-| §5: Gate α-1 (flip sanity) | `alpha=0.0` removes read-side credit | not started |
-| §6: Gates α-2/α-3 (live reload) | The control file works, mid-run, without corruption | not started |
+| §4: Gate α-0 (regression) | `alpha=1.0` changes nothing | **done, passed** |
+| §5: Gate α-1 (flip sanity) | `alpha=0.0` removes read-side credit | **done, passed** (after the fingerprint fix, §0a of the plan doc) |
+| §6: Gates α-2/α-3 (live reload) | The control file works, mid-run, without corruption | **done, passed** — reload latency ~1.1ms, single clean flip |
 | §7: Gate α-4 (local smoothness) | The alpha-conditioned network behaves sanely near a trained point | not started |
 | §8: Frontier sweep | Does the alpha dial trace a usable read/write tradeoff | **blocked** — needs the `Assoc` Gate 1 hull, which has not been re-measured yet |
 | §9: Runtime-switch dynamics | Realistic infrequent-flip usage pattern | deferred, low priority per your stated usage |
@@ -275,7 +275,10 @@ actually producing decisions, then flip the file:
 ```bash
 RESULTS_ROOT=/home/cc/lsm-workload/LSM-WorkloadAwareCompaction/results/alpha-live
 DB_ROOT=/home/cc/lsm-workload/LSM-WorkloadAwareCompaction/db/alpha-live
-mkdir -p "$RESULTS_ROOT" "$DB_ROOT"
+# Do NOT pre-create these directories: 03_run_experiments.sh refuses to
+# start if RESULTS_ROOT already exists at all (`[[ -e "$RESULTS_ROOT" ]]`,
+# not "already has a completed run in it") and creates both itself,
+# internally, right after that check passes.
 RESULT_DIR="$RESULTS_ROOT/10M/T2/rl-alpha1.0live"
 
 WORKLOAD_SIZES_M=10 SIZE_RATIOS=2 EXPERIMENT_ARMS=rl REPEATS=1 \
@@ -300,31 +303,40 @@ Polling for the log file rather than a fixed `sleep N` before starting is
 deliberate — a fixed guess is either too short (misses the run entirely on a
 fast machine) or wastes time on a slower one.
 
-**What to check for α-2 (reload latency):**
+**What to check for α-3 first (clean transition)** — do this before α-2,
+since it tells you which line number the flip happened at, which α-2 then
+uses. `io.jsonl` can be tens of thousands of lines, so don't dump the whole
+file — print only where the value actually *changes*:
+
+```bash
+jq -r '.reward_components.objective_alpha' "$RESULT_DIR/io.jsonl" | \
+  awk 'NR==1{prev=$0; print NR": start="$0}
+       $0!=prev{print NR": "prev" -> "$0; prev=$0}
+       END{print NR": end="prev}'
+```
+
+**Pass:** exactly one transition line, `1.0 -> 0.0`, plus possibly a
+`0.0 -> null` transition right at the very end. That trailing `null` run is
+the per-level terminal ("shutdown") frames — `_global_reward()`
+short-circuits on `done` and returns no `objective_alpha` key at all, same
+as gates α-0/α-1 — not a failure. **Fail** looks like more than one
+non-terminal transition (flickering back and forth) or a value other than
+`1.0`/`0.0`/`null` appearing anywhere.
+
+**What to check for α-2 (reload latency)**, using the line number the α-3
+check just found (substitute your own — `2449` below is an example):
 
 ```bash
 jq -c '.constrained_reward.objective_alpha_reload_events' \
   "$RESULT_DIR/server_summary.json"
-jq -c 'select(.reward_components.objective_alpha == 0.0) | .ts' \
-  "$RESULT_DIR/io.jsonl" | head -1
+jq -c '.ts' "$RESULT_DIR/io.jsonl" | sed -n '2449p'
 ```
 
-**Pass:** the timestamp of the first `alpha=0.0` decision is within roughly
-one decision interval (50 ms, plus normal scheduling jitter) of the reload
-event's own timestamp — not seconds later.
-
-**What to check for α-3 (clean transition):**
-
-```bash
-jq -c '[.ts, .step, .reward_components.objective_alpha] | @tsv' \
-  "$RESULT_DIR/io.jsonl"
-```
-
-**Pass:** the `objective_alpha` column is `1.0` for a prefix of lines, then
-`0.0` for the rest, with no line in between showing an inconsistent or
-missing value. (Per the design note in `RUNTIME_ALPHA_OBJECTIVE_PLAN.md` §4,
-this should hold *by construction* — the gate exists to catch a future
-regression, not because a failure is expected here.)
+The first command prints the server's own record of when it noticed the
+file change; the second prints the timestamp of the exact decision where
+α-3 found the flip. **Pass:** those two timestamps are within about 50 ms
+of each other (one decision interval) — measured on this node, the gap was
+about 1.1 ms.
 
 ---
 
@@ -338,17 +350,33 @@ cold start, which this project's own no-pretraining rule makes unrealistic
 to expect (see the plan doc §2a for why that scope limit is deliberate).
 
 **Procedure** (analysis only, using the checkpoint and states already
-produced by §6's run): load `$RESULT_DIR/model.pt`, take a handful of real
-states logged in `io.jsonl` near the end of the `alpha=0.0` segment, and
-query the network's Q-values at that state with the alpha input perturbed to
-nearby values (e.g. 0.0, 0.05, 0.1, 0.15) instead of the true one.
+produced by §6's run — no new experiment). `scripts/dbbench_pipeline/
+check_alpha_smoothness.py` loads the saved per-level checkpoint, takes the
+last few real states logged for that level (from `metrics.jsonl`, which
+already carries the exact post-encoding feature vector, alpha included), and
+queries the network's Q-values at each state with the alpha input perturbed
+to nearby values instead of the true one:
 
-**Pass:** the implied action ranking (compact vs. defer) and the Q-value gap
-between them change smoothly across those nearby values — no sign flip or
-discontinuity between adjacent points.
+```bash
+scripts/dbbench_pipeline/check_alpha_smoothness.py \
+  "$RESULT_DIR" --level 0 --states 5 --alphas 0.0 0.05 0.1 0.15 0.2
+```
 
-This is deferred as a small follow-up analysis script once §6's data exists,
-rather than written speculatively now.
+**Pass:** for each probed state, the implied action (`compact`/`defer`) and
+the advantage (`Q_compact - Q_defer`) move smoothly across adjacent alpha
+values — the advantage should change gradually, and any action flip should
+happen at roughly the same alpha across the probed states, not jump around
+unpredictably. The script marks every flip inline (`<-- action flip vs
+previous alpha`) so they're easy to spot without eyeballing every number.
+**Not a failure by itself:** a *single*, consistent flip point across states
+is expected and healthy — it's exactly what "the network learned where the
+decision boundary is" looks like. What would fail this gate is a flip point
+that differs wildly between very similar states, or an advantage that jumps
+non-monotonically rather than sliding.
+
+Run it once per level worth checking — L0 (the default) is the most active
+and the best first check; repeat with `--level 1`, `--level 2`, etc. if L0
+looks clean and you want more coverage.
 
 ---
 
