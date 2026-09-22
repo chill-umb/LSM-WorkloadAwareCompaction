@@ -675,6 +675,60 @@ and its logged components, `reward_state`), `rl_agent/server.py` (startup
 banner). Python only: no rebuild, `dbbench_sha256` unchanged, the 182-arm
 Hull-0 and the guard manifests stand.
 
+### D-7, 2026-09-22 — what the learner is expected to do on `Assoc`
+
+**Recorded before any `rl` arm has run on `Assoc`, on this binary, or under the
+P1c-22 reward.** Nothing here can be fitted to an outcome: the learned arms of
+2026-09-03 ran on the uniform workload, under the superseded reward, and with
+the pre-D-4 prior. All three have since changed, so §10.7's measured behaviour
+is not a baseline expectation and this entry says what replaces it.
+
+**Why a prediction is owed.** §10.7 Finding 3 measured the residual deferring
+top-of-tree compaction, deepening the tree by one to three levels, and trading
+part of the prior's read advantage for space amplification. That was rational
+for the reward it was given — $\Phi$ treated space as a quantity to minimise.
+P1c-22 removed space as a minimand and D-6 repaired the hinge that replaced it.
+If the same behaviour reappears, the repair is incomplete, and the cheapest
+time to say so is before the run.
+
+**Predictions.**
+
+1. **Depth does not inflate.** $\delta L = 0$ against the paired `regular` arm
+   in every cell, measured from `levelstats` and the release events. §10.7's
+   +1 / +1 / +3 does not reproduce.
+2. **$\lambda_W$ binds and $\lambda_S$ does not.** At the end of every run
+   $\lambda_S < \lambda_W$, and $\lambda_S$ plateaus rather than rising
+   monotonically (D-6 predictions 1 and 2, restated here as policy outcomes).
+3. **E-5 becomes measurable for the first time, and passes.** The conditional
+   override rate exceeds 0.001 in at least one cell — i.e. the policy actually
+   disagrees with the guard, which neither the `oracle` holdout nor
+   `prior_only` can do — and stays $\le$ 1% in every cell. A conditional rate
+   of exactly zero everywhere would mean E-5 is undecidable by any arm this
+   programme has, which is a reportable negative result about the criterion.
+4. **The residual moves.** Argmax flip rate $>$ 0.1 per level (Pathway D's D-5
+   threshold); on uniform at 10M it reached 0.42–0.73.
+5. **No read gain at the trigger-2 comparators.** At $T{=}2$ and $T{=}10$ the
+   comparator is L0 trigger 2, where no below-threshold band exists (D-5) and
+   the only lever is deferring a due level, which costs reads through depth
+   (D-4). So $\Delta R$ against `regular` does not fall below −2% at either
+   cell. $T{=}6$ carries trigger 4 and may improve, bounded by the band's
+   measured trade of 2.75 reads per unit of write.
+
+**Falsification.** Prediction 1 is the load-bearing one. If depth inflates, the
+reward still credits something the criteria do not, D-6 must be reported as an
+incomplete repair rather than a fix, and the run is diagnostic rather than
+evidential.
+
+**What this does not claim.** Nothing here predicts that `rl` beats the hull.
+C-4 is the criterion for that and is not evaluable until Hull$_s$ exists at
+Gate 3c. A policy can satisfy every prediction above and still be dominated;
+that outcome is reported as dominated.
+
+**Scope.** 10M, $T$ = 2/6/10, three repeats, `rl` and `unconstrained_rl`, on
+binary `9b9321b1…` at the stage-06 comparators. Three repeats is a mechanism
+count, not an acceptance count; no criterion carrying a 2% margin is scored
+from it.
+
 ---
 
 ## 2. Gate verdicts as measured
