@@ -337,7 +337,7 @@ def main() -> None:
           f"gamma_per_sec={config.GAMMA_PER_SEC} "
           f"eval_mode={config.EVAL_MODE} "
           f"write_bound={config.WRITE_BOUND:.4f} "
-          f"space_bound={config.SPACE_BOUND:.4f} "
+          f"space_bytes_bound={config.SPACE_BYTES_BOUND:.0f} "
           f"scan_seeks_bound={config.SCAN_SEEKS_BOUND:.4f}")
 
     pool = multilevel.AgentPool()

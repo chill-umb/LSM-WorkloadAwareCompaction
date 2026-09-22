@@ -330,6 +330,351 @@ and the B.1 ceiling; the manifest metric description in
 **Evidence.** `results/baseline_sweep/*/10M/T*/repeat-*/regular/{sizes.env,run.log}`,
 108 runs, fingerprint `assoc-v1:…:binary9b9321b1…`.
 
+### D-4, 2026-09-22 — the prior compacts a deep level only when RocksDB scores it due
+
+**Recorded after the `Assoc` Hull-0 sweep and the guard protocol, and before
+any policy arm has run on `Assoc`.** It follows a structural audit of
+`analytic_advantage` against PATHWAYS, prompted by the 2026-09-19 uniform C-3
+failure and by A-0's attribution of the prior's whole write excess to
+eagerness. It does not re-score C-3, and there is no `Assoc` measurement of
+the prior to fit to: every number below comes from the code evaluated on the
+pipeline's geometry and from the `regular` sweep.
+
+**What was found.** For levels $\ge 1$ the prior's benefit side was
+`stall_urgency = fullness²` with `fullness = clamp(bytes / target)`. Below
+score 1 a deep level stalls nothing — the only deep-level stall path is
+`estimated_compaction_needed_bytes` against a 64 GiB soft limit, on a tree of
+about 3 GB — so the term was a "due soon" signal. Its cost side,
+`work_now = (1 + overlap/bytes) / size_ratio`, is fed `overlap_bytes` computed
+over the whole level's key span (`NextLevelOverlapBytes`), so overlap
+$\approx T \cdot$ bytes and the term clamps to 1.0 whenever the level below is
+full: a constant, not a cost. Evaluated over the pipeline geometry (2 MiB
+flush, 512 KiB SST, 16 MiB base) the prior authorises a deep compaction at
+**0.82–0.92 of target** ($T$ = 10/6/2), against native's measured
+φ-at-release p50 of **1.01–1.24** on the `Assoc` comparators. P1c-23's depth
+charge ($-0.6 \cdot$ exposure when the output would populate an empty level)
+loses to the urgency term in every state tried (advantage +0.12 to +0.78), so
+the prior grows depth on demand. And it never defers due work: at score
+$\ge 1$ the advantage is a flat +0.2 or more.
+
+Under the constrained objective this is incoherent at every deep level. By A4
+a deep level is one sorted run whatever its size, so compacting it early buys
+nothing on $R$; by Theorem B.1 it forfeits the overwrites a later merge would
+have dropped — and `Assoc` has them: $\eta$ = 0.84 / 0.86 / 0.93 at L1 and
+0.76 / 0.88 / 0.87 at L2 for $T$ = 2 / 6 / 10 in the sweep — so it can only
+add $W$. A-0 measured exactly this: $D_{\text{eager}}$ 100%, $D_{\text{depth}}$
+0, in every cell.
+
+**Decision.** For level $\ge 1$, `stall_urgency` becomes the due indicator
+`score >= 1.0` — the same predicate the native picker and the guard use — and
+the depth charge is removed. The deep branch is therefore
+$W_{\text{stall}} \cdot [\text{due}] - W_{\text{work}} \cdot \text{work\_now}
+- W_{\text{prem}} \cdot \text{premature}$, strictly negative below due and at
+least +0.2 at due: **a deep level compacts if and only if RocksDB would
+compact it.** L0 is unchanged from P1c-23. The prior's whole contribution
+against the static twin is now the L0 proactive band, which exists only at
+triggers $\ge 3$.
+
+**Why the depth charge goes rather than being strengthened.** Output into an
+empty level is a trivial move, free on $W$, so deferring it saves no write;
+Corollary A.3 says removing a level — holding the bottom level over target —
+is never write-profitable for $T \ge 2$; and under enforcement the guard's
+due-age limit at the bottom levels is tens of milliseconds (61.6 ms at L7,
+history 14.8), so a hold would be forced open almost at once and counted
+against E-5.
+
+**What this is not.** It is not a deferral policy. B-3's lever — hold a due
+level so more overwrites accumulate before the merge — is left to the learned
+residual, for two reasons recorded here: the protocol carries no per-level
+garbage observable that could drive a prior term with a falsifiable
+prediction, and under enforcement any deferral past native's due-age envelope
+is forced by the guard (D-2, history 14.17), so on `prior_only` it could not
+be measured in any case.
+
+**Predictions, recorded in advance.** On `prior_only` and
+`unconstrained_prior_only` at 10M, $T$ = 2 / 6 / 10, against the
+same-configuration `regular` twin from the Hull-0 sweep
+(`frontier_analysis.paired_comparison`, as in history 14.10):
+
+1. **Mechanism.** φ at release (`compaction_measurements.json` `releases`,
+   workload phase, trivial moves and drain excluded) at every populated level
+   $\ge 1$ has p50 $\ge 0.98$ and within 0.05 of the twin's. Under the
+   superseded prior the code's own flip points put it at 0.82–0.92.
+2. **Merge survival.** Per-level $\eta$ (`views.workload.levels`) at L1 and
+   L2 within $\pm 0.03$ of the twin's.
+3. **Trigger-2 cells ($T$ = 2 and $T$ = 10), where no L0 band exists.** Mean
+   paired relative $\Delta W$ and $\Delta R$ against the twin both inside
+   $\pm 2\%$; at ten repeats the upper 95% bound on $\Delta W$ is $\le +2\%$.
+   The prior is native there and should be indistinguishable from it.
+4. **$T$ = 6 (trigger 4), the L0 band in isolation.** $\Delta W \in [+2\%,
+   +12\%]$ and $\Delta R \in [-3\%, -12\%]$. This is the first measurement of
+   the band's write cost with deep eagerness removed; it is expected to
+   exceed $\delta_W$.
+5. **E-5 on `prior_only` is zero by construction** — prior-compact ⟺ due at
+   deep levels, and `RL_L0_ALLOW_DEFER=0` promotes any due L0 defer — so
+   `prior_only` passes E-5 vacuously, exactly as the `oracle` holdout did,
+   and cannot test the guard. E-5 is decided on `rl`.
+
+**What this predicts for C-3, stated plainly: not a pass.** At $T$ = 2 and
+$T$ = 10 the prior sits on its twin, which is on or near the hull:
+non-dominated, contributing nothing. At $T$ = 6 it trades reads for writes
+outside the margin and is expected to be dominated by a static point with a
+lower trigger. D-4's purpose is to stop the prior spending write budget where
+it buys no reads, so that what remains is the one lever the theory names,
+measured cleanly.
+
+**Falsification.** If prediction 1 fails, the change did not reach the plant
+— an implementation defect, to be fixed before anything else is read. If 1
+and 2 hold and 3 fails, the prior's write excess has a component other than
+eagerness that A-0 did not see, and that is reported as a correction to A-0.
+
+**Not taken, and why.** `work_now`'s normalisation stays (`/ size_ratio`,
+where the typical overlap ratio is itself $\approx T$): under D-4 it only
+grades the advantage at due, where the decision is already made. The L0
+band's threshold stays at P1c-23's ruling; prediction 4 measures it.
+`PRIOR_W_READ` is now inert and is kept as an ablation knob.
+
+**Timing, and what git does and does not prove.** This entry and the code it
+governs were committed **after** the arms that test it. The edit's file mtime
+is 2026-09-22 08:07 UTC and the entry's 08:08; the first arm completed at
+09:05, so the change was live for every run and the numbers are valid. But
+mtimes survive no clone and any `touch` rewrites them, so **there is no dated
+evidence that these predictions preceded the run**, and D-4 is therefore a
+weaker record than D-1, D-2 or D-3. It is stated here rather than left for a
+reader to discover, on the 14.15 precedent. The same applies to D-5.
+
+**Predictions as scored, 2026-09-22** (`results/paired-assoc`, three repeats,
+against the same-configuration static twin):
+
+| # | Prediction | Result |
+| --- | --- | --- |
+| 1 | $\varphi$@release p50 $\ge$ 0.98 and within 0.05 of twin, every level $\ge$ 1 | **FAILED** at $T{=}6$ (L1 −0.062); passed at $T{=}2$ (0.003) and $T{=}10$ (0.001) |
+| 2 | $\eta$ at L1/L2 within $\pm$0.03 | passed, max 0.008 |
+| 3 | $T{=}2$/$T{=}10$ $\Delta W$, $\Delta R$ within $\pm$2% | passed: +0.09/+1.14, +0.10/+0.74 |
+| 4 | $T{=}6$ $\Delta W \in [+2,+12]\%$, $\Delta R \in [-3,-12]\%$ | passed: +2.07, −5.69 |
+| 5 | E-5 on `prior_only` zero by construction | confirmed: 0.0006 / 0.0000 / 0.0007 |
+
+**Prediction 1 is recorded failed and is not reworded.** The rule it was
+testing is confirmed by a direct measurement the prediction did not use:
+**zero deep-level releases below due, 0 of ~20,000** merges across all three
+cells. The $T{=}6$ gap is a downstream effect of the L0 proactive band, which
+exists only at that cell's trigger of 4 — D-5 was preregistered to test that
+reading and confirms it. The prediction was mis-specified: it used the static
+twin as the reference for a deep-level property, but the twin also differs in
+the L0 band, so it measured two things at once. The φ-below-due count is the
+clean test and is what any successor should use.
+
+**Implementation.** `rl_agent/multilevel.py` `analytic_advantage`, deep
+branch only, and a comment in `rl_agent/config.py`. Python only: no rebuild,
+`dbbench_sha256` unchanged, the 182-arm Hull-0 stands.
+`docs/physics_informed_rl_architecture.md` §3.1 describes a superseded form
+and is not the specification; this entry is.
+
+**Evidence.** The decision map is reproducible from the pipeline constants;
+native φ-at-release and $\eta$ from
+`results/baseline_sweep/{T2-l0-2,T6-l0-4,T10-l0-2}-20-36-pri3-base16777216/10M/T*/repeat-0{1,2,3}/regular/compaction_measurements.json`.
+
+### D-5, 2026-09-22 — the L0 proactive band is measured at a fixed trigger across ratios
+
+**Recorded after the D-4 arms were scored at the comparators stage 06 selected
+(L0 trigger 2 / 4 / 2 at $T$ = 2 / 6 / 10), and before the control runs below.**
+Those arms are not re-scored and the programme's comparator does not change:
+trigger 2 / 4 / 2 remains what stage 06 chose on 2026-09-21, before any policy
+arm existed. This entry adds arms at a configuration the comparator rule did
+not pick; it does not re-pick it.
+
+**What was found.** Stage 06 selects minimum-space, then fastest, then lower
+$W$. Under D-3's denominator the space filter admits all four triggers at
+every ratio, so runtime decides — and at $T{=}6$ triggers 2 and 4 came in at
+**156.487 s and 156.803 s on three repeats each, 0.20% apart**, inside the
+rule's own 1% tie band. The tie went to trigger 4 on write amplification
+(7.812 against 9.253). At $T{=}2$ and $T{=}10$ trigger 2 won on runtime
+outright, by 4.2% and 2.6%.
+
+The consequence was not foreseen when the comparator rule was written. The
+prior's only remaining contribution after D-4 is the below-threshold L0 band,
+and the band exists **only when the trigger is at least 3**: at trigger 2 the
+sole below-threshold state is one file, which P1c-23's minimum run reduction
+zeroes. So the D-4 arms measured the band at exactly one size ratio, and the
+band's presence is perfectly confounded with $T{=}6$:
+
+| cell | trigger | L0 jobs, policy / twin | $\Delta W$ | $\Delta R$ |
+| --- | ---: | ---: | ---: | ---: |
+| $T{=}2$ | 2 | 773 / 780 = **0.99×** | +0.09% | +1.14% |
+| $T{=}6$ | 4 | 541 / 411 = **1.32×** | +2.07% | −5.69% |
+| $T{=}10$ | 2 | 830 / 833 = **1.00×** | +0.10% | +0.74% |
+
+Nothing distinguishes "the band costs 2% of $W$ and buys 5.7% of $R$" from
+"the prior behaves this way at $T{=}6$". One arm set separates them.
+
+**Decision.** Run `prior_only` and `unconstrained_prior_only` at **L0 trigger
+4, base 16 MiB, $T$ = 2 and 10**, 10M, three repeats, on binary
+`9b9321b1…`. The `regular` twins already exist in the Hull-0 sweep at nine and
+three repeats, so no baseline is run. Results are reported as a named control,
+never pooled with the comparator arms.
+
+**Predictions, recorded in advance.** Against the trigger-4 twin at the same
+ratio, by `frontier_analysis.paired_comparison`. The twins measure:
+
+| cell | trigger | $W$ | $R$ | band headroom, $R_4 - R_2$ |
+| --- | ---: | ---: | ---: | ---: |
+| $T{=}2$ | 2 → 4 | 8.009 → 6.764 | 4.656 → 5.585 | **16.6%** of $R_4$ |
+| $T{=}6$ | 2 → 4 | 9.253 → 7.812 | 3.662 → 4.260 | **14.0%** |
+| $T{=}10$ | 2 → 4 | 10.493 → 8.742 | 3.026 → 4.004 | **24.4%** |
+
+1. **The band appears at both ratios.** L0 compaction jobs against the twin
+   $\ge 1.15\times$ at $T{=}2$ and $T{=}10$, against the 0.99× and 1.00×
+   measured at trigger 2.
+2. **Reads improve, ordered by headroom.** $\Delta R < 0$ at both, and the
+   ordering is $|\Delta R|(T{=}10) > |\Delta R|(T{=}2) > |\Delta R|(T{=}6)$.
+   Point estimates from $T{=}6$ recovering 41% of its headroom:
+   $\Delta R \approx -6.8\%$ at $T{=}2$ and $-10\%$ at $T{=}10$; the
+   preregistered intervals are $[-3\%, -11\%]$ and $[-5\%, -15\%]$.
+3. **Writes rise, ordered by tree depth.** L0→L1 is a larger share of total
+   write bytes in a shallow tree, so $\Delta W(T{=}10) > \Delta W(T{=}6) >
+   \Delta W(T{=}2)$, with $\Delta W \in [+0.5\%, +4\%]$ at $T{=}2$ and
+   $[+1.5\%, +7\%]$ at $T{=}10$.
+4. **The D-4 prediction-1 failure reappears, which is what identifies it as a
+   band artifact.** L1 $\varphi$ at release has p50 at least 0.02 below the
+   twin's at both ratios — the same direction and mechanism as $T{=}6$'s
+   −0.062. If instead $\varphi$ matches the twin at trigger 4, the explanation
+   recorded for that failure is wrong and must be withdrawn.
+5. **The D-4 rule still holds.** Zero deep-level releases below due at every
+   populated level, as measured on the comparator arms (0 of ~20,000).
+
+**Falsification.** If prediction 1 fails — the band does not appear at trigger
+4 away from $T{=}6$ — then the attribution of $T{=}6$'s $\Delta W$/$\Delta R$
+to the band is wrong, D-4's post-hoc reading of its own prediction-1 failure is
+wrong, and both must be reported as withdrawn.
+
+**What this does not decide.** It is not C-3. It does not change the
+comparator, the manifest the programme's arms run against, or any acceptance
+criterion. Whether the band should be retuned — `RL_PRIOR_MIN_RUN_REDUCTION`
+is the constant that governs it — is **not** taken here: that constant would
+be chosen after seeing the number it moves, which is the objection that kept
+C-2 and E-1 recorded failed. The write hinge and $\lambda_W$ of Pathway D are
+the preregistered mechanism for that trade, and they act on `rl`, not on the
+prior.
+
+**One consequence worth recording now, before the ten-repeat C-3.** At
+$T{=}6$ the D-4 arms give $\Delta W$ = +2.07% with a 95% interval of
+[+0.71, +3.43]. The write constraint is an upper-bound test at
+$\delta_W = 2\%$, so on three repeats `prior_only` does not meet it at that
+cell. That is reported as measured; no margin is widened.
+
+**Implementation.** Manifests for the control cells come from stage 06 pointed
+at the single trigger-4 configuration directory, so the existing selection rule
+is applied to a one-candidate set rather than modified — no code change, and
+the guard limits are calibrated from the arms the control actually runs on.
+Driver: `d5_band_control.sh`.
+
+**Evidence to be written.** `results/band-control/10M/T{2,10}/repeat-*/{prior_only,unconstrained_prior_only}/`,
+against `results/baseline_sweep/T{2,10}-l0-4-20-36-pri3-base16777216/`.
+
+### D-6, 2026-09-22 — the reward's space constraint is measured in bytes, not as a ratio
+
+**Recorded before any `rl` arm has run on `Assoc`, and no `rl` arm has ever run
+on this workload or this binary.** Unlike D-4 and D-5 this entry precedes every
+run it can influence with nothing to re-score: the reward's space term has
+produced no measurement on `Assoc` at all, because the only arms run so far are
+`regular`, `oracle`, `prior_only` and `unconstrained_prior_only`, and the first
+two carry no reward while the last two run in `eval_mode` with a zero residual,
+so no multiplier has ever ascended. Found by reading the reward against the
+manifest after D-5, not by observing a training failure.
+
+**What was found.** `multilevel._global_reward` formed the space hinge as
+`physical_sst_bytes / live_logical_bytes` against
+`space_amplification_reference * (1 + rung)`. The numerator's denominator is
+RocksDB's `EstimateLiveDataSize`, taken live per frame
+(`compaction_picker_rl.cc:345`); the manifest's reference has been computed on
+D-3's **measured garbage-free denominator** since 2026-09-21. The two sides are
+therefore different metrics, and D-3 already documented the gap between them —
+46% of live data discarded at $T{=}2$. Evaluated on today's `prior_only` arms:
+
+| cell | $S$ estimate (live signal) | reference $\times 1.02$ | hinge, frame one |
+| --- | ---: | ---: | ---: |
+| $T{=}2$ | 1.9475 | 1.1120 | **+0.751** |
+| $T{=}6$ | 1.2047 | 1.0620 | **+0.134** |
+| $T{=}10$ | 1.1042 | 1.0517 | **+0.050** |
+
+The hinge is violated on the first frame of every cell and stays violated
+whatever the policy does, so `_dual_ascent` would drive $\lambda_S$ up
+monotonically until it clipped at `LAMBDA_MAX`. **Pathway D's D-4 criterion
+reads monotone multiplier divergence as evidence that a cell is analytically
+infeasible** — so the learner would have manufactured a confirmation of
+Theorem B.1 out of a unit mismatch, in every cell, and the diagnostic corollary
+that makes D-4 "a positive result, not a failure" would have been reading its
+own instrument.
+
+**Decision.** The space hinge becomes settled physical SST bytes against the
+tuned baseline's, at the rung's margin:
+`hinge(physical_sst_bytes, expected_physical_sst_bytes * (1 + rung))`. Both
+quantities are already in the manifest and in the protocol; nothing new is
+measured.
+
+**Why bytes rather than a repaired ratio.** The denominator is a constant of
+the workload, not of the policy — `filluniquerandom` writes 2.9M unique keys
+and `mixgraph` only overwrites them, and D-3 measured the garbage-free size
+stable to **0.0060% across 108 runs**. Dividing two arms' physical bytes by the
+same constant cannot change which is larger, so the ratio adds nothing except
+the estimate's depth-sensitivity, which is exactly the defect D-3 documents and
+which biases the term against the behaviour under test. And the correct
+denominator is not available live in any case: it comes from a reference
+compaction run after the measured phase.
+
+**It also makes the reward and the shield agree.** `rl_safety_manifest.cc:200`
+and `:345` already load `allowed_physical_sst_bytes` and compare
+`state.physical_sst_bytes` against it. Before this change the learner's space
+signal and the guard's space signal were different quantities in different
+units; they are now the same quantity. At the 2% headline rung the two bounds
+coincide to one byte (the manifest rounds `1.02 * expected`); at other rungs
+the reward follows the swept margin (P0-6) while the guard keeps its fixed 2%,
+which is intended — the guard is a safety envelope, not the objective.
+
+**No acceptance criterion changes.** The paired evaluator continues to score
+space through `04_generate_graphs.amplification_metrics` on D-3's measured
+denominator. Only the learner's control signal is affected. The contract is
+**not** edited, for D-3's reason: `research_objective.py:27` hashes its raw
+bytes into every fingerprint, so an edit would void the 182-arm Hull-0.
+`constraints.space` names a metric and a rung ladder and has never named a
+denominator; P1c-22 says space enters "as a hinge above the manifest's
+tuned-baseline reference" and does not specify its form.
+
+**Predictions, recorded in advance.** On the first `rl` arms at 10M,
+$T$ = 2/6/10:
+
+1. **$\lambda_S$ does not diverge.** On every cell it plateaus or returns to
+   zero rather than rising monotonically to `LAMBDA_MAX` (Pathway D's D-3
+   criterion). Under the superseded form it would have clipped in all three.
+2. **$\lambda_W$ is the binding multiplier, not $\lambda_S$.** The D-4/D-5 arms
+   put settled bytes at 97.2%, 98.2% and 98.1% of the bound at $T$ = 2, 6, 10
+   while the write constraint is missed at every ratio where the prior has a
+   lever. If any cell shows $\lambda_S$ exceeding $\lambda_W$ at the end of the
+   run, the space constraint is binding for a reason this entry has not
+   identified.
+3. **On a `prior_only` re-run under the fixed reward the frame-mean space
+   excess is below 0.01 at every ratio**, against +0.751 / +0.134 / +0.050
+   under the superseded form. This is the cheap check and it needs no learner.
+
+**Falsification.** If $\lambda_S$ still rises monotonically on a cell whose
+settled bytes finish inside the bound, the hinge remains mis-specified and this
+entry must be reported as an incomplete repair rather than a fix.
+
+**Not taken, and why.** The live per-frame signal in C++ still computes
+`EstimateLiveDataSize` for the snapshot's `live_logical_bytes`, and the guard's
+read-side and debt terms still use it. Replacing it is a C++ change, and a
+rebuild voids the hull, so it is batched into Gate 2 with the other deferred
+instrument work. Nothing in this entry depends on it: the reward no longer
+reads that field for the space term, and it is retained in the frame log as
+`space_amplification_estimate` so a frame can be joined to the pre-D-6 logs.
+
+**Implementation.** `rl_agent/config.py` (`expected_physical_sst_bytes` added
+to the manifest's required references; `SPACE_BYTES_BOUND`; `SPACE_BOUND`
+retained as a diagnostic), `rl_agent/multilevel.py` (`_global_reward`'s hinge
+and its logged components, `reward_state`), `rl_agent/server.py` (startup
+banner). Python only: no rebuild, `dbbench_sha256` unchanged, the 182-arm
+Hull-0 and the guard manifests stand.
+
 ---
 
 ## 2. Gate verdicts as measured
@@ -379,6 +724,95 @@ bulk load. Fixed in submodule `25468bbaa`; the narrative is history Section
 `--admission-latency-limit-micros 5000`, which both callers pass, leaving
 `due_to_admission_latency` unscored; the artifact was regenerated under the
 suite's flags. The verdict is unchanged under either invocation.
+
+### D-5 control scored, 2026-09-22: the band is a property of the trigger, not of $T$
+
+**Verdict: predictions 1, 2 (range), 3 (range), 4 and 5 pass; both orderings
+fail.** Twelve `prior_only` / `unconstrained_prior_only` arms at L0 trigger 4,
+$T$ = 2 and 10, three repeats, binary `9b9321b1…`, against the
+same-configuration static twin restricted to the paired seeds. Six `oracle`
+calibration arms produced the trigger-4 manifests through the same chain the
+programme's own cells used; the independent holdout was not run, and E-1/E-5
+are therefore not scored here.
+
+| cell | $L$ | L0 jobs/run, policy / twin | $\Delta W$ | $\Delta R$ | L1 $\Delta\varphi$ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| $T{=}2$ | 9 | 178.7 / 134.7 = **1.33×** | +2.94 [+1.97, +3.92] | −4.53 [−7.15, −1.90] | −0.037 |
+| $T{=}6$ | 5 | **1.32×** *(comparator cell)* | +2.07 [+0.71, +3.43] | −5.69 [−9.48, −1.90] | −0.062 |
+| $T{=}10$ | 5 | 180.7 / 136.0 = **1.33×** | +2.11 [+1.26, +2.96] | −7.07 [−11.60, −2.53] | −0.070 |
+
+**Prediction 1 passes and it settles the confound.** The band's magnitude is
+1.33×, 1.32×, 1.33× at $T$ = 2, 6, 10 — it is a function of the L0 trigger and
+essentially nothing else. The D-4 arms at trigger 2 measured 0.99× and 1.00×.
+So "the band costs ~2% of $W$ and buys ~5% of $R$" is a statement about
+trigger 4, not about $T{=}6$, and D-4's reading of its own prediction-1 failure
+stands: prediction 4 here reproduces the $\varphi$ gap at both new cells
+(−0.037, −0.070) exactly as that reading requires.
+
+**Prediction 5 passes at 0 of 24,400** deep releases below due, adding to
+D-4's 0 of ~20,000. The rule "a deep level compacts iff RocksDB scores it due"
+now rests on ~44,000 merges across five (cell, trigger) combinations.
+
+**Both orderings fail, and they fail for one reason.** The predicted orderings
+were built from share-of-total arguments — read gain scaling with the band's
+headroom, write cost scaling with L0's share of write bytes. Neither holds.
+What both track is **populated depth $L$**, in opposite directions:
+
+| ordering | predicted | measured |
+| --- | --- | --- |
+| $\|\Delta R\|$ | $T{=}10 > T{=}2 > T{=}6$ (headroom 24.4/16.6/14.0%) | $T{=}10 > T{=}6 > T{=}2$ — i.e. decreasing in $L$ |
+| $\Delta W$ | $T{=}10 > T{=}6 > T{=}2$ (shallow tree, larger L0 share) | $T{=}2 > T{=}10 > T{=}6$ — i.e. increasing in $L$ |
+
+The fraction of headroom recovered is 27%, 41% and 29% at $T$ = 2, 6, 10, so
+the headroom model is simply wrong. The mechanism the measurement supports is
+that a shallower tree gives L0 a larger share of the probe path, so removing
+L0 runs is worth more; and that extra top-of-tree work in a deeper tree is
+rewritten at every level it then crosses, so it costs more. Both are
+statements about $L$, and together they make the band's trade monotone in
+depth:
+
+| cell | $L$ | reads bought per unit of write spent |
+| --- | ---: | ---: |
+| $T{=}10$ | 5 | **3.35** |
+| $T{=}6$ | 5 | 2.75 |
+| $T{=}2$ | 9 | 1.54 |
+
+This was not predicted and is recorded as a finding of the control, not as a
+confirmed prediction. It bears directly on Gate 3b cell selection: the
+top-of-tree lever is worth most where the tree is shallowest.
+
+**The consequence for the write constraint, measured at every ratio.** The
+constraint is an upper-bound test at $\delta_W = 2\%$. At trigger 4 the upper
+bound is **+3.92%, +3.43% and +2.96%** at $T$ = 2, 6, 10 — `prior_only` misses
+it in every cell. At trigger 2 it passes trivially (+0.27%, +0.53%) because
+the band does not exist and the policy is native. **The prior's only lever
+costs more write than the budget allows, at every size ratio**, and that is now
+measured across three ratios rather than inferred from one. No margin is
+widened and no constant is retuned; `RL_PRIOR_MIN_RUN_REDUCTION` is left
+exactly where P1c-23 set it, because choosing it now would be choosing it after
+seeing the number it moves.
+
+**A defect in the scoring script, found and fixed before the verdict was
+recorded.** The first run of the D-5 scorer summed L0 compaction jobs across
+every run in a glob without dividing by the repeat count. The $T{=}2$ twin
+carries nine repeats against the policy's three, so its job count was inflated
+3× and the ratio printed as **0.44×** — which would have falsified prediction 1
+and, by D-5's own falsification clause, forced the withdrawal of D-4's reading.
+$0.44 \times 3 = 1.33$. The $T{=}10$ twin has three repeats, matching, so that
+cell was unaffected and the disagreement between the two cells is what exposed
+it. The corrected scorer normalises per run and restricts the twin to the
+paired seeds. The arms are untouched; only the analysis was wrong. Recorded
+because a falsification clause that fires on an arithmetic error is worth more
+as a caution than as a verdict.
+
+**Timing.** As with D-4, this entry and its predictions were written before the
+run but committed after it; see D-4's timing note. The predictions are
+unedited from the pre-run text — only the verdict block above is new.
+
+**Evidence.** `results/band-control/10M/T{2,10}/repeat-*/{prior_only,unconstrained_prior_only}/`,
+`results/band-control-guard/assoc-v1/calibration/`,
+`baseline_slo_band/assoc-v1/10M/T{2,10}/baseline_slo.json`,
+`gate1/d5_verdict.txt`; twins `results/baseline_sweep/T{2,10}-l0-4-20-36-pri3-base16777216/`.
 
 ### Gate 1 — Hull₀ re-measured on `Assoc`, 2026-09-21
 
@@ -1065,7 +1499,8 @@ start on the amended instruments.
     runs; a deep level earns no read relief and is charged one exposed probe
     for output into an empty level. The flush size is measured, not read
     from L1's target (the pipeline runs a 2 MiB write buffer against a
-    16 MiB base).
+    16 MiB base). *The empty-level charge was withdrawn by D-4 (2026-09-22)
+    before any policy arm ran under it; the L0 rule stands.*
 24. **C-3/C-4/C-6 dominators must be inside the policy's space bound.** A
     hull point whose $S$ exceeds $S_{\text{policy}}(1 + \text{rung})$ is
     reported under `dominated_by_outside_space_bound` and does not decide.

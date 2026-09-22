@@ -73,7 +73,7 @@ scripts/*
 # results
 results/*
 baseline_slo*
-baseline_selection
+baseline_selection*
 gate1
 *.tex
 *.tgz

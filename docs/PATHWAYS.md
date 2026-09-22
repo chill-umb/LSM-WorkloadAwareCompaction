@@ -1077,6 +1077,15 @@ the offline replay's per-level attribution, and the two corrections to the T=2
 reading are in `docs/PREREGISTRATION.md`; the narrative is history Sections 14.8
 and 14.9.
 
+**Status on `Assoc` (2026-09-22): guard protocol run; E-5 measured on
+`prior_only` and vacuous there.** The D-4/D-5 arms carry enforcement live
+(1351 / 520 / 744 interventions) and score E-5 at 0.0006 / 0.0000 / 0.0007
+against the 1% limit — but under D-4 a deep level compacts iff it is due,
+which is the guard's own force predicate, so force cannot change the prior's
+action by construction. That is the same structural bar the `oracle` holdout
+hit, reproduced on a second arm. **E-5 is decided on `rl`.** Details in
+`docs/PREREGISTRATION.md` D-5; narrative in history 14.18.
+
 **Status on `Assoc` (2026-09-22): guard protocol run, E-5 not yet measurable.**
 Nine calibration and nine holdout `oracle` arms at 10M × T=2/6/10. D-2's first
 prediction is confirmed (marginal rate below 0.20 in every cell, roughly halved
@@ -1338,8 +1347,25 @@ cells were found to be the *same* configuration: L0's byte branch (A3′) caps t
 effective trigger at roughly `max_bytes_for_level_base` / L0 file size, so
 triggers 8 and 16 at base 8 MiB are indistinguishable by construction. This
 should shape the Hull$_s$ grid at Gate 3c. C-3, C-4 and C-6 stay unevaluable
-until `prior_only` runs, which needs a guard-calibrated manifest; C-5 needs
-stage 16.
+until `prior_only` runs at ten repeats against the hull.
+
+**C-5 closed 2026-09-22**: stage 16 over 27 capacity arms gives
+$s_{\max} = 2.0$ at the 2% rung at every ratio, every applied vector verified
+against its request. Applying the A-1b (cell, rung) rule still needs $\kappa$
+measured on `Assoc` — the $\kappa$ = 3.00/1.60/1.71 in Theorem B.2's table is
+from the uniform workload — which Gate 3a-0 owes.
+
+**`prior_only` measured on `Assoc` 2026-09-22 at three repeats** (D-4, D-5;
+history 14.18), which is a mechanism result, not C-3. After the D-4 prior
+repair the policy is native at deep levels — zero releases below due in ~44,000
+merges — and its only lever is the below-threshold L0 band, which exists only
+at L0 trigger $\ge$ 3. Against the same-configuration static twin the band
+costs $\Delta W$ = +2.9/+2.1/+2.1% and buys $\Delta R$ = −4.5/−5.7/−7.1% at
+$T$ = 2/6/10, with paired upper bounds on $\Delta W$ of +3.92/+3.43/+2.96%
+against $\delta_W$ = 2%: **the prior misses the write constraint at every
+ratio where it has a lever, and has no lever where it meets it.** The band's
+trade is monotone in populated depth, buying 3.35 / 2.75 / 1.54 units of read
+per unit of write at $T$ = 10 / 6 / 2, which bears on Gate 3b cell selection.
 
 **The superseded uniform measurement (2026-09-19)** recorded C-1 passing, C-5
 closed at $s_{\max} = 2.0$, and C-2, C-3 and C-6 failed, on binary `deb6753c`

@@ -104,6 +104,9 @@ def _load_baseline_manifest() -> dict[str, float]:
         "write_latency_avg_ns_limit", "write_latency_p99_ns_limit",
         "write_amplification_reference", "space_amplification_reference",
         "sorted_run_seeks_per_scan_reference", "stall_fraction_reference",
+        # D-6: the space hinge is measured in BYTES, not as a ratio. See
+        # SPACE_BYTES_BOUND below for why the ratio form was unusable.
+        "expected_physical_sst_bytes",
     )
     try:
         limits = {name: float(manifest[name]) for name in names}
@@ -132,8 +135,30 @@ SCAN_RELATIVE_MARGIN = _env_float("RL_SCAN_RELATIVE_MARGIN", 0.02)
 SPACE_RELATIVE_MARGIN = _env_float("RL_SPACE_RELATIVE_MARGIN", 0.02)
 WRITE_BOUND = (BASELINE_LIMITS.get("write_amplification_reference", 0.0)
                * (1.0 + WRITE_RELATIVE_MARGIN))
+# D-6 (2026-09-22): the space constraint is settled physical SST bytes against
+# the tuned baseline's, at the rung's margin -- the same quantity and the same
+# unit the C++ guard already uses (`allowed_physical_sst_bytes`,
+# rl_safety_manifest.cc:200/345).
+#
+# The ratio form it replaces was unusable. The live per-frame signal divides
+# physical bytes by `EstimateLiveDataSize`, while stage 06 computes
+# `space_amplification_reference` on D-3's measured garbage-free denominator,
+# so the two sides were different metrics: the hinge read +0.751 / +0.134 /
+# +0.050 on frame one at T = 2 / 6 / 10 regardless of what the policy did, and
+# lambda_space would have ascended monotonically in every cell. Pathway D's D-4
+# criterion reads monotone lambda divergence as an infeasible cell, so the
+# learner would have manufactured a confirmation of the theory out of a unit
+# mismatch.
+#
+# Bytes rather than a repaired ratio because the denominator is a constant of
+# the workload, not of the policy: `filluniquerandom` writes 2.9M unique keys
+# and `mixgraph` only overwrites them, and D-3 measured the garbage-free size
+# stable to 0.0060% across 108 runs. Dividing by a constant adds nothing except
+# the estimate's depth-sensitivity, which is the defect D-3 documents.
 SPACE_BOUND = (BASELINE_LIMITS.get("space_amplification_reference", 0.0)
-               * (1.0 + SPACE_RELATIVE_MARGIN))
+               * (1.0 + SPACE_RELATIVE_MARGIN))   # diagnostic only since D-6
+SPACE_BYTES_BOUND = (BASELINE_LIMITS.get("expected_physical_sst_bytes", 0.0)
+                     * (1.0 + SPACE_RELATIVE_MARGIN))
 SCAN_SEEKS_BOUND = (BASELINE_LIMITS.get("sorted_run_seeks_per_scan_reference", 0.0)
                     * (1.0 + SCAN_RELATIVE_MARGIN))
 STALL_FRACTION_BOUND = BASELINE_LIMITS.get("stall_fraction_reference", 0.0)
@@ -449,13 +474,10 @@ REWARD_PRESSURE_RELIEF = reward_weight("PRESSURE_RELIEF")
 # research claim (online adaptation, no prior workload knowledge) requires.
 ANALYTIC_PRIOR = _env_bool("RL_ANALYTIC_PRIOR", True)
 PRIOR_W_STALL = _env_float("RL_PRIOR_W_STALL", 1.0)
-# Deep levels: weight on the DEPTH cost of a compaction. A level below L0 is
-# one sorted run whatever its size, so compacting it removes no probe; what
-# it can do is populate an empty level below and add one probe to every
-# read that reaches it (Theorem A.1's cascade). That is the only read-side
-# term a deep level carries under the point-read objective. The previous
-# form priced bytes merged per scan, which is the withdrawn scan metric, and
-# grew with fullness -- the top-of-tree eagerness A-0 measured.
+# Deep levels: INERT since PREREGISTRATION D-4 (2026-09-22). A level below
+# L0 is one sorted run whatever its size (A4), so it carries no read term;
+# the depth charge this weight used to scale was dropped there (trivial
+# move, Corollary A.3). Kept as an ablation knob only.
 PRIOR_W_READ = _env_float("RL_PRIOR_W_READ", 0.6)
 # L0: a proactive (below-trigger) compaction must remove at least this many
 # sorted runs beyond what native RocksDB would remove one flush later, or it

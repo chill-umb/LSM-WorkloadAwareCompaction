@@ -313,16 +313,16 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
     piece of LSM cost theory:
 
       stall_urgency     queueing: projected proximity to the write-slowdown
-                        threshold given current inflow (L0); superlinear
-                        fullness for deeper levels (they trigger via score).
+                        threshold given current inflow (L0). For a deeper
+                        level it is the due indicator, score >= 1 -- the
+                        predicate the native picker and the guard use
+                        (PREREGISTRATION D-4).
       readamp_relief    probe count, in ABSOLUTE sorted runs: compacting L0
                         removes its files from every lookup's probe path, net
                         of the run native RocksDB would remove one flush
                         later and of the run the output creates if L1 was
-                        empty. A deeper level is one run whatever its size,
-                        so it earns no relief; it is charged instead when
-                        its output would populate an empty level below
-                        (depth, Theorem A.1's read cost of the cascade).
+                        empty. A deeper level is one run whatever its size
+                        (A4), so it carries no read term at all.
       work_now          merge I/O: (bytes + next-level overlap) normalized by
                         the two levels' capacities.
       premature_penalty Bentley-Saxe amortization: overlap is re-paid per
@@ -366,15 +366,24 @@ def analytic_advantage(raw: dict, g: dict) -> Tuple[float, dict]:
         runs_removed = _clamp(net_runs / _PROBE_SATURATION)
     else:
         cap_i = max(raw["target_bytes"], 1.0)
-        raw_full = bytes_i / cap_i          # unclamped: deferral pushes past 1
-        fullness = _clamp(raw_full)
-        stall_urgency = fullness * fullness
-        # A level below L0 is one sorted run whatever its size: compacting it
-        # removes no probe from any lookup, and the data a scan merges is the
-        # withdrawn scan metric, not the objective. Its only read-side effect
-        # is depth: output into an empty level below adds one probe to every
-        # read that reaches it. That is a cost, so it enters negative.
-        runs_removed = -1.0 if creates_level else 0.0
+        fullness = _clamp(bytes_i / cap_i)
+        # D-4 (2026-09-22): a level below L0 stalls nothing until RocksDB
+        # scores it due. Below score 1 there is no stall mechanism at all --
+        # the only deep-level stall path is pending bytes against a 64 GiB
+        # soft limit, on a ~3 GB tree -- so the previous fullness**2 term was
+        # a "due soon" signal, i.e. eagerness, and it authorised deep
+        # compactions at 0.82-0.92 of target where native waits for 1.0.
+        # A-0 measured the prior's entire write excess as exactly that.
+        # Urgency is now the same predicate the native picker and the guard
+        # use, so a deep level compacts if and only if RocksDB would.
+        stall_urgency = 1.0 if raw["score"] >= 1.0 else 0.0
+        # No read-side term. A deeper level is one sorted run whatever its
+        # size (A4), so compacting it removes no probe. The P1c-23 depth
+        # charge for output into an empty level is dropped: that output is
+        # a trivial move, free on W; Corollary A.3 says holding a level back
+        # to avoid depth is never write-profitable; and it never outweighed
+        # the urgency term in any state (audit 2026-09-22).
+        runs_removed = 0.0
 
     # Relief is only worth what the reads that traverse this level are worth.
     # Without this the prior valued compaction identically on a write-only and
@@ -732,7 +741,7 @@ class MultiLevelProcessor:
             "lambda": dict(self._lambda),
             "frames": self._frames,
             "write_bound": config.WRITE_BOUND,
-            "space_bound": config.SPACE_BOUND,
+            "space_bytes_bound": config.SPACE_BYTES_BOUND,
             "scan_seeks_bound": config.SCAN_SEEKS_BOUND,
             "stall_fraction_bound": config.STALL_FRACTION_BOUND,
             "space_relative_margin": config.SPACE_RELATIVE_MARGIN,
@@ -796,10 +805,19 @@ class MultiLevelProcessor:
                if self._ewma_logical_write_bytes > 0 else 0.0)
         write_excess = self._hinge(waf, config.WRITE_BOUND)
 
-        # -- space constraint: settled-snapshot S against the rung's bound ----
-        space_amp = (g["physical_sst_bytes"] / g["live_logical_bytes"]
-                     if g["live_logical_bytes"] > 0 else 0.0)
-        space_excess = self._hinge(space_amp, config.SPACE_BOUND)
+        # -- space constraint: settled physical SST bytes against the tuned
+        # baseline's, at the rung's margin (D-6). Bytes, not a ratio: the live
+        # denominator is `EstimateLiveDataSize` while the manifest reference is
+        # D-3's measured garbage-free size, so the ratio form compared two
+        # different metrics and was violated on frame one in every cell. The
+        # C++ guard already hinges this exact quantity.
+        space_bytes = _positive(g["physical_sst_bytes"])
+        space_excess = self._hinge(space_bytes, config.SPACE_BYTES_BOUND)
+        # Reported for diagnostics only; not the hinge input. This is the
+        # depth-sensitive estimate D-3 replaced, kept so a frame can be joined
+        # to the older logs.
+        space_amp_estimate = (g["physical_sst_bytes"] / g["live_logical_bytes"]
+                              if g["live_logical_bytes"] > 0 else 0.0)
 
         # -- scan constraint: sorted-run seeks per scan (P0-1) ----------------
         scan_seeks = (g["scan_sorted_run_seeks"] / g["seeks"]
@@ -851,7 +869,9 @@ class MultiLevelProcessor:
             "point_probe_amplification": point_amp,
             "write_amplification_window": waf,
             "write_excess": write_excess,
-            "space_amplification": space_amp,
+            "space_physical_sst_bytes": space_bytes,
+            "space_bytes_bound": config.SPACE_BYTES_BOUND,
+            "space_amplification_estimate": space_amp_estimate,
             "space_excess": space_excess,
             "sorted_run_seeks_per_scan": scan_seeks,
             "scan_excess": scan_excess,

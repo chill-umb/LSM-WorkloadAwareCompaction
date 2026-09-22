@@ -2962,6 +2962,103 @@ step, so a failing cell is a result, not an error" — without the script ever
 being changed. It cost the same two cells twice. The loop now scores every cell
 and exits on the worst status at the end.
 
+### 14.18 The prior repaired (D-4) and the L0 band isolated (D-5), 2026-09-22
+
+Two changes and two arm sets, both Python-only, both on binary `9b9321b1…`, so
+the 182-arm Hull-0 is untouched. The dated decisions, predictions and verdicts
+are `docs/PREREGISTRATION.md` D-4 and D-5; this is the narrative.
+
+**The prior was audited against PATHWAYS and found incoherent at deep levels.**
+For levels >= 1 its benefit term was `fullness**2`, which authorised a
+compaction at 0.82-0.92 of target where native RocksDB waits for 1.0. Below
+score 1 a deep level stalls nothing -- the only deep stall path is pending
+bytes against a 64 GiB soft limit on a 3 GB tree -- so the term was a "due
+soon" signal, i.e. eagerness. Its cost term was inert for a different reason:
+`NextLevelOverlapBytes` spans the whole level's key range, so overlap is about
+T times bytes and `(1 + overlap/bytes) / size_ratio` clamps to 1.0 whenever the
+level below is full. By A4 a deep level is one sorted run whatever its size, so
+compacting it early buys nothing on R; by Theorem B.1 it forfeits the
+overwrites a later merge would drop, and `Assoc` has them (measured eta 0.84,
+0.86, 0.93 at L1). A-0 had already attributed the prior's entire write excess
+to eagerness in every cell. D-4 replaced the term with the due indicator
+`score >= 1` and dropped P1c-23's empty-level depth charge.
+
+**D-4's mechanism is confirmed; one prediction failed on a mis-specified
+proxy.** Against the same-configuration static twin at the programme's
+comparators, deep levels became native: eta within 0.008, phi at release within
+0.003 at T=2 and 0.001 at T=10, and **zero releases below due in about 20,000
+merges**. At the trigger-2 cells the policy is now indistinguishable from doing
+nothing (+0.09% and +0.10% W, +1.14% and +0.74% R), which closes the 14.10
+defect where T=2 was worse than its twin on both axes. At T=6 it trades +2.07%
+W for -5.69% R, against +14.96% / -8.69% for the same cell before the repair --
+the write cost of the read gain fell about sevenfold. Prediction 1 failed at
+T=6 only: L1's phi at release came in 0.062 below the twin's, just past the
+0.05 tolerance, and in the direction of compacting *earlier*. It is recorded
+failed and not reworded; the rule it was testing is established by the
+below-due count, which the prediction did not use.
+
+**The cause was a confound nobody had noticed in the comparator rule.** Stage
+06 selects minimum-space, then fastest, then lower W. Since D-3 the space
+filter admits all four triggers at every ratio, so runtime decides -- and at
+T=6 triggers 2 and 4 came in **0.20% apart on three repeats each**, inside the
+rule's own 1% tie band, with the tie going to trigger 4 on write
+amplification. The prior's only remaining lever after D-4 is the
+below-threshold L0 band, which exists only at trigger >= 3. So the programme's
+comparators had measured the band at exactly one size ratio, and its presence
+was perfectly confounded with T=6.
+
+**D-5 ran the missing cells and the confound is resolved.** Twelve policy arms
+at trigger 4 for T=2 and T=10, with six `oracle` calibration arms to produce
+the trigger-4 manifests through the same chain the programme's cells used. The
+band's magnitude is **1.33x, 1.32x, 1.33x** at T = 2, 6, 10 against 0.99x and
+1.00x at trigger 2: it is a function of the trigger and essentially nothing
+else. The phi gap reappears at both new cells (-0.037, -0.070), which is what
+identifies it as a band artifact rather than a T=6 artifact. Deep releases
+below due: 0 of 24,400 more, so the D-4 rule now rests on about 44,000 merges.
+
+**Both predicted orderings failed, and the replacement is more useful than
+either.** The read gain was predicted to scale with the band's headroom and the
+write cost with L0's share of write bytes; neither holds. Both track
+**populated depth**, in opposite directions -- a shallower tree gives L0 a
+larger share of the probe path, while extra top-of-tree work in a deeper tree
+is rewritten at every level it then crosses. The band therefore buys 3.35,
+2.75 and 1.54 units of read per unit of write at T = 10, 6, 2. This was not
+predicted and is recorded as a finding of the control. It bears on Gate 3b cell
+selection: the top-of-tree lever is worth most where the tree is shallowest.
+
+**What this settles for the programme.** At trigger 4 the paired upper bound on
+delta-W is +3.92%, +3.43% and +2.96% at T = 2, 6, 10 against a 2%
+non-inferiority margin, so **`prior_only` misses the write constraint at every
+ratio**; at trigger 2 it passes trivially because the band does not exist and
+the policy is native. The prior's only lever costs more write than the budget
+allows, measured across three ratios rather than inferred from one.
+`RL_PRIOR_MIN_RUN_REDUCTION` governs that trade and was **not** retuned:
+choosing it after seeing the number it moves is the objection that kept C-2 and
+E-1 recorded failed, and the preregistered mechanism for the trade is Pathway
+D's write hinge and its multiplier, which act on `rl`.
+
+**E-5 passed on the prior and the pass is vacuous.** The conditional override
+rate is 0.0006 / 0.0000 / 0.0007 against a 1% limit, with enforcement live and
+1351 / 520 / 744 interventions applied. Under D-4 a deep level compacts iff it
+is due, which is the guard's own force predicate, and `RL_L0_ALLOW_DEFER=0`
+promotes any due L0 defer -- so force cannot change the prior's action, by
+construction. This is the same structural reason the `oracle` holdout could not
+measure E-5 (14.17), reproduced on a second arm. **E-5 is decided on `rl`.**
+
+**C-5 is closed on `Assoc`**: s_max = 2.0 at the 2% rung at all three ratios,
+27 capacity arms with every applied vector verified against its request.
+
+**Two process defects, both recorded rather than quietly fixed.** D-4 and D-5
+were committed *after* the arms that test them; file mtimes order the edits an
+hour earlier, but mtimes prove nothing that survives a clone, so both entries
+are weaker records than D-1 through D-3 and say so. And the D-5 scoring script
+summed L0 jobs across a glob without dividing by repeat count; the T=2 twin
+carries nine repeats against the policy's three, so the ratio printed as 0.44x
+instead of 1.33x, which would have triggered D-5's falsification clause and
+forced the withdrawal of D-4's reading. The T=10 twin has three repeats and was
+unaffected, and the disagreement between the two cells is what exposed it. The
+arms were never wrong; only the analysis was.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,
