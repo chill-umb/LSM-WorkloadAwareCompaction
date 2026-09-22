@@ -3048,6 +3048,41 @@ measure E-5 (14.17), reproduced on a second arm. **E-5 is decided on `rl`.**
 **C-5 is closed on `Assoc`**: s_max = 2.0 at the 2% rung at all three ratios,
 27 capacity arms with every applied vector verified against its request.
 
+**The arms in full, `regular` against `prior_only`, paired on three seeds.**
+Amplification rows only; the latency rows are recorded in
+`docs/PREREGISTRATION.md` under the D-5 verdict, with the reason they cannot
+yet be read as a controlled comparison.
+
+| cell | arm | W | R | S | seeks/scan | stall s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| T=2 trig 2 | regular | 8.010 | 4.610 | 1.0895 | 7.606 | 43.4 |
+| | prior_only | 8.017 | 4.663 | 1.0861 | 7.582 | 43.8 |
+| T=6 trig 4 | regular | 7.812 | 4.260 | 1.0412 | 5.380 | 44.4 |
+| | prior_only | **7.974** | **4.018** | 1.0428 | **5.070** | 45.0 |
+| T=10 trig 2 | regular | 10.513 | 3.016 | 1.0306 | 3.592 | 45.9 |
+| | prior_only | 10.524 | 3.039 | 1.0314 | 3.611 | 46.1 |
+| T=2 trig 4 | regular | 6.761 | 5.550 | 1.0835 | 9.181 | 45.5 |
+| | prior_only | **6.960** | **5.298** | 1.0843 | **8.799** | 45.8 |
+| T=10 trig 4 | regular | 8.742 | 4.004 | 1.0384 | 4.856 | 42.2 |
+| | prior_only | **8.926** | **3.721** | 1.0388 | **4.700** | 42.9 |
+
+Reads and sorted-run seeks move together everywhere, as they must -- both are
+the L0 run count. Space is flat to within 0.31% in every cell, so the space
+constraint is nowhere near binding for this policy; the write constraint is the
+only one it misses.
+
+**A get-latency result the control cells carry, and cannot yet settle.** At the
+two D-5 cells `prior_only` shows get p99 of 88.4 us against the twin's 31.9 at
+T=10 and 104.3 against 65.7 at T=2, while p50 and p95 are unchanged and
+`unconstrained_prior_only` is identical -- so it is not the guard. T=6 runs the
+same trigger and shows none of it. The leading explanation is that latency is a
+warm-cache figure (direct I/O is pinned off per A-Impl-2) and the twins were
+measured on 2026-09-21 while the control arms ran on 2026-09-22 after about
+forty arms of I/O, so the two sides are not cache-equivalent. The amplification
+table above is unaffected, being byte ratios. Six `regular` arms run in the same
+session as the policy arms would settle it; until then no latency figure from
+`results/band-control` belongs in an acceptance table.
+
 **Two process defects, both recorded rather than quietly fixed.** D-4 and D-5
 were committed *after* the arms that test them; file mtimes order the edits an
 hour earlier, but mtimes prove nothing that survives a clone, so both entries

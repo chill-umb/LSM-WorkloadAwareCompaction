@@ -809,6 +809,44 @@ as a caution than as a verdict.
 run but committed after it; see D-4's timing note. The predictions are
 unedited from the pre-run text — only the verdict block above is new.
 
+**An unexplained latency tail at the control cells, measured and not scored.**
+D-5 predicted nothing about latency and none of its criteria are affected, but
+the arms carry a get-latency result that must not go unrecorded, because
+latency is a preregistered acceptance constraint at a 2% margin (P0-4):
+
+| cell / arm | p50 | p95 | p99 | p100 |
+| --- | ---: | ---: | ---: | ---: |
+| $T{=}10$ trig 4 `regular` | 2.57 | 20.84 | 31.9 | 3521 |
+| $T{=}10$ trig 4 `prior_only` | 2.60 | 21.60 | **88.4** | **6858** |
+| $T{=}2$ trig 4 `regular` | 2.93 | 38.08 | 65.7 | 1887 |
+| $T{=}2$ trig 4 `prior_only` | 2.95 | 43.46 | **104.3** | 2043 |
+| $T{=}6$ trig 4 `regular` | 2.57 | 23.28 | 33.6 | 1694 |
+| $T{=}6$ trig 4 `prior_only` | 2.58 | 23.17 | 33.6 | 1371 |
+
+Median and p95 are untouched; only the top ~1% moves, and only at the two
+cells D-5 added. **It is not the guard**: `unconstrained_prior_only`, which
+classifies without enforcing, is identical to `prior_only` there (p99 88.3
+against 88.4 at $T{=}10$, 104.4 against 104.3 at $T{=}2$). But $T{=}6$ runs the
+same trigger with the same band intensity and shows none of it, so "the band
+costs tail latency" does not fit either.
+
+**The leading explanation is a confound in the comparison, not a property of
+the policy.** Direct I/O is pinned off, so latency and elapsed are warm-cache
+figures that A-Impl-2 already says must be read as bounds on foreground
+disruption and never as storage-latency claims. The twins come from the
+2026-09-21 Hull-0 sweep and the control arms ran on 2026-09-22 after roughly
+forty arms of I/O, so the two sides of this comparison are not
+cache-equivalent. The amplification rows are unaffected — $W$, $R$, $S$ and
+sorted-run seeks are byte ratios and cache-invariant, which is the reason
+A-Impl-2 accepts the buffered-I/O cost in the first place.
+
+**Not resolved here, and what would resolve it:** three `regular` repeats at
+each of the two band cells run in the same session as the policy arms, which
+is six arms and about twenty minutes. Until that exists, **no latency figure
+from `results/band-control` may enter an acceptance table**, and the D-4 arms'
+latency — measured against twins from the same sweep and showing +0.39% at
+$T{=}6$ — is subject to the same caveat.
+
 **Evidence.** `results/band-control/10M/T{2,10}/repeat-*/{prior_only,unconstrained_prior_only}/`,
 `results/band-control-guard/assoc-v1/calibration/`,
 `baseline_slo_band/assoc-v1/10M/T{2,10}/baseline_slo.json`,
