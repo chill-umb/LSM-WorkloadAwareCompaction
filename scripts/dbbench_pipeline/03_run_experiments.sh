@@ -92,22 +92,24 @@ if [[ -n "$STATIC_CAPACITY_SCALES" ]]; then
   CAPACITY_FINGERPRINT=":cap${CAPACITY_TAG}"
 fi
 
-# The fingerprint gains an alpha segment only when the knob is off its
-# bit-identical default (1.0) or is live-controlled mid-run, so a default run
-# keeps the identity it had before this knob existed (RUNTIME_ALPHA_
-# OBJECTIVE_PLAN.md). Validated as a plain decimal in [0, 1] up front, so a
-# typo fails before any process starts rather than inside a malformed
-# fingerprint later.
+# Validated as a plain decimal in [0, 1] up front, so a typo fails before any
+# process starts. Deliberately NOT part of experiment_fingerprint: alpha is a
+# reward-only knob the RL controller reads -- it has no effect on `regular`
+# (which never starts a server) and does not describe database/workload
+# geometry the way T, the L0 triggers or the skew fit do. A manifest is
+# always generated from a `regular` run, which never carries an alpha value
+# at all; putting alpha in the fingerprint that gets checked against the
+# manifest would make every non-default alpha fail that check against every
+# manifest, forever -- discovered exactly this way (Gate alpha-1 failing
+# "Current geometry does not match ..." against the alpha-0-produced
+# manifest). It is still recorded per arm in metadata.env
+# (objective_alpha/objective_alpha_live), same treatment as
+# RL_OPTIONAL_MIN_SCORE and the other RL-only policy knobs that also sit
+# outside the fingerprint.
 [[ "$OBJECTIVE_ALPHA" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || {
   echo "OBJECTIVE_ALPHA must be a decimal in [0, 1]: $OBJECTIVE_ALPHA" >&2
   exit 1
 }
-ALPHA_FINGERPRINT=""
-if [[ "$OBJECTIVE_ALPHA" != "1.0" && "$OBJECTIVE_ALPHA" != "1" \
-      || "$OBJECTIVE_ALPHA_LIVE" == "1" ]]; then
-  ALPHA_FINGERPRINT=":alpha${OBJECTIVE_ALPHA}"
-  [[ "$OBJECTIVE_ALPHA_LIVE" == "1" ]] && ALPHA_FINGERPRINT+="live"
-fi
 
 # Expand a taskset -c list ("0-7,12") into one CPU number per line.
 expand_cpu_list() {
@@ -711,7 +713,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}${ALPHA_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2

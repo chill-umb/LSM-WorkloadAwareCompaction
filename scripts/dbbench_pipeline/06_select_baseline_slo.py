@@ -138,8 +138,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"mix([0-9.]+)-([0-9.]+)-([0-9.]+):scan(\d+)-(\d+)"
         r"(?::skew(\d+)-([0-9.]+))?:"
         r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
-        r"dio([01])(?::cap([0-9.x]+))?(?::alpha([0-9.]+)(live)?)?:"
-        r"dynamic([01]):soft(\d+):hard(\d+):"
+        r"dio([01])(?::cap([0-9.x]+))?:dynamic([01]):soft(\d+):hard(\d+):"
         r"binary([0-9a-f]{64}):objective([0-9a-f]{64})$"
     )
     match = pattern.fullmatch(fingerprint)
@@ -156,7 +155,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "mix_max_scan_length", "keyrange_num", "value_theta",
         "block_cache_size", "bloom_bits",
         "max_background_jobs", "threads", "disable_wal", "use_direct_io",
-        "static_capacity_scales", "objective_alpha", "objective_alpha_live",
+        "static_capacity_scales",
         "level_compaction_dynamic_level_bytes",
         "soft_pending_compaction_bytes_limit",
         "hard_pending_compaction_bytes_limit",
@@ -172,15 +171,6 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         if name == "static_capacity_scales":
             # Absent means the run predates the knob, which is no expansion.
             values[index] = values[index] or "off"
-            continue
-        # Absent means the run predates RUNTIME_ALPHA_OBJECTIVE_PLAN.md's
-        # knob, which is alpha=1.0 fixed (RL_ALPHA_CONTROL_FILE unset) --
-        # today's default and the pre-existing reward, bit-identical.
-        if name == "objective_alpha":
-            values[index] = float(values[index]) if values[index] else 1.0
-            continue
-        if name == "objective_alpha_live":
-            values[index] = values[index] == "live"
             continue
         if name in SKEW_DEFAULTS:
             raw = values[index] or SKEW_DEFAULTS[name]

@@ -20,18 +20,54 @@ node builds this revision.
 | `rl_agent/server.py` | Startup log line now prints `objective_alpha` and `alpha_control_file`. |
 | `scripts/dbbench_pipeline/set_objective_alpha.sh` | New. Atomic writer (`mktemp` + `mv`) with value validation. |
 | `scripts/dbbench_pipeline/config.sh` | `OBJECTIVE_ALPHA` (default `1.0`), `OBJECTIVE_ALPHA_LIVE` (default `0`). |
-| `scripts/dbbench_pipeline/03_run_experiments.sh` | `start_server()` passes `RL_OBJECTIVE_ALPHA`/`RL_ALPHA_CONTROL_FILE` through. Fingerprint gains a conditional `:alpha<value>[live]` segment (empty at the default, same convention as `:cap`/`:skew`). `run_arm()`'s directory name gains the same suffix when non-default, or every alpha in a sweep would collide on one `result_dir`. `metadata.env` records `objective_alpha`/`objective_alpha_live`/`alpha_control_file`. |
-| `scripts/dbbench_pipeline/06_select_baseline_slo.py` | `parse_fingerprint_options`'s regex and field list extended in lockstep with the new fingerprint segment (the exact hazard `CLAUDE.md` names for this file) — verified against 4 representative fingerprints, group-count and value alignment both checked. |
+| `scripts/dbbench_pipeline/03_run_experiments.sh` | `start_server()` passes `RL_OBJECTIVE_ALPHA`/`RL_ALPHA_CONTROL_FILE` through. `run_arm()`'s directory name gains an `-alpha<value>[live]` suffix when non-default, or every alpha in a sweep would collide on one `result_dir`. `metadata.env` records `objective_alpha`/`objective_alpha_live`/`alpha_control_file`. **Alpha is deliberately NOT part of `experiment_fingerprint`** — see the correction below. |
+| `scripts/dbbench_pipeline/06_select_baseline_slo.py` | No change (a fingerprint-segment addition here was tried, then reverted — see below). |
 | `scripts/dbbench_pipeline/04_generate_graphs.py` | `collect_arm()` now copies `objective_alpha`/`objective_alpha_live` from `metadata.env` into each `summary.csv` row (they were being written to `metadata.env` but silently dropped before this, since `collect_arm` builds an explicit field list rather than dumping the file). |
 
 **Confirmed needing no changes**, by reading rather than assuming:
 `07_evaluate_paired.py` filters by the `arm` column only, which alpha never
-touches. `frontier_analysis.py`'s `policy_positions()` compares raw measured
-W/R/S means against the hull with no fingerprint match between the policy
-run and the hull points — it only requires internal self-consistency within
-one `collect_grid()` call, which holds automatically as long as one sweep
-point (one alpha value) is analyzed per invocation (see §7's operational
-note below).
+touches.
+
+### 0a. A real bug, caught on hardware: alpha does not belong in the fingerprint
+
+**First implementation (wrong, since fixed).** The fingerprint gained a
+conditional `:alpha<value>[live]` segment, on the same pattern as `:cap`/
+`:skew`. This looked consistent by analogy but was wrong: `:cap` and `:skew`
+describe changes that affect *every* arm including `regular` (capacity
+expansion is applied in `PrepareForVersionAppend` regardless of compaction
+style; skew changes the workload `db_bench` itself generates). `alpha` only
+ever reaches the RL controller's reward — `regular` never starts a server
+and is structurally incapable of having an alpha value. A manifest is always
+generated from a `regular` run, which therefore never carries an `:alpha`
+segment at all. Putting alpha in the fingerprint that gets checked against
+the manifest meant **every non-default alpha would fail that check against
+every manifest, unconditionally** — which is exactly backwards for a knob
+whose whole purpose (the frontier sweep, §7) is checking many alpha values
+against one shared manifest.
+
+**Found by running Gate α-1 on the node**, not by review: `alpha=1.0` (the
+default, empty fingerprint segment) passed cleanly; `alpha=0.0` failed with
+`Current geometry does not match baseline_slo/.../baseline_slo.json`, the
+manifest-match check, the moment a non-default value was tried. That
+asymmetry — the first real value tested being the one that breaks — is what
+distinguishes a design bug in the fingerprint scheme itself from a fluke in
+one run.
+
+**Fix.** Alpha is not part of `experiment_fingerprint` at all — same
+treatment as `RL_OPTIONAL_MIN_SCORE`, `RL_EXPLORATION_ANNEAL_SECONDS`, and
+every other RL-only policy knob that already lived outside the fingerprint,
+recorded only in `metadata.env`. `06_select_baseline_slo.py`'s regex change
+was reverted to its pre-alpha form rather than kept dormant.
+
+**What this costs, honestly.** `frontier_analysis.py`'s `collect_grid()`
+used to be able to catch an accidentally-mixed-alpha results root through
+its own fingerprint self-consistency check (`len(identities) != 1` raises).
+With alpha out of the fingerprint, two different alpha values now produce
+*identical* fingerprints, so that automatic check no longer distinguishes
+them. The mitigation is operational, not automatic: every alpha value gets
+its own top-level results root (§7's note, and this is now how the runbook
+is actually run), so nothing relies on the fingerprint to keep sweep points
+apart.
 
 No changes to `model.py`, `agent.py`, or `replay_buffer.py`. Conditioning the
 network on alpha turned out to need **no architecture change**: `alpha` is
@@ -206,15 +242,16 @@ All reuse the existing paired-repeat, alternating-order, Student-t
 machinery (`07_evaluate_paired.py`) — `alpha` is just a new axis alongside
 `T`, not a new statistical instrument.
 
-**Operational note: one `RESULTS_ROOT` (or `SUITE_ROOT`) per alpha value.**
-`frontier_analysis.py`'s `collect_grid()` requires every run it collects to
-share one identity (`common_fingerprint`, which does not strip the alpha
-segment) and raises rather than silently mixing them. The simplest way to
-satisfy that — and the one that needs no new tooling — is to give each swept
-alpha value its own results tree (`OBJECTIVE_ALPHA=0.25 ./03_run_experiments.sh
-...` into its own `RESULTS_ROOT`, repeated per alpha), then call
-`frontier_analysis.py --policy-results <that tree> --policy-arm rl` once per
-alpha. `docs/PREREGISTRATION.md` D-3 records this as the intended usage.
+**Operational note: one `RESULTS_ROOT` (or `SUITE_ROOT`) per alpha value —
+now load-bearing, not just tidy.** Alpha is deliberately not part of
+`experiment_fingerprint` (§0a), which means `frontier_analysis.py`'s
+`collect_grid()` can no longer catch a mixed-alpha results root through its
+fingerprint self-consistency check — two different alpha values now produce
+identical fingerprints. Give each swept alpha value its own results tree
+(`OBJECTIVE_ALPHA=0.25 ./03_run_experiments.sh ...` into its own
+`RESULTS_ROOT`, repeated per alpha), then call `frontier_analysis.py
+--policy-results <that tree> --policy-arm rl` once per alpha.
+`docs/PREREGISTRATION.md` D-3 records this as the intended usage.
 
 1. **Frontier sweep (static alpha per run).** `alpha ∈ {0, 0.25, 0.5, 0.75,
    1}`, fixed per run, at existing Gate-1-style cells (e.g. 10M × T=2/6/10),
