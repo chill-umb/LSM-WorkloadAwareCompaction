@@ -208,42 +208,66 @@ ML_STATE_FIELDS = (
     # deep-level read term of the reward.
     "file_reads_per_op_norm",
     "point_probe_amp_norm",    # logical SST probes / point Get
-    "scan_work_amp_norm",      # (returned + internal skipped) / returned
-    "space_amp_norm",          # physical SST bytes / live logical bytes
     "structural_dirty_flag",   # source generation is newer than built view
+    # -- constraints (D-9) -----------------------------------------------
+    # Where the run stands against each bound and what a violation costs
+    # right now. Without these the policy could not tell "over the write
+    # budget" from "under it", and Q was fit to a reward whose multipliers
+    # moved with no trace in the state. They replace the withdrawn scan-work
+    # metric (a constant at its floor of 1.0) and the space estimate on the
+    # denominator D-3 retired.
+    "write_cum_over_bound",    # measured-phase W / (1.02 W_base), halved
+    "write_window_over_bound", # 10 s windowed W / (1.02 W_base), halved
+    "space_bytes_over_bound",  # physical SST bytes / bytes bound, halved
+    "lambda_write_norm",       # lambda / LAMBDA_MAX
+    "lambda_space_norm",
+    "lambda_latency_norm",
+    "lambda_scan_norm",
+    "lambda_stall_norm",
 )
 ML_STATE_DIM = len(ML_STATE_FIELDS)
 
 # ---------------------------------------------------------------------------
-# Reward: the constrained objective of PATHWAYS Pathway D
+# Reward: the constrained objective of PATHWAYS Pathway D, in the D-9 form
 # ---------------------------------------------------------------------------
 # Every per-level action changes one tree, so every head receives the same
-# whole-tree transition reward (multilevel.MultiLevelProcessor._global_reward):
+# whole-tree transition reward. It is computed as a COMPONENT VECTOR in
+# multilevel.MultiLevelProcessor._global_reward and priced by
+# lagrange.MULTIPLIERS -- at frame time for the logs and again at
+# replay-sample time for training:
 #
-#   r = shaping
-#       - dt * ( REWARD_READ * point_probes_per_get
-#              + lambda_W * [W_window  - W_bound]^+
-#              + lambda_S * [S         - S_bound]^+
-#              + lambda_L * latency_excess_over_avg_and_p99_limits
-#              + lambda_scan * [seeks_per_scan - seeks_bound]^+
-#              + lambda_stall * [stall_fraction - stall_bound]^+ )
+#   r = shaping - objective - lambda_W * write - lambda_S * space
+#                           - lambda_L * latency - lambda_scan * scan
+#                           - lambda_stall * stall
 #
-# The objective is point-read amplification, charged as a rate; everything
-# else is a constraint and enters ONLY through a hinge above its bound
-# (Proposition D.2), so the learner earns nothing for space or write headroom
-# it is not judged on. Space is therefore not a minimand anywhere.
+#   objective = REWARD_READ * probes_t / G_bar           R, Get-weighted
+#   write     = (phys_t - W_bound * logical_t) / L_bar    signed marginal, W units
+#   space     = [bytes_t / bytes_bound - 1]^+ * dt        level hinge (D-6)
+#   latency   = sum_op [avg_op / limit_op - 1]^+ * dt     level hinge (D-8)
+#   scan      = (run_seeks_t - seeks_bound * scans_t) / S_bar   signed marginal
+#   stall     = stall_seconds_t - stall_bound * dt        signed marginal
+#
+# with G_bar, L_bar and S_bar the run-to-date mean Get, logical-write and scan
+# rates. A FLOW constraint (a ratio of run totals) is charged by the frame's
+# marginal contribution, so the run sum is exactly the constraint the
+# evaluator scores; a LEVEL constraint keeps the hinge, because a window value
+# estimates the run value. The 10 s windowed write ratio this replaces was
+# time-weighted against a byte-weighted criterion and read 13-61% above the
+# run W on 94-100% of frames (history 14.20), so its hinge fired whatever the
+# policy did. Nothing is a minimand except the objective.
 #
 # shaping = Phi_prev - gamma^dt * Phi_now with Phi = -REWARD_STRUCTURAL_RUNS
 # * (L0 files + non-empty deeper levels): the absolute sorted-run count,
 # which is what a point lookup probes. Potential-based, so policy-invariant
-# (Proposition D.1, gamma^tau form). It is in absolute runs, not runs over
-# the L0 trigger, so removing one L0 file is worth the same at trigger 2 as
-# at trigger 16.
+# (Proposition D.1, gamma^tau form).
 #
-# The multipliers follow dual ascent on the slow timescale (Proposition D.3):
-# lambda <- clip(lambda + LAMBDA_LR * violation, 0, LAMBDA_MAX) once per
-# frame. A lambda that grows without plateauing is D-4's infeasibility
-# signal, so it is logged in every reward component record.
+# The multipliers follow SIGNED dual ascent on the slow timescale
+# (Proposition D.3): lambda <- clip(lambda + LAMBDA_LR * slack, 0, LAMBDA_MAX)
+# once per frame, where slack is the constraint's run-to-date (flows) or
+# window (levels) value over its bound, minus one. Because replay stores the
+# component vector and re-prices at sample time, a change in lambda reaches
+# every stored transition. A lambda that grows without plateauing is D-4's
+# infeasibility signal, so it is logged in every reward component record.
 REWARD_READ = _env_float("RL_REWARD_READ", 1.0)
 REWARD_STRUCTURAL_RUNS = _env_float("RL_REWARD_STRUCTURAL_RUNS", 0.5)
 LAMBDA_WRITE_INIT = _env_float("RL_LAMBDA_WRITE_INIT", 1.0)
@@ -251,7 +275,13 @@ LAMBDA_SPACE_INIT = _env_float("RL_LAMBDA_SPACE_INIT", 1.0)
 LAMBDA_LATENCY_INIT = _env_float("RL_LAMBDA_LATENCY_INIT", 1.0)
 LAMBDA_SCAN_INIT = _env_float("RL_LAMBDA_SCAN_INIT", 1.0)
 LAMBDA_STALL_INIT = _env_float("RL_LAMBDA_STALL_INIT", 1.0)
-LAMBDA_LR = _env_float("RL_LAMBDA_LR", 0.01)
+# D-9: 0.05, sized to the single-episode budget. The write multiplier is
+# useful over roughly [0, R / (slack * W_base)] -- about 5 at a 10% overshoot
+# -- and has to traverse that inside the first third of a ~3,000-frame run:
+# 5 / (1,000 frames * 0.1 slack) = 0.05 per frame per unit of slack. The
+# previous 0.01 was sized against the biased window statistic, which
+# over-reported the slack four to five times and hid the shortfall.
+LAMBDA_LR = _env_float("RL_LAMBDA_LR", 0.05)
 LAMBDA_MAX = _env_float("RL_LAMBDA_MAX", 100.0)
 # Write amplification is a ratio of byte totals. Over one 50 ms window it is
 # undefined whenever no Put landed, and over the whole run it is a constant
@@ -380,6 +410,18 @@ SHARED_TRUNK = _env_bool("RL_SHARED_TRUNK", True)
 # available. One environment variable therefore feeds both sides.
 ML_MIN_COMPACT_SCORE = _env_float(
     "RL_ML_MIN_COMPACT_SCORE", _env_float("RL_OPTIONAL_MIN_SCORE", 0.10))
+# D-9 action mask. A level below L0 is offered `compact_now` only when RocksDB
+# scores it due (score >= 1, the predicate D-4 gave the prior and the guard
+# uses); L0 below its trigger only when the compaction removes at least
+# PRIOR_MIN_RUN_REDUCTION sorted runs net of the output run. By A4 an early
+# deep compaction removes no probe and by Theorem B.1 it forfeits elision; a
+# one-file L0 compaction buys one run one flush early for a full L1 merge
+# (history 14.10). D-4 removed both from the PRIOR, but the action space kept
+# offering both to the residual, which re-learned them in the D-7 arms: L1
+# released at 41% of target at T=2, and L0 compacted at 1.1 files on 16-26%
+# of below-trigger frames. Both knobs exist for ablation only.
+MASK_DEEP_BELOW_DUE = _env_bool("RL_MASK_DEEP_BELOW_DUE", True)
+MASK_L0_MIN_RUN_REDUCTION = _env_bool("RL_MASK_L0_MIN_RUN_REDUCTION", True)
 
 # Multi-level stall attribution: when enabled, the global stall/stop penalty is
 # scaled by the level's own fullness, so a near-empty deep level is not charged
@@ -402,14 +444,28 @@ N_STEP = _env_int("RL_N_STEP", 5)
 # lookahead, i.e. effectively one-step credit. 4000ms spans 2-3 decisions.
 # Tune from the `credit_lag_s` diagnostic rather than by guessing; it is logged
 # per decision.
-CREDIT_HORIZON_MS = _env_int("RL_CREDIT_HORIZON_MS", 4_000)
+# D-9: 8 s. A compaction cascade at the comparators runs for seconds, and a
+# 4 s window closed before a deferred merge's write bytes landed.
+CREDIT_HORIZON_MS = _env_int("RL_CREDIT_HORIZON_MS", 8_000)
 # Discount expressed per second rather than per step. Decision intervals vary,
 # so a fixed per-step gamma discounts wall-clock time inconsistently (an SMDP,
 # not an MDP). 0 disables and falls back to the per-step GAMMA.
-GAMMA_PER_SEC = _env_float("RL_GAMMA_PER_SEC", 0.95)
+# D-9: 0.98, an effective horizon of 50 s (1 / (1 - gamma)) against 20 s at
+# 0.95. A trigger decision's consequences persist as tree depth for the rest
+# of a ~150 s run; at 0.95 a cost 20 s away weighed 0.36 and one 60 s away
+# 0.05, which made deferral look free and early compaction cheap (history
+# 14.20).
+GAMMA_PER_SEC = _env_float("RL_GAMMA_PER_SEC", 0.98)
 # Double DQN decouples next-action selection (policy net) from its evaluation
 # (target net), reducing Q-value overestimation on the noisy aggregated reward.
 DOUBLE_DQN = os.environ.get("RL_DOUBLE_DQN", "1") != "0"
+# D-9: Huber (smooth-L1) TD loss, PATHWAYS Pathway D implementation item 5.
+# The signed marginal write term is byte-weighted, so one compaction burst
+# puts tens of W-units into a single frame and the return distribution is
+# heavy-tailed; a squared loss lets those samples own the gradient. "mse"
+# restores the previous loss for ablation.
+TD_LOSS = os.environ.get("RL_TD_LOSS", "huber").strip().lower()
+HUBER_BETA = _env_float("RL_HUBER_BETA", 1.0)
 
 # Adaptive normalization. Scales track observed maxima with a small decay so
 # the agent can adapt when the workload regime changes.

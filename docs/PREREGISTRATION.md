@@ -817,6 +817,189 @@ this entry is an incomplete repair, to be reported as such.
 **Implementation.** `rl_agent/multilevel.py` `_global_reward` only. Python:
 no rebuild, `dbbench_sha256` unchanged, the 182-arm Hull-0 stands.
 
+### D-9, 2026-09-23 — the learner's action space, state, reward and horizon are aligned with the constrained objective
+
+**Recorded after D-7 was scored and after the architecture audit of
+2026-09-23 (history 14.20), and before any arm runs under it.** D-7's verdict
+stands as measured. D-8's repair is kept and its five predictions are
+re-stated below under this instrument rather than run on their own: an
+instrument change this large makes a D-8-only re-run a test of a harness that
+is about to be replaced. Nothing in this entry is a re-scoring; every number
+quoted from the D-7 arms is an audit measurement of the harness, not a result
+about the learner, which is precisely the finding.
+
+**What the audit found.** The learner was built when the objective was
+latency and stalls, then given a constrained reward on 2026-09-20 without the
+rest of the architecture being re-derived. Measured on the D-7 arms
+(`results/learner-assoc`, repeat 1), against their same-configuration static
+twins:
+
+1. **The write hinge measured the wrong quantity.** It compared a 10 s
+   exponentially weighted ratio against the whole-run bound. The window is
+   time-weighted, the criterion is byte-weighted, and under `Assoc`'s 26–46%
+   stall fractions the two differ: run-level $W$ 8.40 / 8.94 / 11.08 against
+   window medians 9.25 / 12.86 / 15.76 at $T$ = 2 / 6 / 10, with the hinge
+   positive on 94% / 100% / 99% of frames and in every decile of the run. The
+   learner was told the constraint was violated by 13–61% when the evaluator
+   saw 3–12%.
+2. **Every multiplier was a ratchet.** The update fed the hinge $[g]^+$ rather
+   than the signed constraint value, so no $\lambda$ could fall. In every D-7
+   arm each multiplier's final value was its maximum and $\lambda_S$ never left
+   1.00. Pathway D's D-3 ("plateaus") and D-4 ("diverges where infeasible")
+   were reading a monotone counter.
+3. **The action space offered the two write-costly moves and withheld the
+   write-saving one.** Any level with score $\ge 0.10$ could be compacted early
+   through an optional token, and L0 at one file; L0 could not be deferred
+   while due (`RL_L0_ALLOW_DEFER=0`, a bridge-validation posture from
+   2026-08-16 never lifted). The residual re-learned exactly what D-4 had
+   removed from the prior: at $T{=}2$ it released L1 at a median 41% of target
+   (686 of 935 releases below 0.95, twin 0 of 1184) and L2 at 38% (940 of
+   1079), with merge survival $\eta$ rising from 0.84 to 0.93 at L1 and 0.76
+   to 0.89 at L2 — each early merge dropped less garbage; and it compacted L0
+   at a mean of 1.1 files on 16–26% of below-trigger frames. That, not
+   deferral, is the depth mechanism of D-7's +2 / +1 / +0.7 levels.
+4. **The state could not see the constraints.** No write-amplification
+   feature, no multiplier, no per-level garbage signal; eleven of 31 features
+   were stall-era pressure terms, one was the withdrawn scan-work metric (a
+   constant at its floor) and one the space estimate D-3 retired.
+5. **The horizon was shorter than the physics.** $\gamma$ = 0.95 per second
+   is a 20 s effective horizon against consequences that persist for the rest
+   of a 150 s run.
+6. **The prior is a step-0 policy only.** $|$prior advantage$|$ averaged
+   0.6–0.7 against a residual advantage of 258–652, because $Q$ is in return
+   units and the prior in a dimensionless $\pm 2$; and the TD loss was
+   squared on returns in the thousands (Pathway D item 5 asked for Huber and
+   normalisation; only clipping was implemented).
+
+**Decisions.** Six, each with an ablation knob that restores the previous
+behaviour, all Python or runner environment, none touching the binary, the
+contract file or any manifest.
+
+1. **Flows and levels.** A constraint that is a ratio of run totals ($W$,
+   $R$, seeks per scan, stall fraction) enters the reward as the frame's
+   **signed marginal** contribution — numerator minus bound times
+   denominator, over the run-to-date mean denominator rate, so the unit is the
+   metric's own and the run sum is exactly the constraint the evaluator
+   scores. A constraint that is a level (space bytes, latency averages) keeps
+   the hinge on its window value, which estimates the run value. The
+   objective becomes Get-weighted the same way. This supersedes P1c-22's
+   "windowed" wording for $W$ on D-8's own principle — a hinge must be a
+   quantity the policy can move and its limit must be measured in the same
+   unit — and the contract JSON is not edited, for D-3's reason (its hash is
+   in every fingerprint).
+2. **Signed dual ascent, and replay re-priced at sample time.**
+   $\lambda \leftarrow \text{clip}(\lambda + \eta\,\text{slack}, 0, 100)$
+   with slack signed in the constraint's unit (run-to-date for flows, window
+   for levels); $\eta$ = 0.05, from the single-episode budget (the write
+   multiplier's useful range, $R / (\text{slack} \cdot W_{\text{base}})
+   \approx 5$ at a 10% overshoot, must be traversable in the first third of a
+   ~3,000-frame run). Transitions store the reward as a component vector and
+   the trainer prices every sample with the multipliers current when it is
+   drawn (`rl_agent/lagrange.py`), so one batch is priced under one
+   objective and a fall in $\lambda$ reaches every stored sample.
+3. **The D-4 rule becomes an action mask.** A level $\ge 1$ is offered
+   `compact` only when RocksDB scores it due; L0 below its trigger only when
+   the compaction nets at least `RL_PRIOR_MIN_RUN_REDUCTION` (2) runs. Due
+   levels are never masked. The mask is never looser than the C++
+   optional-token gate, so no offered action is silently dropped.
+4. **The L0 posture is lifted for the learned arms.** `rl` and
+   `unconstrained_rl` run with `RL_L0_ALLOW_DEFER_LEARNED=1`; `prior_only`
+   and `unconstrained_prior_only` keep 0, so the D-4/D-5 record stays
+   comparable. On the enforced arm the guard's calibrated L0 limits and its
+   `l0_slowdown` term still bound the deferral; the unconstrained arm shows
+   the lever unbounded. Recorded per arm in `metadata.env`; not a
+   fingerprint field, since it is a controller setting that pairs against
+   `regular` exactly as before.
+5. **The state gains the constraints.** Run-to-date and windowed $W$ over
+   bound, space bytes over bound and the five multipliers replace the two
+   dead features: 37 inputs (`config.ML_STATE_FIELDS`).
+6. **Horizon and loss.** $\gamma$ = 0.98 per second (50 s), credit window
+   8 s, Huber TD loss. Reward normalisation and a re-scaled prior are **not**
+   taken (below).
+
+**Predictions, recorded in advance.** Scope: 10M, $T$ = 2 / 6 / 10, three
+repeats, `rl` and `unconstrained_rl`, binary `9b9321b1…`, at the stage-06
+comparators, after a one-arm smoke test; paired against the same-seed
+`regular` twins of the Hull-0 sweep by `frontier_analysis.paired_comparison`.
+Three repeats is a mechanism count; no criterion carrying a 2% margin is
+scored from it.
+
+1. **The instrument is consistent with the evaluator.** Per arm, the
+   reward's run-to-date $W$ at shutdown equals the evaluator's $W$ within 2%.
+2. **No multiplier is a ratchet.** In every arm at least one multiplier ends
+   below its run maximum, and $\lambda_{\text{lat}}$ never reaches
+   `LAMBDA_MAX` (D-8 prediction 1).
+3. **The mask reaches the plant.** Zero releases below $\varphi$ = 0.95 at
+   any level $\ge 1$ in the workload phase, trivial moves excluded, in every
+   learned arm (against 686 of 935 at L1, $T{=}2$, under D-7); and the mean
+   L0 file count at a below-trigger compaction is at least 2.0 (against 1.1).
+4. **$\lambda_W$ binds.** It is the largest multiplier at the end of every
+   `rl` arm (D-8 prediction 2), and in any arm whose run-level $W$ finishes
+   inside the 2% margin it ends below its run maximum — the D-3 criterion,
+   decidable for the first time.
+5. **Depth does not inflate.** $\delta L \le 0$ against the paired `regular`
+   in every cell (D-7 prediction 1 and D-8 prediction 4, re-asked under an
+   instrument that no longer offers early deep compaction).
+6. **Write moves toward parity.** Mean paired $\Delta W$ for `rl` is at most
+   +3% at $T{=}2$ and $T{=}10$ (trigger-2 comparators, where the mask closes
+   every write-costly lever) and at most +5% at $T{=}6$ (trigger 4, where the
+   L0 band exists), against +6.1 / +13.2 / +4.6% under D-7; and
+   `unconstrained_rl` finishes with lower $W$ than `rl` in every cell, because
+   the L0 lever is bounded only on the enforced arm.
+7. **Read does not regress at the trigger-2 cells.** If prediction 5 holds,
+   mean paired $\Delta R$ for `rl` is at most +2% at $T{=}2$ and $T{=}10$
+   (against +3.6 / +6.0% under D-7).
+8. **E-5 stays above 1% in at least two cells** (D-8 prediction 5): `due_age`
+   and `pressure` latch by construction, so the guard still changes a
+   deferring policy's action on well over 1% of the frames where it could.
+9. **The L0 lever is real but guard-bounded on `rl`.** `rl` defers a due L0
+   on more than zero frames in every cell, and `unconstrained_rl` defers a
+   larger fraction of its due-L0 frames than `rl` does.
+
+D-8's prediction 3 — at least 90% of the superseded latency excess was
+`write_p99` — is scored from the `latency_terms` log as a measurement of the
+D-7 instrument, not of this one.
+
+**Falsification.** Prediction 3 is the plumbing check: if any early deep
+release appears, the mask did not reach the plant and nothing else is read
+until that is fixed. Prediction 1 failing means the reward's write accounting
+and the evaluator's disagree and the flow ruling must be withdrawn. If
+predictions 3 and 5 both hold but 6 fails at the trigger-2 cells, then holding
+due levels closed for the guard's due-age allowance costs more write than the
+budget by relocation alone, without any elision gain — the learner's last
+lever in this action space is worthless at parity and Pathway A is the only
+remaining route. If 3 holds and 5 fails, the depth is coming from deferral,
+not eagerness, which is the Theorem A.1 cascade; the same conclusion follows.
+Either way the run is evidential about the architecture, which D-7 was not.
+
+**Not taken, and why.** (a) A frame-simulated windowed-$W$ reference in the
+manifest, as `frame_simulated_limits` does for the guard, would let the
+window hinge stand; the marginal form needs no reference and sums to the
+criterion exactly, so it is preferred. (b) Reward normalisation by running
+standard deviation and a prior re-scaled to return units are left for a later
+entry: the return scale moves roughly 300-fold under this change and D-2's
+criterion should first be read on the new scale. (c) The guard's write sensor
+(E-3) and Pathway A's capacity action are C++, and a rebuild voids the
+182-arm Hull-0; they stay in Gate 2. (d) `RL_PRIOR_MIN_RUN_REDUCTION` and the
+comparator are untouched.
+
+**Implementation.** `rl_agent/lagrange.py` (new), `rl_agent/config.py`,
+`rl_agent/multilevel.py` (`_global_reward`, `_encode`, `_compact_allowed`,
+`process`), `rl_agent/replay_buffer.py`, `rl_agent/agent.py`,
+`rl_agent/server.py`, `scripts/dbbench_pipeline/config.sh`
+(`RL_L0_ALLOW_DEFER_LEARNED`) and `03_run_experiments.sh` (per-arm posture).
+Exercised offline on a synthetic frame stream before commit: state width 37,
+mask behaviour, the run-to-date $W$ identity, the marginal write sum
+reproducing the constraint total to 0.7%, the write multiplier peaking where
+the run-to-date $W$ crosses its bound and falling after, the four slack
+constraints decaying to zero, and training under re-priced replay with Huber
+loss. Python and shell only: no rebuild, `dbbench_sha256` unchanged, the
+182-arm Hull-0 and every manifest stand. Driver: `d9_learner_run.sh`.
+
+**Evidence to be written.** `results/learner-assoc-d9/10M/T{2,6,10}/repeat-*/{rl,unconstrained_rl}/`,
+`results/learner-smoke-d9/`, `gate1/d9_verdict.txt`, `gate1/d9_conditional.{json,txt}`;
+twins from `results/baseline_sweep/`.
+
 ---
 
 ## 2. Gate verdicts as measured

@@ -12,6 +12,7 @@ from typing import Optional
 import config
 from model import DQN, MultiHeadDQN
 from replay_buffer import ReplayBuffer, LevelBufferView
+from lagrange import MULTIPLIERS, COMPONENT_COUNT, scalar_components
 
 # One thread per agent is plenty: the nets are tiny (23->64->64->2) and the
 # agents already run concurrently, so intra-op parallelism only adds contention
@@ -25,6 +26,14 @@ _REWARD_INVALID_REASON_NAMES = {
     3: "rejected_manifest",
     4: "unknown_control_ownership",
 }
+
+
+def _td_loss(q_pred: torch.Tensor, q_target: torch.Tensor) -> torch.Tensor:
+    """Huber by default (D-9, PATHWAYS Pathway D item 5); MSE for ablation."""
+    if config.TD_LOSS == "huber":
+        return nn.functional.smooth_l1_loss(q_pred, q_target,
+                                            beta=config.HUBER_BETA)
+    return nn.functional.mse_loss(q_pred, q_target)
 
 
 class SharedTrunk:
@@ -126,7 +135,8 @@ class SharedTrunk:
         with self._data_lock:
             if len(self.buffer) < config.MIN_REPLAY_SIZE:
                 return
-            batch = self.buffer.sample(config.BATCH_SIZE)
+            batch = self.buffer.sample(config.BATCH_SIZE,
+                                       MULTIPLIERS.price_vector())
 
         (states, actions, rewards, next_states, dones, priors, next_priors,
          discounts, levels) = batch
@@ -164,7 +174,7 @@ class SharedTrunk:
                     q_next = q_next_target.max(dim=1).values
                 q_target = r + disc * q_next * (1.0 - d)
 
-            loss = nn.functional.mse_loss(q_pred, q_target)
+            loss = _td_loss(q_pred, q_target)
             self.optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=10.0)
@@ -552,6 +562,11 @@ class DQNAgent:
         path.
         """
         now = time.monotonic()
+        # D-9: the reward is a component vector priced at replay time. A
+        # scalar (legacy reward, terminal frame) rides in the shaping slot.
+        reward = np.asarray(reward, dtype=np.float64)
+        if reward.ndim == 0:
+            reward = scalar_components(float(reward))
         with self._data_lock:
             self.last_returns = []
 
@@ -654,7 +669,7 @@ class DQNAgent:
                                     if legacy_credit else int(decision_id)),
                     "confirmed": confirmed,
                     "prior": None if prior is None else np.asarray(prior).copy(),
-                    "return": 0.0,
+                    "return": np.zeros(COMPONENT_COUNT, dtype=np.float64),
                     "discount": 1.0,
                     "steps": 0,
                     "t0": now,
@@ -673,11 +688,14 @@ class DQNAgent:
 
     def _push_transition(self, entry: dict, state: np.ndarray,
                          prior: Optional[np.ndarray], terminal: bool) -> None:
-        self.buffer.push(entry["state"], entry["action"], entry["return"],
+        components = np.asarray(entry["return"], dtype=np.float32)
+        self.buffer.push(entry["state"], entry["action"], components,
                          state, terminal, entry["prior"], prior,
                          entry["discount"])
         self.finalized_transitions += 1
-        self.last_returns.append(entry["return"])
+        # Diagnostic only: the return as priced by the multipliers of this
+        # moment. Training re-prices every sample when it is drawn.
+        self.last_returns.append(float(MULTIPLIERS.price(components)))
 
     def flush_pending(self, state: np.ndarray = None) -> int:
         """Finalize every open credit window as a terminal transition.
@@ -754,7 +772,8 @@ class DQNAgent:
         with self._data_lock:
             if len(self.buffer) < config.MIN_REPLAY_SIZE:
                 return
-            batch = self.buffer.sample(config.BATCH_SIZE)
+            batch = self.buffer.sample(config.BATCH_SIZE,
+                                       MULTIPLIERS.price_vector())
 
         states, actions, rewards, next_states, dones, priors, next_priors, \
             discounts, _levels = batch
@@ -795,7 +814,7 @@ class DQNAgent:
                     q_next = q_next_target.max(dim=1).values
                 q_target = r + disc * q_next * (1.0 - d)
 
-            loss = nn.functional.mse_loss(q_pred, q_target)
+            loss = _td_loss(q_pred, q_target)
             self.optimizer.zero_grad()
             loss.backward()
             # gradient clip for stability

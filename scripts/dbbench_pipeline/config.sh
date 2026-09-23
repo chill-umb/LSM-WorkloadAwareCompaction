@@ -160,6 +160,15 @@ RL_OPTIONAL_MIN_SCORE="${RL_OPTIONAL_MIN_SCORE:-0.10}"
 # native leveled behavior on the axis that drives stalls. Set to 1 only for a
 # deliberate learned-L0 experiment.
 RL_L0_ALLOW_DEFER="${RL_L0_ALLOW_DEFER:-0}"
+# D-9 (2026-09-23). The LEARNED arms (rl, unconstrained_rl) may defer a due
+# L0. The L0 trigger is the static class's main write/read lever, and under the
+# posture above a learned policy could only ever compact L0 EARLIER than
+# native, never later -- the write-costly direction, with the write-saving one
+# withheld. prior_only and unconstrained_prior_only keep the posture above so
+# the D-4/D-5 record stays comparable. On the enforced arm the guard's L0
+# limits and its l0_slowdown term still bound the deferral; the unconstrained
+# arm shows the lever's unbounded effect.
+RL_L0_ALLOW_DEFER_LEARNED="${RL_L0_ALLOW_DEFER_LEARNED:-1}"
 # D3a. A `defer` selected while a level was BELOW its trigger expressed no
 # judgement about a due level, so it does not bind once the level crosses;
 # the level is admitted under the kPosture reason and the transition stays

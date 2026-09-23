@@ -3170,6 +3170,99 @@ D-5 scorer had summed L0 jobs across a glob without dividing by repeat count
 left owing, which make the latency comparison at those cells same-session for
 the first time.
 
+### 14.20 The learner audited against the objective; D-9 realigns it, 2026-09-23
+
+The whole RL architecture — action space, state, reward, credit, prior, loss
+and the guard's interaction with it — was read against the constrained
+objective and measured on the D-7 arms. The dated decisions and predictions
+are `docs/PREREGISTRATION.md` D-9; this is the narrative. No arm has run under
+D-9.
+
+**Verdict of the audit: the architecture was a stall-and-latency-era
+controller with a constrained reward attached, and it could not express the
+objective.** Six findings, each measured rather than inferred.
+
+1. **The write hinge measured the wrong quantity.** The reward compared a
+   10 s exponentially weighted write ratio against the whole-run bound. The
+   window is time-weighted, the criterion byte-weighted, and under `Assoc`'s
+   stall fractions they differ by far more than the margin:
+
+   | cell | run-level W (`rl`) | bound | window W median | frames with hinge > 0 |
+   | --- | ---: | ---: | ---: | ---: |
+   | T=2 | 8.40 | 8.17 | 9.25 | 94% |
+   | T=6 | 8.94 | 7.97 | 12.86 | 100% |
+   | T=10 | 11.08 | 10.70 | 15.76 | 99% |
+
+   The gap holds in every decile of the run. This is the third instrument in
+   the project to compare a per-frame statistic against a whole-run limit —
+   after the guard's due-age limits (14.8) and the reward's latency p99
+   (D-8) — and it was the one on the binding constraint.
+2. **Every multiplier was a ratchet.** `_dual_ascent` added the hinge, never
+   the signed slack, so a multiplier could only rise. In every D-7 arm each
+   multiplier's final value was its run maximum; `lambda_space` sat at its
+   initial 1.00 throughout. Pathway D's D-3 and D-4 criteria were reading a
+   monotone counter.
+3. **The action space was asymmetric in the wrong direction.** It withheld
+   "compact L0 later" (`RL_L0_ALLOW_DEFER=0`, a bridge-validation posture from
+   2026-08-16 never lifted) and offered "compact any level early" (an
+   optional token at score $\ge 0.10$) and "compact L0 at one file". The
+   residual re-learned both. Release occupancy $\varphi$ and merge survival
+   $\eta$, D-7 `rl` repeat 1 against the static twin, workload phase, trivial
+   moves excluded:
+
+   | cell | level | rl releases | rl $\varphi$ median | rl below 0.95 | twin $\varphi$ | twin below 0.95 | rl $\eta$ | twin $\eta$ |
+   | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+   | T=2 | L1 | 935 | 0.41 | 686 | 1.09 | 0 | 0.93 | 0.84 |
+   | T=2 | L2 | 1079 | 0.38 | 940 | 1.03 | 0 | 0.89 | 0.76 |
+   | T=2 | L3 | 927 | 0.51 | 803 | 1.01 | 0 | 0.79 | 0.77 |
+   | T=6 | L2 | 2110 | 0.75 | 1166 | 1.03 | 0 | 0.88 | 0.88 |
+   | T=10 | L1 | 2240 | 1.02 | 330 | 1.12 | 0 | 0.91 | 0.93 |
+
+   At T=2 the learner compacted L1 and L2 at 40% of target on three quarters
+   of its releases, each early merge dropped less garbage, and the bytes
+   pushed down early populated L3 and L4 three to fifty times more often than
+   in the twin. That — eagerness, not deferral — is the depth mechanism of
+   D-7's +2 / +1 / +0.7 levels, and it is the behaviour D-4 had just removed
+   from the prior. On L0 the same arm compacted at a mean of 1.1 files on
+   16–26% of below-trigger frames, the 14.10 defect, this time chosen by the
+   residual. Under the correct reward the best this action space could do was
+   imitate native RocksDB.
+4. **The state could not represent the constrained problem.** Of 31 features,
+   none was write amplification, none a multiplier, none a garbage signal;
+   eleven were stall-era pressure terms, one the withdrawn scan-work metric
+   (a constant at its floor), one the space estimate D-3 retired. With
+   multipliers moving and absent from the state, Q was fit to a moving target
+   and replay mixed rewards priced under different $\lambda$.
+5. **The horizon was shorter than the physics.** $\gamma$ = 0.95 per second
+   weighs a cost 20 s away at 0.36 and 60 s away at 0.05; deferral looked
+   free and early compaction cheap.
+6. **The prior was a step-0 policy only.** Under D-7 the prior advantage
+   averaged 0.6–0.7 against a residual advantage of 258–652, a 400-to-1
+   ratio, because Q is in return units and the prior is a dimensionless
+   $\pm 2$; the TD loss was squared on returns in the thousands.
+
+**What D-9 changes**, all Python or runner environment, none touching the
+binary, the contract or a manifest: the reward becomes a component vector in
+the flow/level form (signed marginal terms for W, R, seeks and stall, hinges
+for space bytes and the latency averages), the multipliers take signed steps
+and replay is re-priced at sample time (`rl_agent/lagrange.py`), the D-4 rule
+becomes an action mask, the L0 posture is lifted for the learned arms only,
+the state gains the run-to-date and windowed W over bound, space bytes over
+bound and the five multipliers (37 inputs), $\gamma$ becomes 0.98 per second
+with an 8 s credit window, and the TD loss becomes Huber. Exercised offline on
+a synthetic stream before commit: the run-to-date W identity is exact, the
+marginal write sum reproduces the constraint total to 0.7%, the write
+multiplier peaks where the run-to-date W crosses the bound and falls after,
+and training runs. `d9_learner_run.sh` runs the smoke, the matrix and the
+scorer.
+
+**What this says about the record.** D-7 and the 2026-09-03 uniform matrix
+have the same status: neither tested the objective, because the harness could
+not express it. Their learner findings are findings about the harness. No
+learned arm in the project's history has yet been evidential about whether a
+learned trigger can beat native RocksDB on reads at write parity; D-9's run is
+the first designed to be.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,

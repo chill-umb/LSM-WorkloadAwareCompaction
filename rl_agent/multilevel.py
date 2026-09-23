@@ -26,6 +26,7 @@ import numpy as np
 
 import config
 from agent import DQNAgent, SharedTrunk
+from lagrange import MULTIPLIERS, COMPONENT_COUNT, scalar_components
 
 
 CREDIT_ASSIGNMENT_VERSION = 2
@@ -448,7 +449,7 @@ class LevelDecision:
                  "valid_actions", "prior", "dt_seconds", "executed_action",
                  "prev_chosen_action", "dt_discount", "decision_id",
                  "prev_decision_id", "previous_overridden",
-                 "reward_invalid_reason_mask")
+                 "reward_invalid_reason_mask", "reward_vector")
 
     def __init__(self, level: int, raw: dict, state: np.ndarray,
                  reward: float, components: dict, valid_actions,
@@ -458,11 +459,17 @@ class LevelDecision:
                  dt_discount: float = 0.0, decision_id: int = 0,
                  prev_decision_id: int = 0,
                  previous_overridden: bool = False,
-                 reward_invalid_reason_mask: int = 0):
+                 reward_invalid_reason_mask: int = 0,
+                 reward_vector: Optional[np.ndarray] = None):
         self.level = level
         self.raw = raw
         self.state = state
+        # The scalar as priced at frame time -- for logs and diagnostics. The
+        # agent trains on `reward_vector`, re-priced when the sample is drawn
+        # (D-9, lagrange.py).
         self.reward = reward
+        self.reward_vector = (reward_vector if reward_vector is not None
+                              else scalar_components(reward))
         self.components = components
         # Action mask: compact_now is withheld from a level with nothing worth
         # compacting (no files, or score below the configured floor). A fresh
@@ -509,16 +516,19 @@ class MultiLevelProcessor:
         # amplification the write hinge is measured on (config.WAF_WINDOW_SECONDS).
         self._ewma_physical_write_bytes = 0.0
         self._ewma_logical_write_bytes = 0.0
-        # Lagrange multipliers of the constrained reward, dual-ascended on
-        # the slow timescale (Proposition D.3) and logged per frame.
-        self._lambda = {
-            "write": config.LAMBDA_WRITE_INIT,
-            "space": config.LAMBDA_SPACE_INIT,
-            "latency": config.LAMBDA_LATENCY_INIT,
-            "scan": config.LAMBDA_SCAN_INIT,
-            "stall": config.LAMBDA_STALL_INIT,
-        }
+        # The Lagrange multipliers live in lagrange.MULTIPLIERS (D-9): the
+        # reward moves them once per frame, the trainer prices replay with them.
         self._frames = 0
+        # Run-to-date totals of every flow the constraints are ratios of. The
+        # marginal terms and the multiplier slacks come from these, so the
+        # reward's write, read, scan and stall accounting sums to the
+        # evaluator's whole-run statistic rather than to a window estimate.
+        self._cum = {"phys": 0.0, "log": 0.0, "probes": 0.0, "gets": 0.0,
+                     "run_seeks": 0.0, "scans": 0.0, "stall": 0.0,
+                     "elapsed": 0.0}
+        # The constraint features of the state (D-9), written by
+        # _global_reward for the frame being encoded.
+        self._constraint_view: Dict[str, float] = {}
 
     # -- parsing --------------------------------------------------------
 
@@ -659,14 +669,11 @@ class MultiLevelProcessor:
 
         point_amp = (g["point_sst_probes"] / g["keys_read"]
                      if g["keys_read"] > 0 else 0.0)
-        scan_amp = ((g["scan_returned_entries"] + g["scan_internal_skipped"])
-                    / g["scan_returned_entries"]
-                    if g["scan_returned_entries"] > 0 else 0.0)
-        space_amp = (g["physical_sst_bytes"] / g["live_logical_bytes"]
-                     if g["live_logical_bytes"] > 0 else 0.0)
         s.observe("global.point_amp", point_amp)
-        s.observe("global.scan_amp", scan_amp)
-        s.observe("global.space_amp", space_amp)
+        # D-9: the constraint view _global_reward wrote for this frame. The
+        # withdrawn scan-work metric (a constant at its floor) and the space
+        # estimate on the denominator D-3 retired are no longer features.
+        cv = self._constraint_view
 
         if level == 0:
             slowdown_pressure = _clamp(
@@ -707,10 +714,16 @@ class MultiLevelProcessor:
             l0_hit_fraction,
             s.normalize("global.file_reads_per_op", file_reads_per_op),
             s.normalize("global.point_amp", point_amp),
-            s.normalize("global.scan_amp", scan_amp),
-            s.normalize("global.space_amp", space_amp),
             1.0 if (g["structural_source_generation"]
                     != g["structural_built_generation"]) else 0.0,
+            cv.get("write_cum_over_bound", 0.0),
+            cv.get("write_window_over_bound", 0.0),
+            cv.get("space_bytes_over_bound", 0.0),
+            cv.get("lambda_write_norm", 0.0),
+            cv.get("lambda_space_norm", 0.0),
+            cv.get("lambda_latency_norm", 0.0),
+            cv.get("lambda_scan_norm", 0.0),
+            cv.get("lambda_stall_norm", 0.0),
         ]
         return np.array(values, dtype=np.float32)
 
@@ -722,24 +735,18 @@ class MultiLevelProcessor:
             return 0.0
         return _positive(value / bound - 1.0)
 
-    def _dual_ascent(self, name: str, violation: float) -> float:
-        """lambda <- clip(lambda + LAMBDA_LR * violation, 0, LAMBDA_MAX).
-
-        The slow timescale of Proposition D.3: one small step per frame
-        against thousands of gradient steps on Q. Unbounded growth is D-4's
-        infeasibility signal, so the trajectory is logged rather than hidden
-        by a tight clip.
-        """
-        value = self._lambda[name] + config.LAMBDA_LR * violation
-        value = _clamp(value, 0.0, config.LAMBDA_MAX)
-        self._lambda[name] = value
-        return value
-
     def reward_state(self) -> dict:
         """Multipliers and the bounds they enforce, for the health summary."""
+        cum = dict(self._cum)
         return {
-            "lambda": dict(self._lambda),
+            "lambda": MULTIPLIERS.values(),
+            "lambda_lr": config.LAMBDA_LR,
             "frames": self._frames,
+            "cumulative": cum,
+            "write_amplification_cumulative": (
+                cum["phys"] / cum["log"] if cum["log"] > 0 else None),
+            "point_read_amplification_cumulative": (
+                cum["probes"] / cum["gets"] if cum["gets"] > 0 else None),
             "write_bound": config.WRITE_BOUND,
             "space_bytes_bound": config.SPACE_BYTES_BOUND,
             "scan_seeks_bound": config.SCAN_SEEKS_BOUND,
@@ -749,27 +756,84 @@ class MultiLevelProcessor:
         }
 
     def _global_reward(self, g: dict, levels: List[dict],
-                       dt: float) -> Tuple[float, dict]:
+                       dt: float) -> Tuple[np.ndarray, dict]:
         """One cooperative reward for the physical tree: the constrained
-        objective of PATHWAYS Pathway D (see config.py, "Reward").
+        objective of PATHWAYS Pathway D as a COMPONENT VECTOR (D-9).
 
-        The objective is point-read amplification, charged as a rate. Every
-        constraint enters only as a hinge above its bound (Proposition D.2),
-        so nothing below a bound earns credit: space and write headroom the
-        criteria do not reward are not rewarded here either. Shaping is the
-        potential difference over the absolute sorted-run count in the
-        gamma^tau form (Proposition D.1), so it is policy-invariant and gives
-        immediate credit for a run removed in a window with no reads.
+        Returns (components, details). In lagrange.COMPONENTS order, each
+        already integrated over the frame:
+
+            shaping    gamma^dt Phi(s_t) - Phi(s_{t-1}), Phi = -REWARD_STRUCTURAL_RUNS * runs
+            objective  REWARD_READ * probes_t / G_bar                  R, Get-weighted
+            write      (phys_t - W_bound * log_t) / L_bar               signed marginal, W units
+            space      [bytes_t / bytes_bound - 1]^+ * dt               level hinge (D-6)
+            latency    sum_op [avg_op / limit_op - 1]^+ * dt            level hinge (D-8)
+            scan       (run_seeks_t - seeks_bound * scans_t) / S_bar    signed marginal
+            stall      stall_seconds_t - stall_bound * dt               signed marginal
+
+        The scalar the learner sees is r = shaping - objective - sum lambda_x x,
+        priced by lagrange.MULTIPLIERS: here for the logs, and again at
+        replay-sample time for training.
+
+        Flows against levels. W, R, seeks per scan and the stall fraction are
+        ratios of run totals, so a frame's honest share is its marginal
+        contribution -- numerator minus bound times denominator -- divided by
+        the run-to-date mean denominator rate, which puts it in the metric's
+        own unit. Summed over the run that is (total - bound * total
+        denominator) / mean rate: the constraint the evaluator scores, with no
+        window bias. The 10 s windowed write ratio this replaces was
+        time-weighted against a byte-weighted criterion; under Assoc's 26-46%
+        stall fractions it read 13-61% above the run W on 94-100% of frames
+        (history 14.20), so its hinge fired whatever the policy did. Space and
+        the latency averages are levels -- a window value estimates the run
+        value -- and keep the hinge.
+
+        Every multiplier then takes one SIGNED step on its constraint's slack
+        in its own unit (run-to-date for flows, window for levels), so it can
+        fall when the constraint has slack.
         """
         if g["done"]:
             # The shutdown message contains synthetic zero level states, not a
             # newly empty physical tree. It finalizes pending credit only.
-            return 0.0, {"terminal": 1.0}
+            return (np.zeros(COMPONENT_COUNT, dtype=np.float64),
+                    {"terminal": 1.0})
         self._frames += 1
+        constrained = bool(config.BASELINE_LIMITS)
 
-        # -- objective: logical point probes per Get in this window ----------
-        point_amp = (g["point_sst_probes"] / g["keys_read"]
-                     if g["keys_read"] > 0 else 0.0)
+        # -- run-to-date totals of every flow -------------------------------
+        phys_t = (_positive(g["flushed_bytes"])
+                  + _positive(g["compaction_bytes_written"]))
+        log_t = _positive(g["user_logical_write_bytes"])
+        probes_t = _positive(g["point_sst_probes"])
+        gets_t = _positive(g["keys_read"])
+        run_seeks_t = _positive(g["scan_sorted_run_seeks"])
+        scans_t = _positive(g["seeks"])
+        stall_t = _positive(g["stall_duration_micros"]) / 1e6
+        cum = self._cum
+        cum["phys"] += phys_t
+        cum["log"] += log_t
+        cum["probes"] += probes_t
+        cum["gets"] += gets_t
+        cum["run_seeks"] += run_seeks_t
+        cum["scans"] += scans_t
+        cum["stall"] += stall_t
+        cum["elapsed"] += max(dt, 0.0)
+        elapsed = max(cum["elapsed"], 1e-9)
+        g_bar = cum["gets"] / elapsed          # Gets per second, run to date
+        l_bar = cum["log"] / elapsed           # logical bytes per second
+        s_bar = cum["scans"] / elapsed         # scans per second
+        w_cum = cum["phys"] / cum["log"] if cum["log"] > 0 else 0.0
+        seeks_cum = (cum["run_seeks"] / cum["scans"]
+                     if cum["scans"] > 0 else 0.0)
+        stall_cum = cum["stall"] / elapsed
+
+        # -- objective: point probes per Get, Get-weighted --------------------
+        # probes_t / G_bar integrates to R_run * elapsed (up to the running
+        # mean), so the learner minimises the criterion's own quantity. The
+        # window ratio probes_t / gets_t weighted every window equally
+        # whatever its read count, and a stalled window has few reads.
+        point_amp = probes_t / gets_t if gets_t > 0 else 0.0
+        objective = config.REWARD_READ * (probes_t / g_bar if g_bar > 0 else 0.0)
 
         # -- shaping: absolute sorted runs a lookup can probe -----------------
         l0_runs = sum(raw["files"] for raw in levels
@@ -789,60 +853,44 @@ class MultiLevelProcessor:
             shaping = self._prev_tree_cost - gamma_dt * tree_cost
         self._prev_tree_cost = tree_cost
 
-        # -- write constraint: windowed WAF against W_base (1 + delta_W) -------
-        # An interval-only ratio is undefined in a window with no Put and a
-        # run-to-date ratio is a constant no single action can move, so the
-        # hinge sees an exponentially weighted window (config.WAF_WINDOW_SECONDS).
+        # -- write: signed marginal against W_base (1 + delta_W) -------------
+        # The 10 s window is kept as a diagnostic and as a state feature; it
+        # no longer feeds the hinge (see the docstring).
         decay = (math.exp(-dt / config.WAF_WINDOW_SECONDS)
                  if config.WAF_WINDOW_SECONDS > 0.0 and dt > 0.0 else 1.0)
         self._ewma_physical_write_bytes = (
-            self._ewma_physical_write_bytes * decay
-            + g["flushed_bytes"] + g["compaction_bytes_written"])
+            self._ewma_physical_write_bytes * decay + phys_t)
         self._ewma_logical_write_bytes = (
-            self._ewma_logical_write_bytes * decay
-            + g["user_logical_write_bytes"])
-        waf = (self._ewma_physical_write_bytes / self._ewma_logical_write_bytes
-               if self._ewma_logical_write_bytes > 0 else 0.0)
-        write_excess = self._hinge(waf, config.WRITE_BOUND)
+            self._ewma_logical_write_bytes * decay + log_t)
+        waf_window = (self._ewma_physical_write_bytes
+                      / self._ewma_logical_write_bytes
+                      if self._ewma_logical_write_bytes > 0 else 0.0)
+        if constrained and config.WRITE_BOUND > 0.0 and l_bar > 0.0:
+            write = (phys_t - config.WRITE_BOUND * log_t) / l_bar
+            write_slack = (w_cum / config.WRITE_BOUND - 1.0
+                           if cum["log"] > 0 else 0.0)
+        else:
+            write, write_slack = 0.0, 0.0
 
-        # -- space constraint: settled physical SST bytes against the tuned
-        # baseline's, at the rung's margin (D-6). Bytes, not a ratio: the live
-        # denominator is `EstimateLiveDataSize` while the manifest reference is
-        # D-3's measured garbage-free size, so the ratio form compared two
-        # different metrics and was violated on frame one in every cell. The
-        # C++ guard already hinges this exact quantity.
+        # -- space: level hinge in settled physical bytes (D-6) --------------
         space_bytes = _positive(g["physical_sst_bytes"])
         space_excess = self._hinge(space_bytes, config.SPACE_BYTES_BOUND)
-        # Reported for diagnostics only; not the hinge input. This is the
-        # depth-sensitive estimate D-3 replaced, kept so a frame can be joined
-        # to the older logs.
+        space = space_excess * dt
+        space_slack = (space_bytes / config.SPACE_BYTES_BOUND - 1.0
+                       if config.SPACE_BYTES_BOUND > 0.0 else 0.0)
+        # Diagnostic only: the depth-sensitive estimate D-3 replaced, kept so
+        # a frame can be joined to the older logs.
         space_amp_estimate = (g["physical_sst_bytes"] / g["live_logical_bytes"]
                               if g["live_logical_bytes"] > 0 else 0.0)
 
-        # -- scan constraint: sorted-run seeks per scan (P0-1) ----------------
-        scan_seeks = (g["scan_sorted_run_seeks"] / g["seeks"]
-                      if g["seeks"] > 0 else 0.0)
-        scan_excess = (self._hinge(scan_seeks, config.SCAN_SEEKS_BOUND)
-                       if g["seeks"] > 0 else 0.0)
-
-        # -- latency constraint: windowed AVERAGES only (D-8) ----------------
-        # The manifest's limits are whole-run statistics. A window mean is an
-        # unbiased estimate of the run mean, so the average terms transfer; a
-        # window p99 is NOT an estimate of the run p99 when the distribution is
-        # heavy-tailed, and this one is extreme -- 97.8% of writes finish under
-        # 1 us while P99.9 is 2749 us, so the run p99 over 2.9M samples is
-        # 2.33 us while a ~500-sample frame's p99 lands in the tail constantly.
-        # Measured under D-7: per-frame latency_excess was never zero, p50
-        # 19.92, and lambda_latency railed at LAMBDA_MAX in all six arms,
-        # 6-11x lambda_write. This is the inspection-paradox unit error that
-        # history 14.8 diagnosed for the guard and fixed with
-        # frame_simulated_limits; the reward never got that fix.
-        #
-        # p99 is still computed and logged per operation, so the decomposition
-        # is readable from a frame rather than inferred -- it just does not
-        # enter the hinge. p99 remains an acceptance metric (P0-4), scored at
-        # run end by the paired evaluator, and the guard keeps its own p95.
+        # -- latency: level hinge on windowed AVERAGES only (D-8) -------------
+        # A window mean is an unbiased estimate of the run mean; a window p99
+        # is not an estimate of the run p99 on this distribution (D-8). p99 is
+        # still computed and logged per operation so the decomposition is
+        # readable from a frame. The multiplier's slack is the worst
+        # operation's signed average excess.
         latency_excess = 0.0
+        latency_slack = None
         latency_terms = {}
         for operation in ("get", "scan", "write"):
             if g[f"{operation}_latency_count"] <= 0:
@@ -850,65 +898,117 @@ class MultiLevelProcessor:
             for quantile in ("avg", "p99"):
                 limit = config.BASELINE_LIMITS.get(
                     f"{operation}_latency_{quantile}_ns_limit", 0.0)
-                excess = self._hinge(
-                    g[f"{operation}_latency_{quantile}_ns"], limit)
+                value = g[f"{operation}_latency_{quantile}_ns"]
+                excess = self._hinge(value, limit)
                 latency_terms[f"{operation}_{quantile}"] = excess
                 if quantile == "avg":
                     latency_excess += excess
+                    if limit > 0.0:
+                        signed = value / limit - 1.0
+                        latency_slack = (signed if latency_slack is None
+                                         else max(latency_slack, signed))
+        latency = latency_excess * dt
+        if latency_slack is None:
+            latency_slack = 0.0
 
-        # -- stall constraint: zero-margin non-inferiority (P0-2) -------------
-        stall_fraction = (g["stall_duration_micros"] / g["interval_micros"]
-                          if g["interval_micros"] > 0 else 0.0)
-        if config.BASELINE_LIMITS:
-            stall_excess = _positive(
-                stall_fraction - config.STALL_FRACTION_BOUND)
+        # -- scan: signed marginal on sorted-run seeks per scan (P0-1) --------
+        scan_seeks = run_seeks_t / scans_t if scans_t > 0 else 0.0
+        if constrained and config.SCAN_SEEKS_BOUND > 0.0 and s_bar > 0.0:
+            scan = (run_seeks_t - config.SCAN_SEEKS_BOUND * scans_t) / s_bar
+            scan_slack = (seeks_cum / config.SCAN_SEEKS_BOUND - 1.0
+                          if cum["scans"] > 0 else 0.0)
         else:
-            stall_excess = 0.0
+            scan, scan_slack = 0.0, 0.0
 
-        lambda_write = self._dual_ascent("write", write_excess)
-        lambda_space = self._dual_ascent("space", space_excess)
-        lambda_latency = self._dual_ascent("latency", latency_excess)
-        lambda_scan = self._dual_ascent("scan", scan_excess)
-        lambda_stall = self._dual_ascent("stall", stall_excess)
+        # -- stall: signed marginal on the stall fraction (P0-2, zero margin) --
+        stall_fraction = stall_t / dt if dt > 0.0 else 0.0
+        if constrained:
+            stall = stall_t - config.STALL_FRACTION_BOUND * dt
+            stall_slack = stall_cum - config.STALL_FRACTION_BOUND
+        else:
+            stall, stall_slack = 0.0, 0.0
 
-        cost_rate = (
-            config.REWARD_READ * point_amp
-            + lambda_write * write_excess
-            + lambda_space * space_excess
-            + lambda_latency * latency_excess
-            + lambda_scan * scan_excess
-            + lambda_stall * stall_excess
-        )
-        reward = shaping - cost_rate * dt
+        # -- multipliers: one signed step each, then price --------------------
+        lam = {
+            "write": MULTIPLIERS.update("write", write_slack),
+            "space": MULTIPLIERS.update("space", space_slack),
+            "latency": MULTIPLIERS.update("latency", latency_slack),
+            "scan": MULTIPLIERS.update("scan", scan_slack),
+            "stall": MULTIPLIERS.update("stall", stall_slack),
+        }
+        components = np.array(
+            [shaping, objective, write, space, latency, scan, stall],
+            dtype=np.float64)
+        reward = float(MULTIPLIERS.price(components))
+        cost_integrated = (objective + lam["write"] * write
+                           + lam["space"] * space + lam["latency"] * latency
+                           + lam["scan"] * scan + lam["stall"] * stall)
+        cost_rate = cost_integrated / dt if dt > 0.0 else 0.0
+
+        lambda_scale = max(config.LAMBDA_MAX, 1e-9)
+        self._constraint_view = {
+            "write_cum_over_bound": (
+                _clamp(w_cum / config.WRITE_BOUND / 2.0)
+                if config.WRITE_BOUND > 0.0 else 0.0),
+            "write_window_over_bound": (
+                _clamp(waf_window / config.WRITE_BOUND / 2.0)
+                if config.WRITE_BOUND > 0.0 else 0.0),
+            "space_bytes_over_bound": (
+                _clamp(space_bytes / config.SPACE_BYTES_BOUND / 2.0)
+                if config.SPACE_BYTES_BOUND > 0.0 else 0.0),
+            "lambda_write_norm": lam["write"] / lambda_scale,
+            "lambda_space_norm": lam["space"] / lambda_scale,
+            "lambda_latency_norm": lam["latency"] / lambda_scale,
+            "lambda_scan_norm": lam["scan"] / lambda_scale,
+            "lambda_stall_norm": lam["stall"] / lambda_scale,
+        }
+
         l0_hit_fraction, file_reads_per_op = self._read_fractions(g)
-        return reward, {
+        return components, {
             "global_tree_cost": tree_cost,
             "global_shaping": shaping,
             "global_gamma_dt": gamma_dt,
             "sorted_runs": sorted_runs,
+            "objective": objective,
             "point_probe_amplification": point_amp,
-            "write_amplification_window": waf,
-            "write_excess": write_excess,
+            "point_probe_amplification_cumulative": (
+                cum["probes"] / cum["gets"] if cum["gets"] > 0 else 0.0),
+            "write_amplification_window": waf_window,
+            "write_amplification_cumulative": w_cum,
+            "write_marginal": write,
+            "write_slack": write_slack,
+            # Hinge on the run-to-date ratio, for continuity with the D-7
+            # readers; the reward's write term is `write_marginal`.
+            "write_excess": _positive(write_slack),
             "space_physical_sst_bytes": space_bytes,
             "space_bytes_bound": config.SPACE_BYTES_BOUND,
             "space_amplification_estimate": space_amp_estimate,
             "space_excess": space_excess,
+            "space_slack": space_slack,
             "sorted_run_seeks_per_scan": scan_seeks,
-            "scan_excess": scan_excess,
+            "sorted_run_seeks_per_scan_cumulative": seeks_cum,
+            "scan_marginal": scan,
+            "scan_slack": scan_slack,
+            "scan_excess": _positive(scan_slack),
             "latency_excess": latency_excess,
+            "latency_slack": latency_slack,
             "latency_terms": latency_terms,
             "stall_fraction": stall_fraction,
-            "stall_excess": stall_excess,
-            "lambda_write": lambda_write,
-            "lambda_space": lambda_space,
-            "lambda_latency": lambda_latency,
-            "lambda_scan": lambda_scan,
-            "lambda_stall": lambda_stall,
-            "constrained": bool(config.BASELINE_LIMITS),
+            "stall_fraction_cumulative": stall_cum,
+            "stall_marginal": stall,
+            "stall_slack": stall_slack,
+            "stall_excess": _positive(stall_slack),
+            "lambda_write": lam["write"],
+            "lambda_space": lam["space"],
+            "lambda_latency": lam["latency"],
+            "lambda_scan": lam["scan"],
+            "lambda_stall": lam["stall"],
+            "constrained": constrained,
             "cost_rate": cost_rate,
-            "cost_integrated": cost_rate * dt,
-            "read_gets": g["keys_read"],
-            "read_seeks": g["seeks"],
+            "cost_integrated": cost_integrated,
+            "reward_components": [float(x) for x in components],
+            "read_gets": gets_t,
+            "read_seeks": scans_t,
             "read_l0_hit_fraction": l0_hit_fraction,
             "read_file_reads_per_op": file_reads_per_op,
             "reward_dt": dt,
@@ -992,6 +1092,43 @@ class MultiLevelProcessor:
             "late_no_compaction": late,
         }
 
+    @staticmethod
+    def _compact_allowed(raw: dict) -> bool:
+        """The action mask (D-9).
+
+        `compact_now` always stays available for a level RocksDB considers
+        due -- otherwise the mask would silently remove the agent's ability
+        to agree with the default. Below due, the two moves the theory rules
+        out are withheld rather than left for the residual to re-learn:
+
+          * a level >= 1 below score 1 (A4: one sorted run whatever its size,
+            so compacting it removes no probe; Theorem B.1: it forfeits the
+            overwrites a later merge would drop). The D-7 arms released L1
+            at 41% of target on three quarters of their L1 compactions;
+          * L0 below its trigger unless the compaction removes at least
+            PRIOR_MIN_RUN_REDUCTION runs net of the output run -- the same
+            rule the prior prices relief by (P1c-23, history 14.10). The
+            D-7 arms compacted L0 at a mean of 1.1 files on 16-26% of
+            below-trigger frames.
+
+        The mask is never looser than the C++ optional-token gate
+        (RL_OPTIONAL_MIN_SCORE), which is the invariant the old floor kept.
+        """
+        if raw["files"] <= 0:
+            return False
+        if raw["score"] >= 1.0 or raw["default_needed"] > 0.0:
+            return True
+        if raw["score"] < config.ML_MIN_COMPACT_SCORE:
+            return False
+        if int(raw["level"]) == 0:
+            if not config.MASK_L0_MIN_RUN_REDUCTION:
+                return True
+            creates_level = ((not raw["is_last"])
+                             and raw["next_level_files"] <= 0.0)
+            net_runs = raw["files"] - (1.0 if creates_level else 0.0)
+            return net_runs >= config.PRIOR_MIN_RUN_REDUCTION
+        return not config.MASK_DEEP_BELOW_DUE
+
     # -- public API -------------------------------------------------------
 
     def process(self, msg: dict) -> List[LevelDecision]:
@@ -1012,7 +1149,8 @@ class MultiLevelProcessor:
             # the excluded interval must never appear as a potential delta in
             # the following valid reward.
             self._prev_tree_cost = None
-        global_reward, global_components = self._global_reward(g, parsed, dt)
+        global_vector, global_components = self._global_reward(g, parsed, dt)
+        global_reward = float(MULTIPLIERS.price(global_vector))
 
         decisions: List[LevelDecision] = []
         for raw in parsed:
@@ -1020,10 +1158,13 @@ class MultiLevelProcessor:
             state = self._encode(raw, g)
             if g["done"]:
                 reward, components = 0.0, {"terminal": 1.0}
+                vector = np.zeros(COMPONENT_COUNT, dtype=np.float64)
             elif config.REWARD_LEGACY:
                 reward, components = self._compute_reward_legacy(raw, g)
+                vector = scalar_components(reward)
             else:
                 reward, components = global_reward, dict(global_components)
+                vector = global_vector
 
             if raw["compactions_from"] > 0 or raw["compactions_scheduled"] > 0:
                 self._seconds_since_compaction[level] = 0.0
@@ -1031,14 +1172,7 @@ class MultiLevelProcessor:
                 self._seconds_since_compaction[level] = (
                     self._seconds_since_compaction.get(level, 0.0) + dt)
 
-            # compact_now stays available for a level RocksDB considers due,
-            # even below the exploration floor — otherwise the mask would
-            # silently remove the agent's ability to agree with the default.
-            compact_allowed = raw["files"] > 0 and (
-                raw["score"] >= config.ML_MIN_COMPACT_SCORE
-                or raw["default_needed"] > 0.0
-            )
-            valid_actions = (0, 1) if compact_allowed else (0,)
+            valid_actions = (0, 1) if self._compact_allowed(raw) else (0,)
 
             prior = None
             if config.ANALYTIC_PRIOR:
@@ -1063,7 +1197,7 @@ class MultiLevelProcessor:
                               dt_discount, decision_id,
                               int(raw["prev_decision_id"]),
                               bool(raw["prev_action_overridden"]),
-                              invalid_mask)
+                              invalid_mask, reward_vector=vector)
             )
         return decisions
 

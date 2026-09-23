@@ -134,7 +134,7 @@ def handle_multilevel_message(
         agent = pool.get(d.level)
         # dt_discount, not dt_seconds: a level that emptied and came back spans
         # the whole gap, which is what the SMDP discount has to see.
-        action = agent.observe(d.state, d.reward, done, d.valid_actions,
+        action = agent.observe(d.state, d.reward_vector, done, d.valid_actions,
                                d.prior, d.dt_discount,
                                executed_action=d.executed_action,
                                decision_id=d.decision_id,
@@ -335,6 +335,10 @@ def main() -> None:
           f"prior={'on' if config.ANALYTIC_PRIOR else 'off'} "
           f"credit_horizon_ms={config.CREDIT_HORIZON_MS} "
           f"gamma_per_sec={config.GAMMA_PER_SEC} "
+          f"credit_horizon_ms={config.CREDIT_HORIZON_MS} "
+          f"lambda_lr={config.LAMBDA_LR} td_loss={config.TD_LOSS} "
+          f"mask_deep_below_due={config.MASK_DEEP_BELOW_DUE} "
+          f"mask_l0_min_run_reduction={config.MASK_L0_MIN_RUN_REDUCTION} "
           f"eval_mode={config.EVAL_MODE} "
           f"write_bound={config.WRITE_BOUND:.4f} "
           f"space_bytes_bound={config.SPACE_BYTES_BOUND:.0f} "

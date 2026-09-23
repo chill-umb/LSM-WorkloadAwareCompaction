@@ -289,6 +289,10 @@ if [[ "$RL_OBSERVE_INTERVAL_MS" != "$RL_DECISION_INTERVAL_MS" ]]; then
   echo "Protocol v2 requires RL_OBSERVE_INTERVAL_MS to equal RL_DECISION_INTERVAL_MS." >&2
   exit 1
 fi
+[[ "$RL_L0_ALLOW_DEFER_LEARNED" =~ ^[01]$ ]] || {
+  echo "RL_L0_ALLOW_DEFER_LEARNED must be 0 or 1." >&2
+  exit 1
+}
 [[ "$RL_L0_ALLOW_DEFER" =~ ^[01]$ ]] || {
   echo "RL_L0_ALLOW_DEFER must be 0 or 1." >&2
   exit 1
@@ -405,6 +409,7 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'RL_STRUCTURAL_DIRTY_DEADLINE_MS=%q\n' "$RL_STRUCTURAL_DIRTY_DEADLINE_MS"
   printf 'RL_OPTIONAL_MIN_SCORE=%q\n' "$RL_OPTIONAL_MIN_SCORE"
   printf 'RL_L0_ALLOW_DEFER=%q\n' "$RL_L0_ALLOW_DEFER"
+  printf 'RL_L0_ALLOW_DEFER_LEARNED=%q\n' "$RL_L0_ALLOW_DEFER_LEARNED"
   printf 'RL_EPSILON_BOUND_MS=%q\n' "$RL_EPSILON_BOUND_MS"
 } > "$RESULTS_ROOT/effective_config.env"
 INDEX="$RESULTS_ROOT/arms.tsv"
@@ -563,6 +568,7 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   local style=0 policy_seed="null" decay_steps=0 uses_server=0 oracle=0
   local anneal_seconds=0 anneal_source="none"
   local safety_enforcement=1
+  local l0_allow_defer="$RL_L0_ALLOW_DEFER"
   local run_seed=$(( DBBENCH_SEED + repeat - 1 ))
   if [[ "$arm" != "regular" ]]; then
     style=4
@@ -577,6 +583,10 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     # Both unconstrained arms disable the live mask; the manifest is still
     # loaded so the guard can classify what it would have masked.
     [[ "$arm" != unconstrained_* ]] || safety_enforcement=0
+    # D-9: the learned arms may defer a due L0 (config.sh). prior_only and
+    # unconstrained_prior_only keep the posture D-4 and D-5 were measured under.
+    [[ "$arm" != "rl" && "$arm" != "unconstrained_rl" ]] \
+      || l0_allow_defer="$RL_L0_ALLOW_DEFER_LEARNED"
     policy_seed=$(( POLICY_SEED_BASE + repeat * 100000 + size_m * 100 + ratio ))
     # D6. Exploration anneals on wall time, not decision count.
     #
@@ -771,7 +781,7 @@ PY
     printf 'rl_trigger_oracle=%s\n' "$oracle"
     printf 'rl_safety_enforcement=%s\n' "$safety_enforcement"
     printf 'rl_optional_min_score=%s\n' "$RL_OPTIONAL_MIN_SCORE"
-    printf 'rl_l0_allow_defer=%s\n' "$RL_L0_ALLOW_DEFER"
+    printf 'rl_l0_allow_defer=%s\n' "$l0_allow_defer"
     printf 'rl_crossing_posture=%s\n' "$RL_CROSSING_POSTURE"
     printf 'rl_exploration_anneal_seconds=%s\n' "$anneal_seconds"
     printf 'rl_exploration_anneal_source=%s\n' "$anneal_source"
@@ -838,7 +848,7 @@ PY
       RL_SAFETY_ENFORCEMENT="$safety_enforcement" \
       RL_STRUCTURAL_DIRTY_DEADLINE_MS="$RL_STRUCTURAL_DIRTY_DEADLINE_MS" \
       RL_OPTIONAL_MIN_SCORE="$RL_OPTIONAL_MIN_SCORE" \
-      RL_L0_ALLOW_DEFER="$RL_L0_ALLOW_DEFER" \
+      RL_L0_ALLOW_DEFER="$l0_allow_defer" \
       RL_CROSSING_POSTURE="$RL_CROSSING_POSTURE" \
       RL_EPSILON_BOUND_MS="$RL_EPSILON_BOUND_MS" \
       "${command[@]}" > "$result_dir/run.log" 2>&1

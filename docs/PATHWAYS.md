@@ -913,6 +913,23 @@ $\lambda_{\text{lat}}$ at `LAMBDA_MAX` in every arm (D-8). D-1 through D-5 are
 therefore **not yet scored**: the run is diagnostic. Verdicts in
 `docs/PREREGISTRATION.md` D-7 and D-8; narrative in history 14.19.
 
+**Status on `Assoc` (2026-09-23): the architecture audited against this
+objective and realigned by D-9; unrun.** The audit (history 14.20) found the
+write hinge measuring a 10 s time-weighted window against a byte-weighted
+whole-run bound (13–61% high on 94–100% of the D-7 frames), every multiplier a
+ratchet (the hinge fed the update, so no $\lambda$ could fall), the action
+space offering the two write-costly moves the theory rules out — early deep
+compaction at score $\ge 0.10$, one-file L0 compaction — while withholding the
+write-saving one (L0 deferral, `RL_L0_ALLOW_DEFER=0`), a state with no write,
+multiplier or garbage feature, and a 20 s effective horizon. D-9 gives the
+reward the flow/level form (signed marginal terms for $W$, $R$, seeks and
+stall; hinges for space and the latency averages), signed dual ascent with
+replay re-priced at sample time, the D-4 rule as an action mask, eight
+constraint features in the state, $\gamma$ = 0.98 per second with an 8 s
+credit window and Huber loss (item 5 above, in part), and lifts the L0 posture
+for `rl` and `unconstrained_rl`. D-1 through D-5 stay unscored until the
+re-run; predictions in `docs/PREREGISTRATION.md` D-9.
+
 ### Acceptance criteria
 
 | # | Criterion | Threshold | Instrument |
