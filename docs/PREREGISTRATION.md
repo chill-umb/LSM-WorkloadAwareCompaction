@@ -729,6 +729,94 @@ binary `9b9321b1…` at the stage-06 comparators. Three repeats is a mechanism
 count, not an acceptance count; no criterion carrying a 2% margin is scored
 from it.
 
+### D-8, 2026-09-22 — the reward's latency hinge drops the windowed p99
+
+**Recorded after the D-7 arms were scored and before any re-run.** D-7's
+verdict stands exactly as measured and nothing in it is re-scored; this entry
+repairs the instrument that verdict exposed and says, in advance, what the
+repaired instrument is expected to show.
+
+**What was found, from the D-7 arms.** `lambda_latency` reached `LAMBDA_MAX`
+= 100.0 in **all six learned arms**, against `lambda_write` of 8.77 / 16.45 /
+10.98 — six to eleven times larger. Per-frame `latency_excess` was **never
+zero** across 2,231 scored frames: p50 19.92, mean 20.74, minimum above zero.
+The learner's objective was therefore dominated by a term no policy could
+satisfy.
+
+The cause is a unit error, not a parse error. The reward hinges a **50 ms
+window's** quantile against a **whole-run** quantile limit. For the average
+that is sound — a window mean is an unbiased estimate of the run mean, and the
+measured whole-run average hinges are 0.00 to 0.07. For the p99 it is not,
+because the write-latency distribution is extreme. From the raw histogram of a
+T{=}6 arm:
+
+| statistic | value |
+| --- | ---: |
+| count | 2,900,000 |
+| average | 16.48 us |
+| P50 | 0.51 us |
+| P99 | **2.33 us** |
+| P99.9 | 2749.36 us |
+| max | 14,076 us |
+
+97.8% of writes complete in under 1 us and the top 0.1% run to milliseconds,
+so the average sits **above** the P99. Over 2.9M samples the tail is 0.1% and
+the run p99 is 2.33 us; over the ~500 writes in one 50 ms frame the p99 is the
+fifth-largest sample and lands in that tail constantly. Against a manifest
+limit of 1.02 us that yields a persistent excess of roughly twenty, which is
+what was measured. **History 10.7 instrument problem 6 flagged the
+p99-below-average anomaly and asked for the histogram to be verified rather
+than assumed; it is hereby verified as a real property of the distribution.**
+This is the same inspection-paradox error history 14.8 diagnosed for the guard
+and repaired with `frame_simulated_limits`; the reward never received that fix.
+
+**Decision.** The latency hinge sums the windowed **average** terms only. The
+p99 terms are still computed per operation and logged as `latency_terms`, so
+the decomposition is readable from a frame instead of inferred, but they do not
+enter the hinge.
+
+**What this does and does not relax.** P0-4 is untouched: average **and** p99
+remain acceptance metrics at a 2% paired margin, scored at run end by the
+paired evaluator on whole-run statistics, where both sides are the same
+quantity. The guard keeps its own p95 envelope. What changes is only which
+signal the learner is asked to act on per frame, and the principle is the one
+P1c-22 already implies — a hinge must be a quantity the policy can move and
+the limit must be measured in the same unit. Re-deriving per-frame p99 limits,
+as `frame_simulated_limits` does for the guard, is the alternative; it needs
+per-frame baseline latency that only a controller-bearing arm produces, and is
+deferred rather than rejected.
+
+**Predictions, recorded in advance.** On a re-run of the D-7 matrix
+(10M, $T$ = 2/6/10, three repeats, `rl` and `unconstrained_rl`):
+
+1. **$\lambda_{\text{lat}}$ does not rail.** It stays below `LAMBDA_MAX` in
+   every cell, and per-frame `latency_excess` has p50 below 0.05 against
+   19.92 under D-7.
+2. **$\lambda_W$ becomes the largest multiplier in every cell.**
+3. **The new `latency_terms` log attributes at least 90% of the superseded
+   excess to `write_p99`**, which is currently an inference from arithmetic
+   (1.02 us limit, ~22 us window p99) and not a measurement.
+4. **Depth is re-tested, and either outcome is informative.** D-7's prediction
+   1 failed at $\delta L$ = +2.0 / +1.0 / +0.7 while the objective was
+   dominated by a broken term, so it did not test what it was written to test.
+   If $\delta L \le 0$ here, that failure was instrument-driven. If depth
+   inflates again, the behaviour is a real property of the learner under a
+   correct objective and must be reported as such — §10.7's finding surviving
+   both P1c-22 and D-6. **D-7's verdict is not re-scored either way**; this is
+   a second experiment under a changed instrument, not a re-run of the first.
+5. **E-5 stays above 1% in at least two cells.** The learner defers 41-43% of
+   due frames and the guard forces on due age and pressure, which latch by
+   construction (D-5 audit), so the conditional rate should remain high. If it
+   instead passes everywhere, the 7-15x measured under D-7 was an artifact of
+   the broken objective and the guard's status must be re-read accordingly.
+
+**Falsification.** If prediction 1 fails — $\lambda_{\text{lat}}$ still rails
+with the p99 terms removed — then an average term is also mis-specified and
+this entry is an incomplete repair, to be reported as such.
+
+**Implementation.** `rl_agent/multilevel.py` `_global_reward` only. Python:
+no rebuild, `dbbench_sha256` unchanged, the 182-arm Hull-0 stands.
+
 ---
 
 ## 2. Gate verdicts as measured
@@ -778,6 +866,82 @@ bulk load. Fixed in submodule `25468bbaa`; the narrative is history Section
 `--admission-latency-limit-micros 5000`, which both callers pass, leaving
 `due_to_admission_latency` unscored; the artifact was regenerated under the
 suite's flags. The verdict is unchanged under either invocation.
+
+### D-7 scored, 2026-09-22: the first learned arms on `Assoc`, and why they are diagnostic
+
+**Verdict: predictions 2, 4 and 5 pass; 1 and 3 fail; and the run does not test
+what D-7 wrote it to test.** Eighteen arms, `rl` and `unconstrained_rl`, 10M ×
+$T$ = 2/6/10 × three repeats, binary `9b9321b1…`, at the stage-06 comparators.
+Every arm passed the learning-health gate with `passed: true` and no errors.
+
+| # | Prediction | Measured | |
+| --- | --- | --- | --- |
+| 1 | depth does not inflate | $\delta L$ = **+2.0 / +1.0 / +0.7** | **FAIL** |
+| 2 | $\lambda_S < \lambda_W$ | **1.00** vs 8.77 / 16.45 / 10.98 | PASS |
+| 3 | E-5 measurable and $\le$ 1% | measurable at last; **0.1497 / 0.0693 / 0.0973** | **FAIL, 15× / 7× / 10×** |
+| 4 | argmax flip $>$ 0.1 | 0.244 / 0.429 / 0.394 | PASS |
+| 5 | no read gain at trigger-2 cells | $\Delta R$ +3.63% / +6.01% | PASS |
+
+| cell | $\Delta W$ vs `regular` | $\Delta R$ vs `regular` |
+| --- | --- | --- |
+| $T{=}2$ | +6.09% [+3.37, +8.81] | +3.63% [−1.39, +8.65] |
+| $T{=}6$ | +13.18% [+10.54, +15.82] | −10.36% [−19.46, −1.27] |
+| $T{=}10$ | +4.57% [+1.94, +7.21] | +6.01% [+1.38, +10.64] |
+
+At $T{=}2$ and $T{=}10$ the learner is worse than plain RocksDB on **both**
+axes; at $T{=}6$ it trades +13.2% of write for −10.4% of read.
+
+**D-6 is confirmed, cleanly.** $\lambda_S$ sat at exactly **1.00 — its
+initial value — in all six arms**, so the space hinge never fired once. Both
+of D-6's predictions hold, and the repair it made is not in question.
+
+**Why the run is diagnostic rather than evidential.**
+`lambda_latency` reached `LAMBDA_MAX` = 100.0 in **every arm**, six to eleven
+times `lambda_write`, and per-frame `latency_excess` was never zero (p50
+19.92, mean 20.74, 2,231 frames). The learner was optimising an objective
+dominated by a latency term no policy can satisfy, because the hinge compares
+a 50 ms window's write-p99 against a whole-run write-p99 limit of 1.02 us on a
+distribution whose average (16.5 us) exceeds its P99 (2.33 us). The mechanism,
+the raw histogram and the repair are D-8.
+
+**Prediction 1's failure therefore cannot be read as D-7 intended.** D-7 made
+depth inflation load-bearing on the reasoning that if §10.7's behaviour
+reappeared, the reward still credited space. **Space is provably clean here**
+— $\lambda_S$ never moved. The learner deepened the tree while chasing a
+broken latency signal, so the question D-7 asked is still open and D-8
+prediction 4 re-asks it under a repaired instrument. The verdict above stands
+as measured and is not re-scored.
+
+**E-5 is measured for the first time, and fails.** Neither the `oracle`
+holdout nor `prior_only` could produce a non-zero conditional rate — force
+requires `due` and neither arm disagrees with that predicate. `rl` defers
+41–43% of due frames (1511/3648 at $T{=}2$, 608/1407 at $T{=}10$), so it can,
+and the guard changes its action on **15%, 7% and 10%** of the frames where it
+could. Against D-2's 1% decider that is a clear failure, and it is the first
+time E-5 has been decidable at all. It carries the same caveat as everything
+else here: the policy that produced it was driven by the railed latency term,
+so this diagnoses the reward-and-guard pair, not the guard alone. Re-measured
+under D-8 prediction 5.
+
+**`unconstrained_rl` produced no scored frames** in stage 17 at any cell, so
+its conditional rate is unavailable. Enforcement is off for that arm by
+construction, which is the intended ablation, but the shadow classifier was
+expected to log regardless per the 2026-09-21 change. Recorded as an
+instrumentation gap, not investigated here.
+
+**A defect in this entry's own scoring script, found and fixed before the
+verdict was recorded.** `d7_learner_run.sh` read the multipliers and the flip
+rate from `io.jsonl`'s `reward_components`, but that file's `"input"` is the
+per-**level** state and the multipliers live in
+`learning_health.json` → `server_summary.constrained_reward`. The first run of
+the scorer printed `nan` for predictions 2 and 4, and scored prediction 4 as
+**PASS on an empty set** — `all()` over a generator that filtered out every
+`nan`. Both were re-scored from the correct source before anything was
+recorded. The arms were never wrong.
+
+**Evidence.** `results/learner-assoc/10M/T{2,6,10}/repeat-*/{rl,unconstrained_rl}/`,
+`results/learner-smoke/`, `gate1/d7_verdict.txt`, `gate1/d7_conditional.{json,txt}`;
+twins from `results/baseline_sweep/`.
 
 ### D-5 control scored, 2026-09-22: the band is a property of the trigger, not of $T$
 

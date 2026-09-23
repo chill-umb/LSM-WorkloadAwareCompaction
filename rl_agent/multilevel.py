@@ -825,16 +825,36 @@ class MultiLevelProcessor:
         scan_excess = (self._hinge(scan_seeks, config.SCAN_SEEKS_BOUND)
                        if g["seeks"] > 0 else 0.0)
 
-        # -- latency constraint: average and p99 against the manifest limits --
+        # -- latency constraint: windowed AVERAGES only (D-8) ----------------
+        # The manifest's limits are whole-run statistics. A window mean is an
+        # unbiased estimate of the run mean, so the average terms transfer; a
+        # window p99 is NOT an estimate of the run p99 when the distribution is
+        # heavy-tailed, and this one is extreme -- 97.8% of writes finish under
+        # 1 us while P99.9 is 2749 us, so the run p99 over 2.9M samples is
+        # 2.33 us while a ~500-sample frame's p99 lands in the tail constantly.
+        # Measured under D-7: per-frame latency_excess was never zero, p50
+        # 19.92, and lambda_latency railed at LAMBDA_MAX in all six arms,
+        # 6-11x lambda_write. This is the inspection-paradox unit error that
+        # history 14.8 diagnosed for the guard and fixed with
+        # frame_simulated_limits; the reward never got that fix.
+        #
+        # p99 is still computed and logged per operation, so the decomposition
+        # is readable from a frame rather than inferred -- it just does not
+        # enter the hinge. p99 remains an acceptance metric (P0-4), scored at
+        # run end by the paired evaluator, and the guard keeps its own p95.
         latency_excess = 0.0
+        latency_terms = {}
         for operation in ("get", "scan", "write"):
             if g[f"{operation}_latency_count"] <= 0:
                 continue
             for quantile in ("avg", "p99"):
                 limit = config.BASELINE_LIMITS.get(
                     f"{operation}_latency_{quantile}_ns_limit", 0.0)
-                latency_excess += self._hinge(
+                excess = self._hinge(
                     g[f"{operation}_latency_{quantile}_ns"], limit)
+                latency_terms[f"{operation}_{quantile}"] = excess
+                if quantile == "avg":
+                    latency_excess += excess
 
         # -- stall constraint: zero-margin non-inferiority (P0-2) -------------
         stall_fraction = (g["stall_duration_micros"] / g["interval_micros"]
@@ -876,6 +896,7 @@ class MultiLevelProcessor:
             "sorted_run_seeks_per_scan": scan_seeks,
             "scan_excess": scan_excess,
             "latency_excess": latency_excess,
+            "latency_terms": latency_terms,
             "stall_fraction": stall_fraction,
             "stall_excess": stall_excess,
             "lambda_write": lambda_write,

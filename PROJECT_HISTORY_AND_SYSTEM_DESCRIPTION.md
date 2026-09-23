@@ -3094,6 +3094,82 @@ forced the withdrawal of D-4's reading. The T=10 twin has three repeats and was
 unaffected, and the disagreement between the two cells is what exposed it. The
 arms were never wrong; only the analysis was.
 
+### 14.19 The first learned arms on `Assoc`; a railed latency multiplier, 2026-09-22
+
+Eighteen learned arms at 10M x T = 2/6/10, three repeats, on binary
+`9b9321b1...`, plus six `regular` arms closing the D-5 latency control and a
+one-arm learner smoke test. Every arm passed the learning-health gate. The
+dated predictions and the verdict are `docs/PREREGISTRATION.md` D-7 and D-8;
+this is the narrative.
+
+**The learner trains and it is worse than plain RocksDB.** Against the paired
+`regular` arm it writes +6.1%, +13.2% and +4.6% more at T = 2, 6 and 10. Reads
+are **worse** at T=2 (+3.6%) and T=10 (+6.0%) and better only at T=6
+(-10.4%), which is the one comparator carrying L0 trigger 4 and therefore the
+only cell where a below-threshold band exists at all (D-5). Populated depth
+rose by two levels at T=2 and one at T=6, reproducing the shape of the
+2026-09-03 uniform matrix (Section 10.7 Finding 3) on a different workload,
+a different reward and a repaired prior.
+
+**D-6 is confirmed and is not in question.** The space multiplier sat at
+exactly 1.00 -- its initial value -- in all six arms, so the space hinge never
+fired once. The repair that entry made works, and the depth growth above is
+not the learner buying space.
+
+**But the run does not test what it was written to test.** The latency
+multiplier reached its cap of 100.0 in *every* arm, six to eleven times the
+write multiplier, and per-frame latency excess was never zero across 2,231
+frames -- p50 19.92. The learner spent the run chasing a constraint no policy
+can satisfy.
+
+The cause is a unit error of exactly the family this project has hit twice
+before. The reward hinges a 50 ms window's quantile against a whole-run
+quantile limit. For an average that is sound; for a p99 it is not, because the
+write-latency distribution is extreme. The raw histogram reads count 2,900,000,
+average 16.48 us, P50 0.51 us, **P99 2.33 us**, P99.9 2749 us, max 14,076 us:
+97.8% of writes finish inside a microsecond and the top 0.1% run to
+milliseconds, so the average sits *above* the P99. Over 2.9M samples the run
+p99 is 2.33 us; over the ~500 writes in one frame the p99 is the fifth-largest
+sample and lands in the tail constantly, against a manifest limit of 1.02 us.
+Section 10.7's instrument problem 6 flagged the p99-below-average anomaly and
+asked for the histogram to be verified rather than assumed -- it is now
+verified as a real property of the distribution, not a parse defect. And this
+is the same inspection-paradox error Section 14.8 diagnosed for the guard and
+repaired with `frame_simulated_limits`; the reward never received that fix.
+
+D-8 drops the windowed p99 terms from the hinge, keeps the averages, and logs
+the p99 decomposition per operation so the next reading is measured rather than
+inferred. P0-4 is untouched: average and p99 both remain acceptance metrics
+scored at run end on whole-run statistics, where both sides are the same
+quantity. D-7's verdict stands as measured; D-8 re-asks the depth question
+under the repaired instrument, and says in advance that either answer is
+informative.
+
+**E-5 is measurable for the first time, and it fails.** Neither the `oracle`
+holdout (14.17) nor `prior_only` (14.18) could produce a non-zero conditional
+override rate, because force requires a due level and neither arm disagrees
+with that predicate. `rl` defers 41-43% of due frames, so it can, and the
+guard changes its action on 15%, 7% and 10% of the frames where it could --
+against D-2's 1% decider. That is the criterion D-2 chose to replace E-1
+with, failing by seven to fifteen times on the first arm capable of scoring
+it. The caveat is the same as everything else in this run: the policy was
+driven by the railed latency term, so the measurement diagnoses the
+reward-and-guard pair rather than the guard alone.
+
+**Two scoring defects in the session's own tooling, both caught before
+anything was recorded.** The D-7 scorer read the multipliers and the argmax
+flip rate from `io.jsonl`, whose `"input"` field is the per-level state, not
+the globals; the multipliers live in `learning_health.json` under
+`server_summary.constrained_reward`. It printed `nan` for two predictions and
+scored one of them PASS on an empty set, because `all()` over a fully filtered
+generator is true. Both were re-scored from the correct source. Separately, the
+D-5 scorer had summed L0 jobs across a glob without dividing by repeat count
+(14.18). Neither touched an arm; both would have produced a wrong verdict.
+
+**Also closed here:** the six `regular` arms at the two band cells that D-5
+left owing, which make the latency comparison at those cells same-session for
+the first time.
+
 ## 15. Current limitations and next work
 
 **Written 2026-09-05; forward planning has since moved to `docs/PATHWAYS.md`,

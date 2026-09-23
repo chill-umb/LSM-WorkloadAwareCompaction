@@ -900,6 +900,19 @@ against the ceiling at measured $S_{\text{flow}}$ and $L$.
    scale; that is not converged.
 6. Log $\lambda$ trajectories as first-class output.
 
+**Status on `Assoc` (2026-09-22): first learned arms run; the objective was
+mis-specified and is repaired.** Eighteen arms at 10M × $T$ = 2/6/10. The
+learner trains (argmax flip 0.24–0.43, health green on every arm) and is worse
+than `regular` on both axes at $T$ = 2 and 10, trading +13.2% $W$ for −10.4%
+$R$ at $T{=}6$. Two reward defects were found and fixed, both unit errors of
+the same family: the space hinge compared a live estimate against a measured
+reference (D-6, confirmed clean — $\lambda_S$ never moved from its initial
+value), and the latency hinge compared a 50 ms window's p99 against a
+whole-run p99 limit on a distribution whose average exceeds its P99, railing
+$\lambda_{\text{lat}}$ at `LAMBDA_MAX` in every arm (D-8). D-1 through D-5 are
+therefore **not yet scored**: the run is diagnostic. Verdicts in
+`docs/PREREGISTRATION.md` D-7 and D-8; narrative in history 14.19.
+
 ### Acceptance criteria
 
 | # | Criterion | Threshold | Instrument |
@@ -1076,6 +1089,16 @@ on the *uniform* measurement (2026-09-19). The measurements, the retraction of
 the offline replay's per-level attribution, and the two corrections to the T=2
 reading are in `docs/PREREGISTRATION.md`; the narrative is history Sections 14.8
 and 14.9.
+
+**Status on `Assoc` (2026-09-22): E-5 measured on `rl` and FAILED.** The
+first arm capable of disagreeing with the guard — `rl` defers 41–43% of due
+frames — puts the conditional override rate at **0.1497 / 0.0693 / 0.0973** at
+$T$ = 2/6/10, **15× / 7× / 10× the 1% limit D-2 made the decider**. Neither
+the `oracle` holdout nor `prior_only` could score it: force requires `due` and
+neither arm disagrees with that predicate. The measurement carries one caveat
+— the policy was driven by a latency multiplier railed at its cap (D-8) — so
+it diagnoses the reward-and-guard pair, not the guard alone, and is re-measured
+under D-8 prediction 5. `docs/PREREGISTRATION.md` D-7; history 14.19.
 
 **Status on `Assoc` (2026-09-22): guard protocol run; E-5 measured on
 `prior_only` and vacuous there.** The D-4/D-5 arms carry enforcement live
