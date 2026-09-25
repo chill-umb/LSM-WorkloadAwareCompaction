@@ -1000,9 +1000,817 @@ loss. Python and shell only: no rebuild, `dbbench_sha256` unchanged, the
 `results/learner-smoke-d9/`, `gate1/d9_verdict.txt`, `gate1/d9_conditional.{json,txt}`;
 twins from `results/baseline_sweep/`.
 
+**Smoke gate as scored, 2026-09-23.** One `rl` arm at 10M/$T{=}2$
+(`results/learner-smoke-d9/10M/T2/rl`). The gate stopped the matrix on a
+railed latency multiplier, so the matrix did not run and predictions 4 and
+6–9 are unscored. On the one arm: prediction 3 holds (zero deep releases
+below $\varphi$ 0.95; L0 compacted below trigger on 7 frames only), prediction
+5 holds ($L$ = 9 against the twin's 9), prediction 1 **fails** (reward $W$
+8.267 against evaluator $W$ 8.036, +2.9%), prediction 2 **fails**
+($\lambda_{\text{lat}}$ = 100.0, $\lambda_W$ = 38.8, $\lambda_{\text{scan}}$
+= 26.3). The arm itself, against its same-seed twin: $W$ +0.45% (8.036),
+$R$ +3.2% (4.70), seeks 7.47 against 7.54–7.69, depth 9 against 9. The causes are three instrument defects,
+measured in D-10, none of them in the policy.
+
+### D-10, 2026-09-23 — the multiplier instrument repaired: latency references in the telemetry's unit, the write denominator, and a warm-up
+
+**Recorded after D-9's smoke gate stopped its matrix, and before any further
+arm runs.** D-9's predictions are not re-scored; its smoke arm is recorded
+above as what it was. D-8's falsification clause — "if $\lambda_{\text{lat}}$
+still rails with the p99 terms removed, an average term is also
+mis-specified" — fired, and this entry is its consequence.
+
+**Three defects, each measured on the smoke arm.**
+
+1. **The latency hinge compared two instruments.** The frame's latency comes
+   from the C++ window telemetry; the formal `*_latency_avg_ns_limit` comes
+   from db_bench's histogram. Totalled over the oracle calibration windows,
+   the baseline's own telemetry averages are:
+
+   | operation | telemetry, $T$=2/6/10 (ns) | histogram, $T$=2/6/10 (ns) | ratio |
+   | --- | --- | --- | ---: |
+   | get | 7,801 / 5,895 / 5,477 | 7,901 / 5,788 / 5,381 | 1.0 |
+   | scan | 460,780 / 289,357 / 255,392 | 23,761 / 13,755 / 10,330 | 19–25 |
+   | write | 1,266 / 1,089 / 1,192 | 11,432 / 11,646 / 11,946 | 0.1 |
+
+   The scan hinge therefore read +18 on 100% of the smoke arm's frames while
+   the evaluator's scan latency for the same run was 22.9 us against a 24.2 us
+   limit — under. **This corrects D-8.** The p99 hinge terms were zero on
+   every frame of the smoke arm (`write_p99` maximum 0.000), so the D-7
+   latency excess of p50 19.9 was `scan_avg` (mean 18.9 here), not the write
+   p99 D-8 inferred from arithmetic; D-8's prediction 3 is falsified at 0%.
+   D-8's remedy stands on its own ground — a window p99 is not an estimate of
+   a run p99 — but its diagnosis of D-7 was wrong.
+2. **The write denominators differ by 2.9%.** The evaluator divides by the
+   `rocksdb.bytes.written` ticker, WriteBatch bytes including per-record
+   framing; the telemetry counts key + value. Measured: 1,054 against 1,024.4
+   bytes per Put. The reward's run-to-date $W$ read 8.267 against the
+   evaluator's 8.036, so a run at parity looked 2.9% over a 2% margin, and
+   D-9 prediction 1 failed at exactly this gap.
+3. **The run-to-date ratios are dominated by the load's backlog early on.**
+   $W_{\text{cum}}$ was 17 over the first 16 s and 11 at 32 s against a bound
+   of 8.2; seeks per scan started at 26 against 7.8. Every flow multiplier
+   climbed before its ratio meant anything — $\lambda_W$ reached 18 inside the
+   first decile — and $\lambda_{\text{scan}}$ finished at 26.3 with the run
+   *under* its seeks bound, because a decay of 0.05 × 0.04 per frame cannot
+   undo a climb of 27 in the frames that remained. Both arms inherit the
+   backlog and the evaluator counts it in both; the defect is only that the
+   multiplier acted on it.
+
+**Decisions.**
+
+1. **Latency references in the telemetry's own unit.**
+   `06_calibrate_live_guard.py` totals count and latency sum per operation
+   over the calibration windows (those after the first Get; the controller is
+   suspended during the load) and writes
+   `{get,scan,write}_latency_avg_ns_telemetry_reference` and `_limit` (2%
+   margin, P0-4) into the manifest. The reward's latency averages become
+   flows in that unit — per frame, (sum − limit × count) over the run-to-date
+   mean count rate, in units of the limit; the multiplier's slack is the worst
+   operation's signed run-to-date excess. p99 is logged raw and enters
+   nothing. The formal limits stay in the manifest and remain what the
+   evaluator scores. The three manifests were regenerated from the existing
+   calibration artifacts with every guard field byte-identical; only the six
+   fields were added. SHA-256: $T$=2 `0bb12249…` → `d73012e3…`, $T$=6
+   `25801e34…` → `929e3a42…`, $T$=10 `c4e51d8e…` → `274ba875…`. The band
+   manifests under `baseline_slo_band/` are not regenerated; nothing runs
+   under them.
+2. **The write denominator gains the framing.** 30 bytes per write operation
+   (`RL_WRITE_BATCH_OVERHEAD_BYTES`, measured; the
+   `WriteBatchInternal::ByteSize` floor for one Put is 16). Prediction 1
+   tightens to 1%.
+3. **A multiplier warm-up and a slack clip.** No multiplier moves during the
+   first 30 s of controlled time (`RL_LAMBDA_WARMUP_SECONDS`), and one step
+   is bounded by `LAMBDA_LR` × 1 (`RL_LAMBDA_SLACK_CLIP`).
+
+**Not taken, and why.** The principled repair for defect 3 is a time-indexed
+reference — the baseline's own run-to-date $W(t)$, seeks$(t)$ and stall$(t)$
+at the same elapsed time, against which a native-like policy reads zero slack
+throughout. The window log carries no byte counters, so it needs either a
+C++ change (deferred to Gate 2 with the rest) or a reconstruction from the
+LOG's flush and compaction events plus an assumed put-rate profile, which is
+its own instrument to validate. The warm-up is the cheap bound; prediction
+10 says how far it must hold, and if it does not the trajectory reference is
+the next entry.
+
+**Predictions, recorded in advance.** D-9's scope: 10M, $T$ = 2 / 6 / 10,
+three repeats, `rl` and `unconstrained_rl`, binary `9b9321b1…`, after a
+one-arm smoke test gated on predictions 1–3 below. D-9's predictions 3 to 9
+are restated unchanged; 1 and 2 are tightened; 10 is new.
+
+1. **Instrument identity.** Per arm, the reward's run-to-date $W$ at shutdown
+   equals the evaluator's $W$ within **1%**.
+2. **Multipliers behave.** No multiplier reaches `LAMBDA_MAX` in any arm; at
+   least one ends below its run maximum in every arm; and
+   $\lambda_{\text{lat}}$ ends at or below 5 in every arm (the smoke arm's
+   evaluator latencies were within 4% of the baseline's, and in the telemetry
+   unit that is a slack near zero).
+3. **The mask reaches the plant.** Zero deep releases below $\varphi$ 0.95;
+   mean L0 file count at a below-trigger compaction at least 2.0.
+4. **$\lambda_W$ binds.** Largest multiplier at the end of every `rl` arm, and
+   below its run maximum in any arm whose $W$ finishes inside the 2% margin.
+5. **Depth does not inflate.** $\delta L \le 0$ against the paired `regular`
+   in every cell (held on the smoke arm: 9 against 9).
+6. **Write moves toward parity.** Mean paired $\Delta W$ for `rl` at most
+   +3% at $T{=}2$ and $T{=}10$ and +5% at $T{=}6$; `unconstrained_rl` below
+   `rl` on $W$ in every cell.
+7. **Read does not regress at the trigger-2 cells.** If 5 holds, mean paired
+   $\Delta R$ for `rl` at most +2% at $T{=}2$ and $T{=}10$. The smoke arm
+   sits at +3.2% against its same-seed twin, so this is the prediction most
+   likely to fail; it is kept as D-9 wrote it.
+8. **E-5 stays above 1% in at least two cells.**
+9. **The L0 lever is real but guard-bounded on `rl`.**
+10. **The transient is bounded.** $\lambda_W$ ends below 20 in every `rl`
+    arm (38.8 on the smoke arm) and $\lambda_{\text{scan}}$ below 10 (26.3).
+
+**Falsification.** If $\lambda_{\text{lat}}$ rails or ends above 5 with the
+references in its own unit, a latency term is still mis-specified and this
+entry is an incomplete repair. If prediction 1 fails at 1%, the framing is
+not a per-operation constant and the correction must be reported as wrong. If
+prediction 10 fails on arms at parity, the multiplier level is
+transient-driven, D-3 and D-4 cannot be read from it, and the trajectory
+reference above becomes required before any $\lambda$ figure is quoted.
+
+**Implementation.** `scripts/dbbench_pipeline/06_calibrate_live_guard.py`
+(`run_totals`, the six fields), `rl_agent/config.py` (required telemetry
+fields, `WRITE_BATCH_OVERHEAD_BYTES`, `LAMBDA_WARMUP_SECONDS`,
+`LAMBDA_SLACK_CLIP`), `rl_agent/lagrange.py` (clip), `rl_agent/multilevel.py`
+(latency as telemetry-unit flows, the framing correction, the warm-up),
+`d10_learner_run.sh` (regenerates the manifests as its first phase; gate
+tightened to 1% and to every multiplier). Exercised offline on the synthetic
+stream: warm-up held, the identity exact with the framing, $\lambda_W$
+peaking and falling, $\lambda_{\text{lat}}$ rising gently on a 3% telemetry
+excess. Python and shell only; no rebuild; the Hull-0 stands.
+
+**Evidence to be written.** `results/learner-assoc-d10/10M/T{2,6,10}/repeat-*/{rl,unconstrained_rl}/`,
+`results/learner-smoke-d10/`, `gate1/d10_verdict.txt`, `gate1/d10_conditional.{json,txt}`;
+twins from `results/baseline_sweep/`.
+
+**Smoke gate as scored, 2026-09-23.** One `rl` arm at 10M/$T{=}2$
+(`results/learner-smoke-d10/10M/T2/rl`). The multiplier repair held:
+$\lambda_{\text{lat}}$ ended at 0.10 (100 under D-9), $\lambda_W$ at 1.79
+(38.8), $\lambda_{\text{scan}}$ at 0.0 (26.3), space and stall at 0 — so
+predictions 2 and 10 hold on the one arm, and 3 and 5 hold again (zero early
+deep releases, depth 9 against 9). The gate stopped on **prediction 1**: reward
+$W$ 7.954 against evaluator $W$ 8.040, −1.07%, the opposite sign to D-9's
++2.9%. Diagnosis: the two sides were never measuring the same phase.
+Decision 2 (30 bytes per Put) is **withdrawn**: the framing is 16 bytes,
+measured at 15.8 once both sides were compared over the same phase. The
+evaluator, not the reward, was wrong; D-11.
+
+### D-11, 2026-09-23 — the evaluator scored the bulk load; write, stall and latency become measured-phase quantities, and the `Assoc` record is re-scored
+
+**Recorded after D-10's smoke gate stopped on its write identity and the
+term-by-term comparison behind it, and before any further arm runs.** This
+is an instrument correction of the D-3 kind: a definition the record already
+claimed, applied uniformly to every existing arm from artifacts it already
+holds, with no criterion reworded. It is also the first defect found in the
+evaluator itself rather than in the controller or the reward.
+
+**What was found.** P1c-19 recorded that `resetstats` between the load and
+mixgraph "zeroes tickers and histograms after the load". db_bench's
+`resetstats` calls `DB::ResetStats`, which clears RocksDB's internal stats
+only; the `Statistics` tickers and histograms the `stats` benchmark prints
+are cumulative since open, and the run log holds exactly one dump, at the
+end. `rocksdb.number.keys.written` on the D-10 smoke arm reads **4,029,089**:
+2,900,000 load keys plus 1,129,089 mixgraph Puts. Consequently, from
+2026-09-20 to 2026-09-23 the evaluator's write amplification, stall seconds
+and write latency covered the whole run. On the smoke arm: stall 44.0 s
+whole-run against **0.033 s** in the measured phase (the internal-stats
+`Cumulative stall` line, which is reset); write latency 11.4 us against
+1.7 us. Point-read amplification, sorted-run seeks and space were unaffected
+(no reads in the load; space is settled), and get and scan latency were
+measured-phase by the same accident, except that `rocksdb.db.seek.micros`
+times the Seek call and not the scan — the 19× behind D-10's scan mismatch.
+
+**Why the whole-run figure was not a diluted version of the right one.** The
+load writes about 24 GB of the 34 GB an arm writes at $T{=}2$, so a
+measured-phase effect appears in the whole-run ratio at roughly a quarter of
+its size — but the load's own bytes scatter run to run by an amount
+comparable to that effect, so whole-run paired deltas carried load noise as
+well as diluted signal. They cannot be rescaled; they had to be re-scored.
+
+**Decisions.**
+
+1. **The evaluator reconstructs the measured phase.** `collect_arm`
+   (`04_generate_graphs.py`) now returns, as `write_amplification`, physical
+   write bytes from the event log — flush SST sizes joined to flush jobs,
+   plus compaction outputs — inside the window between the
+   `RL_CONTROL_RESUMED_MICROS` and `RL_DRAIN_END_MICROS` stamps every run log
+   prints, over user bytes equal to the `rocksdb.bytes.written` ticker less
+   the load's exact bytes (`load_operations × (key + value + 16)`: fixed
+   record size plus the WriteBatch framing of one Put); `stall_seconds` from
+   the internal-stats `Cumulative stall` line; and latency from db_bench's
+   own per-benchmark histograms after the mixgraph line, which time the whole
+   scan and exclude the load, with p95 interpolated from the printed buckets
+   as db_bench derives its own percentiles. The whole-run values and the
+   source of each figure are kept beside them (`*_whole_run`, `*_source`).
+   On the smoke arm the reward's run-to-date $W$ and the evaluator's
+   measured-phase $W$ agree to **0.015%** with the 16-byte framing.
+2. **The manifests are regenerated on the corrected evaluator.** Stage 06
+   re-selected from the existing sweep; the comparators did not move
+   (trigger 2 / 4 / 2 at base 16 MiB), so the guard calibration binds through
+   an explicitly accepted prior selection hash
+   (`--accept-selection-sha256`, recorded in the output), the guard's level
+   limits are unchanged at $T$ = 6 and 10 and differ at $T{=}2$ only in a
+   debt-ratio bound's fourth digit and the physical-bytes bound's fifth. The
+   references moved: $W$ 8.013 / 7.812 / 10.493 → **7.919 / 8.484 / 13.451**;
+   stall fraction 0.258 / 0.404 / 0.459 → **0.00011 / 0.00006 / 0.0014**; scan
+   latency average 23.8 / 13.8 / 10.3 us → 477 / 289 / 256 us; write latency
+   average 11.4 / 11.6 / 11.9 us → 1.68 / 1.59 / 1.70 us. Manifest SHA-256:
+   $T$=2 `d73012e3…` → `41fb57c5…`, $T$=6 `929e3a42…` → `ec5dad11…`,
+   $T$=10 `274ba875…` → `4b263068…`. The previous selection and calibrated
+   manifests and hull files are kept under `deprecated/pre-d11-2026-09-23/`.
+3. **D-10's framing constant is withdrawn** (16 bytes, the
+   `WriteBatchInternal::ByteSize` value, measured 15.8), and **the reward's
+   stall term is off** until a manifest carries a stall reference in the
+   telemetry's own unit: the frame's stall accounting (0.647 s on the smoke
+   arm) and the internal stats' (0.033 s) are different quantities, and a
+   hinge between them would rail on a run with no stall problem. Stall stays
+   an acceptance criterion at the evaluator and a live guard term.
+
+**The record re-scored, same artifacts, measured phase.** Paired against the
+same-seed static twins by `frontier_analysis.paired_comparison`; the
+whole-run column is what the entries above recorded.
+
+| set | cell | n | $\Delta W$ measured | $\Delta W$ whole-run (as recorded) | $\Delta R$ |
+| --- | --- | ---: | ---: | ---: | ---: |
+| D-4 `prior_only` | $T{=}2$, trig 2 | 3 | **+2.75** [+0.20, +5.30] | +0.09 [−0.08, +0.27] | +1.14 |
+| D-4 `prior_only` | $T{=}6$, trig 4 | 3 | **+6.32** [+3.14, +9.50] | +2.07 [+0.71, +3.43] | −5.69 |
+| D-4 `prior_only` | $T{=}10$, trig 2 | 3 | +0.45 [−0.94, +1.84] | +0.10 [−0.33, +0.53] | +0.74 |
+| D-5 band | $T{=}2$, trig 4 | 3 | **+14.43** [+13.75, +15.11] | +2.94 [+1.97, +3.92] | −4.53 |
+| D-5 band | $T{=}10$, trig 4 | 3 | **+6.62** [−1.83, +15.07] | +2.11 [+1.26, +2.96] | −7.07 |
+| D-7 `rl` | $T{=}2$ | 3 | **+24.4** [+18.8, +30.1] | +6.09 | +3.63 |
+| D-7 `rl` | $T{=}6$ | 3 | **+42.7** [+33.2, +52.2] | +13.18 | −10.36 |
+| D-7 `rl` | $T{=}10$ | 3 | **+13.1** [+4.8, +21.4] | +4.57 | +6.01 |
+| D-9 smoke `rl` | $T{=}2$ | 1 | +5.47 | +0.45 | +3.20 |
+| D-10 smoke `rl` | $T{=}2$ | 1 | +4.44 | +0.49 | −0.12 |
+
+Three readings change. **D-4's "native at trigger 2" is withdrawn at
+$T{=}2$**: the prior costs +2.75% write there, with an interval that excludes
+zero; it holds at $T{=}10$. **The L0 band costs 6–14% of measured-phase
+write**, not 2–3%, so D-5's conclusion that the prior misses the budget
+strengthens by a factor of three to five. **The learned arms so far are 13–43%
+over parity**, not 5–13%, and neither smoke arm reached parity; their
+"write parity" was the load. Every earlier write, stall or write-latency
+figure in the `Assoc` record is a whole-run figure and is superseded by this
+table and by the corrected evaluator's output.
+
+**The hulls, re-extracted.** C-1 still passes at every ratio: 8 / 7 / 8 hull
+points of 12 at $T$ = 2 / 6 / 10, of which 8, 7 and 7 were on the previous
+hulls. **C-2 at $T{=}6$ flips from pass to fail.** The reason is that the
+honest write axis is noisier: the comparator's run-to-run coefficient of
+variation is 1.8% / 1.1% / 0.75% measured against 0.20% / 0.33% / 0.27%
+whole-run. The load's stable 72% share had been making every write interval
+look three to nine times tighter than it is. The 14.7 justification of ten
+repeats was computed on the diluted axis and does not hold as stated: a 2%
+write margin is undecidable at three repeats on this axis, and at ten the
+unpaired half-width is about 1.3% at $T{=}2$. The C-2 top-up decisions
+(`15_top_up_hull.py`) are not re-run here and are owed. **The cross-$T$
+pooled hull still holds 14 of 38 points, but only 9 of them are the same
+points**: its composition moves from 8 / 4 / 2 at $T$ = 2 / 6 / 10 to
+**4 / 7 / 3**, and $T{=}14$ and $T{=}20$ still contribute none, so P1-14's
+conclusion that the ratio axis is bounded above survives while the frontier
+within it is redrawn. Any C-6 verdict must be read against this hull, not
+the 2026-09-21 one.
+
+**Not re-scored, and why.** E-1 and E-5 are frame statistics and unaffected.
+C-5 is a space measurement and unaffected. The 2026-09-19 C-3 verdict is on
+the uniform workload and superseded already.
+
+**The oracle parity gate, re-scored on the measured phase (same day).**
+Stage 04 rebuilt the parity root's summary on the corrected evaluator and
+stage 09 ran under the suite's own flags (`--minimum-pairs 10
+--minimum-envelope-pairs 10 --admission-latency-limit-micros 5000`),
+written to `results/oracle-parity-assoc-2/oracle_parity-measured-phase.json`
+beside the recorded file. Verdict unchanged: `undecided`, `failed_checks: []`.
+The write envelope is **+0.68% [−2.56%, +3.92%]** against a ±5% limit
+(recorded +0.31% [−0.54%, +1.16%]), still passing at ten pairs with seven
+required (three before) — the same 3.5× widening the comparator scatter
+predicts. Point-read, seeks, L0–L1 input size, pending debt, observation
+health and admission latency are byte-identical to the recorded values, as
+they must be. Measured-phase stall duration is 0.000 s on every one of the
+twenty 1M arms, so `stall_duration` stays `no_allowance_configured` with
+nothing to allow for.
+
+**C-2 on the measured axis: computed, decision open.** `15_top_up_hull.py`
+over the re-extracted hulls (`gate1/topup.tsv`,
+`gate1/hull_indistinguishable.tsv`; the 2026-09-21 files are under
+`deprecated/pre-d11-2026-09-23/gate1/`) asks for **26 additional `regular`
+arms across six configurations, about 1.3 h**, and finds five pairs it cannot
+resolve: three $T{=}2$ points unresolvable at any $n \le 200$, one $T{=}2$
+point needing 54 repeats against 7, and one $T{=}10$ point needing 20 against
+5. The preregistered cap is ten additional arms per configuration
+*cumulative*, and 14.16 records that the tool enforces it per pass, so the
+list must be scored by hand against what each configuration already received
+on 2026-09-21 before any arm runs. Whether to spend that time or to record
+C-2 failed on the measured axis, as it was recorded failed on uniform, is a
+decision for its own dated entry; nothing in D-11 or the learner run depends
+on it.
+
+**Predictions, recorded in advance.** D-10's scope and its predictions 2 to 5
+and 7 to 10 are restated unchanged; 1 and 6 change; 11 is new. Scored by
+`d11_learner_run.sh`, whose first phase regenerates the manifests exactly as
+above and stops if the comparator selection moves.
+
+1. **Instrument identity.** Per arm, the reward's run-to-date $W$ equals the
+   evaluator's measured-phase $W$ within **0.5%**, and the evaluator reports
+   `measured_phase_event_log` as the source on every arm.
+6. **Write moves toward parity, measured.** Mean paired $\Delta W$ for `rl` at
+   most **+6%** at $T{=}2$ and $T{=}10$ and **+10%** at $T{=}6$, against
+   +24 / +43 / +13% under D-7; `unconstrained_rl` below `rl` on $W$ in every
+   cell. The smoke arms sit at +5.5% and +4.4%, so the trigger-2 bound is
+   deliberately tight.
+11. **Measured-phase stall stays negligible.** Every learned arm's
+    `stall_seconds` is below 1.0 s (references 0.02–0.14 s; the D-7 arms'
+    measured stalls were 0.00–0.10 s), with the reward's stall term off.
+
+**Falsification.** If prediction 1 fails, the reconstruction and the reward
+disagree on the same phase and one of them is wrong in a way this entry has
+not found. If prediction 6 fails at the trigger-2 cells while 3 and 5 hold,
+the learner's remaining lever costs more write than the budget by relocation
+alone, as D-9 said, now measured on the honest axis. If C-2 cannot be
+recovered at ten repeats on the measured axis, the write criterion's margin
+or repeat count must be re-derived before Gate 5, in its own dated entry.
+
+**Implementation.** `scripts/dbbench_pipeline/04_generate_graphs.py`
+(`parse_phase_histograms`, `parse_measured_stall_seconds`, `parse_geometry`,
+phase-split flush bytes in `parse_drain`, measured-phase fields in
+`collect_arm`), `06_calibrate_live_guard.py` (`--accept-selection-sha256`),
+`rl_agent/config.py` (framing 16; stall term gated on a telemetry
+reference), `rl_agent/multilevel.py`, `d11_learner_run.sh`. Every downstream
+consumer — stage 06, the paired evaluator, `frontier_analysis`, the gate
+scorers — reads through `collect_arm` and inherits the definition. No
+rebuild; the Hull-0 arms stand and were re-read.
+
+**Evidence.** `results/learner-smoke-d10/10M/T2/rl/{run.log,rocksdb_LOG.txt,learning_health.json}`
+(the keys-written count, the internal-stats block, the reward's cumulative);
+`deprecated/pre-d11-2026-09-23/` (the superseded manifests and hulls);
+`gate1/hull-T{2,6,10}.json` and `gate1/hull-crossT.json` (re-extracted);
+`baseline_selection/assoc-v1/10M/T*/baseline_frontier.csv`. To be written:
+`results/learner-assoc-d11/`, `results/learner-smoke-d11/`,
+`gate1/d11_verdict.txt`, `gate1/d11_conditional.{json,txt}`.
+
+**Smoke gate as scored, 2026-09-23.** One `rl` arm at 10M/$T{=}2$
+(`results/learner-smoke-d11/10M/T2/rl`). Prediction 1 holds: reward $W$
+8.227 against the evaluator's measured-phase $W$ 8.222, +0.06%, source
+`measured_phase_event_log`. **Prediction 2 fails**: $\lambda_{\text{lat}}$
+ended at **27.75** against $\le 5$; no multiplier railed ($\lambda_W$ 10.03,
+$\lambda_{\text{scan}}$ 0.91, $\lambda_S$ 0.00, $\lambda_{\text{stall}}$ 1.00
+with the term off). Predictions 3, 5, 10 and 11 hold on the one arm: zero deep
+releases below $\varphi$ 0.95 in 2,624; depth 9 against the twin's 9;
+$\lambda_W$ 10.03 $<$ 20 and $\lambda_{\text{scan}}$ 0.91 $<$ 10;
+measured-phase stall 0.000 s. The gate stopped the matrix, so 4 and 6–9 are
+unscored. The arm against its same-seed twin: $W$ +6.5% (8.222 against
+7.718), $R$ +1.9% (4.643 against 4.558), seeks −2.7%, get average −5.9%, scan
+average −1.6%, write average +14.7%. The cause is D-12: D-10's falsification
+clause for this prediction — "a latency term is still mis-specified" — fired,
+and the mis-specification is in the term's time base, not its unit.
+
+**Timing, stated plainly.** The D-10 and D-11 work was still uncommitted when
+the node ran this smoke arm, so this entry's predictions carry no commit date
+that precedes it; on the D-4 precedent D-11 is a weaker record than D-1
+through D-3 and says so. The matrix the predictions are written for has not
+run.
+
+### D-12, 2026-09-23 — the latency multiplier's slack is measured from the warm-up against the baseline's own trajectory
+
+**Recorded after D-11's smoke gate stopped on prediction 2, and before any
+further arm runs.** D-11's verdict stands as scored above and nothing in it
+is re-scored. D-10's falsification clause fired and this entry is its
+consequence, as D-10 was D-8's.
+
+**What was found, on the two smoke arms' own frame logs.** The worst
+operation for the multiplier was write latency in both arms. Its *window*
+value was under the limit from 10 s to the end; its *run-to-date* value was
+not, because of the first two seconds after `rlresume`:
+
+| arm | L0 files at resume | stall fraction, s 0 / s 1 | window write / limit, s 0 / s 1 | run-to-date write / limit at 30 s | at end | window write / limit, $t \ge 10$ s | $\lambda_{\text{lat}}$ at end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| D-10 `rl` | 16 | 0.68 / 0.00 | 15.5 / 0.85 | 1.18 | 0.904 | 0.828 | 0.10 |
+| D-11 `rl` | 22 | 1.00 / 0.47 | 32.2 / 3.33 | 1.65 | 1.019 | 0.837 | 27.75 |
+
+The tree the suspended controller inherits from the bulk load holds L0 above
+the slowdown trigger of 20 in the D-11 run, the write controller stalls, and
+two seconds of stalled writes carry the latency sum of tens of seconds of
+normal ones. The D-10 arm's cumulative crossed back under the limit at about
+70 s and its multiplier decayed; the D-11 arm's never did. From second 2 on
+the two arms are indistinguishable on write latency, and both compacted 78–82%
+of due L0 frames through the backlog; the policy is not the cause.
+
+**The baseline reads the same way.** The three $T{=}2$ oracle calibration
+arms carry the same transient, so measured against their own whole-run
+reference — the D-10 form — the baseline's cumulative write latency is:
+
+| elapsed | 0.5 s | 10 s | 30 s | 60 s | 90 s | 120 s | 150 s | 160 s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| pooled cumulative / limit | 15.7 | 2.95 | 1.60 | 1.20 | 1.09 | 1.03 | 0.99 | 0.98 |
+
+Any policy, the oracle included, reads a positive slack for 120–150 s of a
+160 s run under that form. Same metric, same instrument, different elapsed
+time: the sixth instrument of the family, in a new variant.
+
+**Simulation, validated first.** The multiplier update was re-implemented
+offline and reproduces the recorded 0.10 and 27.75 from the logged slack.
+Then, on the same frames:
+
+| slack form | D-10 arm $\lambda_{\text{lat}}$ at end | D-11 arm |
+| --- | ---: | ---: |
+| whole-run cumulative against the whole-run limit (D-10) | 0.10 | 27.75 |
+| whole-run cumulative against the baseline's cumulative at the same elapsed time | 0.00 | 7.10 |
+| **since-warm-up cumulative against the baseline's since-warm-up cumulative at the same elapsed time** | **0.00** | **4.04** (4.10 through the regenerated manifest and the real lookup) |
+
+The middle row shows why the reference alone is not enough: the D-11 arm's
+transient was about 10% heavier than the pooled calibration transient, and a
+whole-run cumulative carries that difference to the end of the run. The
+transient's size is the load's own scatter — the two smoke arms ran the same
+seed and inherited 16 and 22 L0 files — so nothing the policy does can move
+it, and the slack that drives the multiplier should not contain it. The
+residual on the D-11 arm under the last row is scan latency (35 samples per
+50 ms window), up to 9% above the calibration arms' at 45–90 s and 1% under
+at the end; the evaluator scored the arm's scan latency below every twin, so
+that is seed scatter against unpaired calibration seeds.
+
+**Decisions.**
+
+1. **The calibrator writes the baseline's since-warm-up trajectory.**
+   `06_calibrate_live_guard.py` reads `latency_windows.jsonl` — which carries
+   `time_micros` and per-operation count and latency sum per 50 ms window —
+   and writes `latency_reference_trajectory`: the cumulative average per
+   operation over windows at or after `--warmup-seconds` (30 s, the reward's
+   `RL_LAMBDA_WARMUP_SECONDS`) of elapsed time since the first Get window, on
+   a 1 s grid, pooled count-weighted over the calibration runs as of each grid
+   point, so the last point is the pooled since-warm-up average and is also
+   written as `*_latency_avg_ns_telemetry_steady_reference`. The whole-run
+   `*_telemetry_reference` and `_limit` are unchanged.
+2. **The latency multiplier's slack is since-warm-up against that
+   trajectory.** Per operation, $\text{slack}(t) = \bar\ell_{[30,t]} /
+   \big((\text{limit}/\text{reference}) \cdot \text{traj}(t)\big) - 1$, with
+   the same 2% margin as before; the multiplier takes the worst operation, as
+   before; before the warm-up ends the slack is 0, where the multiplier is
+   held anyway. **The priced term is unchanged**, so the reward's run sum is
+   still the constraint the evaluator scores. The superseded slack is still
+   computed and logged per frame as `latency_slack_whole_run`, and the run
+   summary records the slack form, the since-warm-up averages and the
+   trajectory's end point. The reward refuses a manifest whose warm-up differs
+   from its own; `RL_LATENCY_SLACK_SINCE_WARMUP=0` restores D-10.
+3. **The manifests are regenerated.** Guard fields byte-identical, four
+   fields added. SHA-256: $T$=2 `41fb57c5…` → `4fbe8122…`, $T$=6
+   `ec5dad11…` → `8d3223be…`, $T$=10 `4b263068…` → `4c0df483…`; the D-11
+   manifests are kept under `deprecated/pre-d12-2026-09-23/`. Steady
+   references (ns), against the whole-run references in brackets:
+
+   | $T$ | get | scan | write |
+   | ---: | ---: | ---: | ---: |
+   | 2 | 7,775 (7,801) | 481,521 (460,780) | 1,059 (1,266) |
+   | 6 | 5,755 (5,895) | 283,996 (289,357) | 1,018 (1,089) |
+   | 10 | 5,382 (5,477) | 249,724 (255,392) | 1,013 (1,192) |
+
+   The write column shows the transient's weight in the whole-run reference:
+   16–20%.
+
+**Not taken, and why.** (a) $W$'s multiplier is transient-driven by the same
+mechanism — the reward's run-to-date $W$ was 10.4 at 30 s against a bound of
+8.08 and 8.23 at the end, so $\lambda_W$'s 10.03 is mostly the load's backlog
+compacting under the controller's nominal authority — but D-10's prediction
+10 held and its falsification clause did not fire. A trajectory reference for
+$W$ needs the baseline's user bytes by time, which the window log's per-window
+write count times the mean record size could supply against physical bytes
+from the event log; that is the candidate instrument for its own entry.
+(b) A dead-band on the slack at the calibration runs' own between-run
+dispersion would be chosen after seeing 4.04, and is not taken. (c) The
+latency multiplier's step size is left at D-9's, for the same reason.
+
+**Predictions, recorded in advance.** D-11's scope; its predictions 1 and
+3–11 are restated unchanged; 2 is restated in D-10's words; 12 and 13 are
+new.
+
+2. **Multipliers behave.** No multiplier reaches `LAMBDA_MAX` in any arm; at
+   least one ends below its run maximum in every arm; and
+   $\lambda_{\text{lat}}$ ends at or below 5 in every arm.
+12. **The transient was the cause, on every arm.** The superseded whole-run
+    form, simulated offline from the logged `latency_slack_whole_run` with
+    the same update rule, ends above the recorded $\lambda_{\text{lat}}$ in
+    every arm. If the two agree on some arm, the transient did not matter
+    there and this entry's reading over-reached.
+13. **The residual is seed scatter, bounded.** Each operation's since-warm-up
+    cumulative at run end is within $\pm 10\%$ of the trajectory's end point
+    in every arm. A violation means the residual is not seed scatter and must
+    be read as a policy effect on that operation's latency, or as a defect in
+    the trajectory.
+
+**Falsification.** If $\lambda_{\text{lat}}$ ends above 5 in this form, the
+term's residual is not the transient and this entry is an incomplete repair;
+prediction 13 says whether the reference's own seed dispersion is where it
+lives. If prediction 12 fails on an arm, the reading of the D-11 arm's 27.75
+as transient-driven does not generalise to that arm.
+
+**Implementation.** `scripts/dbbench_pipeline/06_calibrate_live_guard.py`
+(`since_warmup_trajectory`, `--warmup-seconds`,
+`--trajectory-resolution-seconds`, the manifest block and the three steady
+references), `rl_agent/config.py` (`LATENCY_SLACK_SINCE_WARMUP`,
+`_load_latency_trajectory`, `latency_reference_ns`), `rl_agent/multilevel.py`
+(the since-warm-up accumulators, the slack, the logged fields,
+`reward_state`), `d12_learner_run.sh` (the D-11 driver: phase 0 archives the
+D-11 manifests and regenerates; the smoke gate and the scorer report the
+superseded form simulated offline beside the recorded one, and score 12 and
+13). Exercised offline before commit: the $T{=}2$ manifest regenerated with
+every guard field unchanged and four fields added; the trajectory loaded
+through the real config and both smoke arms replayed through the real lookup
+(0.00 and 4.10); and the reward function driven on a synthetic frame stream
+with a two-second 10× write transient — the slack is 0 through the warm-up,
+the since-warm-up average excludes the transient (1,072 ns against 1,071
+expected), the per-operation slacks equal the hand calculation, the multiplier
+moves only after the warm-up, and the summary carries the new fields. Python
+and shell only; no rebuild; the Hull-0 stands.
+
+**Evidence.** `results/learner-smoke-d11/10M/T2/rl/{io.jsonl,learning_health.json}`,
+`results/learner-smoke-d10/10M/T2/rl/{io.jsonl,learning_health.json}`,
+`results/guard/assoc-v1/calibration/10M/T2/repeat-0{1,2,3}/oracle/latency_windows.jsonl`,
+`deprecated/pre-d12-2026-09-23/baseline_slo/`. To be written:
+`results/learner-assoc-d12/`, `results/learner-smoke-d12/`,
+`gate1/d12_verdict.txt`, `gate1/d12_conditional.{json,txt}`. The smoke retry
+writes to `results/learner-smoke-d12-2/` (see the first attempt below).
+
+**First smoke attempt, 2026-09-23: invalid; two implementation defects,
+corrected before the next.** One `rl` arm at 10M/$T{=}2$
+(`results/learner-smoke-d12/10M/T2/rl`, kept as the record; the RocksDB LOG is
+in the preserved database under `.dbbench_pipeline_dbs/learner-smoke-d12/`).
+The runner's learning-health gate failed it on `no_reward_invalid_intervals`
+(862, all `rejected_manifest`) and `full_horizon_replay` (0 of 29,052
+transitions), so the driver stopped before the matrix. **No D-12 prediction
+is scored from this arm and none is changed.**
+
+1. **The C++ side rejected the manifest.** The RocksDB LOG reads *"RL baseline
+   SLO manifest rejected; learned trigger will use conservative all-due native
+   eligibility: baseline SLO schema, fingerprint, or required limits
+   mismatch"*, and every diagnostics line carries `manifest_invalid=1`. Cause:
+   `rl_safety_manifest.cc` reads each key by its **first textual occurrence**
+   in the file, not the top-level one; the calibrator writes keys sorted, so
+   the trajectory block's own `"schema_version": 1` came before the top-level
+   `"schema_version": 2`, the parser read 1, and the whole manifest was
+   refused. The Python loader parses JSON properly and accepted it, so the
+   reward ran constrained while the guard ran its all-due fallback: 38,191
+   `kEmergency` overrides, 3,745 of 41,184 decisions executed differently from
+   the policy's choice. **Correction:** the nested key is
+   `trajectory_schema_version`, and the calibrator now refuses to write a
+   manifest in which any key `RLSafetyController::Parse` reads occurs other
+   than exactly once (`CPP_FIRST_MATCH_KEYS`, in lockstep with `Parse`). It
+   refuses the rejected manifests and accepts the corrected ones; an
+   emulation of the first-match reader reads every key correctly on the
+   corrected manifests and reproduces the `schema_version` = 1 misread on the
+   rejected ones. Guard fields and trajectory data are byte-identical; only
+   the key name changed. SHA-256: $T$=2 `4fbe8122…` → **`9e0faa5e…`**, $T$=6
+   `8d3223be…` → **`2e19c6fc…`**, $T$=10 `4c0df483…` → **`52079b1e…`**;
+   the rejected manifests are kept under `deprecated/d12-rejected-2026-09-23/`.
+2. **The reward counted load writes in its first frame.** On this arm the
+   reward's run-to-date $W$ was 7.838 against the evaluator's measured-phase
+   7.923, −1.07%, which would fail prediction 1. The whole gap is in the
+   denominator: the first controlled frame carried 14.7 MB of user writes in
+   50 ms, about 14,100 records, against 0.36–0.38 MB on the D-10 and D-11
+   arms. The C++ worker empties the telemetry window on every suspended tick,
+   but the first controlled frame's window opens at the *last suspended
+   tick*, not at `rlresume`, so load writes after that tick land in frame 1,
+   while the evaluator's phase starts at `RL_CONTROL_RESUMED_MICROS` and
+   excludes them. It is a race, and nothing in it involves the manifest.
+   **Correction:** the reward leaves the first frame's flows out of every
+   run-to-date total, marginal term and window average
+   (`RL_REWARD_DROP_RESUME_FRAME`, default on); its elapsed time and tree
+   state still count, and what it carried is reported as
+   `resume_frame_dropped`. The cost is at most one tick of mixgraph, about
+   0.03% of the phase. Replayed from the logged frames: this arm −1.07% →
+   **−0.03%**, the D-11 arm +0.06% → **−0.01%**. The principled fix — consume
+   the telemetry at the resume instant in C++ — needs a rebuild and is
+   deferred with the rest of Gate 2.
+
+**Two observations from this arm, recorded before any valid D-12 arm and used
+for nothing.** The guard's fallback forced every due level open, so the plant
+was close to native RocksDB. (a) Under the D-12 slack form
+$\lambda_{\text{lat}}$ ended at **4.63**; the superseded whole-run form,
+simulated offline on the same frames, ends at **17.86**. That supports the
+transient diagnosis on a second arm. But it also puts a near-native plant
+0.37 under prediction 2's threshold of 5, driven by get and scan latency
+5.6% and 5.1% above the trajectory's end point. The calibration arms ran on
+2026-09-21 and this arm two days later on a machine that has run over a
+hundred arms since, and latency is a warm-cache figure (A-Impl-2), so
+between-session drift of this size is expected; prediction 13's ±10% band
+covers it and prediction 2 may not. (b) On $W$ this near-native arm sits
++2.7% over its same-seed twin (7.923 against 7.718) and $R$ +3.6%, against a
+measured-phase write coefficient of variation of 1.8% at $T{=}2$ (D-11). The
+earlier smoke arms' +4.4% to +6.5% should be read against that.
+
 ---
 
 ## 2. Gate verdicts as measured
+
+### D-12 scored, 2026-09-23: the first evidential learner run, and the answer is no
+
+**Verdict.** The instrument is right for the first time, and under it the
+learned trigger does not improve point reads at write parity in any cell.
+Nineteen arms — the smoke retry (`results/learner-smoke-d12-2`) and the
+18-arm matrix (`results/learner-assoc-d12`, `rl` and `unconstrained_rl`,
+10M × $T$ = 2/6/10 × seeds 1–3) — on binary `9b9321b1…`, manifests
+`9e0faa5e…` / `2e19c6fc…` / `52079b1e…`, every arm through the
+learning-health gate with the manifest accepted by the C++ parser. Three
+repeats is a mechanism count; no criterion carrying a 2% margin is accepted
+from it.
+
+**Audit correction, same day (`docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`).**
+Two readings below are wrong and are corrected here rather than rewritten.
+(1) *The $T{=}2$ write excess is not a learned deferral lever.* All of it,
++0.68 GB per run, falls in the first 30 s after `rlresume`, before the first
+gradient step (38–42 s). There Boltzmann exploration over a prior that gives
+every due deep level the same +0.20 advantage deferred 43–45% of due L3–L5
+frames against the greedy choice while the post-load backlog drained. After
+30 s the arm writes 0.07 GB less than its twin and releases every deep level
+at $\varphi$ = 1.00. The "L4/L5 at 2–2.6× target" releases all fall in that
+window. (2) *The rising merge survival is not "overwrites absorbed higher
+up".* The early merges combined bulk-load data with bulk-load data, and the
+keys are unique, so nothing could drop. In addition, the $T{=}2$ twins ran on
+2026-09-20, and the same trigger-4 configuration and seeds write +2.9% to
++4.1% more in later sessions ($T{=}6$ and $T{=}10$ show no such drift), so part
+of the $T{=}2$ $\Delta W$ and $\Delta R$ is session drift. D-9's falsification
+clause is therefore **not** established by this run; the predictions table
+stands as scored. E-5 is 0–1.4% after the first 30 s, and $\lambda_W$ ($T{=}2$)
+and $\lambda_{\text{scan}}$ ($T{=}10$) end at 0 when measured from the warm-up.
+
+**Timing, stated first.** D-10, D-11 and D-12 were still uncommitted when
+this run started, as they were for the D-11 smoke and the first D-12 attempt,
+so none of their predictions carries a commit date that precedes the arms it
+governs. The predictions below are scored exactly as written in the working
+tree before the run; git cannot prove that, and D-10 through D-12 are
+therefore weaker records than D-1 through D-3, on the D-4 precedent.
+
+**The instrument, validated.** Reward and evaluator agree on measured-phase
+$W$ to within 0.10% on every arm (prediction 1). No deep release below
+$\varphi$ 0.95 anywhere (3). Populated depth equals the twin's in every arm,
+9 / 5 / 5 (5) — the first learned arms in the project's history whose tree
+did not deepen. Measured-phase stall at most 0.19 s (11). No multiplier
+rails. The resume frame the reward now drops carried 6.8 MB on the smoke
+retry, so the race D-12's first attempt exposed recurs and the correction
+was needed.
+
+**The arms against their same-seed static twins** (`paired_comparison`,
+relative difference, 95% interval, seeds 1–3):
+
+| cell | arm | $\Delta W$ | $\Delta R$ | $\Delta$seeks | $\Delta S$ |
+| --- | --- | ---: | ---: | ---: | ---: |
+| $T{=}2$ | `rl` | **+6.64** [+1.04, +12.24] | **+3.03** [−0.58, +6.64] | −1.83 [−2.98, −0.68] | −1.08 |
+| | `unconstrained_rl` | +5.74 [−1.87, +13.36] | +2.41 [+0.37, +4.45] | +1.01 | −0.59 |
+| $T{=}6$ | `rl` | +9.71 [−11.93, +31.35] | −7.07 [−21.25, +7.12] | −7.48 | +0.08 |
+| | `unconstrained_rl` | +12.73 [−18.84, +44.29] | −9.88 [−21.12, +1.35] | −10.53 | −0.02 |
+| $T{=}10$ | `rl` | **−0.56** [−2.11, +1.00] | +1.12 [−2.40, +4.64] | +1.66 | +0.07 |
+| | `unconstrained_rl` | −1.66 [−4.16, +0.85] | +3.71 [−6.83, +14.25] | +3.96 | +0.05 |
+
+For reference on the same seeds and the same evaluator: `prior_only` (D-4)
++2.75 / +6.32 / +0.45% $W$ and +1.14 / −5.69 / +0.74% $R$; the D-7 learner
++24.4 / +42.7 / +13.1% $W$. The realignment of D-9 to D-12 removed three
+quarters or more of the learner's write excess in every cell, and what
+remains is no better than the hand-written prior.
+
+- **$T{=}2$: worse than plain RocksDB on both axes**, and worse than the
+  prior on writes (paired by seed, +3.78% [+0.40, +7.17]) with reads
+  undecidable against it. Dominated on means by its own twin. The write interval
+  straddles the 2% margin, so non-inferiority is undecidable rather than
+  failed; its lower bound excludes zero.
+- **$T{=}6$: reads bought with writes, at a worse rate than the prior on
+  means** — 0.73 units of read per unit of write against the prior's 0.90;
+  paired against the prior both axes are undecidable. The wide
+  intervals are one variable: the number of below-trigger L0 compactions the
+  learner chose, 300 / 123 / 101 on `rl` seeds 1–3, giving $\Delta W$ +19.0 /
+  +8.3 / +1.8% and $\Delta R$ −13.7 / −4.0 / −3.6%. One `unconstrained_rl`
+  arm (seed 3, 90 such compactions) beat its twin on both axes, −1.9% $W$ and
+  −4.7% $R$; one run is not a result and it is recorded as the only such
+  point.
+- **$T{=}10$: native.** The write constraint passes at the 2% margin — the
+  first learned arm in the project to do so in any cell — and reads do not
+  move. Release fill, merge survival and job counts match the twin level by
+  level.
+
+**Where the $T{=}2$ write goes, measured.** Compaction output in the measured
+phase is +7.4% over the twin, and 0.50 of its 0.60 GB is at L3 and L4. The
+learner holds deep levels far past due: fill at release has median 2.56 at L4
+and 1.97 at L5 with 75–80% of releases above 1.5, against 1.00 and 0% for the
+twin. Those late merges keep **more** of their input, not less — merge
+survival rises from 0.79 to 0.84 at L3, 0.81 to 0.97 at L4 and 0.88 to 0.995
+at L5. Holding a deep level back on `Assoc` elides nothing, because the
+overwrites are absorbed at L0–L2 before they reach it; it only relocates and
+enlarges the rewrite. L0 is deferred on about a quarter of its due frames
+(0.24–0.26 per arm), the likely source of the +3% read cost, since a deep
+level is one sorted run however full it is (A4). **This is D-9's falsification clause, measured
+rather than inferred:** with the mask reaching the plant (3) and depth flat
+(5), the learner's deferral lever costs write by relocation alone with no
+elision gain, and on this workload it is worthless at parity. At $T{=}10$ the
+learner does not pull it.
+
+**Why the guard lets it happen at $T{=}2$.** The calibrated score limits at
+L2–L4 are 12.9 / 12.4 / 11.9 at $T{=}2$, because the calibration runs include
+the post-load backlog in which native RocksDB itself releases L3 at twelve
+times its target (twin p90 12.2). A steady-state hold at 2–3× is therefore
+far inside the envelope. It is the same root as D-12 — a whole-run statistic
+carrying the startup transient — now in the guard's limits rather than the
+reward. Not re-fitted here; recorded for its own entry.
+
+**Predictions as scored.** The driver's scorer printed 1–9, 12 and 13;
+10 and 11 were scored by hand from the same logs.
+
+| # | Prediction | Result |
+| --- | --- | --- |
+| 1 | reward $W$ = evaluator $W$ within 0.5% | **PASS**, max gap 0.10% |
+| 2 | no rail; one multiplier below its peak; $\lambda_{\text{lat}} \le 5$ | **FAIL** — 5.08, 8.24, 7.92 on three `unconstrained_rl` arms; all nine `rl` arms and the smoke arm $\le$ 4.86 |
+| 3 | zero early deep releases; L0 below-trigger at $\ge$ 2 files | **PASS** |
+| 4 | $\lambda_W$ largest at end of every `rl` arm; falls where $W$ ends inside 2% | **FAIL** / pass — at $T{=}10$ $\lambda_{\text{scan}}$ (7.1–8.0) binds and $\lambda_W$ ends 0.45–2.2, below its peak |
+| 5 | $\delta L \le 0$ | **PASS**, 0 / 0 / 0 |
+| 6 | `rl` $\Delta W \le$ +6 / +10 / +6%; `unconstrained_rl` below `rl` every cell | **FAIL** — +6.64% at $T{=}2$; $T{=}6$ +9.71 and $T{=}10$ −0.56 hold; `unconstrained_rl` above `rl` at $T{=}6$ |
+| 7 | `rl` $\Delta R \le$ +2% at $T{=}2$, $T{=}10$ | **FAIL** at $T{=}2$ (+3.03); $T{=}10$ +1.12 holds |
+| 8 | E-5 above 1% in $\ge$ 2 cells | **PASS** — 0.149–0.171 / 0.061–0.082 / 0.085–0.096 |
+| 9 | L0 lever real, larger when unguarded | **PASS** (0.239 against 0.228 of due-L0 frames deferred) |
+| 10 | $\lambda_W < 20$, $\lambda_{\text{scan}} < 10$ on `rl` | **FAIL** — $\lambda_W$ 20.95 on $T{=}6$ seed 1; $\lambda_{\text{scan}}$ max 8.03 holds |
+| 11 | measured-phase stall $<$ 1 s | **PASS**, max 0.19 s |
+| 12 | whole-run form ends above the recorded $\lambda_{\text{lat}}$ | **PASS** on all 18 matrix arms; **FAILS on the smoke retry** (whole-run 0.00 against 2.61) |
+| 13 | since-warm-up latency within ±10% of the trajectory end | **FAIL** on one of 18 (`unconstrained_rl` $T{=}6$ seed 3, scan 1.107); holds on the other 17 and the smoke arm |
+
+D-12's falsification clause for prediction 2 applies to the unguarded arms
+only: their residual $\lambda_{\text{lat}}$ is scan latency 3–11% over the
+calibration trajectory, a seed or session effect or a policy effect on scans,
+not the transient. On the enforced arms the repair holds.
+
+**Pathway D criteria, first scored.**
+
+| # | Criterion | $T{=}2$ | $T{=}6$ | $T{=}10$ |
+| --- | --- | --- | --- | --- |
+| D-1 | residual tail $<$ 20 | pass (16.5) | pass (9.6) | **fail** (26.9 at L2) |
+| D-2 | final TD loss $<$ 2× return scale | pass (12.6 vs 29.1) | pass (35.0 vs 125), TD loss **rising** (trend 2.2) | pass (2.6 vs 21.0) |
+| D-3 | multipliers plateau on feasible cells | **fail** — $\lambda_W$ monotone to the end (11–15) | **fail** — monotone (12–21) | pass — $\lambda_W$ peaks mid-run and falls |
+| D-4 | $\lambda_W$ diverges only where B.1 ceiling $< d'$ | **fail** — rises where the constraint is feasible | **fail** | pass |
+| D-5 | flip $>$ 0.1 per level; beats the prior | flip pass except L7 (0.018); **loses to the prior**: $W$ +3.78% [+0.40, +7.17], $R$ undecidable | flip pass; undecidable against the prior; worse exchange rate on means | flip fails at L1 (0.066); $W$ −1.00% [−1.41, −0.59] against the prior, $R$ equal |
+
+The monotone $\lambda_W$ at $T{=}2$ and $T{=}6$ is not the infeasibility
+signal D-4 describes: the static twin meets the bound by definition. The arm's
+run-to-date $W$ never returns under its bound within a 160 s run, and most of
+the multiplier's level is accumulated while the post-load backlog holds that
+ratio at 13–20 — the transient D-12 recorded for $W$ and left for its own
+entry.
+The scan multiplier at $T{=}10$ is the same effect: run-to-date seeks per
+scan start at 10–11 against a bound of 3.69, fall under it only in the last
+6–10% of the run, and every arm *ends* under it, yet $\lambda_{\text{scan}}$
+finishes at 7.1–8.0 — which is why prediction 4 fails there. All three flow
+multipliers inherit the startup transient; D-12 removed it from latency only.
+The bias runs toward restraint: an inflated $\lambda_W$ pushes the learner
+toward fewer writes, so the $T{=}2$ write excess arose despite it.
+
+**Latency, under P0-4's rule** (pass if the upper bound $\le$ +2%, fail if the
+lower bound $>$ +2%, otherwise undecidable): at $T{=}2$ write p99 fails
+(+9.67% [+7.77, +11.56]) and the rest pass or are undecidable; at $T{=}6$ and
+$T{=}10$ every latency check is undecidable or passes. The write-p99 figure is
+not a clean policy effect: the twins ran on 2026-09-21 and these arms two days
+later, latency is warm-cache (A-Impl-2), and `prior_only` shows the same
+direction (+6.5%). Three same-session `regular` arms at $T{=}2$ would settle
+it.
+
+**The guard.** E-5's conditional rate is 6 to 17 times its 1% limit, with
+`pressure` the dominant term, as D-8 and D-9 predicted. But the guard no
+longer decides the outcome: `rl` and `unconstrained_rl` differ by less than
+either differs from `regular` on $W$ at $T{=}2$ and $T{=}6$ (0.07 against 0.45,
+0.25 against 1.08 absolute) — E-4's form, satisfied informally at three
+repeats.
+
+**Against the static frontier** (`frontier_analysis.py --policy-results`,
+`gate1/d12_position-*.json`, space margin 2%; Hull$_0$ is the comparator for
+an arm without a capacity action). Means decide the classification; the
+paired interval against each dominator is reported with it.
+
+| cell | arm | per-$T$ hull | cross-$T$ hull (C-6) |
+| --- | --- | --- | --- |
+| $T{=}2$ | `rl` | **dominated** by its own twin (trigger 2, 16 MiB); paired $W$ [−11.1, −1.3]%, $R$ [−6.4, +0.5]% | **dominated**, decided: $T{=}6$ trigger 4 / 8 MiB and trigger 8 / 8 MiB, both intervals below zero on both axes |
+| | `unconstrained_rl` | **dominated** by its twin; $R$ decided, $W$ not | dominated on means by the same two; undecidable |
+| $T{=}6$ | `rl` | non-dominated, between two hull points and 5% above the line joining them | dominated on means by $T{=}10$ trigger 4 / 8 MiB; undecidable |
+| | `unconstrained_rl` | non-dominated | non-dominated |
+| $T{=}10$ | `rl` | non-dominated — it sits on its twin ($W$ −0.1%, $R$ +0.8%) | non-dominated, same reason |
+| | `unconstrained_rl` | non-dominated | non-dominated |
+
+A non-dominated verdict at $T{=}10$ is not a contribution: the policy is its
+twin within noise, and the twin is a hull point. The only cell where a
+learned arm lies off the static frontier in a way the paired test can see is
+$T{=}2$, and there it lies on the wrong side.
+
+**What this settles.** The question D-9 was written to make evidential —
+can a learned trigger beat native RocksDB on reads at write parity — is
+answered for this action space on `Assoc` at 10M, at three repeats: **no**.
+Where the learner defers, deferral costs write without elision (deep levels)
+or reads (L0); where it compacts early, it reproduces the prior's L0 band at
+a worse exchange rate; where it does neither, it is native. No reward or
+instrument repair changes that, because the finding is about the levers, not
+the signal. D-9 named the consequence in advance: Pathway A — capacity
+expansion, the lever that lets a level hold data without releasing a burst —
+is the remaining route, and it is C++ (Gate 2), which means a rebuild and a
+re-measured hull.
+
+**Evidence.** `results/learner-assoc-d12/`, `results/learner-smoke-d12-2/`,
+`gate1/d12_verdict.txt`, `gate1/d12_conditional.{json,txt}`,
+`gate1/d12_learning.json`, `gate1/d12_position-*.json`; twins from
+`results/baseline_sweep/`, the prior from `results/paired-assoc/`, D-7 from
+`results/learner-assoc/`.
 
 ### Oracle parity gate — `Assoc` re-execution, 2026-09-21
 
@@ -1039,6 +1847,12 @@ is bound to this binary**: `frontier_analysis.py:196` keys identity on
 `(fingerprint, dbbench_sha256)` and refuses to pool across binaries, so every
 step through `prior_only` must run on `9b9321b1…`. A rebuild voids the hull.
 This is what invalidated the 2026-09-12 Gate 1 below.
+
+**Re-scored on the measured phase, 2026-09-23 (D-11).** The write envelope
+above was a whole-run figure. On the corrected evaluator it is +0.68%
+[−2.56%, +3.92%], still inside the ±5% limit at ten pairs; every other check
+is unchanged; verdict `undecided` with no failed checks, as before. The
+artifact is `results/oracle-parity-assoc-2/oracle_parity-measured-phase.json`.
 
 **Two prior conditions, recorded for completeness.** The first execution of this
 gate (`results/oracle-parity-assoc`) failed `observation_health` on an
@@ -1908,7 +2722,13 @@ start on the amended instruments.
     are measured over `mixgraph` plus the drain. Load-phase compaction events
     carry `rl_suspended` and form the `load` view of the $\eta$ instrument.
     Metric definitions version `trigger-v2-logical-v3`; not poolable with
-    earlier runs.
+    earlier runs. *Corrected by D-11 (2026-09-23): `resetstats` clears
+    RocksDB's internal stats only; the `Statistics` tickers and histograms
+    the evaluator parsed were never reset, so $W$, stall seconds and write
+    latency as scored from 2026-09-20 to 2026-09-23 covered the whole run.
+    The evaluator now reconstructs the measured phase from the event log,
+    db_bench's per-benchmark histograms and the reset internal stats; every
+    `Assoc` arm is re-scored from its existing artifacts.*
 20. **`sorted_run_seeks_per_scan` counts sorted runs.** The counter ticks
     once per keyed table seek (each L0 file) and once per level on
     `SeekToFirst`/`SeekToLast`; a scan crossing a file boundary inside one

@@ -107,6 +107,21 @@ def _load_baseline_manifest() -> dict[str, float]:
         # D-6: the space hinge is measured in BYTES, not as a ratio. See
         # SPACE_BYTES_BOUND below for why the ratio form was unusable.
         "expected_physical_sst_bytes",
+        # D-10: the latency averages in the TELEMETRY's own unit, written by
+        # 06_calibrate_live_guard.py from the oracle calibration windows. The
+        # formal limits above come from db_bench's histogram, a different
+        # instrument: on Assoc at 10M the two disagree by 19x on scans and 9x
+        # on writes (get agrees to 1%). The D-9 smoke arm's scan hinge read
+        # +18 on every frame against a run whose evaluator scan latency was 4%
+        # UNDER its limit, and lambda_latency railed. The reward now hinges
+        # the frame's telemetry value against a telemetry reference; the
+        # formal limits stay loaded because they are what the evaluator scores.
+        "get_latency_avg_ns_telemetry_reference",
+        "get_latency_avg_ns_telemetry_limit",
+        "scan_latency_avg_ns_telemetry_reference",
+        "scan_latency_avg_ns_telemetry_limit",
+        "write_latency_avg_ns_telemetry_reference",
+        "write_latency_avg_ns_telemetry_limit",
     )
     try:
         limits = {name: float(manifest[name]) for name in names}
@@ -117,9 +132,10 @@ def _load_baseline_manifest() -> dict[str, float]:
            for value in limits.values()):
         raise RuntimeError(
             f"baseline SLO manifest has invalid objective references: {path}")
-    if any(limits[name] <= 0.0 for name in names[:6]):
+    positive = names[:6] + tuple(n for n in names if n.endswith("_telemetry_limit"))
+    if any(limits[name] <= 0.0 for name in positive):
         raise RuntimeError(
-            f"baseline SLO manifest has invalid formal latency limits: {path}")
+            f"baseline SLO manifest has invalid latency limits: {path}")
     return limits
 
 
@@ -161,7 +177,16 @@ SPACE_BYTES_BOUND = (BASELINE_LIMITS.get("expected_physical_sst_bytes", 0.0)
                      * (1.0 + SPACE_RELATIVE_MARGIN))
 SCAN_SEEKS_BOUND = (BASELINE_LIMITS.get("sorted_run_seeks_per_scan_reference", 0.0)
                     * (1.0 + SCAN_RELATIVE_MARGIN))
-STALL_FRACTION_BOUND = BASELINE_LIMITS.get("stall_fraction_reference", 0.0)
+# D-11: the stall term is active only against a reference in the telemetry's
+# own unit. The manifest's `stall_fraction_reference` is the evaluator's
+# (internal-stats) stall over measured time, while the frame's
+# `stall_duration_micros` is the telemetry's own accounting; on the D-10
+# smoke arm they read 0.033 s and 0.647 s over the same 157 s, so a hinge
+# between them would rail on a run with no stall problem. No manifest carries
+# a telemetry stall reference yet, so the term is off and stall remains an
+# acceptance criterion scored by the evaluator (P0-2) and guarded live.
+STALL_FRACTION_BOUND = BASELINE_LIMITS.get("stall_fraction_telemetry_reference", 0.0)
+STALL_TERM_ACTIVE = STALL_FRACTION_BOUND > 0.0
 
 ACTION_DIM = 2  # 0=do_nothing, 1=compact_now
 ACTION_NAMES = {0: "do_nothing", 1: "compact_now"}
@@ -283,6 +308,109 @@ LAMBDA_STALL_INIT = _env_float("RL_LAMBDA_STALL_INIT", 1.0)
 # over-reported the slack four to five times and hid the shortfall.
 LAMBDA_LR = _env_float("RL_LAMBDA_LR", 0.05)
 LAMBDA_MAX = _env_float("RL_LAMBDA_MAX", 100.0)
+# D-10: no multiplier moves during the first LAMBDA_WARMUP_SECONDS of
+# controlled time, and a single step is bounded by LAMBDA_LR * LAMBDA_SLACK_CLIP.
+# The run-to-date ratios the flow slacks are read from are dominated by the
+# bulk load's compaction backlog early in the measured phase -- on the D-9
+# smoke arm the run-to-date W was 17 over the first 16 s and 11 at 32 s
+# against a bound of 8.2, and sorted-run seeks per scan started at 26
+# against 7.8 -- so every flow multiplier climbed to 20-40 before the ratios
+# could mean anything, and the seeks multiplier never came back although the
+# run finished under that bound. Both arms inherit the same backlog and the
+# evaluator counts it in both; only the multiplier must not act on it before
+# the cumulative has mass. The clip keeps a first-frame ratio of 50 from
+# moving a multiplier by 2.5 in one step.
+LAMBDA_WARMUP_SECONDS = _env_float("RL_LAMBDA_WARMUP_SECONDS", 30.0)
+LAMBDA_SLACK_CLIP = _env_float("RL_LAMBDA_SLACK_CLIP", 1.0)
+# D-12: the LATENCY multiplier's slack excludes the bulk load's tail and is
+# measured against the baseline's own trajectory. The run-to-date average is
+# poisoned by the first 1-2 s after `rlresume`: the tree the suspended
+# controller inherits from the load holds L0 at 16-22 files, above the
+# slowdown trigger, and the write controller stalls writes at 15-32x the
+# limit. The calibration arms carry the same transient, so measured this way
+# the BASELINE's own cumulative write latency sits above its limit until
+# 120-150 s of a 160 s run, and any policy reads a positive slack for most of
+# the run; lambda_latency ended at 27.75 on the D-11 smoke arm whose window
+# write latency sat 16-19% UNDER the limit from 10 s on (history 14.23). The
+# slack is now the arm's cumulative since LAMBDA_WARMUP_SECONDS against the
+# baseline's cumulative since the same instant at the same elapsed time, read
+# from the manifest's `latency_reference_trajectory`
+# (06_calibrate_live_guard.py). The priced TERM is unchanged, so the run sum is
+# still the evaluator's constraint; only what drives the multiplier changes.
+# 0 restores the D-10 whole-run form.
+LATENCY_SLACK_SINCE_WARMUP = _env_int("RL_LATENCY_SLACK_SINCE_WARMUP", 1) != 0
+# D-12 correction: the first controlled frame's telemetry window opens at the
+# last SUSPENDED worker tick, not at `rlresume`, so it can carry the tail of the
+# bulk load -- 14,100 load writes (14.7 MB) on the first D-12 smoke attempt,
+# 1.25% of the measured phase's user bytes, against 50 ms of mixgraph on the
+# D-10 and D-11 arms. The evaluator's measured phase starts at
+# RL_CONTROL_RESUMED_MICROS and excludes them; Python cannot split the frame,
+# so its flows are left out of every run-to-date total. The cost is at most one
+# tick of mixgraph, about 0.03% of the phase. 0 restores counting it.
+DROP_RESUME_FRAME = _env_int("RL_REWARD_DROP_RESUME_FRAME", 1) != 0
+
+
+def _load_latency_trajectory() -> dict:
+    """The manifest's since-warm-up latency trajectory (D-12): the baseline's
+    cumulative average per operation on an elapsed-time grid. Empty without a
+    manifest or with the since-warm-up slack switched off."""
+    path = os.environ.get("RL_BASELINE_SLO_PATH", "")
+    if not path or not BASELINE_LIMITS or not LATENCY_SLACK_SINCE_WARMUP:
+        return {}
+    with open(path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    block = manifest.get("latency_reference_trajectory")
+    if not isinstance(block, dict):
+        raise RuntimeError(
+            "baseline SLO manifest lacks latency_reference_trajectory (D-12); "
+            f"regenerate it with 06_calibrate_live_guard.py: {path}")
+    try:
+        warmup = float(block["warmup_seconds"])
+        resolution = float(block["resolution_seconds"])
+        grid = [float(value) for value in block["elapsed_seconds"]]
+        series = {operation: [float(value) for value in block["cumulative_avg_ns"][operation]]
+                  for operation in ("get", "scan", "write")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"malformed latency_reference_trajectory in {path}") from exc
+    if abs(warmup - LAMBDA_WARMUP_SECONDS) > 1e-9:
+        raise RuntimeError(
+            f"latency_reference_trajectory warm-up {warmup} s differs from "
+            f"RL_LAMBDA_WARMUP_SECONDS {LAMBDA_WARMUP_SECONDS} s: {path}")
+    if (resolution <= 0.0 or not grid
+            or any(len(values) != len(grid) for values in series.values())
+            or any(not math.isfinite(value) or value <= 0.0
+                   for values in series.values() for value in values)):
+        raise RuntimeError(f"invalid latency_reference_trajectory in {path}")
+    return {"warmup_seconds": warmup, "resolution_seconds": resolution,
+            "elapsed_seconds": grid, "cumulative_avg_ns": series}
+
+
+LATENCY_TRAJECTORY = _load_latency_trajectory()
+
+
+def latency_reference_ns(operation: str, elapsed_seconds: float) -> float:
+    """The baseline's since-warm-up cumulative average for `operation` at
+    `elapsed_seconds` of controlled time: the grid point at or before it, the
+    first point before the grid starts, the last point held after it ends.
+    0.0 when no trajectory is loaded."""
+    trajectory = LATENCY_TRAJECTORY
+    if not trajectory:
+        return 0.0
+    series = trajectory["cumulative_avg_ns"][operation]
+    index = int((elapsed_seconds - trajectory["elapsed_seconds"][0])
+                // trajectory["resolution_seconds"])
+    return series[max(0, min(len(series) - 1, index))]
+# D-10/D-11: the evaluator's write denominator is the `rocksdb.bytes.written`
+# ticker, which counts WriteBatch bytes -- key, value and per-record framing
+# -- while the telemetry's `user_logical_write_bytes` counts key + value only.
+# The framing of one Put is 16 bytes (WriteBatchInternal::ByteSize: 12-byte
+# header, type byte, two varint lengths), measured at 15.8 on the D-10 smoke
+# arm once the two sides were compared over the SAME phase. D-10 had fitted 30
+# by comparing the reward's measured-phase W against an evaluator W that still
+# included the bulk load (D-11); that constant was an artifact and is
+# withdrawn.
+WRITE_BATCH_OVERHEAD_BYTES = _env_float("RL_WRITE_BATCH_OVERHEAD_BYTES", 16.0)
 # Write amplification is a ratio of byte totals. Over one 50 ms window it is
 # undefined whenever no Put landed, and over the whole run it is a constant
 # that no single action can move. It is therefore measured over an

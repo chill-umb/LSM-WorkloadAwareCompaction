@@ -64,6 +64,12 @@ class LagrangeMultipliers:
         slack = float(slack)
         if not np.isfinite(slack):
             slack = 0.0
+        # D-10: one step is at most LAMBDA_LR * LAMBDA_SLACK_CLIP, so a
+        # run-to-date ratio read off a handful of early frames cannot move a
+        # multiplier by tens in a few ticks.
+        clip = float(config.LAMBDA_SLACK_CLIP)
+        if clip > 0.0:
+            slack = max(-clip, min(clip, slack))
         with self._lock:
             value = self._values[name] + config.LAMBDA_LR * slack
             value = min(config.LAMBDA_MAX, max(0.0, value))

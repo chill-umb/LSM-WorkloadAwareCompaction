@@ -144,6 +144,120 @@ def parse_mix_counts(text: str) -> tuple[float, float, float, float, float]:
 EVENT_LOG = re.compile(r"EVENT_LOG_v1 (\{.*\})")
 
 
+# D-11 (2026-09-23): db_bench's `resetstats` calls DB::ResetStats, which clears
+# RocksDB's INTERNAL stats only. The `Statistics` tickers and histograms the
+# `stats` benchmark prints are cumulative since open and therefore include the
+# bulk load, contrary to what P1c-19 recorded. The measured phase is recovered
+# from what the run does print per phase: db_bench's own per-benchmark latency
+# histograms after the mixgraph line, the internal-stats block's cumulative
+# stall (reset), the RocksDB event log's flush and compaction outputs inside
+# [RL_CONTROL_RESUMED_MICROS, RL_DRAIN_END_MICROS], and the load's user bytes,
+# which are exact: fixed key and value sizes plus the 16-byte WriteBatch
+# framing of one Put (12-byte header, type byte, two varint lengths).
+WRITE_BATCH_FRAMING_BYTES = 16.0
+STALL_LINE = re.compile(
+    r"^Cumulative stall: (\d+):(\d+):(\d+(?:\.\d+)?) H:M:S", re.M)
+PHASE_HIST_HEADER = re.compile(r"^Microseconds per (read|write|seek):\s*$", re.M)
+BENCH_RESULT_LINE = re.compile(r"^([a-z_]+)\s+:\s+[\d.]+ micros/op", re.M)
+# The first bucket prints with an inclusive "[" lower bound, the rest with "(".
+HIST_BUCKET = re.compile(
+    r"^[\(\[]\s*(-?\d+),\s*(-?\d+)\s*\]\s+(\d+)\s+[\d.]+%\s+[\d.]+%")
+
+
+def parse_measured_stall_seconds(text: str) -> float:
+    """Measured-phase stall from the internal-stats block, which resetstats
+    does reset; the last occurrence is the `stats` dump after the drain."""
+    matches = STALL_LINE.findall(text)
+    if not matches:
+        return math.nan
+    hours, minutes, seconds = matches[-1]
+    return int(hours) * 3600.0 + int(minutes) * 60.0 + float(seconds)
+
+
+def _bucket_percentile(buckets: list[tuple[float, float, int]],
+                       probability: float) -> float:
+    """Linear interpolation inside the bucket, as HistogramImpl::Percentile."""
+    total = sum(count for _, _, count in buckets)
+    if total <= 0:
+        return math.nan
+    target = probability * total
+    seen = 0
+    for low, high, count in buckets:
+        if seen + count >= target:
+            if count <= 0:
+                return float(high)
+            return low + (high - low) * (target - seen) / count
+        seen += count
+    return float(buckets[-1][1])
+
+
+def parse_phase_histograms(text: str) -> dict[str, dict[str, float]]:
+    """db_bench's per-benchmark latency histograms for the mixgraph phase:
+    the `Microseconds per read/write/seek` blocks that follow the mixgraph
+    result line. These cover the measured phase only, unlike the
+    rocksdb.db.*.micros statistics, and `seek` times the whole scan rather
+    than the Seek call alone. p95 is not printed and is interpolated from the
+    bucket rows the same way db_bench derives its printed percentiles."""
+    result: dict[str, dict[str, float]] = {}
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        match = BENCH_RESULT_LINE.match(line)
+        if match and match.group(1) == "mixgraph":
+            start = index
+    if start is None:
+        return result
+    names = {"read": "get", "write": "write", "seek": "scan"}
+    index = start + 1
+    while index < len(lines):
+        line = lines[index]
+        if BENCH_RESULT_LINE.match(line):
+            break
+        header = PHASE_HIST_HEADER.match(line)
+        if not header:
+            index += 1
+            continue
+        block = {"count": math.nan, "avg": math.nan, "p50": math.nan,
+                 "p95": math.nan, "p99": math.nan, "p100": math.nan}
+        buckets: list[tuple[float, float, int]] = []
+        index += 1
+        while index < len(lines) and not PHASE_HIST_HEADER.match(lines[index]) \
+                and not BENCH_RESULT_LINE.match(lines[index]):
+            item = lines[index]
+            count_match = re.match(r"^Count: (\d+) Average: ([\d.]+)", item)
+            minmax = re.match(r"^Min: ([\d.]+)\s+Median: ([\d.]+)\s+Max: ([\d.]+)", item)
+            pct = re.match(r"^Percentiles: P50: ([\d.]+) P75: ([\d.]+) P99: ([\d.]+)", item)
+            bucket = HIST_BUCKET.match(item)
+            if count_match:
+                block["count"] = float(count_match.group(1))
+                block["avg"] = float(count_match.group(2))
+            elif minmax:
+                block["p50"] = float(minmax.group(2))
+                block["p100"] = float(minmax.group(3))
+            elif pct:
+                block["p50"] = float(pct.group(1))
+                block["p99"] = float(pct.group(3))
+            elif bucket:
+                buckets.append((float(bucket.group(1)), float(bucket.group(2)),
+                                int(bucket.group(3))))
+            elif item.strip() and not item.startswith("-"):
+                break
+            index += 1
+        if buckets:
+            block["p95"] = _bucket_percentile(buckets, 0.95)
+        block["sum"] = block["avg"] * block["count"]
+        result[names[header.group(1)]] = block
+    return result
+
+
+def parse_geometry(fingerprint: str) -> tuple[float, float]:
+    """Key and value size from the fingerprint's `:k64:v960:` segment."""
+    match = re.search(r":k(\d+):v(\d+):", fingerprint or "")
+    if not match:
+        return math.nan, math.nan
+    return float(match.group(1)), float(match.group(2))
+
+
 def parse_drain(text: str, log_path: Path) -> dict[str, float]:
     starts = [int(value) for value in re.findall(
         r"^RL_DRAIN_START_MICROS (\d+)$", text, re.M)]
@@ -168,6 +282,8 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
     workload_compaction_bytes = 0.0
     drain_compaction_seconds = 0.0
     workload_compaction_seconds = 0.0
+    measured_flush_bytes = math.nan
+    load_flush_bytes = math.nan
     if log_path.exists():
         events = []
         # rocksdb_LOG.txt runs to hundreds of MB per arm: two EVENT_LOG_v1
@@ -190,6 +306,27 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
         drain_jobs = {int(item["job"]) for item in events if "job" in item
                       if item.get("event") == "compaction_started" and
                       item.get("rl_drain") in (True, 1, "true", "1")}
+        # D-11: flush bytes by phase. A flush's SST is its table_file_creation
+        # event, joined on the job id of a flush_started event; the phase is
+        # the event time against the resume and drain-end stamps db_bench
+        # prints. Flushes outside the window (the load; the manual flush before
+        # the reference compaction, after the stats dump) are not measured.
+        flush_jobs = {int(item["job"]) for item in events if "job" in item
+                      if item.get("event") == "flush_started"}
+        if resumed and ends:
+            measured_flush_bytes = 0.0
+            load_flush_bytes = 0.0
+            for item in events:
+                if item.get("event") != "table_file_creation" or "job" not in item:
+                    continue
+                if int(item["job"]) not in flush_jobs:
+                    continue
+                when = int(item.get("time_micros", 0))
+                size = float(item.get("file_size", 0))
+                if when < resumed[-1]:
+                    load_flush_bytes += size
+                elif when <= ends[-1]:
+                    measured_flush_bytes += size
         for item in events:
             if item.get("event") != "compaction_finished" or "job" not in item:
                 continue
@@ -218,6 +355,8 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
         "workload_compaction_write_bytes": workload_compaction_bytes,
         "drain_compaction_seconds": drain_compaction_seconds,
         "workload_compaction_seconds": workload_compaction_seconds,
+        "measured_flush_write_bytes": measured_flush_bytes,
+        "load_flush_write_bytes": load_flush_bytes,
     }
 
 
@@ -233,9 +372,42 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
     gets, puts, scans, scan_returned, average_scan_length = parse_mix_counts(text)
     drain = parse_drain(text, run_dir / "rocksdb_LOG.txt")
 
+    # Whole-run tickers (cumulative since open; they include the bulk load).
     flush_bytes = tickers.get("rocksdb.flush.write.bytes", 0.0)
     compact_bytes = tickers.get("rocksdb.compact.write.bytes", 0.0)
     user_write_bytes = tickers.get("rocksdb.bytes.written", 0.0)
+    # D-11: the measured phase. Physical bytes from the event log inside the
+    # resume..drain-end window; user bytes as the ticker less the load's exact
+    # bytes (fixed record size plus WriteBatch framing).
+    key_size, value_size = parse_geometry(metadata.get("experiment_fingerprint", ""))
+    load_operations = number(metadata.get("load_operations"))
+    load_user_write_bytes = (
+        load_operations * (key_size + value_size + WRITE_BATCH_FRAMING_BYTES)
+        if all(math.isfinite(v) for v in (load_operations, key_size, value_size))
+        else math.nan)
+    measured_user_write_bytes = (
+        user_write_bytes - load_user_write_bytes
+        if math.isfinite(load_user_write_bytes) else math.nan)
+    measured_physical_write_bytes = (
+        drain["measured_flush_write_bytes"]
+        + drain["workload_compaction_write_bytes"]
+        + drain["drain_compaction_write_bytes"])
+    measured_write_ok = (math.isfinite(measured_physical_write_bytes)
+                         and measured_physical_write_bytes > 0
+                         and math.isfinite(measured_user_write_bytes)
+                         and measured_user_write_bytes > 0)
+    write_amplification_whole_run = divide(flush_bytes + compact_bytes,
+                                           user_write_bytes)
+    if measured_write_ok:
+        write_flush_bytes = drain["measured_flush_write_bytes"]
+        write_compact_bytes = (drain["workload_compaction_write_bytes"]
+                               + drain["drain_compaction_write_bytes"])
+        write_user_bytes = measured_user_write_bytes
+        write_source = "measured_phase_event_log"
+    else:
+        write_flush_bytes, write_compact_bytes = flush_bytes, compact_bytes
+        write_user_bytes = user_write_bytes
+        write_source = "whole_run_tickers_fallback"
     point_probes = tickers.get("rocksdb.point.sst.probe", 0.0)
     scan_skips = tickers.get("rocksdb.number.iter.skip", 0.0)
     sorted_run_seeks = tickers.get("rocksdb.sorted.run.seek", 0.0)
@@ -255,17 +427,33 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         # hull on a non-finite S.
         before = properties.get("rocksdb.total-sst-files-size", math.nan)
     amplification = amplification_metrics(
-        flush_bytes=flush_bytes, compact_bytes=compact_bytes,
-        user_write_bytes=user_write_bytes, point_probes=point_probes,
+        flush_bytes=write_flush_bytes, compact_bytes=write_compact_bytes,
+        user_write_bytes=write_user_bytes, point_probes=point_probes,
         gets=gets, scan_returned=scan_returned, scan_skips=scan_skips,
         sorted_run_seeks=sorted_run_seeks, scans=scans,
         physical_sst_bytes=before, live_logical_bytes=live_logical_bytes,
         garbage_free_sst_bytes=after)
 
-    get_latency = histograms.get("rocksdb.db.get.micros", {})
-    scan_latency = histograms.get("rocksdb.db.seek.micros", {})
-    write_latency = histograms.get("rocksdb.db.write.micros", {})
+    # D-11: latency from db_bench's own mixgraph histograms (measured phase;
+    # `seek` times the whole scan). The rocksdb.db.*.micros statistics are
+    # whole-run for writes and time only the Seek call for scans; they remain
+    # available as *_internal_* diagnostics.
+    phase_histograms = parse_phase_histograms(text)
+    internal_get = histograms.get("rocksdb.db.get.micros", {})
+    internal_scan = histograms.get("rocksdb.db.seek.micros", {})
+    internal_write = histograms.get("rocksdb.db.write.micros", {})
+    if phase_histograms:
+        get_latency = phase_histograms.get("get", {})
+        scan_latency = phase_histograms.get("scan", {})
+        write_latency = phase_histograms.get("write", {})
+        latency_source = "db_bench_mixgraph_histograms"
+    else:
+        get_latency, scan_latency, write_latency = (
+            internal_get, internal_scan, internal_write)
+        latency_source = "rocksdb_statistics_histograms_fallback"
     write_stall = histograms.get("rocksdb.db.write.stall", {})
+    measured_stall_seconds = parse_measured_stall_seconds(text)
+    whole_run_stall_seconds = tickers.get("rocksdb.stall.micros", 0.0) / 1e6
     size_label = metadata.get("size", run_dir.parents[1].name)
     size_m = int(str(size_label).rstrip("Mm"))
     ratio = int(metadata.get("size_ratio", run_dir.parent.name.lstrip("T")))
@@ -284,8 +472,23 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         "space_relative_margin": metadata.get("space_relative_margin", ""),
         "elapsed_seconds": number(metadata.get("elapsed_seconds")),
         **amplification,
-        "stall_seconds": tickers.get("rocksdb.stall.micros", 0.0) / 1e6,
+        "write_amplification_whole_run": write_amplification_whole_run,
+        "write_amplification_source": write_source,
+        "measured_physical_write_bytes": measured_physical_write_bytes,
+        "measured_user_write_bytes": measured_user_write_bytes,
+        "load_user_write_bytes": load_user_write_bytes,
+        "stall_seconds": (measured_stall_seconds
+                          if math.isfinite(measured_stall_seconds)
+                          else whole_run_stall_seconds),
+        "stall_seconds_source": ("measured_phase_internal_stats"
+                                 if math.isfinite(measured_stall_seconds)
+                                 else "whole_run_ticker_fallback"),
+        "stall_seconds_whole_run": whole_run_stall_seconds,
         "stall_events": write_stall.get("count", 0.0),
+        "latency_source": latency_source,
+        "get_latency_internal_avg_us": internal_get.get("avg", math.nan),
+        "scan_latency_internal_avg_us": internal_scan.get("avg", math.nan),
+        "write_latency_internal_avg_us": internal_write.get("avg", math.nan),
         **drain,
         "get_latency_avg_us": get_latency.get("avg", math.nan),
         "get_latency_p95_us": get_latency.get("p95", math.nan),

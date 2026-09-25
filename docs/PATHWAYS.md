@@ -930,6 +930,71 @@ credit window and Huber loss (item 5 above, in part), and lifts the L0 posture
 for `rl` and `unconstrained_rl`. D-1 through D-5 stay unscored until the
 re-run; predictions in `docs/PREREGISTRATION.md` D-9.
 
+**Status on `Assoc` (2026-09-23, later): D-9's smoke gate stopped its matrix;
+D-10 repairs the multiplier instrument; unrun.** The one smoke arm reached
+write parity ($W$ +0.45% against its same-seed twin at $T{=}2$, $R$ +3.2%,
+depth 9 against 9, zero early deep releases) but every flow multiplier railed or climbed to
+tens. Three instrument defects (history 14.21): the latency hinge compared
+the C++ telemetry's window value against db_bench's histogram limit, 19–25×
+apart on scans — which also corrects D-8, whose p99 hinges were zero on every
+frame; the write denominators differed by a 30-byte-per-Put framing; and the
+run-to-date ratios are dominated by the load's compaction backlog early in
+the run. D-10 adds telemetry-unit latency references to the manifest, treats
+the latency averages as flows in that unit, adds the framing, and gives the
+multipliers a 30 s warm-up and a slack clip. `docs/PREREGISTRATION.md` D-10.
+
+**Status on `Assoc` (2026-09-23, latest): the evaluator had been scoring the
+bulk load; D-11 corrects it and re-scores the record; unrun.** db_bench's
+`resetstats` clears internal stats only, so the tickers behind $W$, stall
+seconds and write latency covered the whole run in every `Assoc` arm
+(history 14.22). Re-scored on the measured phase: the prior at the
+trigger-2 comparators is +2.75% / +0.45% write (recorded +0.09 / +0.10), the
+L0 band +14.4% / +6.6% (recorded +2.9 / +2.1), the D-7 learner +24 / +43 /
++13% (recorded +6 / +13 / +5), and both smoke arms +5% against their twins
+(recorded at parity). The comparator references moved to $W$ = 7.92 / 8.48 /
+13.45 and the stall references to about 0.01% of time. C-1 still passes;
+C-2 at $T{=}6$ flips to fail because the honest write axis has three to nine
+times the run-to-run scatter, which also voids the 14.7 ten-repeat
+justification as stated. D-1 through D-5 remain unscored; predictions in
+`docs/PREREGISTRATION.md` D-11.
+
+**Status on `Assoc` (2026-09-23, latest): D-11's smoke gate stopped on the
+latency multiplier; D-12 measures its slack from the warm-up against the
+baseline's own trajectory; unrun.** `lambda_latency` ended at 27.75 on an
+arm whose window write latency sat 16-19% under its limit from 10 s on
+(history 14.23): the run-to-date average carried the first two seconds after
+`rlresume`, when the L0 backlog inherited from the suspended load stalls
+writes at 15-32× the limit -- and the calibration arms carry the same
+transient, so under that form the *baseline* reads a positive slack until
+120-150 s of a 160 s run. D-12 makes the latency multiplier's slack the
+since-warm-up cumulative against the baseline's since-warm-up cumulative at
+the same elapsed time, from a trajectory the calibrator writes into the
+manifest; the priced term is unchanged. $W$'s multiplier is transient-driven
+the same way and is left for its own entry. D-1 through D-5 remain unscored;
+predictions in `docs/PREREGISTRATION.md` D-12.
+The first D-12 smoke attempt was invalid (the C++ parser rejected the
+manifest on a nested key, and the reward's first frame carried load writes);
+both are corrected and the smoke is re-run into its own root.
+
+**Status on `Assoc` (2026-09-23, scored): D-12 is the first evidential
+learner run, and the learned trigger does not beat native RocksDB.** Every
+instrument held (write identity within 0.095%, no early deep release, depth
+flat, manifest accepted on all nineteen arms). Against the same-seed static
+twin at three repeats, `rl` is +6.6% $W$ / +3.0% $R$ at $T{=}2$ (dominated,
+and beaten across ratios by two static $T{=}6$ points), +9.7% / −7.1% at
+$T{=}6$ (non-dominated per $T$, a worse exchange rate than the prior on
+means), and −0.6% / +1.1% at $T{=}10$ (native; the write constraint passes
+at 2%, reads do not move). The $T{=}2$ write cost is deep-level deferral with
+no elision — L4 and L5 released at 2–2.6× target, merge survival rising to
+0.97–0.995 — which is D-9's falsification clause, measured. D-1 fails at
+$T{=}10$, D-2 passes, D-3 and D-4 fail at $T{=}2$ and $T{=}6$ ($\lambda_W$
+monotone, driven partly by the post-load transient that also inflates
+$\lambda_{\text{scan}}$), D-5 fails. Verdict and tables in
+`docs/PREREGISTRATION.md`, "D-12 scored"; narrative history 14.24.
+*Corrected the same day:* the $T{=}2$ write excess is start-up exploration
+plus session drift, not a learned lever; see
+`docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`, which also audits this document.
+
 ### Acceptance criteria
 
 | # | Criterion | Threshold | Instrument |

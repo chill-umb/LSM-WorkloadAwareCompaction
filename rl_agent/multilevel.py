@@ -519,13 +519,25 @@ class MultiLevelProcessor:
         # The Lagrange multipliers live in lagrange.MULTIPLIERS (D-9): the
         # reward moves them once per frame, the trainer prices replay with them.
         self._frames = 0
+        # D-12 correction: what the resume-straddling first frame carried and
+        # the reward left out, for the health summary.
+        self._resume_frame_dropped: Dict[str, float] = {}
         # Run-to-date totals of every flow the constraints are ratios of. The
         # marginal terms and the multiplier slacks come from these, so the
         # reward's write, read, scan and stall accounting sums to the
         # evaluator's whole-run statistic rather than to a window estimate.
         self._cum = {"phys": 0.0, "log": 0.0, "probes": 0.0, "gets": 0.0,
                      "run_seeks": 0.0, "scans": 0.0, "stall": 0.0,
-                     "elapsed": 0.0}
+                     "elapsed": 0.0,
+                     # D-10: per-operation latency totals, telemetry unit.
+                     "get_count": 0.0, "get_sum": 0.0,
+                     "scan_count": 0.0, "scan_sum": 0.0,
+                     "write_count": 0.0, "write_sum": 0.0,
+                     # D-12: the same totals from the end of the multiplier
+                     # warm-up, which drive the latency multiplier's slack.
+                     "get_since_count": 0.0, "get_since_sum": 0.0,
+                     "scan_since_count": 0.0, "scan_since_sum": 0.0,
+                     "write_since_count": 0.0, "write_since_sum": 0.0}
         # The constraint features of the state (D-9), written by
         # _global_reward for the frame being encoded.
         self._constraint_view: Dict[str, float] = {}
@@ -753,6 +765,19 @@ class MultiLevelProcessor:
             "stall_fraction_bound": config.STALL_FRACTION_BOUND,
             "space_relative_margin": config.SPACE_RELATIVE_MARGIN,
             "constrained": bool(config.BASELINE_LIMITS),
+            # D-12: what drove lambda_latency, and where the arm and the
+            # baseline's trajectory ended, for the scorer.
+            "resume_frame_dropped": dict(self._resume_frame_dropped),
+            "latency_slack_form": ("since_warmup_vs_trajectory"
+                                   if config.LATENCY_TRAJECTORY
+                                   else "whole_run_vs_limit"),
+            "latency_since_warmup_avg_ns": {
+                op: (cum[f"{op}_since_sum"] / cum[f"{op}_since_count"]
+                     if cum[f"{op}_since_count"] > 0 else None)
+                for op in ("get", "scan", "write")},
+            "latency_reference_end_ns": {
+                op: config.latency_reference_ns(op, cum["elapsed"])
+                for op in ("get", "scan", "write")},
         }
 
     def _global_reward(self, g: dict, levels: List[dict],
@@ -791,6 +816,15 @@ class MultiLevelProcessor:
         Every multiplier then takes one SIGNED step on its constraint's slack
         in its own unit (run-to-date for flows, window for levels), so it can
         fall when the constraint has slack.
+
+        D-12: the latency multiplier's slack is the since-warm-up cumulative
+        average against the baseline's own since-warm-up cumulative at the
+        same elapsed time, not the whole-run cumulative against the whole-run
+        limit. The first 1-2 s after `rlresume` stall writes at 15-32x the
+        limit under the L0 backlog the suspended controller inherits from the
+        load; the calibration arms carry the same transient, so under the
+        whole-run form the baseline itself reads a positive slack until
+        120-150 s of a 160 s run (history 14.23). The priced term is unchanged.
         """
         if g["done"]:
             # The shutdown message contains synthetic zero level states, not a
@@ -799,16 +833,34 @@ class MultiLevelProcessor:
                     {"terminal": 1.0})
         self._frames += 1
         constrained = bool(config.BASELINE_LIMITS)
+        # D-12 correction: the first frame straddles `rlresume` and can carry
+        # load-phase writes the evaluator excludes (config.DROP_RESUME_FRAME).
+        # Its flows enter no run-to-date total, no marginal term and no window
+        # average; its elapsed time and its tree state still count.
+        resume_frame = self._frames == 1 and config.DROP_RESUME_FRAME
 
         # -- run-to-date totals of every flow -------------------------------
         phys_t = (_positive(g["flushed_bytes"])
                   + _positive(g["compaction_bytes_written"]))
         log_t = _positive(g["user_logical_write_bytes"])
+        # D-10/D-11: add the per-Put WriteBatch framing the evaluator's ticker
+        # counts and the telemetry does not (config.WRITE_BATCH_OVERHEAD_BYTES,
+        # 16 bytes), so the run-to-date W here is the evaluator's
+        # measured-phase W.
+        log_t += (config.WRITE_BATCH_OVERHEAD_BYTES
+                  * _positive(g["write_latency_count"]))
         probes_t = _positive(g["point_sst_probes"])
         gets_t = _positive(g["keys_read"])
         run_seeks_t = _positive(g["scan_sorted_run_seeks"])
         scans_t = _positive(g["seeks"])
         stall_t = _positive(g["stall_duration_micros"]) / 1e6
+        if resume_frame:
+            self._resume_frame_dropped = {
+                "physical_bytes": phys_t, "logical_bytes": log_t,
+                "gets": gets_t, "scans": scans_t,
+                "write_ops": _positive(g["write_latency_count"])}
+            phys_t = log_t = probes_t = gets_t = run_seeks_t = scans_t = 0.0
+            stall_t = 0.0
         cum = self._cum
         cum["phys"] += phys_t
         cum["log"] += log_t
@@ -883,33 +935,93 @@ class MultiLevelProcessor:
         space_amp_estimate = (g["physical_sst_bytes"] / g["live_logical_bytes"]
                               if g["live_logical_bytes"] > 0 else 0.0)
 
-        # -- latency: level hinge on windowed AVERAGES only (D-8) -------------
-        # A window mean is an unbiased estimate of the run mean; a window p99
-        # is not an estimate of the run p99 on this distribution (D-8). p99 is
-        # still computed and logged per operation so the decomposition is
-        # readable from a frame. The multiplier's slack is the worst
-        # operation's signed average excess.
-        latency_excess = 0.0
+        # -- latency: the averages as FLOWS, in the telemetry's unit (D-10) --
+        # A run average is sum / count, a ratio of run totals, so a frame's
+        # honest share is (sum_t - limit * count_t) over the run-to-date mean
+        # count rate, in units of the limit; summed over the run that is the
+        # relative excess of the run average, times elapsed time. The limit
+        # is the baseline's average as measured by THIS instrument -- the C++
+        # window telemetry, totalled by 06_calibrate_live_guard.py -- not
+        # db_bench's histogram, which disagrees by 19x on scans and 9x on
+        # writes. The D-9 smoke arm's scan hinge read +18 on every frame
+        # against a run whose evaluator scan latency was 4% under its limit,
+        # and lambda_latency railed on the first frames. The multiplier's
+        # slack is the worst operation's signed run-to-date excess. p99 is
+        # logged per operation as a raw window value and enters nothing
+        # (D-8); D-8's attribution of the D-7 excess to write p99 was wrong
+        # -- that hinge was zero on every frame -- the excess was scan_avg.
+        latency = 0.0
         latency_slack = None
+        latency_slack_whole_run = None
         latency_terms = {}
+        latency_window_avg_ns = {}
+        latency_window_p99_ns = {}
+        latency_cumulative_avg_ns = {}
+        latency_since_warmup_avg_ns = {}
+        latency_reference_avg_ns = {}
+        # D-12: the multiplier's slack is the since-warm-up cumulative against
+        # the baseline's own since-warm-up cumulative at the same elapsed time
+        # (config.LATENCY_TRAJECTORY). The load's tail -- the first 1-2 s after
+        # `rlresume`, writes stalled at 15-32x the limit under an inherited
+        # L0 backlog -- never enters it, and the baseline's own transient
+        # cancels rather than being carried by the whole-run cumulative for
+        # 120-150 s (history 14.23). The priced TERM below is unchanged. The
+        # whole-run form is still computed and logged as
+        # `latency_slack_whole_run` so the two can be compared offline.
+        lambda_warm = cum["elapsed"] >= config.LAMBDA_WARMUP_SECONDS
+        since_warmup = lambda_warm and bool(config.LATENCY_TRAJECTORY)
         for operation in ("get", "scan", "write"):
-            if g[f"{operation}_latency_count"] <= 0:
+            count_t = _positive(g[f"{operation}_latency_count"])
+            avg_t = _positive(g[f"{operation}_latency_avg_ns"])
+            latency_window_p99_ns[operation] = g[f"{operation}_latency_p99_ns"]
+            if count_t <= 0 or resume_frame:
                 continue
-            for quantile in ("avg", "p99"):
-                limit = config.BASELINE_LIMITS.get(
-                    f"{operation}_latency_{quantile}_ns_limit", 0.0)
-                value = g[f"{operation}_latency_{quantile}_ns"]
-                excess = self._hinge(value, limit)
-                latency_terms[f"{operation}_{quantile}"] = excess
-                if quantile == "avg":
-                    latency_excess += excess
-                    if limit > 0.0:
-                        signed = value / limit - 1.0
-                        latency_slack = (signed if latency_slack is None
-                                         else max(latency_slack, signed))
-        latency = latency_excess * dt
+            latency_window_avg_ns[operation] = avg_t
+            cum[f"{operation}_count"] += count_t
+            cum[f"{operation}_sum"] += avg_t * count_t
+            cum_avg = cum[f"{operation}_sum"] / cum[f"{operation}_count"]
+            latency_cumulative_avg_ns[operation] = cum_avg
+            if since_warmup:
+                cum[f"{operation}_since_count"] += count_t
+                cum[f"{operation}_since_sum"] += avg_t * count_t
+            limit = config.BASELINE_LIMITS.get(
+                f"{operation}_latency_avg_ns_telemetry_limit", 0.0)
+            reference = config.BASELINE_LIMITS.get(
+                f"{operation}_latency_avg_ns_telemetry_reference", 0.0)
+            if not constrained or limit <= 0.0:
+                continue
+            cbar = cum[f"{operation}_count"] / elapsed
+            if cbar <= 0.0:
+                continue
+            term = (avg_t - limit) * count_t / (limit * cbar)
+            latency_terms[f"{operation}_avg"] = term
+            latency += term
+            signed_whole_run = cum_avg / limit - 1.0
+            latency_slack_whole_run = (
+                signed_whole_run if latency_slack_whole_run is None
+                else max(latency_slack_whole_run, signed_whole_run))
+            if config.LATENCY_TRAJECTORY:
+                if not since_warmup or cum[f"{operation}_since_count"] <= 0:
+                    continue   # warm-up: the multiplier is held anyway
+                since_avg = (cum[f"{operation}_since_sum"]
+                             / cum[f"{operation}_since_count"])
+                latency_since_warmup_avg_ns[operation] = since_avg
+                trajectory_ns = config.latency_reference_ns(
+                    operation, cum["elapsed"])
+                latency_reference_avg_ns[operation] = trajectory_ns
+                if trajectory_ns <= 0.0:
+                    continue
+                margin = limit / reference if reference > 0.0 else 1.0
+                signed = since_avg / (margin * trajectory_ns) - 1.0
+            else:
+                signed = signed_whole_run
+            latency_slack = (signed if latency_slack is None
+                             else max(latency_slack, signed))
         if latency_slack is None:
             latency_slack = 0.0
+        if latency_slack_whole_run is None:
+            latency_slack_whole_run = 0.0
+        latency_excess = _positive(latency_slack)
 
         # -- scan: signed marginal on sorted-run seeks per scan (P0-1) --------
         scan_seeks = run_seeks_t / scans_t if scans_t > 0 else 0.0
@@ -920,22 +1032,30 @@ class MultiLevelProcessor:
         else:
             scan, scan_slack = 0.0, 0.0
 
-        # -- stall: signed marginal on the stall fraction (P0-2, zero margin) --
+        # -- stall: signed marginal on the stall fraction (P0-2, zero margin),
+        # only against a telemetry-unit reference (D-11; config.py) --------
         stall_fraction = stall_t / dt if dt > 0.0 else 0.0
-        if constrained:
+        if constrained and config.STALL_TERM_ACTIVE:
             stall = stall_t - config.STALL_FRACTION_BOUND * dt
             stall_slack = stall_cum - config.STALL_FRACTION_BOUND
         else:
             stall, stall_slack = 0.0, 0.0
 
-        # -- multipliers: one signed step each, then price --------------------
-        lam = {
-            "write": MULTIPLIERS.update("write", write_slack),
-            "space": MULTIPLIERS.update("space", space_slack),
-            "latency": MULTIPLIERS.update("latency", latency_slack),
-            "scan": MULTIPLIERS.update("scan", scan_slack),
-            "stall": MULTIPLIERS.update("stall", stall_slack),
-        }
+        # -- multipliers: one signed step each after the warm-up, then price --
+        # D-10: the run-to-date ratios are dominated by the bulk load's
+        # compaction backlog for the first tens of seconds (config.py,
+        # LAMBDA_WARMUP_SECONDS); no multiplier acts on them until then.
+        # `lambda_warm` was decided above, before the latency accumulators.
+        if lambda_warm:
+            lam = {
+                "write": MULTIPLIERS.update("write", write_slack),
+                "space": MULTIPLIERS.update("space", space_slack),
+                "latency": MULTIPLIERS.update("latency", latency_slack),
+                "scan": MULTIPLIERS.update("scan", scan_slack),
+                "stall": MULTIPLIERS.update("stall", stall_slack),
+            }
+        else:
+            lam = MULTIPLIERS.values()
         components = np.array(
             [shaping, objective, write, space, latency, scan, stall],
             dtype=np.float64)
@@ -992,7 +1112,15 @@ class MultiLevelProcessor:
             "scan_excess": _positive(scan_slack),
             "latency_excess": latency_excess,
             "latency_slack": latency_slack,
+            "latency_slack_whole_run": latency_slack_whole_run,
+            "latency_since_warmup_avg_ns": latency_since_warmup_avg_ns,
+            "latency_reference_avg_ns": latency_reference_avg_ns,
             "latency_terms": latency_terms,
+            "latency_window_avg_ns": latency_window_avg_ns,
+            "latency_window_p99_ns": latency_window_p99_ns,
+            "latency_cumulative_avg_ns": latency_cumulative_avg_ns,
+            "lambda_warm": lambda_warm,
+            "write_logical_bytes_window": log_t,
             "stall_fraction": stall_fraction,
             "stall_fraction_cumulative": stall_cum,
             "stall_marginal": stall,
