@@ -44,3 +44,72 @@ workload.txt
 
 # build
 **/build/**
+/build-dbbench/*
+
+# venv
+.venv
+.venv-dbbench/*
+
+# python
+__pycache__/
+*.pyc
+
+# metrics
+*.jsonl
+scripts/*
+!scripts/
+!scripts/*.sh
+# Everything in scripts/ is source, not output. Listing individual .py files
+# here meant new analysis scripts were silently ignored and never reached
+# another machine — which is why run_pressure_experiment.sh carries a check for
+# a missing check_pressure.py. Generated artefacts are covered by the
+# __pycache__ and *.jsonl rules above.
+!scripts/*.py
+!scripts/dbbench_pipeline/
+!scripts/dbbench_pipeline/*.sh
+!scripts/dbbench_pipeline/*.py
+!scripts/dbbench_pipeline/*.md
+
+# results
+results/*
+baseline_slo*
+baseline_selection*
+gate1
+*.tex
+*.tgz
+
+# workloads
+# Generated workload files are large and reproducible from their specs, so they
+# stay out of the repo. The SPECS are source and must travel with it, otherwise
+# a fresh machine cannot regenerate the workloads at all.
+*.txt
+*.json
+!config/research_objective_contract.v1.json
+!config/research_objective_contract.v2.json
+!config/research_objective_contract.v3.json
+!workload_specs/**/*.json
+!workload_specs/**/*.md
+
+# docs/ is deliberately NOT ignored (b253e85, 2026-09-21). PREREGISTRATION.md
+# must keep its commit date to be worth anything, and PATHWAYS.md and
+# EXPERIMENTAL_SETUP.md are current authority. Do not re-add a /docs/* rule.
+
+# Some sketchy executable file
+linux-x64
+
+build-bench/
+
+# Databases created by scripts/run_vanilla_sweep.sh. Kept on the project
+# partition rather than /tmp, which is tmpfs here — a multi-GB db_bench run
+# there would sit in RAM and measure page-cache speed instead of disk.
+.dbbench_*/
+.dbbench/
+
+# Artifacts from before the Gate 2 rebuild (2026-09-20). Invalidated by three
+# simultaneous changes: a new db_bench binary, the in-place contract amendment,
+# and a measured phase that now excludes the bulk load. Structure is preserved,
+# so any path the project record cites resolves by prefixing this directory.
+deprecated/
+
+# graphify
+graphify-out/
