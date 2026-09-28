@@ -33,17 +33,19 @@ The pre-restart project (per-level DQN trigger, objective contract v3) lives on 
 
 ## Build and test
 
-- **Builds and test runs happen on the Chameleon node** (CHI@NCAR, Zen 5). This machine never builds RocksDB. When a step needs the node, give the user the exact command.
+- **RocksDB builds and C++ test runs happen on the Chameleon node** (CHI@NCAR, Zen 5). This machine never builds RocksDB. When a step needs the node, give the user the exact command.
+- **Python tests run locally**, and must pass here before anything goes to the node, so that a long node run never fails on an error a local test would have caught.
 - The local check is syntax-only: run `g++ -fsyntax-only` with the flags recorded for `db/version_set.cc` in `build/compile_commands.json`. That file comes from a legacy build tree. Files it lacks, such as `tools/db_bench_tool.cc` and new `tools/rl_controller/` sources, reuse the same flags.
-- **Tests follow architecture §15.** A milestone is done when its listed tests pass on the node in a debug build (assertions on). T and C tests use RocksDB's framework (gtest, `DBTestBase`, `SyncPoint`); P tests use `pytest`. Commit each milestone separately.
+- **Tests follow architecture §15.** A milestone is done when its listed tests pass: T and C tests on the node in a debug build (assertions on), using RocksDB's framework (gtest, `DBTestBase`, `SyncPoint`); P tests locally with `pytest`. Commit each milestone separately.
 - Python uses the standard library plus `numpy`, and `scipy` for M8 only.
-- This branch has no node build scripts yet. When M1 needs a node build, start from the old ones: `scripts/dbbench_pipeline/00–02` on `dqn-poc-new`. They include the `znver5` toolchain check, which needs GCC 14.1+ or Clang 19+.
+- Node build scripts are `scripts/dbbench_pipeline/00_install_dependencies.sh` and `01_build.sh` (`release` for `db_bench`, `debug <test>...` for named test binaries), with defaults in `config.sh`. Every binary gets a `.provenance` file next to it (commit, dirty flag, compile command, sha256). Run them with `bash`: this checkout sits on NTFS, so git does not record the executable bit unless it is added with `git add --chmod=+x`.
 
 ## Measurement
 
 - **Paper mode** (direct I/O on, WAL on, sync off) produces every reported number, the knee table, the hull and the `--rl_mu0` calibration. Iteration mode (both off) is only for debugging and correctness tests (feasibility §9.2, architecture §15).
 - Paper mode is slow. In the old configuration the node ran 2,750 ops/s with direct I/O, against 58,332 buffered (10M ops, T=2). Measure throughput once in the new configuration before sizing a sweep.
 - Put the database on the device being measured. `/tmp` is tmpfs here, so a run there would measure RAM.
+- **Every long node run gets a short trial first**: the same script, flags and mode, with fewer operations. Bugs are found in the trial, never in the long run.
 - The hull and the knee table belong to the `db_bench` binary that measured them. Re-measure both whenever the binary that runs the policy changes.
 
 ## Repo gotchas
