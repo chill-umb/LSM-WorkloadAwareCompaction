@@ -3,9 +3,10 @@
 # order and writes the marker PREFLIGHT_PASSED, bound to the db_bench, plugin
 # and code hashes, which 03_run_experiments.sh requires before any long run.
 #
-#   1 rebuild the Release db_bench (and the plugin)   4 parity, ACT-4 and ARCH-5
-#   2 tier 1 and tier 2 suites                        5 rules-mode smoke
-#   3 ACT-1 on the real binary                        6 learner smoke
+#   1 rebuild the Release db_bench (and the plugin)   4 parity, ACT-4 and ARCH-5,
+#   2 tier 1 and tier 2 suites                          and the evaluator smoke
+#   3 ACT-1 on the real binary                        5 rules-mode smoke
+#                                                     6 learner smoke
 #
 # A step whose component does not exist yet is skipped and recorded as skipped;
 # a run whose arms need that step is then refused by 03. A step whose component
@@ -78,6 +79,26 @@ if (( parity == 2 )); then
        "$PREFLIGHT_WORK_DIR/act4/act4_report.json)." >&2
 fi
 (( parity == 0 )) || exit 1
+# The evaluator (Gate N0 item 5): one 03 native arm at 1M, T=2, run exactly
+# as a Gate N2 arm (settle, host log, stamps) and scored by 04, whose
+# self-checks must pass. 04 exits non-zero if it refuses the arm.
+EVALUATOR_RESULTS="$PREFLIGHT_WORK_DIR/evaluator"
+rm -rf "$EVALUATOR_RESULTS" "$DB_ROOT/preflight-evaluator"
+CONFIRM_EXPERIMENTS=YES EXPERIMENT_ARMS=native WORKLOAD_SIZES_M=1 \
+  SIZE_RATIOS=2 REPEATS=1 RESUME=0 RESULTS_ROOT="$EVALUATOR_RESULTS" \
+  DB_ROOT="$DB_ROOT/preflight-evaluator" "$PIPELINE_DIR/03_run_experiments.sh"
+"$PYTHON" "$PIPELINE_DIR/04_generate_graphs.py" \
+  --results "$EVALUATOR_RESULTS" --summary-only
+"$PYTHON" - "$EVALUATOR_RESULTS/graphs/summary.csv" <<'PY'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+if len(rows) != 1 or rows[0]["settle_ok"] != "1":
+    raise SystemExit("[step 4] FAIL: the native arm was not scored as a "
+                     "Programme 1 arm (no settled measured phase)")
+print(f"[step 4] evaluator: {rows[0]['measured_operations']} operations, "
+      f"throughput {float(rows[0]['throughput_ops_per_second']):.0f} ops/s, "
+      f"stall fraction {float(rows[0]['stall_fraction']):.4f}")
+PY
 pass 4
 
 echo "=== steps 5 and 6: rules-mode and learner smoke ==="

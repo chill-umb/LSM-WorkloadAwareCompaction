@@ -1,4 +1,11 @@
-"""Load the frozen research objective once for evaluation and frontier tools."""
+"""Load the frozen Programme 1 contract (PREREGISTRATION D-13) and price a
+run's costs with it (PATHWAYS D §2).
+
+A run's three priced costs, in USD over the measured phase, are
+C_W (bytes written), C_R (filter probes, block-reading probes and run seeks)
+and C_S (bytes held per operation served). J_beta weights them by a mode:
+J = beta_W C_W + beta_R C_R + beta_S C_S.
+"""
 
 from __future__ import annotations
 
@@ -8,46 +15,102 @@ import math
 from pathlib import Path
 
 DEFAULT_CONTRACT = (Path(__file__).resolve().parents[2] / "config" /
-                    "research_objective_contract.v3.json")
+                    "research_objective_contract.json")
+MODES = ("balanced", "read", "write", "space")
+# Device prices 18_calibrate_prices.py measures, USD per unit: per byte
+# written, per filter probe, per block-reading probe, per run seek.
+DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk")
 
 
 def load_contract(path: Path = DEFAULT_CONTRACT) -> tuple[dict, str]:
-    raw = path.read_bytes()
+    """The contract and its SHA-256. A copy that differs from the frozen file
+    is refused: an amendment is an in-place edit with a written reason."""
+    raw = Path(path).read_bytes()
     contract = json.loads(raw)
-    # Version 3 is frozen. Reject an incomplete or silently edited copy; a
-    # deliberate amendment needs a new schema implementation and provenance.
-    frozen = json.loads(DEFAULT_CONTRACT.read_bytes())
-    if contract != frozen:
-        raise ValueError("objective differs from frozen contract v3")
-    if (contract["schema_version"] != 3 or
-            contract["contract_status"] != "frozen" or
-            contract["difference_form"] != "paired_relative" or
-            contract["confidence_level"] != 0.95):
+    if contract != json.loads(DEFAULT_CONTRACT.read_bytes()):
+        raise ValueError(f"{path} differs from the frozen contract")
+    objective = contract.get("objective", {})
+    if (contract.get("schema_version") != 1 or
+            contract.get("contract_status") != "frozen" or
+            objective.get("weight_order") != ["write", "read", "space"] or
+            set(objective.get("modes", {})) != set(MODES)):
         raise ValueError("unsupported research objective contract")
+    storage = contract["prices"].get("storage_price_per_byte_second")
+    if not (isinstance(storage, (int, float)) and storage > 0):
+        raise ValueError("the contract's storage price c_s must be > 0")
     return contract, hashlib.sha256(raw).hexdigest()
 
 
-def metric_specs(contract: dict, space_margin: float,
-                 safety_only: bool = False) -> list[tuple[str, float, bool]]:
-    constraints = contract["constraints"]
-    if space_margin not in constraints["space"]["relative_margin_axis"]:
-        raise ValueError("space margin must be a frozen W-R-S sweep point")
-    specs = []
-    if not safety_only:
-        specs.append((contract["primary_objective"]["metric"], 0.0, True))
-    for name in ("write", "space", "scan", "stalls"):
-        block = constraints[name]
-        specs.append((block["metric"], space_margin if name == "space"
-                      else block["relative_margin"], False))
-    latency = constraints["latency"]
-    specs.extend((metric, latency["relative_margin"], False)
-                 for metric in latency["acceptance_metrics"])
-    return specs
+def beta_stars(contract: dict) -> list[int]:
+    return list(contract["objective"]["reported_beta_star"])
+
+
+def storage_scales(contract: dict) -> list[float]:
+    """c_s itself, then the sensitivity points c_s/2 and 2c_s (OBJ-2)."""
+    return [1.0, *contract["prices"]["storage_price_sensitivity"]]
+
+
+def mode_weights(contract: dict, mode: str,
+                 beta_star: float) -> tuple[float, float, float]:
+    """(beta_W, beta_R, beta_S) for a mode (PATHWAYS D §2 table)."""
+    return tuple(float(beta_star) if w == "beta_star" else float(w)
+                 for w in contract["objective"]["modes"][mode])
+
+
+def j_beta(costs: tuple[float, float, float], weights, cs_scale=1.0) -> float:
+    """J at the storage price scaled by cs_scale; costs = (C_W, C_R, C_S)."""
+    w, r, s = costs
+    return weights[0] * w + weights[1] * r + weights[2] * cs_scale * s
+
+
+def j_column(mode: str, beta_star: float, cs_scale: float) -> str:
+    """Column name of one J in summary.csv. Balanced mode has no beta*."""
+    head = "J_balanced" if mode == "balanced" else f"J_{mode}_b{beta_star:g}"
+    return f"{head}_cs{cs_scale:g}"
+
+
+def objective_grid(contract: dict):
+    """Every (mode, beta*, c_s scale) the contract reports; balanced once per
+    scale, since beta* does not enter it."""
+    for scale in storage_scales(contract):
+        yield "balanced", 1, scale
+        for mode in MODES[1:]:
+            for beta in beta_stars(contract):
+                yield mode, beta, scale
+
+
+def objective_columns(contract: dict,
+                      costs: tuple[float, float, float]) -> dict[str, float]:
+    return {j_column(mode, beta, scale):
+            j_beta(costs, mode_weights(contract, mode, beta), scale)
+            for mode, beta, scale in objective_grid(contract)}
+
+
+def validate_prices(prices: dict, contract: dict) -> dict:
+    """Prices must be money (OBJ-2): positive, finite device prices, and the
+    contract's c_s > 0 and instance price > 0. Returns prices with c_s."""
+    instance = contract["prices"].get("instance_price_per_device_second")
+    storage = contract["prices"].get("storage_price_per_byte_second")
+    for name, value in (("instance price", instance), ("c_s", storage),
+                        *((key, prices.get(key)) for key in DEVICE_PRICES)):
+        if (not isinstance(value, (int, float)) or isinstance(value, bool) or
+                not math.isfinite(value) or value <= 0):
+            raise ValueError(f"{name} must be a positive money price; "
+                             f"got {value!r}")
+    if prices.get("c_s", storage) != storage:
+        raise ValueError("prices carry a c_s other than the contract's")
+    return {**{key: float(prices[key]) for key in DEVICE_PRICES},
+            "c_s": float(storage)}
+
+
+def reference_rate(contract: dict, family: str):
+    """q-bar for a workload family, or None while it is unmeasured."""
+    return contract["reference_rate"]["ops_per_second"].get(family)
 
 
 def relative_difference(candidate: float, baseline: float) -> float:
     if not all(math.isfinite(v) and v >= 0 for v in (candidate, baseline)):
-        raise ValueError("objective measurements must be finite and nonnegative")
+        raise ValueError("measurements must be finite and nonnegative")
     if baseline == 0:
         if candidate == 0:
             return 0.0

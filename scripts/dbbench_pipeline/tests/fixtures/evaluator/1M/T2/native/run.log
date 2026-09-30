@@ -1,0 +1,17 @@
+RocksDB:    version 11.1.1
+filluniquerandom :       4.948 micros/op 202056 ops/sec 0.144 seconds 290 operations;  197.3 MB/s
+RL_SETTLED ok=1 wait_micros=123 hold_micros=10000000
+RL_CONTROL_RESUMED_MICROS 4999000000
+RL_MEASURE_START_OP 290
+mixgraph     :      14084.507 micros/op 71 ops/sec 10.000 seconds 710 operations;  0.1 MB/s ( Gets:560 Puts:110 Seek:40 ScanEntries:600, reads 600 in 600 found, avg size: 956.4 value, 15.0 scan)
+RL_DRAIN_START_MICROS 5010000000
+RL_DRAIN_END_MICROS 5020000000
+Cumulative stall: 00:00:2.500 H:M:S, 25.0 percent
+STATISTICS:
+rocksdb.bytes.written COUNT : 450000
+rocksdb.flush.write.bytes COUNT : 17777
+rocksdb.compact.write.bytes COUNT : 14499
+rocksdb.point.sst.probe COUNT : 2500
+rocksdb.bloom.filter.full.positive COUNT : 900
+rocksdb.sorted.run.seek COUNT : 170
+rocksdb.stall.micros COUNT : 9999999

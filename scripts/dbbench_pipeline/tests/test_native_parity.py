@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import host_log as hostlog
+
 PIPELINE = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
     "native_parity", PIPELINE / "22_check_native_parity.py")
@@ -198,7 +200,7 @@ class HostLogTest(unittest.TestCase):
 
     def problems(self, records):
         self.path.write_text("".join(json.dumps(r) + "\n" for r in records))
-        return act4.host_log_problems(self.path)
+        return hostlog.problems(self.path)
 
     def test_consistent_log_has_no_problems(self):
         self.assertEqual(self.problems(host_log(100, 40)), [])
@@ -223,7 +225,7 @@ class HostLogTest(unittest.TestCase):
 
     def test_unparsable_log_is_a_problem(self):
         self.path.write_text("{not json\n")
-        self.assertTrue(act4.host_log_problems(self.path)[0]
+        self.assertTrue(hostlog.problems(self.path)[0]
                         .startswith("unreadable"))
 
 

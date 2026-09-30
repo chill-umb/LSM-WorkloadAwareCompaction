@@ -119,6 +119,138 @@ wired into `13` fails. Wire each step in the change that builds its component.
     consistent with itself (`host_log_consistency`).
   - "Undecided" (too few pairs for the observed spread) fails the step.
     Raise `PARITY_PAIRS` and rerun.
+- **Step 4, the evaluator smoke** (a few minutes; Gate N0 item 5): one `03`
+  `native` arm at 1M operations, T=2, run exactly as a Gate N2 arm (settle,
+  host log, stamps), then `04`. `04` refuses the arm, and the step fails, if
+  its settle failed, its host log is inconsistent, or a self-check fails: the
+  operations summed over the intervals between installs must equal what
+  `mixgraph` served, and the last sampled H must equal the live SST bytes at
+  the end of the drain. Output: `$PREFLIGHT_WORK_DIR/evaluator/`.
+
+### Node runbook: the first node session
+
+Everything below runs on the node from the repository root. Steps a–d need
+no new code: if one fails, stop and report the output. Step e also needs
+decisions and one piece of analysis that do not exist yet; it says which.
+
+a. Publish and fetch the code. On the machine that holds the commits, push
+   the fork first, since the root records a fork commit:
+
+   ```bash
+   /usr/bin/git -C lib/rocksdb push origin rl-compaction-policy-new
+   /usr/bin/git push origin dqn-poc-new
+   ```
+
+   On the node (a fresh clone needs `git clone` and `git checkout dqn-poc-new`
+   first):
+
+   ```bash
+   git pull --ff-only
+   git submodule update --init --recursive
+   git -C lib/rocksdb log -1 --format=%H   # must equal: git ls-tree HEAD lib/rocksdb
+   scripts/dbbench_pipeline/00_install_dependencies.sh   # fresh node only
+   ```
+
+b. Tier 2, the fork's gtests in a Debug tree:
+
+   ```bash
+   scripts/dbbench_pipeline/01b_build_test_trees.sh
+   ```
+
+   Expected last line:
+   `[tier2] passed: level_target_multipliers_test per_level_read_counters_test rl_controller_host_test`.
+   This is the first time the C++ of plan steps 3 and 4 is compiled and run.
+
+c. The preflight, steps 1–4 (Release build, tiers 1–2, ACT-1, ACT-4, the
+   evaluator smoke), and the marker. Put `DB_ROOT` on the NVMe device:
+
+   ```bash
+   CONFIRM_PREFLIGHT_VERIFICATION=YES DB_ROOT=/mnt/nvme/preflight-dbs \
+     scripts/dbbench_pipeline/13_run_preflight_verification.sh
+   ```
+
+   Expected: `[step 1]` to `[step 4] PASS`, steps 5 and 6 `SKIP` (no plugin
+   yet), and `preflight marker written: build-dbbench/PREFLIGHT_PASSED`.
+   Reports: `build-dbbench/preflight/act1_report.json`,
+   `build-dbbench/preflight/act4/act4_report.json`,
+   `build-dbbench/preflight/evaluator/graphs/summary.csv`.
+
+d. Price calibration (OBJ-2, Gate N0 item 7), about 10 minutes:
+
+   ```bash
+   CONFIRM_PRICE_CALIBRATION=YES DB_ROOT=/mnt/nvme/prices-db \
+     scripts/dbbench_pipeline/18_calibrate_prices.sh
+   ```
+
+   It writes `build-dbbench/prices.json`, which `03` copies into every later
+   arm and records in the fingerprint. The measurement method is in the
+   docstring of `18_calibrate_prices.py`.
+
+e. Gate N2, the static comparator. It cannot start in the first session.
+   Four things must exist first, in this order:
+   1. **Gate N1's run length**, `<N2 size>` in millions of operations
+      (PATHWAYS Gate N1). `19_admission_test.py` runs the collapse test, but
+      it needs its preregistered config file (§0.6 item 7: reference level,
+      margins, ω_max, block length, k, n_min), which does not exist yet, and
+      it reads host logs, which the pre-Programme-1 artifacts do not have.
+   2. **q̄ per workload** (D-13 §1), recorded in
+      `config/research_objective_contract.json` and in a dated D-13
+      amendment before any Θ_s run. D-13 defines it as the native arm's
+      measured-phase throughput at T=10 over its ACT-4 repeats, but ACT-4
+      runs at T=2; until the owner settles that, the candidate measurement
+      is `native` at T=10 through `03`, e.g. for `Assoc`:
+
+      ```bash
+      EXPERIMENT_ARMS=native SIZE_RATIOS=10 WORKLOAD_SIZES_M=<N2 size> \
+        REPEATS=5 SESSION_ID=qbar-assoc RESULTS_ROOT=/mnt/nvme/qbar-assoc \
+        DB_ROOT=/mnt/nvme/qbar-dbs/assoc CONFIRM_EXPERIMENTS=YES \
+        scripts/dbbench_pipeline/03_run_experiments.sh
+      scripts/dbbench_pipeline/04_generate_graphs.py \
+        --results /mnt/nvme/qbar-assoc --summary-only
+      ```
+
+      q̄ is the mean of `throughput_ops_per_second` in its `summary.csv`.
+      For the power-law workload add `WORKLOAD_SKEW=2 MIX_GET_RATIO=0.95
+      MIX_PUT_RATIO=0.05 MIX_SEEK_RATIO=0 WORKLOAD_PROFILE=powerlaw-get95-v1`
+      (03 refuses the power law under the Assoc profile).
+   3. **The two measured profiles** of Θ_s: survival-weighted (Theorem A.2)
+      and last-level-emptying, as vectors, from the native runs. No stage
+      computes them yet: that is new analysis. `03` checks each vector as
+      RocksDB will (one entry per level, entry 0 = 1, entries in
+      [0.5, 2.0], no level's target below the one above it).
+   4. **The price-measurement method** of step d, which D-13 does not
+      preregister (see `18_calibrate_prices.py`), accepted by the owner.
+
+   Then, per workload and per point of the grid (T ∈ {2, 6, 10}; base
+   ∈ {8, 16, 32} MiB; K0 ∈ {2, 4, 8}, skipping K0 above base / write buffer,
+   A-Impl-6), in one session, each grid point with its own results and DB
+   directories:
+
+   ```bash
+   EXPERIMENT_ARMS="native static:uniform_0_75 static:survival_weighted static:last_level_emptying" \
+     STATIC_PROFILE_survival_weighted=<vector> \
+     STATIC_PROFILE_last_level_emptying=<vector> \
+     SIZE_RATIOS=<T> MAX_BYTES_FOR_LEVEL_BASE=<bytes> L0_COMPACTION_TRIGGER=<K0> \
+     WORKLOAD_SIZES_M=<N2 size> REPEATS=5 SESSION_ID=n2-assoc \
+     RESULTS_ROOT=/mnt/nvme/n2-assoc/T<T>-b<base>-k<K0> \
+     DB_ROOT=/mnt/nvme/n2-dbs/assoc/T<T>-b<base>-k<K0> \
+     CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh
+   ```
+
+   An arm whose tree does not settle after the load is marked `UNSETTLED`
+   and the matrix goes on (D-13 §6); `04` lists it as refused.
+
+   Score and build the hull per (workload, T):
+
+   ```bash
+   scripts/dbbench_pipeline/04_generate_graphs.py --results /mnt/nvme/n2-assoc --summary-only
+   scripts/dbbench_pipeline/frontier_analysis.py /mnt/nvme/n2-assoc/graphs/summary.csv \
+     --workload-profile assoc-v1 --size-millions <N2 size> --size-ratio 2 \
+     --output /mnt/nvme/n2-assoc/frontier_T2.json
+   ```
+
+   `frontier_T2.json` holds the hull, θ*_β for every mode, β* and c_s scale,
+   and β̄.
 
 Finally run the selected regular, prior-only, unconstrained-learning ablation,
 and constrained learned arms. The trigger and
@@ -135,12 +267,28 @@ CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh
 
 scripts/dbbench_pipeline/04_generate_graphs.sh \
   --results /mnt/nvme/dbbench-results
-
-scripts/dbbench_pipeline/07_evaluate_paired.py \
-  /mnt/nvme/dbbench-results/graphs/summary.csv \
-  --size-millions 10 --size-ratio 2 \
-  --scan-objective sorted_run_seeks
 ```
+
+**Programme 1 evaluation** (plan §5; PATHWAYS D §1, C §4). `04` scores each
+Programme 1 arm from its host log over the measured phase (the
+`measure_start` to `drain_end` stamps): C_W from the event log's SST bytes in
+that window (D-11), C_R from the tickers differenced between the stamps, C_S
+from H times the operations served between installs, `J_<mode>_b<β*>_cs<s>`
+for every mode, β* ∈ {2, 5, 10} and c_s scale s ∈ {0.5, 1, 2}, plus stall
+seconds, the stall fraction and throughput over mixgraph's wall time. It
+writes the refused arms to `graphs/refused_arms.json` and exits 3 if there
+are any. `frontier_analysis.py` gives the hull, θ*_β and β̄; `07` compares
+one arm with θ*_β:
+
+```bash
+scripts/dbbench_pipeline/07_evaluate_paired.py summary.csv \
+  --policy-arm rules --size-millions <N> --size-ratio 2 --output paired.json
+```
+
+It reports CMP-3's paired interval on J(arm) − J(θ*), the D-13 stall rule,
+regret (C.5) and, with several workloads in one summary, suite robustness
+(CMP-7). `19_admission_test.py` is the collapse test of Gate N1 (G §4); its
+values come from a preregistered config file.
 
 `db_bench` and the Python controller are pinned to disjoint cores by
 `DBBENCH_CPUS` and `CONTROLLER_CPUS` in `config.sh`, defaulting to `0-7` and
@@ -154,10 +302,10 @@ Clear both variables to run unpinned. After the first pinned run, confirm
 the socket timeout, and a fallback frame is a hard-invalid interval that fails
 the learner-health gate for reasons unrelated to the policy.
 
-Gate 0 of `docs/PATHWAYS.md` runs off-box on the artifacts above. Every arm
-now writes `compaction_measurements.json` (per-level merge survival from the
-`merge_schema_version` 1 events, release-time occupancy from the
-`compaction_release` events; items 1 and 2). Items 3 and 4, the A-0
+Every arm writes `compaction_measurements.json`: per source level, from the
+host log's `job_end` records, ρ, o, η, ξ, ρ̃, dropped bytes and trivially
+moved bytes, trivial moves excluded from ρ, o and η (PATHWAYS B §2 item 4).
+The old stack's Gate 0 (historical): items 3 and 4, the A-0
 write-excess decomposition and the flow-garbage elision ceiling, come from
 `14_gate0_reanalysis.py`, which needs only `summary.csv` and each arm's
 `run.log`; it uses `rocksdb_LOG.txt` for exact per-level bytes when the arm

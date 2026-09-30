@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
 import statistics
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
+import host_log
+import research_objective
 
 
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -124,10 +128,12 @@ def parse_histograms(text: str) -> dict[str, dict[str, float]]:
 
 
 def parse_mix_counts(text: str) -> tuple[float, float, float, float, float]:
+    # mixgraph divides by the Put and Seek counts to print its averages, so
+    # a mix without seeks (D-13's power-law workload) prints "-nan scan".
     matches = list(
         re.finditer(
             rf"Gets:(\d+) Puts:(\d+) Seek:(\d+)(?: ScanEntries:(\d+))?"
-            rf".*?avg size: ({NUMBER}) value, ({NUMBER}) scan",
+            rf".*?avg size: ({NUMBER}|-?nan) value, ({NUMBER}|-?nan) scan",
             text,
         )
     )
@@ -258,7 +264,31 @@ def parse_geometry(fingerprint: str) -> tuple[float, float]:
     return float(match.group(1)), float(match.group(2))
 
 
-def parse_drain(text: str, log_path: Path) -> dict[str, float]:
+def read_events(log_path: Path) -> list[dict]:
+    """The RocksDB event log's records. rocksdb_LOG.txt runs to hundreds of
+    MB per arm: two EVENT_LOG_v1 records per compaction plus a full stats
+    block every stats_dump_period_sec. Reading it whole and running a regex
+    on every line made graph generation dominate the pipeline, so the file is
+    streamed and non-event lines rejected with a substring test, a C-level
+    search rather than the regex engine, before matching."""
+    events = []
+    if not log_path.exists():
+        return events
+    with log_path.open(errors="replace") as handle:
+        for raw in handle:
+            if "EVENT_LOG_v1" not in raw:
+                continue
+            match = EVENT_LOG.search(raw)
+            if not match:
+                continue
+            try:
+                events.append(json.loads(match.group(1)))
+            except json.JSONDecodeError:
+                pass
+    return events
+
+
+def parse_drain(text: str, events: list[dict]) -> dict[str, float]:
     starts = [int(value) for value in re.findall(
         r"^RL_DRAIN_START_MICROS (\d+)$", text, re.M)]
     ends = [int(value) for value in re.findall(
@@ -284,25 +314,7 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
     workload_compaction_seconds = 0.0
     measured_flush_bytes = math.nan
     load_flush_bytes = math.nan
-    if log_path.exists():
-        events = []
-        # rocksdb_LOG.txt runs to hundreds of MB per arm: two EVENT_LOG_v1
-        # records per compaction plus a full stats block every
-        # stats_dump_period_sec. Reading it whole and running a regex on every
-        # line made graph generation dominate the pipeline. Stream the file and
-        # reject non-event lines with a substring test, which is a C-level
-        # search rather than the regex engine, before matching.
-        with log_path.open(errors="replace") as handle:
-            for raw in handle:
-                if "EVENT_LOG_v1" not in raw:
-                    continue
-                match = EVENT_LOG.search(raw)
-                if not match:
-                    continue
-                try:
-                    events.append(json.loads(match.group(1)))
-                except json.JSONDecodeError:
-                    pass
+    if events:
         drain_jobs = {int(item["job"]) for item in events if "job" in item
                       if item.get("event") == "compaction_started" and
                       item.get("rl_drain") in (True, 1, "true", "1")}
@@ -360,7 +372,219 @@ def parse_drain(text: str, log_path: Path) -> dict[str, float]:
     }
 
 
+class InvalidArm(ValueError):
+    """An arm 04 refuses to score: its settle hold failed (A8, D-13 §6), or
+    its host log or a Gate N0 item 5 self-check failed. Reported, never
+    pooled."""
+
+
+SETTLED = re.compile(r"^RL_SETTLED ok=(\d+)", re.M)
+# Programme 1 columns (PATHWAYS D §1, OBJ-6, Gate N0 item 5). NaN on an arm
+# that did not run the Programme 1 protocol (no settle step recorded).
+PROGRAMME1_FIELDS = (
+    "measured_operations", "measured_operations_host_log",
+    "mixgraph_seconds", "throughput_ops_per_second",
+    "measured_stall_seconds", "stall_fraction", "measured_phase_seconds",
+    "stall_fraction_measured_phase", "controller_cpu_seconds",
+    "flush_bytes_written", "compaction_bytes_written", "sst_bytes_written",
+    "compaction_bytes_host_log", "user_bytes_written",
+    "write_amplification_measured", "filter_probes", "block_reading_probes",
+    "run_seeks", "drain_read_ticks", "held_byte_operations",
+    "C_W", "C_R", "C_S")
+
+
+def sst_bytes_in_window(events: list[dict], start_us: int,
+                        end_us: int) -> tuple[float, float, set[int]]:
+    """D-11's SST bytes, by event time in [start_us, end_us]: flush outputs
+    (table_file_creation joined to a flush job) and compaction outputs
+    (compaction_finished total_output_size), and the flush jobs seen.
+    OPTIONS, MANIFEST, WAL and info log writes are not SST outputs, so they
+    never enter; a trivial move logs no compaction_finished and writes
+    nothing."""
+    flush_jobs = {int(e["job"]) for e in events
+                  if e.get("event") == "flush_started" and "job" in e}
+    flush = compaction = 0.0
+    flushed = set()
+    for event in events:
+        if not start_us <= int(event.get("time_micros", -1)) <= end_us:
+            continue
+        if (event.get("event") == "table_file_creation" and
+                int(event.get("job", -1)) in flush_jobs):
+            flush += float(event.get("file_size", 0))
+            flushed.add(int(event["job"]))
+        elif event.get("event") == "compaction_finished":
+            compaction += float(event.get("total_output_size", 0))
+    return flush, compaction, flushed
+
+
+def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
+                       events: list[dict], mixgraph_ops: float) -> dict:
+    """The measured phase from the host log: from the measure_start stamp
+    (n_w, the first mixgraph operation) to the drain_end stamp.
+
+    C_W prices the SST bytes written in the window (event log, D-11). C_R
+    prices the tickers differenced between the two stamps: filter probes
+    (point.sst.probe), block-reading probes (bloom.filter.full.positive,
+    true and false positives) and run seeks (sorted.run.seek). C_S is
+    (c_s / q-bar) times the sum, over the intervals between version
+    installs, of H times the operations served in the interval (Lemma D.15).
+    Throughput and the stall fraction are over mixgraph's wall time, from
+    measure_start to drain_start, the span of D-13 §1's q-bar; the drain
+    serves no operation and stalls no write. D-13 §8's literal reading, the
+    drain in the denominator, is reported beside it as
+    stall_fraction_measured_phase until the owner settles which governs."""
+    contract, contract_hash = research_objective.load_contract()
+    row: dict[str, object] = {name: math.nan for name in PROGRAMME1_FIELDS}
+    row.update(settle_ok=math.nan, objective_status="not programme 1",
+               prices_sha256="", reference_rate=math.nan)
+    row.update(research_objective.objective_columns(
+        contract, (math.nan, math.nan, math.nan)))
+    settled = [int(v) for v in SETTLED.findall(text)]
+    if any(v != 1 for v in settled):
+        raise InvalidArm("RL_SETTLED ok=0: the settle hold failed (A8)")
+    if not metadata.get("settle_hold_seconds"):
+        if settled:
+            raise InvalidArm("run.log shows a settle step, but metadata.env "
+                             "does not record settle_hold_seconds")
+        return row
+    # h_w is preregistered (D-13 §6); an arm held for another time is not
+    # a Programme 1 arm.
+    hold = contract["measured_phase"]["hold_seconds"]
+    if number(metadata["settle_hold_seconds"]) != hold:
+        raise InvalidArm(f"settle hold {metadata['settle_hold_seconds']} s, "
+                         f"not the preregistered {hold} s")
+
+    try:
+        records = host_log.load(run_dir / host_log.FILE_NAME)
+    except (OSError, json.JSONDecodeError) as error:
+        raise InvalidArm(f"host log unreadable: {error}") from error
+    problems = host_log.check(records)
+    if not problems:
+        at = host_log.stamp_index(records)
+        problems = [f"no {name} stamp" for name in ("settle", "drain_start")
+                    if name not in at]
+    if problems:
+        raise InvalidArm("host log: " + "; ".join(problems))
+    settle, start, mix_end, end = (records[at[name]] for name in (
+        "settle", "measure_start", "drain_start", "drain_end"))
+    if settle.get("ok") != 1 or not settled:
+        raise InvalidArm("no successful settle before the measured phase")
+    if settle.get("hold_micros", 0) < hold * 1_000_000:
+        raise InvalidArm(f"settle held {settle.get('hold_micros')} us, "
+                         f"less than {hold} s")
+    if not at["settle"] < at["measure_start"] < at["drain_start"] < at["drain_end"]:
+        raise InvalidArm("host log stamps out of order")
+
+    # H held between installs, times the operations served meanwhile.
+    # (host_log.check has already required the last H sample to equal the
+    # live SST bytes at drain_end, Gate N0 item 5's second self-check.)
+    samples = [(start["op"], start["h"])] + [
+        (r["op"], r["h"]) for r in records[at["measure_start"] + 1:at["drain_end"]]
+        if r.get("type") == "h"]
+    ends = [op for op, _ in samples[1:]] + [end["op"]]
+    served = [later - op for (op, _), later in zip(samples, ends)]
+    held = sum(h * n for (_, h), n in zip(samples, served))
+    # Gate N0 item 5: the intervals' operations are the operations mixgraph
+    # reports serving.
+    if sum(served) != mixgraph_ops:
+        raise InvalidArm(f"per-interval operations sum to {sum(served)}, "
+                         f"mixgraph served {mixgraph_ops:.0f}")
+
+    def delta(ticker: str, first=start) -> float:
+        return float(end["tickers"][ticker] - first["tickers"][ticker])
+
+    # C_W's event-log window must see every flush and compaction the host
+    # log saw: a compaction's bytes are the same job's bytes_written on both
+    # sides, and every flush's H sample names its job. So a missing or
+    # truncated LOG cannot price writes at zero, or leave some out.
+    if not events:
+        raise InvalidArm("rocksdb_LOG.txt has no event log")
+    window = records[at["measure_start"] + 1:at["drain_end"]]
+    flush, compaction, flushed = sst_bytes_in_window(
+        events, start["wall_us"], end["wall_us"])
+    compaction_host_log = float(sum(
+        r["x"] for r in window
+        if r.get("type") == "job_end" and r["ok"] == 1 and not r["trivial"]))
+    if compaction != compaction_host_log:
+        raise InvalidArm(f"event log shows {compaction:.0f} compaction bytes in "
+                         f"the measured phase, the host log {compaction_host_log:.0f}")
+    flushes_host_log = {r["job"] for r in window
+                        if r.get("type") == "h" and r.get("cause") == "flush"}
+    if flushed != flushes_host_log:
+        raise InvalidArm(f"flush jobs in the measured phase: event log "
+                         f"{sorted(flushed)}, host log {sorted(flushes_host_log)}")
+    mixgraph_seconds = (mix_end["t_us"] - start["t_us"]) / 1e6
+    measured_seconds = (end["t_us"] - start["t_us"]) / 1e6
+    stall_seconds = (end["stall_micros"] - start["stall_micros"]) / 1e6
+    user_bytes = delta("rocksdb.bytes.written")
+    arm = metadata.get("arm", "")
+    row.update(
+        settle_ok=1,
+        measured_operations=mixgraph_ops,
+        measured_operations_host_log=float(end["op"] - start["op"]),
+        mixgraph_seconds=mixgraph_seconds,
+        throughput_ops_per_second=divide(mix_end["op"] - start["op"],
+                                         mixgraph_seconds),
+        measured_stall_seconds=stall_seconds,
+        stall_fraction=divide(stall_seconds, mixgraph_seconds),
+        # D-13 §8 read literally (the drain in the denominator); reported
+        # until the owner settles which reading governs.
+        measured_phase_seconds=measured_seconds,
+        stall_fraction_measured_phase=divide(stall_seconds, measured_seconds),
+        # OBJ-6: native and static arms run no controller.
+        controller_cpu_seconds=(0.0 if arm == "native" or
+                                arm.startswith("static:") else math.nan),
+        flush_bytes_written=flush, compaction_bytes_written=compaction,
+        sst_bytes_written=flush + compaction,
+        compaction_bytes_host_log=compaction_host_log,
+        user_bytes_written=user_bytes,
+        write_amplification_measured=divide(flush + compaction, user_bytes),
+        filter_probes=delta("rocksdb.point.sst.probe"),
+        block_reading_probes=delta("rocksdb.bloom.filter.full.positive"),
+        run_seeks=delta("rocksdb.sorted.run.seek"),
+        # Read counts the drain added: background work should add none.
+        drain_read_ticks=sum(delta(t, mix_end) for t in (
+            "rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
+            "rocksdb.sorted.run.seek")),
+        held_byte_operations=float(held),
+    )
+
+    # Priced costs need the run's own prices (OBJ-2) and q-bar, under the
+    # contract the run recorded.
+    rate = number(metadata.get("reference_rate"))
+    prices_path = run_dir / "prices.json"
+    if metadata.get("research_objective_sha256") != contract_hash:
+        row["objective_status"] = "run recorded another contract"
+        return row
+    if not prices_path.exists():
+        row["objective_status"] = "no prices"
+        return row
+    if not (rate > 0):
+        row["objective_status"] = "no reference rate"
+        return row
+    prices_sha256 = hashlib.sha256(prices_path.read_bytes()).hexdigest()
+    if metadata.get("prices_sha256") != prices_sha256:
+        raise InvalidArm("prices.json is not the file the run recorded")
+    try:
+        prices = research_objective.validate_prices(
+            json.loads(prices_path.read_text()), contract)
+    except (ValueError, KeyError, json.JSONDecodeError) as error:
+        raise InvalidArm(f"prices.json: {error}") from error
+    costs = (prices["c_w"] * (flush + compaction),
+             prices["c_f"] * row["filter_probes"] +
+             prices["c_blk"] * row["block_reading_probes"] +
+             prices["c_sk"] * row["run_seeks"],
+             prices["c_s"] / rate * held)
+    row.update(zip(("C_W", "C_R", "C_S"), costs))
+    row.update(research_objective.objective_columns(contract, costs))
+    row.update(objective_status="priced", reference_rate=rate,
+               prices_sha256=prices_sha256)
+    return row
+
+
 def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
+    """One completed arm's row. Raises InvalidArm for an arm that must not
+    be scored."""
     if not (run_dir / "COMPLETED").exists() or not (run_dir / "run.log").exists():
         return None
     metadata = read_env(run_dir / "metadata.env")
@@ -370,7 +594,10 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
     properties = parse_properties(text)
     histograms = parse_histograms(text)
     gets, puts, scans, scan_returned, average_scan_length = parse_mix_counts(text)
-    drain = parse_drain(text, run_dir / "rocksdb_LOG.txt")
+    events = read_events(run_dir / "rocksdb_LOG.txt")
+    drain = parse_drain(text, events)
+    programme1 = programme1_metrics(run_dir, text, metadata, events,
+                                    gets + puts + scans)
 
     # Whole-run tickers (cumulative since open; they include the bulk load).
     flush_bytes = tickers.get("rocksdb.flush.write.bytes", 0.0)
@@ -523,23 +750,39 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
         "sst_bytes_before": before,
         "sst_bytes_after": after,
         "live_logical_bytes": live_logical_bytes,
+        "session_id": metadata.get("session_id", ""),
+        "workload_family": metadata.get("workload_family", ""),
+        "settle_hold_seconds": metadata.get("settle_hold_seconds", ""),
+        "dbbench_sha256": metadata.get("dbbench_sha256", ""),
+        **programme1,
         "result_directory": str(run_dir),
     }
 
 
-def collect(results: Path) -> list[dict[str, object]]:
-    rows = []
+def collect(results: Path) -> tuple[list[dict[str, object]], list[dict]]:
+    """Rows of every completed arm, and the arms refused (InvalidArm) with
+    their reasons."""
+    rows, refused = [], []
     # The leading **/ lets one results root cover a whole sweep, whose arms sit
     # under a per-configuration directory (<root>/<config_id>/10M/T2/...). It
     # still matches a single arm root, where ** contracts to nothing.
     for completed in results.glob("**/*M/T*/**/COMPLETED"):
-        row = collect_arm(completed.parent)
+        try:
+            row = collect_arm(completed.parent)
+        except InvalidArm as error:
+            refused.append({"result_directory": str(completed.parent),
+                            "reason": str(error)})
+            continue
         if row is not None:
             rows.append(row)
+    # 03 marks an arm whose tree did not settle and goes on (D-13 §6).
+    refused += [{"result_directory": str(marker.parent),
+                 "reason": "the tree did not settle after the load (A8)"}
+                for marker in results.glob("**/*M/T*/**/UNSETTLED")]
     rows.sort(key=lambda row: (str(row["workload_profile"]),
                                int(row["size_ratio"]), str(row["arm"]),
                                int(row["size_millions"]), int(row["repeat"])))
-    return rows
+    return rows, refused
 
 
 def finite(value: object) -> bool:
@@ -634,10 +877,16 @@ def main() -> int:
     args = parser.parse_args()
     results = args.results.resolve()
     output = (args.output or results / "graphs").resolve()
-    rows = collect(results)
-    if not rows:
-        raise SystemExit(f"no completed arms found below {results}")
+    rows, refused = collect(results)
     output.mkdir(parents=True, exist_ok=True)
+    # Refused arms are reported, never scored (A8); a refusal fails the stage.
+    (output / "refused_arms.json").write_text(
+        json.dumps(refused, indent=2) + "\n")
+    for item in refused:
+        print(f"refused: {item['result_directory']}: {item['reason']}",
+              file=sys.stderr)
+    if not rows:
+        raise SystemExit(f"no scorable arms found below {results}")
 
     fields = list(rows[0].keys())
     with (output / "summary.csv").open("w", newline="") as handle:
@@ -646,8 +895,9 @@ def main() -> int:
         writer.writerows(rows)
 
     if args.summary_only:
-        print(f"rows: {len(rows)}; csv: {output / 'summary.csv'}")
-        return 0
+        print(f"rows: {len(rows)}; refused: {len(refused)}; "
+              f"csv: {output / 'summary.csv'}")
+        return 3 if refused else 0
 
     graph_grid(rows, output, [
         ("write_amplification", "Write amplification", "Physical / logical bytes"),
@@ -675,7 +925,7 @@ def main() -> int:
     print(f"rows:   {len(rows)}")
     print(f"csv:    {output / 'summary.csv'}")
     print(f"graphs: {output}")
-    return 0
+    return 3 if refused else 0
 
 
 if __name__ == "__main__":

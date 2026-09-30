@@ -41,6 +41,11 @@ MIX_MAX_SCAN_LENGTH="${MIX_MAX_SCAN_LENGTH:-10000}"
 # pre-2026-09-20 `balanced-v1` family and is what made the workload
 # near-garbage-free. Set WORKLOAD_SKEW=0 to restore it for the uniform control
 # arms that criterion B-1 compares against.
+# WORKLOAD_SKEW=2 is D-13's second Gate N2 workload, "YCSB-B operation mix
+# with power-law key popularity" (never Zipfian or YCSB-B): keyrange_num 1 and
+# no keyrange_dist, so mixgraph draws keys from f(x) = a x^b at KEY_DIST_A/B,
+# Assoc's own key-hotness fit. It needs MIX_GET_RATIO=0.95 MIX_PUT_RATIO=0.05
+# MIX_SEEK_RATIO=0, which 03 checks against the contract.
 WORKLOAD_SKEW="${WORKLOAD_SKEW:-1}"
 KEYRANGE_NUM="${KEYRANGE_NUM:-30}"          # skew-intensity axis; sweep {5, 30, 100}
 KEYRANGE_DIST_A="${KEYRANGE_DIST_A:-14.18}"
@@ -130,8 +135,8 @@ ROCKSDB_PORTABLE="${ROCKSDB_PORTABLE:-znver5}"
 # `regular`, which starts no controller: an arm that had the controller's cores
 # to itself would not be comparable with one that did not. Empty disables
 # pinning. 03_run_experiments.sh validates the sets and records them per arm.
-DBBENCH_CPUS="${DBBENCH_CPUS:-0-7}"
-CONTROLLER_CPUS="${CONTROLLER_CPUS:-8}"
+DBBENCH_CPUS="${DBBENCH_CPUS-0-7}"
+CONTROLLER_CPUS="${CONTROLLER_CPUS-8}"
 DBBENCH_BUILD_DIR="${DBBENCH_BUILD_DIR:-build-dbbench}"
 PYTHON_VENV="${PYTHON_VENV:-.venv-dbbench}"
 BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
@@ -162,8 +167,24 @@ PARITY_PAIRS="${PARITY_PAIRS:-5}"
 # stall fraction may exceed stock's by at most this, as a paired bound.
 PARITY_STALL_FRACTION_MARGIN="${PARITY_STALL_FRACTION_MARGIN:-0.02}"
 
+# Programme 1 measured phase (PREREGISTRATION D-13 §6): after the load, the
+# settle step waits for compaction and then holds h_w seconds with nothing
+# due; every mixgraph operation is then scored, on native and static arms.
+SETTLE_HOLD_SECONDS="${SETTLE_HOLD_SECONDS:-10}"
+# Money prices (OBJ-2), written by 18_calibrate_prices.sh on the node. 03
+# copies the file into every arm and records its hash in the fingerprint; an
+# arm run before it exists is scored without J (04: "no prices").
+PRICES_FILE="${PRICES_FILE:-$DBBENCH_BUILD_DIR/prices.json}"
+# 18's tree: keys loaded, operations per read benchmark, and T.
+PRICE_KEYS="${PRICE_KEYS:-1000000}"
+PRICE_READS="${PRICE_READS:-1000000}"
+PRICE_SIZE_RATIO="${PRICE_SIZE_RATIO:-10}"
+
 # Output. Put DB_ROOT on the storage device being evaluated, not /tmp.
 RUN_NAME="${RUN_NAME:-$(date +%Y%m%d-%H%M%S)}"
+# CMP-8: comparisons pair runs of one session; recorded in metadata.env.
+# Empty: 03 takes the session a resumed RESULTS_ROOT recorded, else RUN_NAME.
+SESSION_ID="${SESSION_ID:-}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/dbbench_pipeline/$RUN_NAME}"
 DB_ROOT="${DB_ROOT:-.dbbench_pipeline_dbs/$RUN_NAME}"
 KEEP_DATABASES="${KEEP_DATABASES:-0}"
@@ -276,6 +297,10 @@ dbbench_shared_flags() {
       --key_dist_a="$KEY_DIST_A"
       --key_dist_b="$KEY_DIST_B"
     )
+  elif [[ "$WORKLOAD_SKEW" == "2" ]]; then
+    # keyrange_dist_* stay at db_bench's default 0, so no prefix modelling.
+    DBBENCH_WORKLOAD+=(--keyrange_num=1 --key_dist_a="$KEY_DIST_A"
+                       --key_dist_b="$KEY_DIST_B")
   else
     DBBENCH_WORKLOAD+=(--keyrange_num=1)
   fi

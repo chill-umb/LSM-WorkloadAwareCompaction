@@ -15,8 +15,22 @@ Usage:
   CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh
 
 Configuration is read from scripts/dbbench_pipeline/config.sh and can be
-overridden with environment variables. Supported arms are regular, oracle,
-prior_only, rl, unconstrained_rl, and unconstrained_prior_only.
+overridden with environment variables.
+
+Programme 1 arms (plan §5; PATHWAYS C §1, H §5) settle after the load and are
+scored from the first mixgraph operation to the end of the drain:
+  native             native leveled compaction, every multiplier 1
+  static:<profile>   the same with a static multiplier profile of Theta_s:
+                     uniform_1 (= native), uniform_0_75, or any <name> whose
+                     vector is in STATIC_PROFILE_<name> (":"-separated, one
+                     entry per level), e.g. the survival-weighted and
+                     last-level-emptying profiles measured from native runs.
+                     The L0 trigger and base size are L0_COMPACTION_TRIGGER
+                     and MAX_BYTES_FOR_LEVEL_BASE, as for every arm.
+
+The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
+unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
+RocksDB refuses multipliers under the other arms' compaction style 4.
 
 unconstrained_prior_only runs the analytic prior with the live guard classifying
 but not enforcing, and writes safety_shadow.jsonl. It is the only arm on which
@@ -48,15 +62,22 @@ fi
   echo "Missing $DB_BENCH; run steps 01 and 02 first." >&2
   exit 1
 }
+# Only the old stack's learned arms start the Python server.
+USES_SERVER=0
+for arm in $EXPERIMENT_ARMS; do
+  case "$arm" in
+    prior_only|rl|unconstrained_rl|unconstrained_prior_only) USES_SERVER=1 ;;
+  esac
+done
 [[ -x "$PYTHON" ]] || {
-  if [[ "$EXPERIMENT_ARMS" == "regular" ]]; then
+  if (( ! USES_SERVER )); then
     PYTHON="$(command -v python3)"
   else
     echo "Missing $PYTHON; run step 00 first." >&2
     exit 1
   fi
 }
-if [[ "$EXPERIMENT_ARMS" != "regular" ]]; then
+if (( USES_SERVER )); then
 "$PYTHON" -c 'import numpy, torch' >/dev/null || {
   echo "The pipeline Python environment does not contain numpy and torch." >&2
   exit 1
@@ -83,14 +104,92 @@ if [[ -n "${STATIC_CAPACITY_SCALES:-}${RL_STATIC_CAPACITY_SCALES:-}" ]]; then
 fi
 # Level target multipliers go to db_bench as its option, which RocksDB
 # validates at open. The fingerprint gains an ltm segment only when they are
-# set, so an unscaled run keeps its identity and stays poolable.
-MULTIPLIER_FINGERPRINT=""
-if [[ -n "$LEVEL_TARGET_MULTIPLIERS" ]]; then
-  [[ "$LEVEL_TARGET_MULTIPLIERS" =~ ^[0-9.]+(:[0-9.]+)*$ ]] || {
-    echo "LEVEL_TARGET_MULTIPLIERS must be \":\"-separated numbers." >&2
+# set, so an unscaled run keeps its identity and stays poolable. The old
+# stack's arms take LEVEL_TARGET_MULTIPLIERS; a Programme 1 arm takes its
+# profile's vector, and m = 1 is no vector at all, so static:uniform_1 and
+# native are one configuration.
+arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
+  local name variable
+  case "$1" in
+    native|static:uniform_1) ;;
+    static:uniform_0_75)
+      printf '1'
+      printf ':0.75%.0s' $(seq 2 "$NUM_LEVELS")
+      ;;
+    static:*)
+      name="${1#static:}"
+      variable="STATIC_PROFILE_$name"
+      [[ -n "${!variable:-}" ]] || {
+        echo "Arm $1 needs its vector in $variable." >&2
+        return 1
+      }
+      printf '%s' "${!variable}"
+      ;;
+    *) printf '%s' "$LEVEL_TARGET_MULTIPLIERS" ;;
+  esac
+}
+is_programme1_arm() { [[ "$1" == native || "$1" == static:* ]]; }
+PROGRAMME1_MATRIX=0
+programme1_vectors=()
+declare -A m_one_arm=() seen_arm=()
+for arm in $EXPERIMENT_ARMS; do
+  [[ -z "${seen_arm[$arm]:-}" ]] || {
+    echo "EXPERIMENT_ARMS names $arm twice." >&2
     exit 1
   }
-  MULTIPLIER_FINGERPRINT=":ltm${LEVEL_TARGET_MULTIPLIERS//:/x}"
+  seen_arm["$arm"]=1
+  if is_programme1_arm "$arm"; then
+    PROGRAMME1_MATRIX=1
+    [[ "$arm" =~ ^(native|static:[A-Za-z0-9_]+)$ ]] || {
+      echo "Unsupported experiment arm: $arm" >&2
+      exit 1
+    }
+  fi
+  vector="$(arm_multipliers "$arm")" || exit 1
+  [[ -z "$vector" || "$vector" =~ ^[0-9.]+(:[0-9.]+)*$ ]] || {
+    echo "Arm $arm: multipliers must be \":\"-separated numbers: $vector" >&2
+    exit 1
+  }
+  if is_programme1_arm "$arm"; then
+    if [[ -n "$vector" ]]; then
+      programme1_vectors+=("$arm=$vector")
+    else
+      m_one_arm["$arm"]=1
+    fi
+  fi
+done
+# native and static:uniform_1 are one configuration with one fingerprint;
+# both in a matrix would be the same runs twice.
+if (( ${#m_one_arm[@]} > 1 )); then
+  echo "Arms ${!m_one_arm[*]} are all m = 1, one configuration; keep one." >&2
+  exit 1
+fi
+if (( PROGRAMME1_MATRIX )) && [[ -n "$LEVEL_TARGET_MULTIPLIERS" ]]; then
+  echo "LEVEL_TARGET_MULTIPLIERS applies to the regular arm only; give a" \
+       "Programme 1 arm its vector as static:<profile>." >&2
+  exit 1
+fi
+# RocksDB refuses a bad vector only when the DB opens, hours into a matrix.
+# Check each profile now as ColumnFamilyData::ValidateOptions will
+# (db/column_family.cc): one entry per level, entry 0 = 1, the rest in
+# [0.5, 2.0], and no level's target below the one above it at any T.
+if (( ${#programme1_vectors[@]} )); then
+  "$PYTHON" - "$NUM_LEVELS" "$SIZE_RATIOS" "${programme1_vectors[@]}" <<'PY' || exit 1
+import sys
+levels, ratios = int(sys.argv[1]), [float(t) for t in sys.argv[2].split()]
+for item in sys.argv[3:]:
+    arm, vector = item.split("=", 1)
+    m = [float(v) for v in vector.split(":")]
+    problem = (f"{len(m)} entries for {levels} levels" if len(m) != levels
+               else "entry 0 must be 1" if m[0] != 1.0
+               else "entries 1.. must lie in [0.5, 2.0]"
+               if any(not 0.5 <= v <= 2.0 for v in m[1:])
+               else next((f"level {i + 1}'s target is below level {i}'s at T={t:g}"
+                          for t in ratios for i in range(1, levels - 1)
+                          if m[i + 1] * t < m[i]), None))
+    if problem:
+        raise SystemExit(f"Arm {arm}: {vector}: {problem}")
+PY
 fi
 
 # Expand a taskset -c list ("0-7,12") into one CPU number per line.
@@ -204,8 +303,8 @@ fi
 # Pathway B1. mixgraph builds hot key ranges only when at least one
 # keyrange_dist_* is nonzero; all-zero is uniform random keys. keyrange_num
 # alone does nothing without them, so the two travel together.
-[[ "$WORKLOAD_SKEW" =~ ^[01]$ ]] || {
-  echo "WORKLOAD_SKEW must be 0 or 1; got: $WORKLOAD_SKEW" >&2
+[[ "$WORKLOAD_SKEW" =~ ^[012]$ ]] || {
+  echo "WORKLOAD_SKEW must be 0, 1 or 2; got: $WORKLOAD_SKEW" >&2
   exit 1
 }
 # The skew flags themselves come from dbbench_shared_flags (config.sh).
@@ -224,6 +323,64 @@ fi
   echo "KEYRANGE_NUM and VALUE_THETA must be plain numbers." >&2
   exit 1
 }
+# D-13 §3: the power-law family's segment, emitted only for it so Assoc runs
+# stay poolable. Its operation mix is the contract's.
+POWER_FINGERPRINT=""
+WORKLOAD_FAMILY=uniform
+case "$WORKLOAD_SKEW" in
+  1) WORKLOAD_FAMILY=assoc ;;
+  2)
+    WORKLOAD_FAMILY=powerlaw_get95
+    # 07 and frontier_analysis group arms by profile.
+    [[ "$WORKLOAD_PROFILE" != assoc-v1 ]] || {
+      echo "WORKLOAD_SKEW=2 needs a WORKLOAD_PROFILE of its own, not assoc-v1." >&2
+      exit 1
+    }
+    POWER_FINGERPRINT=":pow${KEY_DIST_A}-${KEY_DIST_B}"
+    [[ "$POWER_FINGERPRINT" =~ ^:pow[0-9.]+-[0-9.]+$ ]] || {
+      echo "KEY_DIST_A and KEY_DIST_B must be plain numbers." >&2
+      exit 1
+    }
+    "$PYTHON" - "$MIX_GET_RATIO" "$MIX_PUT_RATIO" "$MIX_SEEK_RATIO" \
+      config/research_objective_contract.json <<'PY' || exit 1
+import json, sys
+spec = json.load(open(sys.argv[4]))["workloads"]["powerlaw_get95"]
+wanted = [spec["mix_get_ratio"], spec["mix_put_ratio"], spec["mix_seek_ratio"]]
+if [float(v) for v in sys.argv[1:4]] != wanted:
+    raise SystemExit(f"WORKLOAD_SKEW=2 is the contract's power-law workload: "
+                     f"set MIX_GET/PUT/SEEK_RATIO to {wanted}")
+PY
+    ;;
+esac
+# q-bar for the family and h_w, from the contract (PREREGISTRATION D-13 §1
+# and §6); q-bar is null until the dated amendment records it. q-bar and the
+# prices file enter a Programme 1 arm's fingerprint only when set (OBJ-2,
+# OBJ-5); the old stack's arms keep their identity.
+mapfile -t contract_values < <("$PYTHON" - "$WORKLOAD_FAMILY" \
+  config/research_objective_contract.json <<'PY'
+import json, sys
+from decimal import Decimal
+contract = json.load(open(sys.argv[2]))
+value = contract["reference_rate"]["ops_per_second"].get(sys.argv[1])
+# Every digit, never an exponent: the fingerprint's qbar is [0-9.]+.
+print("none" if value is None else format(Decimal(repr(float(value))), "f"))
+print(contract["measured_phase"]["hold_seconds"])
+PY
+)
+REFERENCE_RATE="${contract_values[0]}"
+[[ "$SETTLE_HOLD_SECONDS" == "${contract_values[1]}" ]] || {
+  echo "SETTLE_HOLD_SECONDS=$SETTLE_HOLD_SECONDS; D-13 §6 preregisters" \
+       "${contract_values[1]} s." >&2
+  exit 1
+}
+QBAR_SEGMENT=""
+[[ "$REFERENCE_RATE" == none ]] || QBAR_SEGMENT=":qbar${REFERENCE_RATE}"
+PRICES_SHA256=""
+PRICES_SEGMENT=""
+if [[ -f "$PRICES_FILE" ]]; then
+  PRICES_SHA256="$(sha256sum "$PRICES_FILE" | awk '{print $1}')"
+  PRICES_SEGMENT=":prices${PRICES_SHA256}"
+fi
 
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS "$REPEATS"; do
   [[ "$integer" =~ ^[0-9]+$ ]] || {
@@ -237,6 +394,7 @@ done
 }
 for arm in $EXPERIMENT_ARMS; do
   case "$arm" in
+    native|static:*) ;;  # checked above
     regular|oracle|prior_only|rl|unconstrained_rl|unconstrained_prior_only) ;;
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
@@ -354,6 +512,10 @@ for size_m in $WORKLOAD_SIZES_M; do
   fi
 done
 
+[[ -z "$SESSION_ID" || "$SESSION_ID" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+  echo "SESSION_ID must be letters, digits, dot, dash or underscore: $SESSION_ID" >&2
+  exit 1
+}
 if [[ -e "$RESULTS_ROOT" && "$RESUME" != "1" ]]; then
   echo "Results already exist: $RESULTS_ROOT" >&2
   echo "Choose another RESULTS_ROOT or set RESUME=1." >&2
@@ -379,6 +541,42 @@ if [[ -n "$strays" && "${ALLOW_CONCURRENT_RUNS:-0}" != "1" ]]; then
   echo "$strays" | sed 's/^/  /' >&2
   echo "Stop it, or deliberately set ALLOW_CONCURRENT_RUNS=1." >&2
   exit 3
+fi
+
+# A resumed matrix stays in its session and under its prices (CMP-8,
+# OBJ-2): arms of one RESULTS_ROOT are paired with each other.
+# Both are plain words, so printf %q wrote them bare ('' when empty).
+recorded() {  # $1=variable in effective_config.env
+  local value
+  value="$(sed -n "s/^$1=//p" "$RESULTS_ROOT/effective_config.env" | tail -n 1)"
+  [[ "$value" == "''" ]] || printf '%s' "$value"
+}
+recorded_session="" recorded_prices="" recorded_contract=""
+if [[ -f "$RESULTS_ROOT/effective_config.env" ]]; then
+  recorded_session="$(recorded SESSION_ID)"
+  recorded_prices="$(recorded PRICES_SHA256)"
+  recorded_contract="$(recorded RESEARCH_OBJECTIVE_SHA256)"
+fi
+if [[ -z "$SESSION_ID" ]]; then
+  SESSION_ID="${recorded_session:-$RUN_NAME}"
+elif [[ -n "$recorded_session" && "$SESSION_ID" != "$recorded_session" ]]; then
+  echo "$RESULTS_ROOT was session $recorded_session, not $SESSION_ID." >&2
+  exit 1
+fi
+[[ "$SESSION_ID" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+  echo "SESSION_ID must be letters, digits, dot, dash or underscore: $SESSION_ID" >&2
+  exit 1
+}
+if [[ -n "$recorded_contract" && "$recorded_contract" != "$RESEARCH_OBJECTIVE_SHA256" ]]; then
+  echo "$RESULTS_ROOT ran under another contract ($recorded_contract);" \
+       "an amended contract starts a new matrix." >&2
+  exit 1
+fi
+if [[ -f "$RESULTS_ROOT/effective_config.env" && "$recorded_prices" != "$PRICES_SHA256" ]] &&
+   grep -q '^PRICES_SHA256=' "$RESULTS_ROOT/effective_config.env"; then
+  echo "$RESULTS_ROOT ran under prices ${recorded_prices:-none}, now" \
+       "${PRICES_SHA256:-none}; resume under the same prices file." >&2
+  exit 1
 fi
 
 cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
@@ -420,6 +618,12 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'RL_L0_ALLOW_DEFER=%q\n' "$RL_L0_ALLOW_DEFER"
   printf 'RL_L0_ALLOW_DEFER_LEARNED=%q\n' "$RL_L0_ALLOW_DEFER_LEARNED"
   printf 'RL_EPSILON_BOUND_MS=%q\n' "$RL_EPSILON_BOUND_MS"
+  printf 'WORKLOAD_SKEW=%q\n' "$WORKLOAD_SKEW"
+  printf 'SETTLE_HOLD_SECONDS=%q\n' "$SETTLE_HOLD_SECONDS"
+  printf 'SESSION_ID=%q\n' "$SESSION_ID"
+  printf 'PRICES_SHA256=%q\n' "$PRICES_SHA256"
+  printf 'RESEARCH_OBJECTIVE_SHA256=%q\n' "$RESEARCH_OBJECTIVE_SHA256"
+  printf 'PRICES_FILE=%q\n' "$PRICES_FILE"
 } > "$RESULTS_ROOT/effective_config.env"
 INDEX="$RESULTS_ROOT/arms.tsv"
 if [[ ! -f "$INDEX" ]]; then
@@ -433,8 +637,6 @@ ulimit -n "$fd_hard" 2>/dev/null || true
 
 dbbench_shared_flags
 COMMON=("${DBBENCH_COMMON[@]}")
-[[ -z "$LEVEL_TARGET_MULTIPLIERS" ]] ||
-  COMMON+=(--level_target_multipliers="$LEVEL_TARGET_MULTIPLIERS")
 
 sst_bytes() {  # $1=database directory
   find "$1" -maxdepth 1 -type f -name '*.sst' -printf '%s\n' 2>/dev/null |
@@ -448,7 +650,7 @@ check_log() {  # $1=exit status, $2=log
     return 0
   fi
   echo "db_bench failed; inspect $log" >&2
-  grep -iE 'error:|IO error:|Corruption:|Too many open files' "$log" |
+  grep -iE '^RL_SETTLED|error:|IO error:|Corruption:|Too many open files' "$log" |
     head -10 >&2 || true
   return 1
 }
@@ -538,6 +740,10 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     echo "[skip] $size_label T=$ratio $arm"
     return
   fi
+  if [[ -f "$result_dir/UNSETTLED" && "$RESUME" == "1" ]]; then
+    echo "[skip] $size_label T=$ratio $arm (unsettled, invalid)"
+    return
+  fi
   if [[ -e "$result_dir" ]]; then
     echo "Partial result exists: $result_dir" >&2
     echo "Inspect or remove that arm before resuming." >&2
@@ -558,8 +764,26 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   local safety_enforcement=1
   local l0_allow_defer="$RL_L0_ALLOW_DEFER"
   local run_seed=$(( DBBENCH_SEED + repeat - 1 ))
-  if [[ "$arm" != "regular" ]]; then
+  if [[ "$arm" != "regular" ]] && ! is_programme1_arm "$arm"; then
     style=4
+  fi
+  # Programme 1 arms settle after the load, before rlresume, and are scored
+  # from the first mixgraph operation (PATHWAYS H §5, D-13 §6); the old
+  # stack's arms keep the sequence their records were measured under. Every
+  # arm writes the host log (plan WP4).
+  local multipliers settle_step="" multiplier_flag=()
+  local MULTIPLIER_FINGERPRINT="" SETTLE_FINGERPRINT=""
+  local QBAR_FINGERPRINT="" PRICES_FINGERPRINT=""
+  multipliers="$(arm_multipliers "$arm")"
+  if [[ -n "$multipliers" ]]; then
+    multiplier_flag=(--level_target_multipliers="$multipliers")
+    MULTIPLIER_FINGERPRINT=":ltm${multipliers//:/x}"
+  fi
+  if is_programme1_arm "$arm"; then
+    settle_step="settle,"
+    SETTLE_FINGERPRINT=":settle${SETTLE_HOLD_SECONDS}"
+    QBAR_FINGERPRINT="$QBAR_SEGMENT"
+    PRICES_FINGERPRINT="$PRICES_SEGMENT"
   fi
   if [[ "$arm" == "oracle" ]]; then
     oracle=1
@@ -673,7 +897,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -696,7 +920,11 @@ PY
     # controller's first frame is the first measured operation. resetstats:
     # counters and histograms cover the measured phase (mixgraph + drain)
     # only, so W, stalls and latency exclude the load (P1c, 2026-09-20).
-    --benchmarks=rlsuspend,filluniquerandom,resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats
+    # settle (Programme 1 arms): WaitForCompact, then the h_w hold; the host
+    # log's stamps then carry the measured phase, whatever resetstats clears.
+    --benchmarks="rlsuspend,filluniquerandom,${settle_step}resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats"
+    --rl_host_log="$result_dir/host_log.jsonl"
+    --rl_settle_hold_seconds="$SETTLE_HOLD_SECONDS"
     --num="$load_ops"
     --reads="$mixed_ops"
     "${DBBENCH_WORKLOAD[@]}"
@@ -711,6 +939,7 @@ PY
     --db="$db_dir"
     --seed="$run_seed"
     "${COMMON[@]}"
+    ${multiplier_flag[@]+"${multiplier_flag[@]}"}
   )
   printf '%q ' "${command[@]}" > "$result_dir/command.txt"
   printf '\n' >> "$result_dir/command.txt"
@@ -743,13 +972,30 @@ PY
     printf 'use_direct_io=%s\n' "$USE_DIRECT_IO"
     printf 'workload_skew=%s\n' "$WORKLOAD_SKEW"
     printf 'keyrange_num=%s\n' "$([[ "$WORKLOAD_SKEW" == 1 ]] && echo "$KEYRANGE_NUM" || echo 1)"
-    printf 'keyrange_dist=%s,%s,%s,%s\n' "$KEYRANGE_DIST_A" "$KEYRANGE_DIST_B" \
-      "$KEYRANGE_DIST_C" "$KEYRANGE_DIST_D"
-    printf 'key_dist=%s,%s\n' "$KEY_DIST_A" "$KEY_DIST_B"
+    # What db_bench was given (dbbench_shared_flags): the key-range fit only
+    # for Assoc, the key fit for Assoc and the power law.
+    if [[ "$WORKLOAD_SKEW" == 1 ]]; then
+      printf 'keyrange_dist=%s,%s,%s,%s\n' "$KEYRANGE_DIST_A" "$KEYRANGE_DIST_B" \
+        "$KEYRANGE_DIST_C" "$KEYRANGE_DIST_D"
+    else
+      printf 'keyrange_dist=0,0,0,0\n'
+    fi
+    if [[ "$WORKLOAD_SKEW" == 0 ]]; then
+      printf 'key_dist=0,0\n'
+    else
+      printf 'key_dist=%s,%s\n' "$KEY_DIST_A" "$KEY_DIST_B"
+    fi
     printf 'value_pareto=%s,%s,%s\n' "$VALUE_THETA" "$VALUE_K" "$VALUE_SIGMA"
     printf 'mix_max_value_size=%s\n' "$MIX_MAX_VALUE_SIZE"
     printf 'iter_pareto=%s,%s,%s\n' "$SCAN_LENGTH" "$ITER_K" "$ITER_SIGMA"
-    printf 'level_target_multipliers=%s\n' "${LEVEL_TARGET_MULTIPLIERS:-none}"
+    printf 'level_target_multipliers=%s\n' "${multipliers:-none}"
+    printf 'workload_family=%s\n' "$WORKLOAD_FAMILY"
+    printf 'session_id=%s\n' "$SESSION_ID"
+    printf 'reference_rate=%s\n' "$REFERENCE_RATE"
+    printf 'prices_sha256=%s\n' "${PRICES_SHA256:-none}"
+    # Present only on Programme 1 arms; 04 scores the settled phase on these.
+    [[ -z "$settle_step" ]] ||
+      printf 'settle_hold_seconds=%s\n' "$SETTLE_HOLD_SECONDS"
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
     printf 'baseline_level_base_scale=%s\n' "${BASELINE_LEVEL_BASE_SCALE:-1}"
     printf 'num_levels=%s\n' "$NUM_LEVELS"
@@ -862,6 +1108,21 @@ PY
   set -e
   end_ns="$(date +%s%N)"
   (( ! uses_server )) || stop_server
+  # D-13 §6: an arm whose tree did not settle is invalid and reported, and
+  # the matrix goes on. db_bench has already stopped it after the load.
+  # Only the tree's own state counts: a WaitForCompact error or a failed
+  # property read is a failed run, left to check_log.
+  if grep -qE '^RL_SETTLED ok=0 .* reason=(compaction pending|L0 files)' \
+      "$result_dir/run.log"; then
+    echo "[unsettled] $size_label T=$ratio $arm:" \
+         "$(grep '^RL_SETTLED' "$result_dir/run.log")" >&2
+    cp "$db_dir/LOG" "$result_dir/rocksdb_LOG.txt" 2>/dev/null || true
+    touch "$result_dir/UNSETTLED"
+    printf '%s\t%s\t%s\t%s\tunsettled\t%s\n' \
+      "$size_label" "$ratio" "$repeat" "$arm" "$result_dir" >> "$INDEX"
+    [[ "$KEEP_DATABASES" == "1" ]] || rm -rf "$db_dir"
+    return
+  fi
   check_log "$status" "$result_dir/run.log" || exit 4
   if (( uses_server )); then
     set +e
@@ -881,10 +1142,12 @@ PY
   printf 'elapsed_seconds=%.6f\n' "$(( end_ns - start_ns ))e-9" \
     >> "$result_dir/metadata.env"
   cp "$db_dir/LOG" "$result_dir/rocksdb_LOG.txt" 2>/dev/null || true
+  # The prices the run is recorded under (OBJ-2); 04 prices it with these.
+  [[ -z "$PRICES_SHA256" ]] || cp "$PRICES_FILE" "$result_dir/prices.json"
   "$PYTHON" "$PIPELINE_DIR/compaction_measurements.py" \
-    "$result_dir/rocksdb_LOG.txt" --num-levels "$NUM_LEVELS" \
+    "$result_dir/host_log.jsonl" --num-levels "$NUM_LEVELS" \
     --output "$result_dir/compaction_measurements.json" || {
-      echo "Incomplete Gate-0 measurements; keeping database and logs: $result_dir" >&2
+      echo "Incomplete compaction measurements; keeping database and logs: $result_dir" >&2
       exit 6
     }
   local before after
@@ -901,6 +1164,7 @@ PY
     --level0_stop_writes_trigger="$effective_l0_stop" \
     --compaction_pri="$effective_priority" \
     --use_existing_db=1 --db="$db_dir" "${COMMON[@]}" \
+    ${multiplier_flag[@]+"${multiplier_flag[@]}"} \
     > "$result_dir/compact.log" 2>&1
   status=$?
   set -e

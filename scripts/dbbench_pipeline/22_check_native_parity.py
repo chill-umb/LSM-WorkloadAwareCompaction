@@ -39,6 +39,7 @@ import math
 import re
 from pathlib import Path
 
+import host_log
 from pipeline_stats import envelope_verdict
 
 _spec = importlib.util.spec_from_file_location(
@@ -54,44 +55,8 @@ BENCH = re.compile(r"^(filluniquerandom|mixgraph)\s+:\s+[\d.]+ micros/op "
                    r"(\d+) ops/sec ([\d.]+) seconds", re.M)
 STALL = re.compile(r"^Cumulative stall: (\d+):(\d+):([\d.]+) H:M:S", re.M)
 IDENTITY_TICKERS = ("rocksdb.bytes.written", "rocksdb.number.keys.written")
-HOST_LOG = "host_log.jsonl"
-# A stamp's levels[i] row order (db/rl_read_counters.h) and each kind's ticker.
-LEVEL_TICKERS = ("rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
-                 "rocksdb.bloom.filter.full.true.positive",
-                 "rocksdb.sorted.run.seek")
-
-
-def host_log_problems(path: Path) -> list[str]:
-    """What is wrong with one run's host log; empty when it is consistent."""
-    try:
-        records = [json.loads(line) for line in path.read_text().splitlines()
-                   if line.strip()]
-    except (OSError, json.JSONDecodeError) as error:
-        return [f"unreadable: {error}"]
-    problems = []
-    if not records or records[0].get("type") != "header":
-        problems.append("no header first")
-    stamps = {r.get("name"): r for r in records if r.get("type") == "stamp"}
-    problems += [f"no {name} stamp" for name in ("measure_start", "drain_end")
-                 if name not in stamps]
-    end = stamps.get("drain_end")
-    if end:
-        for kind, ticker in enumerate(LEVEL_TICKERS):
-            total = sum(row[kind] for row in end["levels"])
-            if total != end["tickers"].get(ticker):
-                problems.append(f"levels sum {total} != {ticker} "
-                                f"{end['tickers'].get(ticker)}")
-        samples = [r for r in records if r.get("type") == "h"]
-        if not samples or samples[-1]["h"] != end["h"]:
-            problems.append("last H sample != live SST bytes at drain_end")
-    begins = sum(r.get("type") == "job_begin" for r in records)
-    ends = sum(r.get("type") == "job_end" for r in records)
-    if begins != ends:
-        problems.append(f"{begins} jobs began, {ends} ended")
-    ops = [r["op"] for r in records if "op" in r]
-    if any(later < earlier for earlier, later in zip(ops, ops[1:])):
-        problems.append("operation count decreased")
-    return problems
+HOST_LOG = host_log.FILE_NAME
+LEVEL_TICKERS = host_log.LEVEL_TICKERS
 
 
 def collect(run_dir: Path) -> dict:
@@ -135,7 +100,7 @@ def collect(run_dir: Path) -> dict:
         "point_read_amplification": probes / gets if gets else math.nan,
         "filter_checks": probes,
         "fork_point_probes": tickers.get("rocksdb.point.sst.probe"),
-        "host_log_problems": (host_log_problems(run_dir / HOST_LOG)
+        "host_log_problems": (host_log.problems(run_dir / HOST_LOG)
                               if (run_dir / HOST_LOG).exists() else None),
         "fork_sorted_run_seeks_per_scan": (
             tickers["rocksdb.sorted.run.seek"] / seeks

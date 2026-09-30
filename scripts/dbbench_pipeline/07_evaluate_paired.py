@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Apply the preregistered paired acceptance checks to summary.csv."""
+"""Paired evaluation of one arm against the static comparator (PATHWAYS
+Pathway C §4, Global acceptance; PREREGISTRATION D-13 §8).
+
+From 04's summary.csv, for every workload in it at one size and T, and for
+every (mode, beta*, c_s scale) the contract reports:
+  - CMP-3: the paired 95% interval of J_beta(policy) - J_beta(theta*),
+    theta* = the static configuration minimising J_beta (frontier_analysis),
+    paired by seed within one session (CMP-8);
+  - the stall rule on the same pairs: the upper bound of the stall-fraction
+    difference at most delta_stall, and the lower bound of the relative
+    throughput difference at least -delta_thr;
+  - regret, Definition C.5: mean J(policy) / mean J(theta*) - 1;
+  - suite robustness, CMP-7, across the workloads: the policy's worst regret
+    below the best worst-case regret of any one static configuration.
+
+Bounds are the ends of pipeline_stats.ci95, the two-sided 95% Student-t
+interval, so each is a one-sided 97.5% bound: the conservative reading of
+D-13's "upper 95% paired bound".
+"""
 
 from __future__ import annotations
 
@@ -7,157 +25,170 @@ import argparse
 import csv
 import json
 import math
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
-# Shared with 09_evaluate_oracle_parity.py so the engineering gate and the
-# research criterion cannot drift onto different instruments.
-from pipeline_stats import ci95, objective_verdict
-from research_objective import (DEFAULT_CONTRACT, load_contract, metric_specs,
-                                relative_difference)
+import frontier_analysis
+import research_objective
+from pipeline_stats import ci95
+
+# Pairs must match on these, besides the seed.
+PAIRED = ("session_id", "workload_profile", "dbbench_sha256", "prices_sha256",
+          "reference_rate", "research_objective_sha256", "settle_hold_seconds",
+          "get_operations", "put_operations", "scan_operations")
 
 
-def f(row: dict, key: str) -> float:
-    value = float(row[key])
-    if not math.isfinite(value):
-        raise SystemExit(f"non-finite {key} in {row.get('result_directory')}")
-    return value
+def stall_rule(pairs: list[tuple[dict, dict]], rule: dict) -> dict:
+    """D-13 §8 on (policy, comparator) row pairs."""
+    stall = ci95([float(p["stall_fraction"]) - float(c["stall_fraction"])
+                  for p, c in pairs])
+    throughput = ci95([research_objective.relative_difference(
+        float(p["throughput_ops_per_second"]),
+        float(c["throughput_ops_per_second"])) for p, c in pairs])
+    if stall["upper"] is None:
+        return {"stall_fraction_difference": stall,
+                "throughput_relative_difference": throughput,
+                "passed": None, "reason": "needs at least two pairs"}
+    stall_ok = stall["upper"] <= rule["stall_fraction_margin"]
+    throughput_ok = throughput["lower"] >= -rule["throughput_relative_margin"]
+    return {"stall_fraction_difference": stall,
+            "throughput_relative_difference": throughput,
+            "stall_passed": stall_ok, "throughput_passed": throughput_ok,
+            "passed": stall_ok and throughput_ok}
 
 
-def relative(rl: float, baseline: float) -> float:
-    return relative_difference(rl, baseline)
+def regret(policy_j: float, comparator_j: float) -> float:
+    return policy_j / comparator_j - 1.0
+
+
+def suite_robustness(policy: dict[str, float],
+                     static: dict[str, dict[str, float]]) -> dict:
+    """Definition C.5. policy: {workload: mean J}; static: {config key:
+    {workload: mean J}}. theta*(w) is the least J among the static
+    configurations at w; only configurations measured on every workload
+    compete for the min-max."""
+    workloads = sorted(policy)
+    best = {w: min(j[w] for j in static.values() if w in j) for w in workloads}
+    policy_worst = max(regret(policy[w], best[w]) for w in workloads)
+    complete = {key: j for key, j in static.items()
+                if all(w in j for w in workloads)}
+    static_worst = {key: max(regret(j[w], best[w]) for w in workloads)
+                    for key, j in complete.items()}
+    minimax = min(static_worst.values()) if static_worst else None
+    return {"workloads": workloads, "policy_worst_regret": policy_worst,
+            "best_static_worst_regret": minimax,
+            # Not measured on every workload, so not one static setting
+            # across the suite: e.g. a profile measured per workload.
+            "excluded_configurations": sorted(set(static) - set(complete)),
+            "best_static": (min(static_worst, key=static_worst.get)
+                            if static_worst else None),
+            "suite_robust": (policy_worst < minimax
+                             if minimax is not None else None)}
+
+
+def config_key(row: dict) -> str:
+    """A static configuration across workloads: its fingerprint without the
+    workload's own segments (profile, mix, skew or power law, and q-bar,
+    which is fixed per workload)."""
+    tail = row["experiment_fingerprint"].split(":", 1)[1]
+    return ":".join(part for part in tail.split(":")
+                    if not part.startswith(("mix", "skew", "pow", "qbar")))
+
+
+def evaluate(rows: list[dict], policy_arm: str, size_millions: int,
+             size_ratio: int, contract: dict) -> dict:
+    by_workload = defaultdict(list)
+    for row in rows:
+        if (int(row["size_millions"]) == size_millions and
+                int(row["size_ratio"]) == size_ratio):
+            by_workload[row["workload_profile"]].append(row)
+    results, suite_inputs = {}, defaultdict(lambda: ([], {}))
+    for workload, selected in sorted(by_workload.items()):
+        mine = [r for r in selected if r["arm"] == policy_arm]
+        policy = {int(r["dbbench_seed"]): r for r in mine}
+        if not policy:
+            continue
+        if len(policy) != len(mine):
+            raise ValueError(f"{workload}: {policy_arm} repeats a seed")
+        if any(r["objective_status"] != "priced" for r in policy.values()):
+            raise ValueError(f"{workload}: {policy_arm} has unpriced runs")
+        configs = frontier_analysis.static_configurations(
+            selected, workload, {size_ratio}, size_millions)
+        if not configs:
+            raise ValueError(f"{workload}: no static arms to compare with")
+        points = {n: frontier_analysis.mean_costs(s) for n, s in configs.items()}
+        cells = []
+        for item in frontier_analysis.comparators(points, contract):
+            column, star = item["column"], configs[item["theta_star"]]
+            seeds = sorted(policy.keys() & star.keys())
+            pairs = [(policy[s], star[s]) for s in seeds]
+            for p, c in pairs:
+                unmatched = [k for k in PAIRED if p[k] != c[k]]
+                if unmatched:
+                    raise ValueError(f"seed {p['dbbench_seed']}: {policy_arm} "
+                                     f"and theta* differ in {unmatched}")
+            differences = [float(p[column]) - float(c[column]) for p, c in pairs]
+            interval = ci95(differences) if differences else None
+            policy_j = statistics.fmean(float(r[column]) for r in policy.values())
+            cells.append({
+                **{k: item[k] for k in ("mode", "beta_star", "cs_scale",
+                                        "theta_star", "ties")},
+                "pairs": len(pairs),
+                "unpaired_seeds": sorted(policy.keys() ^ star.keys()),
+                "cmp3_difference": interval,
+                "cmp3_gain": (interval["upper"] < 0
+                              if interval and interval["upper"] is not None
+                              else None),
+                "stall_rule": (stall_rule(pairs, contract["stall_rule"])
+                               if pairs else None),
+                "regret": regret(policy_j, item["J"]),
+            })
+            key = (item["mode"], item["beta_star"], item["cs_scale"])
+            suite_inputs[key][0].append((workload, policy_j))
+            statics = suite_inputs[key][1]
+            for name, samples in configs.items():
+                row = next(iter(samples.values()))
+                statics.setdefault(config_key(row), {})[workload] = (
+                    research_objective.j_beta(
+                        points[name], research_objective.mode_weights(
+                            contract, item["mode"], item["beta_star"]),
+                        item["cs_scale"]))
+        results[workload] = cells
+    suite = []
+    for (mode, beta, scale), (policy_js, statics) in suite_inputs.items():
+        if len(policy_js) > 1:
+            suite.append({"mode": mode, "beta_star": beta, "cs_scale": scale,
+                          **suite_robustness(dict(policy_js), statics)})
+    return {"per_workload": results, "suite_robustness": suite}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("summary", type=Path)
-    parser.add_argument("--size-millions", required=True, type=int)
-    parser.add_argument("--size-ratio", required=True, type=int)
-    parser.add_argument("--baseline-arm", default="regular")
-    parser.add_argument("--rl-arm", default="rl")
-    parser.add_argument("--minimum-pairs", type=int, default=10)
-    parser.add_argument(
-        "--safety-only", action="store_true",
-        help="check frozen constraints without requiring point-read improvement",
-    )
-    parser.add_argument(
-        "--scan-objective",
-        choices=("sorted_run_seeks",),
-        default="sorted_run_seeks",
-        help="compatibility flag; P0 freezes sorted-run seeks non-inferiority",
-    )
-    parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
-    parser.add_argument("--space-margin", type=float, required=True,
-                        help="one frozen relative space budget: 0, .02, .05, .10")
-    parser.add_argument("--pilot", action="store_true",
-                        help="retrospective evaluation; never formal acceptance")
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("summary", type=Path, help="04's summary.csv")
+    parser.add_argument("--policy-arm", required=True)
+    parser.add_argument("--size-millions", type=int, required=True)
+    parser.add_argument("--size-ratio", type=int, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.minimum_pairs < 2:
-        parser.error("minimum-pairs must be at least two")
-    contract, contract_hash = load_contract(args.contract)
-    specs = metric_specs(contract, args.space_margin, args.safety_only)
-    if args.baseline_arm != contract["baseline_arm"]:
-        parser.error("baseline arm differs from frozen contract")
-
-    grouped = defaultdict(dict)
     with args.summary.open(newline="") as handle:
-        for row in csv.DictReader(handle):
-            if (int(row["size_millions"]) == args.size_millions and
-                    int(row["size_ratio"]) == args.size_ratio):
-                repeat = int(row.get("repeat", 1))
-                if row["arm"] in grouped[repeat]:
-                    raise SystemExit(f"duplicate arm/repeat {row['arm']}/{repeat}")
-                grouped[repeat][row["arm"]] = row
-    pairs = []
-    for repeat, arms in sorted(grouped.items()):
-        if args.baseline_arm in arms and args.rl_arm in arms:
-            pairs.append((repeat, arms[args.baseline_arm], arms[args.rl_arm]))
-        elif args.baseline_arm in arms or args.rl_arm in arms:
-            raise SystemExit(f"repeat {repeat}: incomplete pair")
-    if not pairs:
-        raise SystemExit("no paired measurements")
-
-    cell_fingerprints = set()
-    cell_manifest_hashes = set()
-    for repeat, baseline, rl in pairs:
-        if not args.pilot:
-            for row in (baseline, rl):
-                if row.get("research_objective_sha256") != contract_hash:
-                    raise SystemExit(f"repeat {repeat}: research objective mismatch")
-                if f(row, "space_relative_margin") != args.space_margin:
-                    raise SystemExit(f"repeat {repeat}: space budget mismatch")
-        if baseline.get("workload_profile") != rl.get("workload_profile"):
-            raise SystemExit(f"repeat {repeat}: workload profile mismatch")
-        if (not baseline.get("experiment_fingerprint") or
-                baseline.get("experiment_fingerprint") != rl.get(
-                    "experiment_fingerprint")):
-            raise SystemExit(f"repeat {repeat}: experiment fingerprint mismatch")
-        if (not baseline.get("baseline_slo_sha256") or
-                baseline.get("baseline_slo_sha256") !=
-                rl.get("baseline_slo_sha256")):
-            raise SystemExit(f"repeat {repeat}: baseline SLO manifest mismatch")
-        cell_fingerprints.add(baseline["experiment_fingerprint"])
-        cell_manifest_hashes.add(baseline["baseline_slo_sha256"])
-        if baseline.get("dbbench_seed") != rl.get("dbbench_seed"):
-            raise SystemExit(f"repeat {repeat}: workload seed mismatch")
-        for key in ("get_operations", "put_operations", "scan_operations",
-                    "user_write_bytes"):
-            if f(baseline, key) != f(rl, key):
-                raise SystemExit(f"repeat {repeat}: unpaired {key}")
-    if len(cell_fingerprints) != 1:
-        raise SystemExit("paired cell mixes experiment fingerprints across repeats")
-    if len(cell_manifest_hashes) != 1:
-        raise SystemExit("paired cell mixes baseline SLO manifests across repeats")
-
-    checks = {}
-    for key, margin, strict in specs:
-        try:
-            differences = [relative(f(rl, key), f(base, key))
-                           for _, base, rl in pairs]
-        except ValueError as error:
-            checks[key] = {"verdict": "undecidable", "passed": None,
-                           "reason": str(error), "metric": key}
-            continue
-        checks[key] = {"metric": key, **objective_verdict(
-            differences, margin, args.minimum_pairs, strict=strict)}
-    failed = [key for key, check in checks.items()
-              if check["verdict"] == "failed"]
-    undecidable = [key for key, check in checks.items()
-                   if check["verdict"] == "undecidable"]
-    verdict = "failed" if failed else "undecidable" if undecidable else "passed"
-    diagnostics = {}
-    for key in ("stall_events", "scan_amplification", "write_latency_p95_us"):
-        if all(base.get(key) not in (None, "") and rl.get(key) not in (None, "")
-               for _, base, rl in pairs):
-            diagnostics[key] = {"ci95_absolute_difference": ci95([
-                f(rl, key) - f(base, key) for _, base, rl in pairs])}
-
-    report = {
-        "schema_version": 2,
-        "size_millions": args.size_millions,
-        "size_ratio": args.size_ratio,
-        "pairs": len(pairs),
-        "experiment_fingerprint": next(iter(cell_fingerprints)),
-        "baseline_slo_sha256": next(iter(cell_manifest_hashes)),
-        "scan_objective": args.scan_objective,
-        "safety_only": args.safety_only,
-        "research_objective_sha256": contract_hash,
-        "space_relative_margin": args.space_margin,
-        "pilot": args.pilot,
-        "formal_acceptance": (not args.pilot and len(pairs) >= 10 and
-                              verdict == "passed"),
-        "checks": checks,
-        "diagnostics": diagnostics,
-        "verdict": verdict, "failed": failed, "undecidable": undecidable,
-        "passed": {"passed": True, "failed": False}.get(verdict),
-    }
-    rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        rows = list(csv.DictReader(handle))
+    contract, contract_hash = research_objective.load_contract()
+    report = {"schema_version": 3, "research_objective_sha256": contract_hash,
+              "policy_arm": args.policy_arm,
+              "size_millions": args.size_millions,
+              "size_ratio": args.size_ratio,
+              **evaluate(rows, args.policy_arm, args.size_millions,
+                         args.size_ratio, contract)}
+    if not report["per_workload"]:
+        raise SystemExit(f"no {args.policy_arm} runs selected")
+    rendered = json.dumps(report, indent=2, sort_keys=True,
+                          allow_nan=False) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered)
     print(rendered, end="")
-    return {"passed": 0, "failed": 1, "undecidable": 3}[verdict]
+    return 0
 
 
 if __name__ == "__main__":

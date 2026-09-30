@@ -28,6 +28,8 @@ SAMPLE = {
     "BLOCK_CACHE_SIZE": "8388608", "BLOOM_BITS": "10",
     "MAX_BACKGROUND_JOBS": "2", "THREADS": "1", "DISABLE_WAL": "0",
     "USE_DIRECT_IO": "0", "MULTIPLIER_FINGERPRINT": "",
+    "POWER_FINGERPRINT": "", "SETTLE_FINGERPRINT": "", "QBAR_FINGERPRINT": "",
+    "PRICES_FINGERPRINT": "",
     "SOFT_PENDING_BYTES": "68719476736", "HARD_PENDING_BYTES": "274877906944",
     "DBBENCH_SHA256": "a" * 64, "RESEARCH_OBJECTIVE_SHA256": "b" * 64,
 }
@@ -61,6 +63,27 @@ class FingerprintTest(unittest.TestCase):
         options = select.parse_fingerprint_options(fingerprint)
         self.assertEqual(options["static_capacity_scales"], "1x1.5x1")
         self.assertEqual(options["level_target_multipliers"], "off")
+
+    def test_older_runs_parse_without_programme1_segments(self):
+        options = select.parse_fingerprint_options(fingerprint_from_03())
+        for name in ("key_dist_a", "key_dist_b", "settle_hold_seconds",
+                     "reference_rate", "prices_sha256"):
+            self.assertIsNone(options[name], name)
+
+    def test_programme1_segments_reach_the_fingerprint_and_parse(self):
+        fingerprint = fingerprint_from_03(
+            SKEW_FINGERPRINT="", POWER_FINGERPRINT=":pow0.002312-0.3467",
+            MULTIPLIER_FINGERPRINT=":ltm1x0.75x0.75",
+            SETTLE_FINGERPRINT=":settle10", QBAR_FINGERPRINT=":qbar58332.0",
+            PRICES_FINGERPRINT=":prices" + "c" * 64)
+        options = select.parse_fingerprint_options(fingerprint)
+        self.assertEqual((options["key_dist_a"], options["key_dist_b"]),
+                         (0.002312, 0.3467))
+        self.assertEqual(options["keyrange_num"], 1)
+        self.assertEqual(options["level_target_multipliers"], "1x0.75x0.75")
+        self.assertEqual(options["settle_hold_seconds"], 10)
+        self.assertEqual(options["reference_rate"], 58332.0)
+        self.assertEqual(options["prices_sha256"], "c" * 64)
 
 
 if __name__ == "__main__":

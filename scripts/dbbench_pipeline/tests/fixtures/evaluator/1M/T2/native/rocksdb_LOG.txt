@@ -1,0 +1,17 @@
+2026/09/30-10:00:00.000000 1 [db/db_impl/db_impl_open.cc:2100] DB pointer 0x1
+2026/09/30-10:00:01.000000 2 EVENT_LOG_v1 {"time_micros": 4000000000, "job": 2, "event": "flush_started", "num_memtables": 1}
+2026/09/30-10:00:01.000001 2 EVENT_LOG_v1 {"time_micros": 4000000001, "cf_name": "default", "job": 2, "event": "table_file_creation", "file_number": 9, "file_size": 7777}
+2026/09/30-10:00:01.500000 3 EVENT_LOG_v1 {"time_micros": 4100000000, "job": 3, "event": "compaction_finished", "compaction_time_micros": 5, "output_level": 1, "total_output_size": 9999, "rl_drain": 0, "rl_suspended": 1}
+2026/09/30-10:00:02.000000 2 EVENT_LOG_v1 {"time_micros": 5001000000, "job": 10, "event": "flush_started", "num_memtables": 1}
+2026/09/30-10:00:02.000100 2 EVENT_LOG_v1 {"time_micros": 5001000100, "cf_name": "default", "job": 10, "event": "table_file_creation", "file_number": 20, "file_size": 2000}
+2026/09/30-10:00:03.000000 3 EVENT_LOG_v1 {"time_micros": 5003000000, "job": 11, "event": "compaction_started", "files_L0": [20], "files_L1": [15], "input_data_size": 3500}
+2026/09/30-10:00:04.000000 3 EVENT_LOG_v1 {"time_micros": 5004900000, "cf_name": "default", "job": 11, "event": "table_file_creation", "file_number": 21, "file_size": 3000}
+2026/09/30-10:00:04.100000 3 EVENT_LOG_v1 {"time_micros": 5005000000, "job": 11, "event": "compaction_finished", "compaction_time_micros": 900000, "output_level": 1, "total_output_size": 3000, "rl_drain": 0, "rl_suspended": 0}
+2026/09/30-10:00:07.000000 2 EVENT_LOG_v1 {"time_micros": 5008000000, "job": 12, "event": "flush_started", "num_memtables": 1}
+2026/09/30-10:00:07.000100 2 EVENT_LOG_v1 {"time_micros": 5008000100, "cf_name": "default", "job": 12, "event": "table_file_creation", "file_number": 22, "file_size": 2000}
+2026/09/30-10:00:12.000000 2 EVENT_LOG_v1 {"time_micros": 5015000000, "job": 13, "event": "flush_started", "num_memtables": 1}
+2026/09/30-10:00:12.000100 2 EVENT_LOG_v1 {"time_micros": 5015000100, "cf_name": "default", "job": 13, "event": "table_file_creation", "file_number": 23, "file_size": 2000}
+2026/09/30-10:00:14.000000 3 EVENT_LOG_v1 {"time_micros": 5017900000, "cf_name": "default", "job": 14, "event": "table_file_creation", "file_number": 24, "file_size": 1500}
+2026/09/30-10:00:14.100000 3 EVENT_LOG_v1 {"time_micros": 5018000000, "job": 14, "event": "compaction_finished", "compaction_time_micros": 900000, "output_level": 1, "total_output_size": 1500, "rl_drain": 1, "rl_suspended": 0}
+2026/09/30-10:00:20.000000 2 EVENT_LOG_v1 {"time_micros": 5030000000, "job": 15, "event": "flush_started", "num_memtables": 1}
+2026/09/30-10:00:20.000100 2 EVENT_LOG_v1 {"time_micros": 5030000100, "cf_name": "default", "job": 15, "event": "table_file_creation", "file_number": 25, "file_size": 5555}

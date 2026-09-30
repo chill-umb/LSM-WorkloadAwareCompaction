@@ -1,343 +1,223 @@
-"""Static W-R-S frontier measurements, with paired uncertainty and provenance.
+#!/usr/bin/env python3
+"""The static class's priced-cost frontier (PATHWAYS C.4, D.4, D.5).
 
-The base-option sweep is a calibration proxy: it changes L0 as well as deep
-targets. It cannot certify an independent capacity actuator's safety bound.
-No interpolation, extrapolation, or space-to-survival inference is performed.
+From 04's summary.csv, the static arms (native and static:<profile>) of one
+workload and size ratio (several ratios for the cross-T hull of C-6): each
+configuration's mean priced costs over its seeds, (C_W, C_R, C_S);
+  - the lower convex hull: the points that minimise J_beta for some beta > 0
+    (Proposition D.5), split into vertices and points that are supported
+    only on a face (a collinear tie);
+  - theta*_beta, the configuration minimising J_beta, per mode, beta* and c_s
+    scale (Proposition C.4 says it is on the hull; checked);
+  - beta-bar per prioritised term (Proposition D.4): above it, J_beta picks
+    the configuration with the least prioritised cost.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
-import importlib.util
+import csv
 import json
 import math
-from pathlib import Path
-import re
 import statistics
+from collections import defaultdict
+from pathlib import Path
 
-from pipeline_stats import ci95, critical_value, objective_verdict
-from research_objective import load_contract, relative_difference
+import research_objective
 
-AXES = ("write_amplification", "point_read_amplification")
-
-
-def dominates(left: dict, right: dict) -> bool:
-    return (all(left[key] <= right[key] for key in AXES) and
-            any(left[key] < right[key] for key in AXES))
-
-
-def paired_comparison(left: dict[int, dict], right: dict[int, dict]) -> dict:
-    seeds = sorted(left.keys() & right.keys())
-    if len(seeds) < 2:
-        return {"verdict": "undecidable", "paired_seeds": seeds}
-    intervals = {axis: ci95([relative_difference(left[s][axis], right[s][axis])
-                           for s in seeds]) for axis in AXES}
-    if (all(intervals[a]["upper"] <= 0 for a in AXES) and
-            any(intervals[a]["upper"] < 0 for a in AXES)):
-        verdict = "dominates"
-    elif any(intervals[a]["lower"] > 0 for a in AXES):
-        verdict = "does_not_dominate"
-    else:
-        verdict = "undecidable"
-    return {"verdict": verdict, "paired_seeds": seeds, "intervals": intervals}
+COSTS = ("C_W", "C_R", "C_S")
+PRIORITISED = {"write": 0, "read": 1, "space": 2}
+# Rows of one hull must share these (binary, prices, q-bar, contract, h_w).
+IDENTITY = ("workload_profile", "size_millions", "dbbench_sha256",
+            "prices_sha256", "reference_rate", "research_objective_sha256",
+            "settle_hold_seconds")
+# A face region of the simplex of beta's thinner than this is a tie, not a
+# vertex. The simplex has area 1/2, and costs are rescaled per axis first.
+AREA_TOLERANCE = 1e-9
 
 
-def analyze_points(configs: dict[str, dict[int, dict]]) -> dict:
-    points = {}
-    for name, samples in configs.items():
-        for row in samples.values():
-            if any(not math.isfinite(row[k]) or row[k] <= 0
-                   for k in (*AXES, "space_amplification")):
-                raise ValueError(f"{name}: missing/invalid W-R-S metric")
-        points[name] = {"means": {key: statistics.fmean(r[key] for r in samples.values())
-                                  for key in (*AXES, "space_amplification")},
-                        "intervals": {key: ci95([r[key] for r in samples.values()])
-                                      for key in (*AXES, "space_amplification")},
-                        "seeds": sorted(samples),
-                        "runs": [r["result_directory"] for r in samples.values()]}
-    hull = [name for name, p in points.items() if not any(
-        dominates(q["means"], p["means"]) for other, q in points.items() if other != name)]
-    comparisons = {name: {other: paired_comparison(configs[other], configs[name])
-                         for other in configs if other != name}
-                   for name in configs}
-    top_up = {}
-    for name in hull:
-        point = points[name]
-        needed = max(5, len(point["seeds"]))
-        decidable = True
-        for axis in AXES:
-            spacings = [abs(point["means"][axis] - points[other]["means"][axis])
-                        for other in hull if other != name]
-            spacing = min(spacings, default=math.inf)
-            values = [r[axis] for r in configs[name].values()]
-            if len(values) < 2 or spacing == 0:
-                decidable = False
-                needed = None
-                break
-            deviation = statistics.stdev(values)
-            # C-2 specifies full CI width, not its half width.
-            count = next((n for n in range(max(5, len(values)), 201)
-                          if 2 * critical_value(n) * deviation / math.sqrt(n)
-                          < spacing / 2), None)
-            if count is None:
-                decidable = False
-                needed = None
-                break
-            needed = max(needed, count)
-            decidable &= count <= len(values)
-        top_up[name] = {"suggested_total_repeats": needed,
-                        "width_criterion_passed": decidable,
-                        "repeats_present": len(point["seeds"]),
-                        "knobs": config_knobs(name),
-                        "reason": "C-2 full CI width < half inter-point spacing"}
-    return {"points": points, "empirical_hull": hull,
-            "paired_dominance": comparisons, "repeat_top_up": top_up,
-            "c1_sampled": len(points) >= 12 and len(hull) >= 4,
-            "c2_widths_passed": all(v["width_criterion_passed"] for v in top_up.values())}
+def is_static(arm: str) -> bool:
+    return arm == "native" or arm.startswith("static:")
 
 
-def run_digest(measurements: dict) -> dict:
-    """Per-run Gate-0 summary for the report. Deliberately omits the releases
-    array: it carries one record per compaction with three per-level arrays,
-    which makes the embedded payload gigabytes. Full detail stays in each run's
-    compaction_measurements.json, referenced by path."""
-    digest = {}
-    for directory, entry in measurements.items():
-        views = entry["measurement"]["views"]
-        releases = entry["measurement"]["releases"]
-        depths = [r["populated_levels"] for r in releases]
-        digest[directory] = {
-            "per_level_survival": {level: bucket["eta"] for level, bucket
-                                   in views["whole_run"]["levels"].items()
-                                   if bucket["jobs"]},
-            "global_survival": {phase: views[phase]["global"]["eta"]
-                                for phase in ("workload", "drain", "whole_run")},
-            "populated_levels_max": max(depths, default=None),
-            "populated_levels_final": depths[-1] if depths else None,
-            "releases": len(releases),
-            "excluded_trivial_moves": entry["measurement"]["excluded_trivial_moves"],
-        }
-    return digest
-
-
-def config_knobs(fingerprint: str) -> dict:
-    """The swept knobs, so a top-up can target one configuration instead of
-    re-running the grid."""
-    ratio = re.search(r":T(\d+):", fingerprint)
-    base = re.search(r":l1(\d+):", fingerprint)
-    l0 = re.search(r":l0-(\d+)-(\d+)-(\d+):", fingerprint)
-    return {"size_ratio": int(ratio.group(1)) if ratio else None,
-            "max_bytes_for_level_base": int(base.group(1)) if base else None,
-            "level0_file_num_compaction_trigger": int(l0.group(1)) if l0 else None}
-
-
-def policy_positions(policy: dict[str, dict[int, dict]], configs: dict,
-                     points: dict, hull: list[str],
-                     space_margin: float) -> dict:
-    """C-3/C-4/C-6: classify each policy arm against the static hull.
-
-    Non-domination is on (W, R) "with S inside the cell's bound" (C-6): a
-    hull point may dominate the policy only if its own space amplification
-    is inside the policy's space budget, S_policy * (1 + margin). A static
-    configuration that buys its W-R position with space the rung does not
-    allow is not a legal competitor at that rung, so it is reported
-    separately as `dominated_by_outside_space_bound` and does not decide.
-    """
-    positions = {}
-    for name, samples in policy.items():
-        means = {key: statistics.fmean(r[key] for r in samples.values())
-                 for key in (*AXES, "space_amplification")}
-        space_bound = means["space_amplification"] * (1.0 + space_margin)
-        candidates = [h for h in hull if dominates(points[h]["means"], means)]
-        dominators = [h for h in candidates
-                      if points[h]["means"]["space_amplification"] <= space_bound]
-        outside = [h for h in candidates if h not in dominators]
-        positions[name] = {
-            "means": means, "seeds": sorted(samples),
-            "space_relative_margin": space_margin,
-            "space_bound": space_bound,
-            "dominated_by": dominators,
-            "dominated_by_outside_space_bound": outside,
-            "verdict": "dominated" if dominators else "non_dominated",
-            "against_hull_points": {h: paired_comparison(configs[h], samples)
-                                    for h in hull}}
-    return positions
-
-
-def common_fingerprint(fingerprint: str) -> str:
-    # These are the ONLY knobs deliberately varied by the Hull-0 sweep.
-    return re.sub(r":(?:T\d+|l1\d+|l0-\d+-\d+-\d+|pri\d+)(?=:|$)",
-                  "", fingerprint)
-
-
-def collect_grid(root: Path, size: int, ratios: list[int],
-                 arm: str = "regular") -> tuple[dict, dict]:
-    spec = importlib.util.spec_from_file_location(
-        "frontier_graphs", Path(__file__).with_name("04_generate_graphs.py"))
-    graph = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(graph)
-    _, objective_hash = load_contract()
-    configs, measurements, identities = defaultdict(dict), {}, set()
-    for marker in sorted(root.glob("**/COMPLETED")):
-        directory = marker.parent
-        row = graph.collect_arm(directory)
-        if (row is None or row["size_millions"] != size or
-                row["size_ratio"] not in ratios or row["arm"] != arm):
+def static_configurations(rows: list[dict], workload: str, size_ratios,
+                          size_millions: int) -> dict[str, dict[int, dict]]:
+    """{fingerprint: {seed: row}} for the priced static arms selected."""
+    configs: dict[str, dict[int, dict]] = defaultdict(dict)
+    identities = set()
+    for row in rows:
+        if not (is_static(row["arm"]) and row["workload_profile"] == workload
+                and int(row["size_ratio"]) in size_ratios
+                and int(row["size_millions"]) == size_millions):
             continue
-        metadata = graph.read_env(directory / "metadata.env")
-        if (metadata.get("research_objective_sha256") != objective_hash or
-                metadata.get("level_compaction_dynamic_level_bytes") != "false" or
-                not metadata.get("dbbench_sha256")):
-            raise ValueError(f"{directory}: missing P0/binary/static-ladder provenance")
-        fingerprint = row["experiment_fingerprint"]
-        if not fingerprint:
-            raise ValueError(f"{directory}: missing configuration fingerprint")
-        identities.add((common_fingerprint(fingerprint), metadata["dbbench_sha256"]))
+        if row["objective_status"] != "priced":
+            raise ValueError(f"{row['result_directory']}: not priced "
+                             f"({row['objective_status']})")
+        identities.add(tuple(row[key] for key in IDENTITY))
         seed = int(row["dbbench_seed"])
-        if seed in configs[fingerprint]:
-            raise ValueError(f"duplicate seed in static configuration: {directory}")
-        measurement = json.loads((directory / "compaction_measurements.json").read_text())
-        if measurement.get("complete") is not True or not measurement.get("releases"):
-            raise ValueError(f"{directory}: incomplete Gate-0 instrument")
-        levels = measurement["views"]["whole_run"]["levels"]
-        if len(levels) != int(metadata["num_levels"]):
-            raise ValueError(f"{directory}: missing per-level survival")
-        configs[fingerprint][seed] = row
-        # Keep only what run_digest and space_curves read. The releases array
-        # carries one record per compaction with three per-level arrays; the
-        # sweep's payloads total 7.5 GB, so retaining them parsed exhausts
-        # memory on a cross-T run (three ratios at once). This is the same
-        # payload that once made the emitted report 1.8 GB -- trimmed there,
-        # still held here.
-        views = measurement["views"]
-        measurements[str(directory)] = {"metadata": metadata, "measurement": {
-            "views": {phase: ({"global": {"eta": views[phase]["global"]["eta"]}}
-                              | ({"levels": {level: {"eta": bucket["eta"],
-                                                     "jobs": bucket["jobs"]}
-                                             for level, bucket in levels.items()}}
-                                 if phase == "whole_run" else {}))
-                      for phase in ("workload", "drain", "whole_run")},
-            "releases": [{"populated_levels": r["populated_levels"]}
-                         for r in measurement["releases"]],
-            "excluded_trivial_moves": measurement["excluded_trivial_moves"],
-        }}
-        del measurement
-    if not configs or len(identities) != 1:
-        raise ValueError("empty sweep or incompatible workload/binary fingerprints")
-    return dict(configs), measurements
+        if seed in configs[row["experiment_fingerprint"]]:
+            raise ValueError(f"{row['result_directory']}: duplicate seed")
+        configs[row["experiment_fingerprint"]][seed] = row
+    if len(identities) > 1:
+        raise ValueError(f"static arms differ in {IDENTITY}: {identities}")
+    return dict(configs)
 
 
-def space_curves(configs: dict, measurements: dict, margins: list[float]) -> list:
-    groups = defaultdict(dict)
-    for config, samples in configs.items():
-        metadata = measurements[next(iter(samples.values()))["result_directory"]]["metadata"]
-        group = (metadata["size_ratio"],) + tuple(
-            metadata[k] for k in ("level0_file_num_compaction_trigger",
-                                  "level0_slowdown_writes_trigger",
-                                  "level0_stop_writes_trigger",
-                                  "compaction_priority"))
-        scale = float(metadata["baseline_level_base_scale"])
-        if scale in groups[group]:
-            raise ValueError("duplicate base scale in curve")
-        groups[group][scale] = config
-    curves = []
-    for group, scales in groups.items():
-        # The cross-T cells (T=14, T=20) are run at scale 1x only: they exist to
-        # bound the pooled hull, not to calibrate the capacity-space curve.
-        # Record them as carrying no curve rather than failing the analysis.
-        if set(scales) == {1.0}:
-            curves.append({"size_ratio": int(group[0]),
-                           "l0_priority_options": group[1:], "points": [],
-                           "capacity_curve": "absent",
-                           "reason": "single base scale; hull cell, not a "
-                                     "capacity calibration curve"})
+def mean_costs(samples: dict[int, dict]) -> tuple[float, float, float]:
+    means = tuple(statistics.fmean(float(r[key]) for r in samples.values())
+                  for key in COSTS)
+    if not all(math.isfinite(v) and v >= 0 for v in means):
+        raise ValueError(f"non-finite or negative priced cost: {means}")
+    return means
+
+
+def _clip(polygon, a, b, c):
+    """Sutherland-Hodgman: the part of `polygon` with a*u + b*v + c <= 0."""
+    def side(p):
+        return a * p[0] + b * p[1] + c
+
+    out = []
+    for i, current in enumerate(polygon):
+        previous = polygon[i - 1]
+        fc, fp = side(current), side(previous)
+        if (fc <= 0) != (fp <= 0):
+            t = fp / (fp - fc)
+            out.append((previous[0] + t * (current[0] - previous[0]),
+                        previous[1] + t * (current[1] - previous[1])))
+        if fc <= 0:
+            out.append(current)
+    return out
+
+
+def _area(polygon) -> float:
+    return abs(sum(p[0] * q[1] - q[0] * p[1] for p, q in
+                   zip(polygon, polygon[1:] + polygon[:1]))) / 2
+
+
+def lower_hull(points: dict[str, tuple]) -> dict[str, list[str]]:
+    """Which points minimise <beta, x> for some beta > 0 (Proposition D.5).
+
+    Each point's set of such beta, on the simplex beta = (u, v, 1-u-v), is
+    the triangle cut by one half-plane per other point. A region with area
+    is a hull vertex; a region of area zero that still reaches the open
+    simplex (an edge between two vertices) is a supported point that is not
+    a vertex, i.e. a collinear or coplanar tie. Axes are rescaled first,
+    which maps the hull to itself, so costs in very different units do not
+    make the regions numerically thin."""
+    scales = [max((abs(x[k]) for x in points.values()), default=1.0) or 1.0
+              for k in range(3)]
+    scaled = {name: tuple(x[k] / scales[k] for k in range(3))
+              for name, x in points.items()}
+    vertices, supported = [], []
+    for name, x in scaled.items():
+        region = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+        for other, y in scaled.items():
+            if other == name or not region:
+                continue
+            d = [x[k] - y[k] for k in range(3)]
+            region = _clip(region, d[0] - d[2], d[1] - d[2], d[2])
+        if not region:
             continue
-        if not {0.5, 1., 2.}.issubset(scales):
-            raise ValueError(
-                f"incomplete 0.5/1/2 base-scale curve for {group}: "
-                f"have {sorted(scales)}")
-        baseline = configs[scales[1.]]
-        points = []
-        for scale, name in sorted(scales.items()):
-            sample = configs[name]
-            seeds = sorted(sample.keys() & baseline.keys())
-            if len(seeds) < 3:
-                raise ValueError("space calibration requires three paired repeats")
-            differences = [relative_difference(sample[s]["space_amplification"],
-                                               baseline[s]["space_amplification"])
-                           for s in seeds]
-            points.append({"scale": scale, "configuration": name,
-                           "paired_seeds": seeds, "space_relative_ci95": ci95(differences),
-                           "budget_checks": {str(m): objective_verdict(differences, m, 3)
-                                             for m in margins}})
-        curves.append({"size_ratio": int(group[0]),
-                       "l0_priority_options": group[1:], "points": points,
-                       "capacity_curve": "measured",
-                       "measured_feasible_base_scales": {
-                           str(m): [p["scale"] for p in points if p["scale"] >= 1 and
-                                    p["budget_checks"][str(m)]["passed"] is True]
-                           for m in margins},
-                       "capacity_s_max": None,
-                       "capacity_bound_status": "requires_matched_deep_capacity_calibration",
-                       "reason": "base-option scale also changes L0; no transfer bound proved"})
-    return curves
+        if _area(region) > AREA_TOLERANCE:
+            vertices.append(name)
+            continue
+        u = statistics.fmean(p[0] for p in region)
+        v = statistics.fmean(p[1] for p in region)
+        if u > 0 and v > 0 and u + v < 1:
+            supported.append(name)
+    return {"vertices": sorted(vertices), "supported_non_vertices": sorted(supported)}
+
+
+def comparators(points: dict[str, tuple], contract: dict) -> list[dict]:
+    """theta*_beta per (mode, beta*, c_s scale): the exact minimiser of J
+    (the name breaks an exact tie), which Proposition D.5 puts on the hull.
+    Every configuration within a relative 1e-12 of it is listed as a tie,
+    for information only: a near-tie need not be on the hull."""
+    out = []
+    for mode, beta, scale in research_objective.objective_grid(contract):
+        weights = research_objective.mode_weights(contract, mode, beta)
+        values = {name: research_objective.j_beta(x, weights, scale)
+                  for name, x in points.items()}
+        star = min(values, key=lambda n: (values[n], n))
+        best = values[star]
+        ties = sorted(n for n, v in values.items()
+                      if v - best <= 1e-12 * abs(best))
+        ranked = sorted(values.values())
+        out.append({"mode": mode, "beta_star": beta, "cs_scale": scale,
+                    "column": research_objective.j_column(mode, beta, scale),
+                    "theta_star": star, "ties": ties, "J": best,
+                    "gap_to_next": (ranked[1] - best if len(ranked) > 1
+                                    else None)})
+    return out
+
+
+def beta_bar(points: dict[str, tuple], mode: str, cs_scale: float):
+    """Proposition D.4's bound M / Delta for the mode's prioritised cost P:
+    Delta the least positive gap above min P, M the range of the sum of the
+    other two costs. None when every point has the same P (any beta* is
+    strict priority)."""
+    k = PRIORITISED[mode]
+    scaled = [(w, r, s * cs_scale) for w, r, s in points.values()]
+    p_min = min(x[k] for x in scaled)
+    gaps = [x[k] - p_min for x in scaled if x[k] > p_min]
+    if not gaps:
+        return None
+    others = [sum(x) - x[k] for x in scaled]
+    return (max(others) - min(others)) / min(gaps)
+
+
+def analyze(configs: dict[str, dict[int, dict]], contract: dict) -> dict:
+    points = {name: mean_costs(samples) for name, samples in configs.items()}
+    hull = lower_hull(points)
+    chosen = comparators(points, contract)
+    on_hull = set(hull["vertices"]) | set(hull["supported_non_vertices"])
+    for item in chosen:
+        if item["theta_star"] not in on_hull:
+            raise AssertionError(f"theta* {item['theta_star']} is off the hull "
+                                 "(Proposition C.4); the hull code is wrong")
+    headline = contract["objective"]["headline_beta_star"]
+    bars = {mode: {f"cs{scale:g}": beta_bar(points, mode, scale)
+                   for scale in research_objective.storage_scales(contract)}
+            for mode in PRIORITISED}
+    return {
+        "points": {name: {"costs": dict(zip(COSTS, x)),
+                          "seeds": sorted(configs[name]),
+                          "arms": sorted({r["arm"] for r in configs[name].values()})}
+                   for name, x in points.items()},
+        "lower_hull": hull, "comparators": chosen, "beta_bar": bars,
+        "headline_beta_star": headline,
+        "headline_in_strict_priority_regime": {
+            mode: {scale: (bar is None or headline > bar)
+                   for scale, bar in by_scale.items()}
+            for mode, by_scale in bars.items()},
+    }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("results", type=Path)
-    parser.add_argument("--size-millions", type=int, default=10)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("summary", type=Path, help="04's summary.csv")
+    parser.add_argument("--workload-profile", required=True)
+    parser.add_argument("--size-millions", type=int, required=True)
     parser.add_argument("--size-ratio", type=int, nargs="+", required=True,
-                        help="one ratio for a per-T hull; several for the "
-                             "cross-T pooled hull required by C-6")
-    parser.add_argument("--policy-results", type=Path,
-                        help="results root holding a policy arm to place "
-                             "against the hull (C-3)")
-    parser.add_argument("--policy-arm", default="prior_only")
-    parser.add_argument("--space-margin", type=float, default=0.02,
-                        help="space budget rung (0, .02, .05, .10) the policy "
-                             "is placed at; a hull point outside the policy's "
-                             "space bound cannot dominate it (C-6)")
+                        help="one ratio for a per-T hull; several for C-6")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    configs, measurements = collect_grid(
-        args.results, args.size_millions, args.size_ratio)
-    contract, fingerprint = load_contract()
-    if args.space_margin not in contract["constraints"]["space"]["relative_margin_axis"]:
-        parser.error("space margin must be a frozen W-R-S sweep point")
-    analysis = analyze_points(configs)
-    # Carry the swept base scale itself, so a targeted top-up does not have to
-    # divide byte counts by the configured L1 base to recover it.
-    scale_by_fingerprint = {
-        entry["metadata"]["experiment_fingerprint"]:
-            float(entry["metadata"]["baseline_level_base_scale"])
-        for entry in measurements.values()
-        if entry["metadata"].get("experiment_fingerprint")}
-    for name, entry in analysis["repeat_top_up"].items():
-        entry["knobs"]["baseline_level_base_scale"] = scale_by_fingerprint.get(name)
-    policy = {}
-    if args.policy_results:
-        policy_configs, _ = collect_grid(
-            args.policy_results, args.size_millions, args.size_ratio,
-            arm=args.policy_arm)
-        policy = policy_positions(policy_configs, configs, analysis["points"],
-                                  analysis["empirical_hull"], args.space_margin)
-    report = {"schema_version": 1, "research_objective_sha256": fingerprint,
-              "space_relative_margin": args.space_margin,
+    with args.summary.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    contract, contract_hash = research_objective.load_contract()
+    configs = static_configurations(rows, args.workload_profile,
+                                    set(args.size_ratio), args.size_millions)
+    if not configs:
+        raise SystemExit("no priced static arms selected")
+    report = {"schema_version": 2, "research_objective_sha256": contract_hash,
+              "workload_profile": args.workload_profile,
               "size_millions": args.size_millions,
               "size_ratios": args.size_ratio,
-              "cross_t": len(args.size_ratio) > 1,
-              "policy_arm": args.policy_arm if policy else None,
-              "policy_positions": policy,
-              **analysis,
-              "space_curves": space_curves(configs, measurements,
-                  contract["constraints"]["space"]["relative_margin_axis"]),
-              "per_run_gate0_digest": run_digest(measurements),
-              "formal_gate1_passed": False,
-              "remaining_gates": ["fresh_prior_only_comparison", "matched_capacity_bound"]}
+              **analyze(configs, contract)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    print(f"hull vertices: {len(report['lower_hull']['vertices'])} of "
+          f"{len(configs)} configurations")
     return 0
 
 
