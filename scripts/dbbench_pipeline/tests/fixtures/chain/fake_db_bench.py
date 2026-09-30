@@ -4,8 +4,8 @@ prints a run.log and writes a RocksDB LOG and a host log that agree with
 each other, so 04 scores the arm and 19 finds turnovers of L2: 20 per 26.1M
 mixgraph operations for Assoc, 6 for the power law. For 18 it prints result
 lines and tickers of trees whose per-operation costs are known: 0.5 us a
-filter probe, 1 us a block read, 2 us a run seek. FAKE_FAIL_POWERLAW=1 makes
-every power-law arm fail as an I/O error would."""
+filter probe, 1 us a block read, 2 us a run seek. FAKE_FAIL_WORKLOAD=assoc (or
+powerlaw) makes every arm of that workload fail as an I/O error would."""
 import json
 import os
 import sys
@@ -43,7 +43,7 @@ if bench in ("readrandom", "readmissing", "seekrandom"):
     sys.exit(0)
 assert "mixgraph" in bench, bench
 power = float(args.get("mix_get_ratio", "0.806")) > 0.9
-if power and os.environ.get("FAKE_FAIL_POWERLAW") == "1":
+if os.environ.get("FAKE_FAIL_WORKLOAD") == ("powerlaw" if power else "assoc"):
     print("IO error: fake failure")
     sys.exit(1)
 

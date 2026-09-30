@@ -568,8 +568,7 @@ class MainTest(unittest.TestCase):
         cases = (([self.released("d1", [0, 5, 8, 300]),
                    self.released("d2", [0, 5, 8, 300, 7], (0, 1, 2, 4, 8))],
                   "differ in depth"),
-                 ([self.run_dir("n")], "no compaction_release after n_w"),
-
+                 ([self.run_dir("n")], "/n: no compaction_release after n_w"),
                  ([self.released("s", [0, 500], (0, 1000))], "too shallow"))
         for runs, message in cases:
             with self.subTest(message=message):

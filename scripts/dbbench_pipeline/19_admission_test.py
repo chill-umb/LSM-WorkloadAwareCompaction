@@ -600,11 +600,20 @@ def main() -> int:
         raise SystemExit("--levels must include the reference level")
     levels, mean_fill = args.levels, None
     if levels is None:  # a first, cheap pass for the cell's settled tree
+        first_pass = []
+        for run in args.runs:
+            try:
+                tree = read_run(run, [], raw)[0]["tree"]
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise SystemExit(f"{run}: {error}") from error
+            if tree is None:
+                raise SystemExit(f"{run}: no compaction_release after n_w, so "
+                                 "no settled tree; pass --levels")
+            first_pass.append(tree)
         try:
             levels, mean_fill = cell_candidates(
-                [read_run(run, [], raw)[0]["tree"] for run in args.runs],
-                reference, raw["last_level_near_target"])
-        except (OSError, ValueError, KeyError, TypeError) as error:
+                first_pass, reference, raw["last_level_near_target"])
+        except ValueError as error:
             raise SystemExit(str(error)) from error
     per_level: dict[int, list[list[dict]]] = {}
     empty: dict[int, int] = {}
@@ -655,8 +664,8 @@ def main() -> int:
     report = {"schema_version": 2, "experiment_fingerprint": fingerprint,
               "config": config, "settled_depth": depths.pop() if len(depths) == 1
               else None,
-              # Per run, [L, B_L/C_L]: the fill decides whether L-1 is a
-              # candidate (D-16 §3).
+              # Per run, [L, B_L/C_L]: their mean fill decides whether L-1
+              # is a candidate (D-16 §3).
               "settled_tree_per_run": trees, "last_level_mean_fill": mean_fill,
               "empty_turnovers": empty,
               **membership(per_level, config, geometry)}

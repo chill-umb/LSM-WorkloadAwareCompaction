@@ -134,18 +134,29 @@ no new code: if one fails, stop and report the output. Step d cannot start
 in the first session; it says what must exist first.
 
 **Unattended:** after step a, `24_gate_n1_chain.sh` runs step c and steps
-d.1–d.3 for both workloads in one go (about 10–14 hours). It first checks
-the results disk (writable, not tmpfs, `MIN_FREE_GB`, default 60), the venv,
-the fork commit and leftover result folders, so a setup mistake fails in
-seconds. Each workload's chain runs as its own process, so one workload's
-failure leaves the other to finish; the prices then wait. Run it in `tmux`:
+d.1–d.3 for both workloads in one go: about 13–16 hours, up to about 20 if
+the power law needs the (290, 1) rung (`STOP_AFTER_N1=1` stops after the
+admission tests, about 5–8 hours). It first checks the results disk
+(writable, not tmpfs, not the root filesystem unless `ALLOW_ROOT_DISK=1`,
+`MIN_FREE_GB` free, default 60), the venv, the fork commit and leftover
+result and database folders, so a setup mistake fails in seconds. Each
+workload's chain runs as its own process, so one workload's failure leaves
+the other to finish; the prices then wait. Run it in `tmux`:
 
 ```bash
 NVME=/mnt/nvme scripts/dbbench_pipeline/24_gate_n1_chain.sh 2>&1 | tee ~/gate_n1.log
 ```
 
-`STOP_AFTER_N1=1` ends after the admission tests; `RESUME=1` reuses the
-finished arms of a failed night. `PARITY_PAIRS` defaults to 10 here.
+- `PARITY_PAIRS` defaults to 10 here.
+- Do not `git pull`, or edit files under `scripts/dbbench_pipeline` or
+  `rl_agent`, while it runs: the preflight marker hashes them, and every
+  later `03` call refuses a changed tree (exit 7).
+- An arm that does not settle makes `04` refuse it (exit 3), which ends
+  that workload's chain, as D-13 §6 intends; the log names the arm.
+- **After a failure,** find the failed arm in the log, delete its result
+  folder and its database folder (03 keeps both on purpose), then rerun
+  with `RESUME=1`. The rerun skips every finished arm but repeats the
+  preflight and the admission tests.
 
 a. Publish and fetch the code. On the machine that holds the commits, push
    the fork first, since the root records a fork commit:

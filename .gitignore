@@ -119,3 +119,13 @@ graphify-out/
 # tree of 01b is build output.
 !**/tests/fixtures/**
 /build-dbbench-debug/
+
+# Editor swap and backup files. The preflight marker hashes every file git
+# does not ignore under the pipeline and rl_agent/, so one of these appearing
+# mid-night would make every later 03 run refuse (exit 7). Last, so they stay
+# ignored under tests/fixtures too.
+*.swp
+*.swo
+*~
+.#*
+.nfs*

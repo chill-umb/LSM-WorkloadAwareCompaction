@@ -63,17 +63,23 @@ class ChainTest(unittest.TestCase):
         executable(self.venv / "bin" / "python",
                    f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
 
-    def run24(self, **overrides) -> subprocess.CompletedProcess:
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("RESUME", "STOP_AFTER_N1", "PARITY_PAIRS")}
+    # Variables of 24 and config.sh that would point the copy at real paths
+    # or change its behaviour if exported where the test runs.
+    SCRUBBED = ("RESUME", "STOP_AFTER_N1", "PARITY_PAIRS", "ALLOW_ROOT_DISK",
+                "FAKE_FAIL_WORKLOAD", "DBBENCH_BUILD_DIR", "PREFLIGHT_MARKER",
+                "PREFLIGHT_WORK_DIR", "PRICES_FILE", "DB_ROOT", "RESULTS_ROOT",
+                "SESSION_ID", "KEEP_DATABASES")
+
+    def run24(self, cwd=None, script=None, **overrides) -> subprocess.CompletedProcess:
+        env = {k: v for k, v in os.environ.items() if k not in self.SCRUBBED}
         env.update({"NVME": str(self.nvme), "MIN_FREE_GB": "0",
                     "DBBENCH_CPUS": "", "CONTROLLER_CPUS": "",
                     "PYTHON_VENV": str(self.venv), "ALLOW_CONCURRENT_RUNS": "1",
-                    **overrides})
-        return subprocess.run(
-            ["bash", str(self.root / "scripts" / "dbbench_pipeline" /
-                         "24_gate_n1_chain.sh")],
-            env=env, capture_output=True, text=True, timeout=600)
+                    "ALLOW_ROOT_DISK": "1", **overrides})
+        script = script or str(self.root / "scripts" / "dbbench_pipeline" /
+                               "24_gate_n1_chain.sh")
+        return subprocess.run(["bash", script], cwd=cwd, env=env,
+                              capture_output=True, text=True, timeout=600)
 
     def admission(self, workload, ratio):
         return json.loads((self.nvme / f"n1-{workload}" /
@@ -100,16 +106,25 @@ class ChainTest(unittest.TestCase):
                                    1.0, places=6, msg=key)
 
     def test_a_failing_workload_leaves_the_other_to_finish(self):
-        ran = self.run24(FAKE_FAIL_POWERLAW="1")
-        self.assertEqual(ran.returncode, 1)
-        self.assertIn("powerlaw FAILED", ran.stdout)
-        self.assertIn("stopping before the prices", ran.stderr)
-        self.assertTrue((self.nvme / "qbar-assoc" / "graphs" / "summary.csv").exists())
-        self.assertFalse((self.nvme / "qbar-powerlaw").exists())
-        self.assertFalse((self.root / "build-dbbench" / "prices.json").exists())
+        for failing, other in (("powerlaw", "assoc"), ("assoc", "powerlaw")):
+            with self.subTest(failing=failing):
+                nvme = self.nvme / f"fail-{failing}"
+                nvme.mkdir()
+                ran = self.run24(NVME=str(nvme), FAKE_FAIL_WORKLOAD=failing)
+                self.assertEqual(ran.returncode, 1)
+                self.assertIn(f"{failing} FAILED", ran.stdout)
+                self.assertIn("stopping before the prices", ran.stderr)
+                self.assertTrue((nvme / f"qbar-{other}" / "graphs" /
+                                 "summary.csv").exists())
+                self.assertFalse((nvme / f"qbar-{failing}").exists())
+                self.assertFalse((self.root / "build-dbbench" / "prices.json").exists())
 
-    def test_stop_after_gate_n1(self):
-        ran = self.run24(STOP_AFTER_N1="1")
+    def test_stop_after_gate_n1_started_from_another_folder(self):
+        # The workload chains are 24 re-run by path after it cds to the repo
+        # root, so a relative start from elsewhere must still find it.
+        ran = self.run24(cwd=self.root.parent,
+                         script="repo/scripts/dbbench_pipeline/24_gate_n1_chain.sh",
+                         STOP_AFTER_N1="1")
         self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
         self.assertIn("stopped after Gate N1", ran.stdout)
         self.assertEqual(self.admission("powerlaw", 10)["run_length"]["rung"],
@@ -117,11 +132,16 @@ class ChainTest(unittest.TestCase):
         self.assertFalse((self.nvme / "qbar-assoc").exists())
 
     def test_checks_fail_before_the_preflight(self):
-        (self.nvme / "n1-assoc").mkdir()
-        cases = ({}, {"MIN_FREE_GB": "999999"},
-                 {"PYTHON_VENV": str(Path(self.tmp.name) / "none")})
-        messages = ("exists: move it away", "GB free", "no Python")
-        for overrides, message in zip(cases, messages):
+        leftovers = {"n1-assoc": self.nvme / "a", "n1-dbs": self.nvme / "b"}
+        for name, nvme in leftovers.items():
+            (nvme / name).mkdir(parents=True)
+        cases = [({"NVME": str(leftovers["n1-assoc"])}, "n1-assoc exists"),
+                 ({"NVME": str(leftovers["n1-dbs"])}, "n1-dbs exists"),
+                 ({"MIN_FREE_GB": "999999"}, "GB free"),
+                 ({"PYTHON_VENV": str(Path(self.tmp.name) / "none")}, "no Python")]
+        if os.stat(self.nvme).st_dev == os.stat("/").st_dev:
+            cases.append(({"ALLOW_ROOT_DISK": "0"}, "on the root filesystem"))
+        for overrides, message in cases:
             with self.subTest(message=message):
                 ran = self.run24(**overrides)
                 self.assertEqual(ran.returncode, 1)

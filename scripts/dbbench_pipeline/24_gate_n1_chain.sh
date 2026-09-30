@@ -10,7 +10,9 @@
 # watching.
 #   NVME=/mnt/nvme scripts/dbbench_pipeline/24_gate_n1_chain.sh
 #   STOP_AFTER_N1=1   ends each workload after its admission test
-#   RESUME=1          after a failed night: 03 skips finished arms
+#   RESUME=1          after a failed night: 03 skips finished arms (delete a
+#                     failed arm's result and database folders first)
+#   ALLOW_ROOT_DISK=1 when NVME is meant to be on the root filesystem
 set -Eeuo pipefail
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,15 +111,27 @@ mkdir -p "$NVME" && touch "$NVME/.write_test" && rm -f "$NVME/.write_test" ||
 free_gb="$(df --output=avail -BG "$NVME" | tail -n 1 | tr -dc 0-9)"
 (( free_gb >= ${MIN_FREE_GB:-60} )) ||
   fail "only ${free_gb} GB free on $NVME; about ${MIN_FREE_GB:-60} GB are needed"
+# Every folder a night writes under NVME must not exist yet: 03 refuses an
+# existing results root, and a failed arm's database.
 if [[ "${RESUME:-0}" != 1 ]]; then
-  for d in n1-assoc n1-powerlaw qbar-assoc qbar-powerlaw; do
+  for d in n1-assoc n1-powerlaw qbar-assoc qbar-powerlaw n1-dbs qbar-dbs; do
     [[ ! -e "$NVME/$d" ]] || fail "$NVME/$d exists: move it away, or rerun with RESUME=1"
   done
 fi
-recorded="$(git ls-tree HEAD lib/rocksdb 2>/dev/null | awk '{print $3}' || true)"
-if [[ -n "$recorded" &&
-      "$(git -C lib/rocksdb rev-parse HEAD 2>/dev/null)" != "$recorded" ]]; then
-  fail "lib/rocksdb is not at the recorded commit $recorded; run git submodule update --init --recursive"
+# The measurements are of the disk NVME is on. An unmounted /mnt/nvme is a
+# plain folder on the root disk, so that is refused unless meant.
+echo "[24] results disk: $(df --output=source,fstype,target "$NVME" | tail -n 1)"
+if [[ "$(stat -c %d "$NVME")" == "$(stat -c %d /)" && "${ALLOW_ROOT_DISK:-0}" != 1 ]]; then
+  fail "$NVME is on the root filesystem: is the NVMe mounted? If the root disk" \
+       "is the device to measure, rerun with ALLOW_ROOT_DISK=1"
+fi
+if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  recorded="$(git ls-tree HEAD lib/rocksdb | awk '{print $3}')"
+  [[ -n "$recorded" ]] || fail "cannot read the recorded lib/rocksdb commit"
+  [[ "$(git -C lib/rocksdb rev-parse HEAD 2>/dev/null)" == "$recorded" ]] ||
+    fail "lib/rocksdb is not at the recorded commit $recorded; run git submodule update --init --recursive"
+else
+  echo "[24] not a git checkout with commits; the fork commit is not checked"
 fi
 if [[ -n "$DBBENCH_CPUS" ]] && ! command -v taskset >/dev/null; then
   fail "taskset is not installed"
@@ -129,7 +143,8 @@ CONFIRM_PREFLIGHT_VERIFICATION=YES PARITY_PAIRS="$NIGHT_PARITY_PAIRS" \
 
 status=0
 for w in assoc powerlaw; do
-  "$BASH" "${BASH_SOURCE[0]}" workload "$w" ||
+  # By absolute path: the working folder is now the repo root.
+  "$BASH" "$PIPELINE_DIR/24_gate_n1_chain.sh" workload "$w" ||
     { stamp "$w FAILED; the other workload goes on"; status=1; }
 done
 (( status == 0 )) || fail "stopping before the prices: a workload's chain failed"
