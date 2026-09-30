@@ -74,22 +74,23 @@ if [[ -f "$BUILD_PROVENANCE" ]]; then
 fi
 RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.json | awk '{print $1}')"
 
-# Inherited by every db_bench launch. The C++ side aborts if it is set but
-# unusable, so a typo stops the run instead of quietly measuring an unexpanded
-# tree.
-export RL_STATIC_CAPACITY_SCALES="$STATIC_CAPACITY_SCALES"
-# The fingerprint gains a cap segment only when expansion is on, so an
-# unexpanded run keeps the identity it had before this knob existed and stays
-# poolable with the arms already measured.
-CAPACITY_TAG="off"
-CAPACITY_FINGERPRINT=""
-if [[ -n "$STATIC_CAPACITY_SCALES" ]]; then
-  CAPACITY_TAG="${STATIC_CAPACITY_SCALES//,/x}"
-  [[ "$CAPACITY_TAG" =~ ^[0-9.x]+$ ]] || {
-    echo "STATIC_CAPACITY_SCALES must be comma-separated numbers." >&2
+# The C++ no longer reads RL_STATIC_CAPACITY_SCALES (WP1), so a leftover
+# setting would be silently ignored. Refuse it instead.
+if [[ -n "${STATIC_CAPACITY_SCALES:-}${RL_STATIC_CAPACITY_SCALES:-}" ]]; then
+  echo "STATIC_CAPACITY_SCALES was replaced by LEVEL_TARGET_MULTIPLIERS" \
+       "(\":\"-separated, e.g. 1:1:1:1:1:2:1)." >&2
+  exit 1
+fi
+# Level target multipliers go to db_bench as its option, which RocksDB
+# validates at open. The fingerprint gains an ltm segment only when they are
+# set, so an unscaled run keeps its identity and stays poolable.
+MULTIPLIER_FINGERPRINT=""
+if [[ -n "$LEVEL_TARGET_MULTIPLIERS" ]]; then
+  [[ "$LEVEL_TARGET_MULTIPLIERS" =~ ^[0-9.]+(:[0-9.]+)*$ ]] || {
+    echo "LEVEL_TARGET_MULTIPLIERS must be \":\"-separated numbers." >&2
     exit 1
   }
-  CAPACITY_FINGERPRINT=":cap${CAPACITY_TAG}"
+  MULTIPLIER_FINGERPRINT=":ltm${LEVEL_TARGET_MULTIPLIERS//:/x}"
 fi
 
 # Expand a taskset -c list ("0-7,12") into one CPU number per line.
@@ -466,6 +467,8 @@ COMMON=(
   --perf_level=1
   --stats_dump_period_sec="$STATS_DUMP_PERIOD_SECONDS"
 )
+[[ -z "$LEVEL_TARGET_MULTIPLIERS" ]] ||
+  COMMON+=(--level_target_multipliers="$LEVEL_TARGET_MULTIPLIERS")
 
 sst_bytes() {  # $1=database directory
   find "$1" -maxdepth 1 -type f -name '*.sst' -printf '%s\n' 2>/dev/null |
@@ -704,7 +707,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${CAPACITY_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -787,7 +790,7 @@ PY
     printf 'value_pareto=%s,%s,%s\n' "$VALUE_THETA" "$VALUE_K" "$VALUE_SIGMA"
     printf 'mix_max_value_size=%s\n' "$MIX_MAX_VALUE_SIZE"
     printf 'iter_pareto=%s,%s,%s\n' "$SCAN_LENGTH" "$ITER_K" "$ITER_SIGMA"
-    printf 'static_capacity_scales=%s\n' "${STATIC_CAPACITY_SCALES:-none}"
+    printf 'level_target_multipliers=%s\n' "${LEVEL_TARGET_MULTIPLIERS:-none}"
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
     printf 'baseline_level_base_scale=%s\n' "${BASELINE_LEVEL_BASE_SCALE:-1}"
     printf 'num_levels=%s\n' "$NUM_LEVELS"

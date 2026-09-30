@@ -46,10 +46,10 @@ for ratio in $SIZE_RATIOS; do
          for base_scale in $BASELINE_LEVEL_BASE_SCALES; do
           base_bytes="$(awk -v base="$MAX_BYTES_FOR_LEVEL_BASE" -v scale="$base_scale" \
             'BEGIN { if (scale <= 0 || base <= 0) exit 1; printf "%.0f", base * scale }')"
-          capacity_tag=""
-          [[ -z "${STATIC_CAPACITY_SCALES:-}" ]] || \
-            capacity_tag="-cap${STATIC_CAPACITY_SCALES//,/x}"
-          config_id="T${ratio}-l0-${compact_trigger}-${slowdown_trigger}-${stop_trigger}-pri${priority}-base${base_bytes}${capacity_tag}"
+          multiplier_tag=""
+          [[ -z "${LEVEL_TARGET_MULTIPLIERS:-}" ]] || \
+            multiplier_tag="-ltm${LEVEL_TARGET_MULTIPLIERS//:/x}"
+          config_id="T${ratio}-l0-${compact_trigger}-${slowdown_trigger}-${stop_trigger}-pri${priority}-base${base_bytes}${multiplier_tag}"
           result_root="$BASELINE_RESULTS_ROOT/$config_id"
           db_root="$BASELINE_DB_ROOT/$config_id"
           if (( DRY_RUN )); then

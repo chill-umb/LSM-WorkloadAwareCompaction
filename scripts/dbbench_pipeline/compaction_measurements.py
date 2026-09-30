@@ -47,7 +47,7 @@ def nonnegative_int(value) -> int:
 def release_snapshot(event: dict, num_levels: int) -> dict:
     required = ("release_micros", "source_level", "output_level",
                 "rl_decision_id", "effective_action", "rl_override_reason",
-                "capacity_generation", "occupancy_bytes", "nominal_target_bytes")
+                "occupancy_bytes", "nominal_target_bytes")
     if event.get("release_schema_version") != 1 or any(
             key not in event for key in required):
         raise ValueError("release event lacks the Gate-0 snapshot")
@@ -56,7 +56,7 @@ def release_snapshot(event: dict, num_levels: int) -> dict:
     if len(occupancy) != num_levels or len(targets) != num_levels:
         raise ValueError("release snapshot geometry mismatch")
     for value in (*occupancy, *targets, event["release_micros"],
-                  event["rl_decision_id"], event["capacity_generation"]):
+                  event["rl_decision_id"]):
         nonnegative_int(value)
     source = nonnegative_int(event["source_level"])
     if source >= num_levels or event["output_level"] >= num_levels:
