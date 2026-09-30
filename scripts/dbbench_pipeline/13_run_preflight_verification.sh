@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Cloud-only, staged verification before launching the full multi-day matrix.
+# Tier 3, the preflight (plan §6.4; CLAUDE.md "Tests"). Runs the checks in
+# order and writes the marker PREFLIGHT_PASSED, bound to the db_bench, plugin
+# and code hashes, which 03_run_experiments.sh requires before any long run.
 #
-# Default sequence:
-#   1. 1M/T2 regular-vs-oracle bridge regression (10 pairs).
-#   2. 5M/T2 narrowed baseline, 3+3 live-guard protocol, then one
-#      unconstrained/constrained learner checkpoint at seed 20001.
-#   3. One 10M/T2 learned-arm checkpoint only after 5M learner health passes.
+#   1 rebuild the Release db_bench (and the plugin)   4 parity, ACT-4 and ARCH-5
+#   2 tier 1 and tier 2 suites                        5 rules-mode smoke
+#   3 ACT-1 on the real binary                        6 learner smoke
 #
-# This script never builds RocksDB/db_bench. It requires freshly rebuilt cloud
-# binaries and invokes only the existing experiment/analysis entry points.
+# A step whose component does not exist yet is skipped and recorded as skipped;
+# a run whose arms need that step is then refused by 03. A step whose component
+# exists but whose check is not wired in here fails, so nothing passes by
+# omission. Wire each step in the same change that builds its component.
 set -Eeuo pipefail
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,423 +19,71 @@ cd "$PROJECT_ROOT"
 # shellcheck source=config.sh
 source "$PIPELINE_DIR/config.sh"
 
-PREFLIGHT_ROOT="${PREFLIGHT_ROOT:-/mnt/nvme/lsm-guardfix-verification}"
-PREFLIGHT_RESULTS_ROOT="${PREFLIGHT_RESULTS_ROOT:-$PREFLIGHT_ROOT/results}"
-PREFLIGHT_DB_ROOT="${PREFLIGHT_DB_ROOT:-$PREFLIGHT_ROOT/databases}"
-PREFLIGHT_MANIFEST_ROOT="${PREFLIGHT_MANIFEST_ROOT:-$PREFLIGHT_ROOT/manifests}"
-PREFLIGHT_WORKLOAD_PROFILE="${PREFLIGHT_WORKLOAD_PROFILE:-balanced-v1}"
-PREFLIGHT_CELLS_M="${PREFLIGHT_CELLS_M:-5 10}"
-PREFLIGHT_RUN_ORACLE="${PREFLIGHT_RUN_ORACLE:-1}"
-PREFLIGHT_ORACLE_REPEATS="${PREFLIGHT_ORACLE_REPEATS:-10}"
-PREFLIGHT_FINAL_REPEATS_5M="${PREFLIGHT_FINAL_REPEATS_5M:-1}"
-PREFLIGHT_FINAL_REPEATS_10M="${PREFLIGHT_FINAL_REPEATS_10M:-1}"
-PREFLIGHT_MIN_TRAIN_STEPS="${PREFLIGHT_MIN_TRAIN_STEPS:-100}"
-PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS="${PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS:-320}"
-PREFLIGHT_REQUIRE_10M_ACTION_FLIP="${PREFLIGHT_REQUIRE_10M_ACTION_FLIP:-1}"
-PREFLIGHT_RESUME="${PREFLIGHT_RESUME:-0}"
-PREFLIGHT_KEEP_DATABASES="${PREFLIGHT_KEEP_DATABASES:-0}"
-PREFLIGHT_CALIBRATION_SEED_BASE="${PREFLIGHT_CALIBRATION_SEED_BASE:-1001}"
-PREFLIGHT_HOLDOUT_SEED_BASE="${PREFLIGHT_HOLDOUT_SEED_BASE:-11001}"
-PREFLIGHT_EXPERIMENT_SEED_BASE="${PREFLIGHT_EXPERIMENT_SEED_BASE:-20001}"
-PREFLIGHT_GUARD_READY=1
-
-for flag in "$PREFLIGHT_RUN_ORACLE" "$PREFLIGHT_REQUIRE_10M_ACTION_FLIP" \
-            "$PREFLIGHT_RESUME" "$PREFLIGHT_KEEP_DATABASES"; do
-  [[ "$flag" =~ ^[01]$ ]] || {
-    echo "Preflight Boolean settings must be 0 or 1; got: $flag" >&2
-    exit 1
-  }
-done
-for integer in "$PREFLIGHT_ORACLE_REPEATS" \
-               "$PREFLIGHT_FINAL_REPEATS_5M" \
-               "$PREFLIGHT_FINAL_REPEATS_10M" \
-               "$PREFLIGHT_MIN_TRAIN_STEPS" \
-               "$PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS"; do
-  [[ "$integer" =~ ^[1-9][0-9]*$ ]] || {
-    echo "Preflight counts must be positive integers; got: $integer" >&2
-    exit 1
-  }
-done
-if (( PREFLIGHT_RUN_ORACLE && PREFLIGHT_ORACLE_REPEATS < 5 )); then
-  echo "Oracle preflight requires at least 5 paired repeats;" >&2
-  echo "paired confidence envelopes are not judged from fewer than five." >&2
-  exit 1
-fi
-
-cell_count=0
-estimated_operations_m=0
-for size_m in $PREFLIGHT_CELLS_M; do
-  case "$size_m" in
-    5)
-      final_repeats="$PREFLIGHT_FINAL_REPEATS_5M"
-      ;;
-    10)
-      final_repeats="$PREFLIGHT_FINAL_REPEATS_10M"
-      ;;
-    *)
-      echo "PREFLIGHT_CELLS_M supports only the staged 5M and 10M cells." >&2
-      exit 1
-      ;;
-  esac
-  cell_count=$(( cell_count + 1 ))
-  # Six narrowed-baseline arms, six calibration/holdout oracle arms, and two
-  # learned diagnostic arms per repeat.
-  estimated_operations_m=$(( estimated_operations_m +
-      size_m * (12 + 2 * final_repeats) ))
-done
-(( cell_count > 0 )) || {
-  echo "PREFLIGHT_CELLS_M must contain at least one cell." >&2
-  exit 1
-}
-if (( PREFLIGHT_RUN_ORACLE )); then
-  estimated_operations_m=$(( estimated_operations_m +
-      2 * PREFLIGHT_ORACLE_REPEATS ))
-fi
-
 if [[ "${CONFIRM_PREFLIGHT_VERIFICATION:-}" != "YES" ]]; then
-  echo "This launches the staged cloud preflight verification." >&2
-  echo "  oracle parity: $PREFLIGHT_RUN_ORACLE" >&2
-  echo "  workload cells: $PREFLIGHT_CELLS_M (all T=2)" >&2
-  echo "  results: $PREFLIGHT_RESULTS_ROOT" >&2
-  echo "  databases: $PREFLIGHT_DB_ROOT" >&2
-  echo "  approximately ${estimated_operations_m}M benchmark operations" >&2
-  echo "Set CONFIRM_PREFLIGHT_VERIFICATION=YES after reviewing these paths." >&2
+  echo "This rebuilds db_bench, builds the Debug test tree and runs the" >&2
+  echo "preflight; the marker goes to $PREFLIGHT_MARKER." >&2
+  echo "Set CONFIRM_PREFLIGHT_VERIFICATION=YES to start." >&2
   exit 2
 fi
 
 if [[ "$PYTHON_VENV" = /* ]]; then
-  PREFLIGHT_PYTHON="$PYTHON_VENV/bin/python"
+  PYTHON="$PYTHON_VENV/bin/python"
 else
-  PREFLIGHT_PYTHON="$PROJECT_ROOT/$PYTHON_VENV/bin/python"
+  PYTHON="$PROJECT_ROOT/$PYTHON_VENV/bin/python"
 fi
-if [[ "$DBBENCH_BUILD_DIR" = /* ]]; then
-  PREFLIGHT_DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
-else
-  PREFLIGHT_DB_BENCH="$PROJECT_ROOT/$DBBENCH_BUILD_DIR/db_bench"
-fi
-[[ -x "$PREFLIGHT_PYTHON" ]] || {
-  echo "Missing pipeline Python: $PREFLIGHT_PYTHON" >&2
+[[ -x "$PYTHON" ]] || { echo "Missing $PYTHON; run step 00 first." >&2; exit 1; }
+DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
+
+passed=()
+skipped=()
+pass() { echo "[step $1] PASS"; passed+=("$1"); }
+skip() { echo "[step $1] SKIP: $2"; skipped+=("$1=$2"); }
+unwired() {
+  echo "[step $1] FAIL: $2 exists, but this step is not wired into 13 yet" \
+       "(plan §6.4)." >&2
   exit 1
 }
-[[ -x "$PREFLIGHT_DB_BENCH" ]] || {
-  echo "Missing cloud db_bench: $PREFLIGHT_DB_BENCH" >&2
-  echo "Rebuild the modified cloud checkout before running this preflight." >&2
-  exit 1
-}
-mkdir -p "$PREFLIGHT_RESULTS_ROOT" "$PREFLIGHT_DB_ROOT" \
-         "$PREFLIGHT_MANIFEST_ROOT/selection" \
-         "$PREFLIGHT_MANIFEST_ROOT/final"
 
-run_oracle_regression() {
-  local result_root="$PREFLIGHT_RESULTS_ROOT/oracle-1m"
-  local database_root="$PREFLIGHT_DB_ROOT/oracle-1m"
-  local report="$result_root/graphs/oracle-parity.json"
+# A stale marker must not outlive a failed preflight.
+rm -f "$PREFLIGHT_MARKER"
 
-  echo
-  echo "=== Stage 1: 1M/T2 oracle bridge regression ==="
-  WORKLOAD_PROFILE="$PREFLIGHT_WORKLOAD_PROFILE" \
-  WORKLOAD_SIZES_M=1 SIZE_RATIOS=2 \
-  EXPERIMENT_ARMS="regular oracle" \
-  REPEATS="$PREFLIGHT_ORACLE_REPEATS" \
-  RL_RUN_PHASE=experiment \
-  RESULTS_ROOT="$result_root" DB_ROOT="$database_root" \
-  RESUME="$PREFLIGHT_RESUME" KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
-  CONFIRM_EXPERIMENTS=YES \
-    "$PIPELINE_DIR/03_run_experiments.sh"
+echo "=== step 1: rebuild the Release db_bench ==="
+if [[ -d controller ]]; then unwired 1 "controller/ (the plugin build)"; fi
+"$PIPELINE_DIR/01_build_rocksdb.sh"
+"$PIPELINE_DIR/02_build_db_bench.sh"
+echo "db_bench sha256: $(sha256sum "$DB_BENCH" | awk '{print $1}')"
+pass 1
 
-  "$PIPELINE_DIR/04_generate_graphs.sh" --results "$result_root"
-  set +e
-  "$PREFLIGHT_PYTHON" "$PIPELINE_DIR/09_evaluate_oracle_parity.py" \
-    "$result_root/graphs/summary.csv" \
-    --size-millions 1 --size-ratio 2 \
-    --minimum-pairs "$PREFLIGHT_ORACLE_REPEATS" \
-    --minimum-envelope-pairs "$PREFLIGHT_ORACLE_REPEATS" \
-    --admission-latency-limit-micros 5000 \
-    --output "$report"
-  local evaluator_status=$?
-  set -e
-  if (( evaluator_status != 0 && evaluator_status != 2 )); then
-    echo "Oracle regression failed; inspect $report" >&2
-    exit 1
-  fi
-  "$PREFLIGHT_PYTHON" - "$report" <<'PY'
-import json
-import sys
+echo "=== step 2: tier 1 and tier 2 suites ==="
+"$PIPELINE_DIR/run_python_tests.sh"
+"$PIPELINE_DIR/01b_build_test_trees.sh"
+pass 2
 
-path = sys.argv[1]
-report = json.load(open(path, encoding="utf-8"))
-failed = report.get("failed_checks", [])
-if failed:
-    raise SystemExit(f"oracle regression has failed checks: {failed}")
-blocking_undecided = []
-for name, check in report.get("checks", {}).items():
-    if check.get("passed") is not None:
-        continue
-    allowed = (
-        check.get("kind") == "paired_envelope"
-        and check.get("verdict") == "insufficient_pairs"
-    ) or (
-        name == "stall_duration"
-        and check.get("verdict") == "no_allowance_configured"
-    )
-    if not allowed:
-        blocking_undecided.append(
-            {"check": name, "verdict": check.get("verdict")}
-        )
-if blocking_undecided:
-    raise SystemExit(
-        "oracle regression has non-statistical undecided checks: "
-        f"{blocking_undecided}"
-    )
-print(
-    "oracle regression:", report.get("verdict"),
-    "(no failed checks; only underpowered envelopes are deferred)",
-)
-PY
-}
-
-screen_learning_health() {
-  local result_root="$1" size_m="$2" repeats="$3" require_flip="$4"
-  local output="$result_root/learning-health-screen.json"
-  "$PREFLIGHT_PYTHON" - "$result_root" "$size_m" "$repeats" \
-    "$PREFLIGHT_MIN_TRAIN_STEPS" \
-    "$PREFLIGHT_MIN_FULL_HORIZON_TRANSITIONS" \
-    "$require_flip" "$output" <<'PY'
-import json
-import os
-import sys
-import tempfile
-from pathlib import Path
-
-(root_arg, size_arg, repeats_arg, steps_arg, finalized_arg,
- require_flip_arg, output_arg) = sys.argv[1:]
-root = Path(root_arg)
-size_m = int(size_arg)
-expected_repeats = int(repeats_arg)
-minimum_steps = int(steps_arg)
-minimum_finalized = int(finalized_arg)
-require_flip = bool(int(require_flip_arg))
-output = Path(output_arg)
-
-failures = []
-runs = {}
-for arm in ("unconstrained_rl", "rl"):
-    paths = sorted(root.glob(f"{size_m}M/T2/**/{arm}/learning_health.json"))
-    if len(paths) != expected_repeats:
-        failures.append(
-            f"{arm}: expected {expected_repeats} health reports, found {len(paths)}"
-        )
-    runs[arm] = []
-    for path in paths:
-        report = json.loads(path.read_text())
-        summary = report.get("server_summary") or {}
-        decisions = int(summary.get("decisions", 0))
-        item = {
-            "directory": str(path.parent),
-            "passed": report.get("passed") is True,
-            "decisions": decisions,
-            "accepted_decisions": int(summary.get("accepted_decisions", 0)),
-            "rejected_decisions": int(summary.get("rejected_decisions", 0)),
-            "override_relabels": int(summary.get("override_relabels", 0)),
-            "full_horizon_transitions": int(
-                summary.get("full_horizon_transitions", 0)
-            ),
-            "boundary_truncated_transitions": int(
-                summary.get("boundary_truncated_transitions", 0)
-            ),
-            "shutdown_terminal_transitions": int(
-                summary.get("shutdown_terminal_transitions", 0)
-            ),
-            "finalized_transitions": int(
-                summary.get("finalized_transitions", 0)
-            ),
-            "replay_size": int(summary.get("replay_size", 0)),
-            "train_steps": int(summary.get("train_steps", 0)),
-            "max_abs_residual_advantage": float(
-                summary.get("max_abs_residual_advantage", 0.0)
-            ),
-            "argmax_flip_count": int(summary.get("argmax_flip_count", 0)),
-            "argmax_comparison_count": int(
-                summary.get("argmax_comparison_count", 0)
-            ),
-            "reward_invalid_intervals": int(
-                summary.get("reward_invalid_intervals", 0)
-            ),
-            "reward_invalid_reason_counts": summary.get(
-                "reward_invalid_reason_counts", {}
-            ),
-            "protocol_errors": int(summary.get("protocol_errors", 0)),
-            "accepted_accounting_balanced": summary.get(
-                "accepted_accounting_balanced") is True,
-            "proposal_accounting_balanced": summary.get(
-                "proposal_accounting_balanced") is True,
-            "trainer_error": summary.get("trainer_error"),
-        }
-        runs[arm].append(item)
-        if not item["passed"]:
-            failures.append(f"{arm}: hard learning-health gate failed at {path.parent}")
-        if not (path.parent / "COMPLETED").exists():
-            failures.append(f"{arm}: missing COMPLETED at {path.parent}")
-        if item["train_steps"] < minimum_steps:
-            failures.append(
-                f"{arm}: only {item['train_steps']} optimizer steps at {path.parent}; "
-                f"meaningful-screen minimum is {minimum_steps}"
-            )
-        if item["full_horizon_transitions"] < minimum_finalized:
-            failures.append(
-                f"{arm}: only {item['full_horizon_transitions']} full-horizon "
-                "transitions "
-                f"at {path.parent}; minimum is {minimum_finalized}"
-            )
-        if item["max_abs_residual_advantage"] <= 1e-8:
-            failures.append(f"{arm}: residual remained zero at {path.parent}")
-if require_flip:
-    learned_flips = sum(
-        item["argmax_flip_count"]
-        for arm in ("unconstrained_rl", "rl") for item in runs[arm]
-    )
-    if learned_flips == 0:
-        failures.append(
-            "zero prior-vs-learned argmax flips across the 10M checkpoint"
-        )
-
-report = {
-    "schema_version": 2,
-    "size_millions": size_m,
-    "size_ratio": 2,
-    "expected_repeats": expected_repeats,
-    "thresholds": {
-        "minimum_train_steps_per_learned_run": minimum_steps,
-        "minimum_full_horizon_transitions_per_learned_run": minimum_finalized,
-        "require_learned_action_flip": require_flip,
-    },
-    "runs": runs,
-    "failures": failures,
-    "passed": not failures,
-}
-output.parent.mkdir(parents=True, exist_ok=True)
-with tempfile.NamedTemporaryFile(
-    "w", encoding="utf-8", dir=output.parent, delete=False
-) as handle:
-    temporary = Path(handle.name)
-    json.dump(report, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-    handle.flush()
-    os.fsync(handle.fileno())
-os.replace(temporary, output)
-print(json.dumps(report, indent=2, sort_keys=True))
-if failures:
-    raise SystemExit(f"learning-health screen failed; inspect {output}")
-PY
-}
-
-run_cell() {
-  local size_m="$1" tag final_repeats require_flip
-  case "$size_m" in
-    5)
-      tag="5m"
-      final_repeats="$PREFLIGHT_FINAL_REPEATS_5M"
-      require_flip=0
-      ;;
-    10)
-      tag="10m"
-      final_repeats="$PREFLIGHT_FINAL_REPEATS_10M"
-      require_flip="$PREFLIGHT_REQUIRE_10M_ACTION_FLIP"
-      ;;
-  esac
-
-  local baseline_results="$PREFLIGHT_RESULTS_ROOT/baseline-$tag"
-  local baseline_databases="$PREFLIGHT_DB_ROOT/baseline-$tag"
-  local selection_manifest="$PREFLIGHT_MANIFEST_ROOT/selection/$PREFLIGHT_WORKLOAD_PROFILE/${size_m}M/T2/baseline_slo.json"
-  local final_manifest_root="$PREFLIGHT_MANIFEST_ROOT/final"
-  local guard_results="$PREFLIGHT_RESULTS_ROOT/guard-$tag"
-  local guard_databases="$PREFLIGHT_DB_ROOT/guard-$tag"
-  local experiment_results="$PREFLIGHT_RESULTS_ROOT/experiment-$tag"
-  local experiment_databases="$PREFLIGHT_DB_ROOT/experiment-$tag"
-
-  echo
-  echo "=== ${size_m}M/T2: narrowed tuned-baseline sweep ==="
-  WORKLOAD_PROFILE="$PREFLIGHT_WORKLOAD_PROFILE" \
-  WORKLOAD_SIZES_M="$size_m" SIZE_RATIOS=2 \
-  RL_RUN_PHASE=experiment BASELINE_REPEATS=3 \
-  BASELINE_L0_COMPACTION_TRIGGERS="4 8" \
-  BASELINE_L0_SLOWDOWN_TRIGGERS=20 \
-  BASELINE_L0_STOP_TRIGGERS=36 \
-  BASELINE_COMPACTION_PRIORITIES=3 \
-  BASELINE_RESULTS_ROOT="$baseline_results" \
-  BASELINE_DB_ROOT="$baseline_databases" \
-  RESUME="$PREFLIGHT_RESUME" KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
-  CONFIRM_BASELINE_SWEEP=YES \
-    "$PIPELINE_DIR/05_run_baseline_sweep.sh"
-
-  echo
-  echo "=== ${size_m}M/T2: provisional schema-v2 manifest ==="
-  "$PREFLIGHT_PYTHON" "$PIPELINE_DIR/06_select_baseline_slo.py" \
-    --baseline-results "$baseline_results" \
-    --workload-profile "$PREFLIGHT_WORKLOAD_PROFILE" \
-    --size-millions "$size_m" --size-ratio 2 --minimum-repeats 3 \
-    --output "$selection_manifest"
-
-  echo
-  echo "=== ${size_m}M/T2: three calibrations + three holdouts ==="
-  set +e
-  WORKLOAD_PROFILE="$PREFLIGHT_WORKLOAD_PROFILE" \
-  WORKLOAD_SIZES_M="$size_m" SIZE_RATIOS=2 \
-  SELECTION_SLO_ROOT="$PREFLIGHT_MANIFEST_ROOT/selection" \
-  FINAL_SLO_ROOT="$final_manifest_root" \
-  GUARD_RESULTS_ROOT="$guard_results" GUARD_DB_ROOT="$guard_databases" \
-  CALIBRATION_SEED_BASE="$PREFLIGHT_CALIBRATION_SEED_BASE" \
-  HOLDOUT_SEED_BASE="$PREFLIGHT_HOLDOUT_SEED_BASE" \
-  RESUME="$PREFLIGHT_RESUME" KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
-  CONFIRM_GUARD_PROTOCOL=YES \
-    "$PIPELINE_DIR/06_run_guard_protocol.sh"
-  local guard_status=$?
-  set -e
-  if (( guard_status != 0 )); then
-    PREFLIGHT_GUARD_READY=0
-    echo "Guard holdout is not ready for ${size_m}M/T2; continuing only with " \
-         "the preregistered mechanical learner diagnostics." >&2
-  fi
-
-  echo
-  echo "=== ${size_m}M/T2: learned-arm mechanical checkpoint (${final_repeats} repeat(s)) ==="
-  WORKLOAD_PROFILE="$PREFLIGHT_WORKLOAD_PROFILE" \
-  WORKLOAD_SIZES_M="$size_m" SIZE_RATIOS=2 \
-  EXPERIMENT_ARMS="unconstrained_rl rl" \
-  REPEATS="$final_repeats" RL_RUN_PHASE=experiment \
-  BASELINE_SLO_DIR="$final_manifest_root" \
-  DBBENCH_SEED="$PREFLIGHT_EXPERIMENT_SEED_BASE" \
-  RESULTS_ROOT="$experiment_results" DB_ROOT="$experiment_databases" \
-  RESUME=0 KEEP_DATABASES="$PREFLIGHT_KEEP_DATABASES" \
-  CONFIRM_EXPERIMENTS=YES \
-    "$PIPELINE_DIR/03_run_experiments.sh"
-
-  screen_learning_health \
-    "$experiment_results" "$size_m" "$final_repeats" "$require_flip"
-
-  "$PREFLIGHT_PYTHON" "$PIPELINE_DIR/11_analyze_learning.py" \
-    "$experiment_results" --arm rl --stride 10 \
-    --output "$experiment_results/learning-rl.json"
-  "$PREFLIGHT_PYTHON" "$PIPELINE_DIR/11_analyze_learning.py" \
-    "$experiment_results" --arm unconstrained_rl --stride 10 \
-    --output "$experiment_results/learning-unconstrained.json"
-}
-
-if (( PREFLIGHT_RUN_ORACLE )); then
-  run_oracle_regression
+echo "=== step 3: ACT-1 on the real binary ==="
+if [[ -f "$PIPELINE_DIR/20_check_actuation.py" ]]; then
+  unwired 3 "20_check_actuation.py"
+else
+  skip 3 "no 20_check_actuation.py (WP1)"
 fi
-for size_m in $PREFLIGHT_CELLS_M; do
-  run_cell "$size_m"
-done
 
-echo
-echo "Preflight verification completed without a mechanical/learning failure."
-echo "Results:   $PREFLIGHT_RESULTS_ROOT"
-echo "Manifests: $PREFLIGHT_MANIFEST_ROOT/final"
-echo "Review each learning-health-screen.json and both learning-analysis JSONs " \
-     "before launching the full matrix."
-if (( ! PREFLIGHT_GUARD_READY )); then
-  echo "Learner diagnostics completed, but guard holdout readiness failed; " \
-       "the repeated performance matrix remains blocked." >&2
-  exit 6
+echo "=== step 4: parity at 1M, T=2 ==="
+db_bench_help="$("$DB_BENCH" --help 2>&1 || true)"
+if grep -q 'level_target_multipliers' <<<"$db_bench_help"; then
+  unwired 4 "db_bench's --level_target_multipliers"
+else
+  skip 4 "db_bench has no --level_target_multipliers (WP1)"
 fi
+
+echo "=== steps 5 and 6: rules-mode and learner smoke ==="
+if [[ -d controller ]]; then unwired 5 "controller/"; fi
+skip 5 "no controller/ plugin (plan §3)"
+skip 6 "no controller/ plugin (plan §3)"
+
+echo "=== step 7: write the marker ==="
+"$PYTHON" "$PIPELINE_DIR/preflight_marker.py" write \
+  --marker "$PREFLIGHT_MARKER" --db-bench "$DB_BENCH" \
+  --passed "${passed[@]}" --skipped "${skipped[@]}"
+echo "passed: ${passed[*]}"
+echo "skipped: ${skipped[*]:-none}"
+echo "03 accepts a long run only when every step its arms need passed:"
+echo "static arms need 1-4, rules also 5, learned arms 1-6."

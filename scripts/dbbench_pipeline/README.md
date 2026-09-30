@@ -78,11 +78,25 @@ Known predicted overrides do not simulate replay invalidation; readiness still
 independently requires no actual holdout intervention and at most a 1%
 predicted-override fraction.
 
-Before the repeated matrix, use `13_run_preflight_verification.sh` for fresh
-5M/T2 and 10M/T2 learner checks. Old-credit runs must not be resumed. The 5M
-screen requires at least 320 full-horizon transitions and 100 optimizer steps;
-the 10M checkpoint additionally requires a learned-versus-prior greedy-action
-flip.
+**Tests and the preflight** (CLAUDE.md "Tests", plan §6 of
+`docs/IMPLEMENTATION_PLAN_PROGRAMME1.md`). No run larger than
+`PREFLIGHT_SHORT_RUN_MAX_M` (2M) operations starts without a passed preflight:
+`03_run_experiments.sh` checks the marker `PREFLIGHT_PASSED` and exits 7 when
+the `db_bench` binary or the code in `rl_agent/`, `controller/` or this
+directory has changed since, or when a step the run's arms need was skipped
+(static arms need steps 1–4, `rules` also 5, learned arms 1–6).
+
+```bash
+scripts/dbbench_pipeline/run_python_tests.sh     # tier 1, seconds, before every commit
+scripts/dbbench_pipeline/01b_build_test_trees.sh # tier 2, node: fork gtests in a Debug tree
+CONFIRM_PREFLIGHT_VERIFICATION=YES \
+  scripts/dbbench_pipeline/13_run_preflight_verification.sh  # tier 3, node: writes the marker
+```
+
+`13` rebuilds `db_bench` (step 1), runs tiers 1 and 2 (step 2), then ACT-1,
+parity, rules-mode and learner smoke (steps 3–6). A step whose component does
+not exist yet is skipped and recorded; one whose component exists but is not
+wired into `13` fails. Wire each step in the change that builds its component.
 
 Finally run the selected regular, prior-only, unconstrained-learning ablation,
 and constrained learned arms. The trigger and

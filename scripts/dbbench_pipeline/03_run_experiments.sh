@@ -345,6 +345,25 @@ if abs(total - 1.0) > 1e-6:
     raise SystemExit(f"mix ratios must sum to one; got {total}")
 PY
 
+# No long run without a passed preflight matching this db_bench and this code
+# (CLAUDE.md "Tests", plan §6.4). Every long-run driver comes through here.
+# Runs no larger than PREFLIGHT_SHORT_RUN_MAX_M million operations are the
+# preflight's own and debugging runs, and are exempt.
+# ponytail: a per-run size cap, not a wall-time cap; a matrix of many short
+# runs is exempt. Count total operations if that is ever abused.
+for size_m in $WORKLOAD_SIZES_M; do
+  if (( size_m > PREFLIGHT_SHORT_RUN_MAX_M )); then
+    "$PYTHON" "$PIPELINE_DIR/preflight_marker.py" check \
+      --marker "$PREFLIGHT_MARKER" --db-bench "$DB_BENCH" \
+      --arms "$EXPERIMENT_ARMS" || {
+      echo "Refusing a ${size_m}M run without a matching preflight;" \
+           "run 13_run_preflight_verification.sh first." >&2
+      exit 7
+    }
+    break
+  fi
+done
+
 if [[ -e "$RESULTS_ROOT" && "$RESUME" != "1" ]]; then
   echo "Results already exist: $RESULTS_ROOT" >&2
   echo "Choose another RESULTS_ROOT or set RESUME=1." >&2

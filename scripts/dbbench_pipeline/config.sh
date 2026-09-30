@@ -136,6 +136,18 @@ DBBENCH_BUILD_DIR="${DBBENCH_BUILD_DIR:-build-dbbench}"
 PYTHON_VENV="${PYTHON_VENV:-.venv-dbbench}"
 BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 
+# Tests and the preflight (CLAUDE.md "Tests", plan §6). 01b builds the fork's
+# own gtest files, listed here relative to lib/rocksdb, in a separate Debug
+# tree so RocksDB's asserts fire; upstream test files are never listed. A
+# listed file that does not exist yet is skipped.
+FORK_TEST_SOURCES="${FORK_TEST_SOURCES:-db/level_target_multipliers_test.cc db/per_level_read_counters_test.cc db/rl_controller_host_test.cc}"
+DBBENCH_TEST_BUILD_DIR="${DBBENCH_TEST_BUILD_DIR:-build-dbbench-debug}"
+# Written by 13, checked by 03 before any run larger than
+# PREFLIGHT_SHORT_RUN_MAX_M million operations (the preflight's own runs are
+# 1M and 2M).
+PREFLIGHT_MARKER="${PREFLIGHT_MARKER:-$DBBENCH_BUILD_DIR/PREFLIGHT_PASSED}"
+PREFLIGHT_SHORT_RUN_MAX_M="${PREFLIGHT_SHORT_RUN_MAX_M:-2}"
+
 # Output. Put DB_ROOT on the storage device being evaluated, not /tmp.
 RUN_NAME="${RUN_NAME:-$(date +%Y%m%d-%H%M%S)}"
 RESULTS_ROOT="${RESULTS_ROOT:-results/dbbench_pipeline/$RUN_NAME}"

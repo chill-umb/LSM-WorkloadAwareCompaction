@@ -110,3 +110,9 @@ deprecated/
 
 # graphify
 graphify-out/
+
+# Tests (plan §6). Fixtures are source even when they end in .log, .txt or
+# .json, which the rules above hide; this must stay after them. The Debug test
+# tree of 01b is build output.
+!**/tests/fixtures/**
+/build-dbbench-debug/
