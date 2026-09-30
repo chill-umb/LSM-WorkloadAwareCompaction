@@ -1,280 +1,2393 @@
 # Improvement Pathways: Specification, Proofs, and Acceptance Criteria
 
-**Revision:** 2026-09-11. Supersedes all earlier revisions; the project record
-(`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`) carries the history of what was
-corrected and why.
+**Revision:** 2026-09-29 (research fork). Supersedes the 2026-09-11 revision and
+every status block added to it up to 2026-09-23. The narrative of what happened
+is `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`; dated decisions and verdicts are
+`docs/PREREGISTRATION.md`; the audit this revision acts on is
+`docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`.
 
-**Target:** EDBT research track (12 pages, ACM double-column) or Experiments &
-Analysis track (same length), depending on the outcome of Gate 3b.
+**Target venue:** not yet chosen for this fork.
 
-**Scope:** Pathways A–E and Gates 0–6 are Programme 1 (the current paper).
-Pathway F and Gates F-0 to F-4 are Programme 2 (the dynamic-SLO follow-on),
-specified now so Programme 1's instruments are built in a reusable form.
+**Scope.** *Programme 1* (this revision) is a per-level reinforcement-learning
+compaction-trigger controller for leveled RocksDB. It minimises a priced cost of
+write, read and space amplification under a chosen priority (reads, writes or
+space), acting only through RocksDB's own compaction scores, so that RocksDB
+keeps sole authority over which files are compacted. *Programme 2* (deferred)
+is SLO-constrained operation: the constrained objective, the guard (Pathway E)
+and phase-aware objective switching (Pathway F).
 
-**Status:** design specification. Every theorem is proved from the stated
-assumptions. Every acceptance criterion is decidable from measurements the
-pipeline already produces or from instrumentation named in the pathway.
-Gate 0 is complete (2026-09-11; results in the Gate 0 section, Theorem B.1's
-table, and Pathway A's A-0 table). Gates 1–6 have not been executed.
+**Status.** Specification. No arm has run under this revision. Every result
+below is either proved from its stated assumptions or explicitly labelled a
+conjecture, an approximation or a measured fact with its source. Results of the
+2026-09-11 programme are summarised in Appendix R and are not re-scored.
 
-**RocksDB version.** Every source-level claim, line number, default and option
-semantic below is version-dependent. Pinned 2026-09-12:
-`ROCKSDB_COMMIT = 81d2742bf05883fa9978a9e984e32f709409444f`, parent
-`7ea2d73655025332855864f0b8d6d2dbdad3f336`, which is the base the contract
-pins and which this commit preserves. It carries the Gate 0 instrumentation.
-Re-verify each cited line number against the pinned commit.
+**Reading order.** §0 (what changed) → §1 (notation and assumptions) → Pathway D
+(objective and cost model) → Pathway A (actuation) → Pathway G (propagation
+across levels) → Pathway H (RL architecture) → Pathway B (workloads) → Pathway C
+(comparator) → Pathways E and F (Programme 2) → execution order → global
+acceptance → references → Appendix R.
 
-**Build and I/O.** The measured binary is compiled `-march=znver5` via
-RocksDB's `PORTABLE` cache variable, not `PORTABLE=0`/`-march=native`, and its
-SHA-256 is part of `experiment_fingerprint`. Direct I/O is pinned **off** on
-measured cost, and is fingerprinted too. See the contract's build section and
-A-Impl-2.
+**Referencing convention.** Numbered results use a dot (Lemma D.7,
+Theorem A.1). Sections inside a pathway use a section sign (D §3, H §5).
+Acceptance criteria use a prefix per pathway: retained criteria keep their
+2026-09-11 names (B-1, C-1, C-2, C-6, E-*, F-*); new criteria use new prefixes
+(OBJ, ACT, PROP, ARCH, WL, CMP) so that no new criterion reuses the name of one
+already scored in `docs/PREREGISTRATION.md`.
 
-**Setup.** `EXPERIMENTAL_SETUP.md` carries the full experimental configuration
-in one place and is the source text for the paper's setup section.
+**RocksDB version.** Upstream base
+`7ea2d73655025332855864f0b8d6d2dbdad3f336` (contract v3, `rocksdb_base`). The
+contract's last recorded fork revision is `6ad9f6b79` (parent `71627a1cd`); the
+root branch records `25468bbaa`, three fork commits later. (`81d2742bf`, pinned
+2026-09-12, is contract v2's revision.) Every RocksDB citation in this revision
+is to `25468bbaa`, read with `git -C lib/rocksdb show 25468bbaa:<path>`, since
+the submodule's working tree can lag the recorded commit. Programme 1 adds one
+option (Pathway A), so its binary differs from every earlier one and every
+static measurement is regenerated on it (Pathway C). Every cited line number and
+option semantic must be re-verified against the commit that binary is built
+from.
+
+**Build and I/O.** Unchanged from 2026-09-11: `-march=znver5` through RocksDB's
+`PORTABLE` variable, binary SHA-256 inside `experiment_fingerprint`. Direct I/O
+is pinned **off** for development (a 21× throughput penalty was measured) and
+fingerprinted as `dio0`. Paper runs may use `dio1`; they then form their own
+comparator chain and are never pooled with `dio0` runs. Latency figures under
+`dio0` are warm-cache and are reported as diagnostics only.
 
 ---
 
-## 0. Notation
+## 0. What changed in this revision, and why
 
-| Symbol | Meaning | Project equivalent |
+### §0.1 The premise behind Pathway A was an artifact of the controller
+
+The 2026-09-11 revision built Pathway A (capacity co-design) so that the
+controller could defer compaction "without the depth cascade" measured in
+history §10.7, where learned arms deepened the tree by one to three levels and
+paid for it in reads. That depth growth came from the controller that produced
+it, not from deferral as a mechanism.
+
+- **The learning setup was never re-derived when the objective changed.** The
+  project's goal moved from latency and stall reduction, to a strict three-way
+  improvement of write, read and space amplification, to "reduce reads with at
+  most 2% more writes". The reward, state and horizon were carried forward
+  through both changes. The reward priced write amplification, probes, scan
+  work and latency, and treated space as a quantity to minimise (history §6.3).
+  The state had eleven stall-era pressure inputs out of 31 and no
+  write-amplification input, and the discount gave a horizon of about 20 s
+  (history §14.20, findings 1–6).
+- **Two different mechanisms produced the depth growth, and neither was
+  deferral as such.** On the uniform workload (2026-09-03) the learner deferred
+  top-of-tree compaction while being rewarded for lower space (history §10.7,
+  Finding 3). On `Assoc` (D-7) it compacted L1 and L2 at about 40% of target,
+  which the action space allowed (history §14.20, finding 3).
+- **With the setup realigned (D-9 to D-12), depth did not grow.** Populated
+  depth equalled the static twin's in all 18 D-12 arms (audit §3).
+- **Pathway A's own measurement already said depth was a minor write cost.**
+  Depth accounted for at most 35% of the learner's extra writing (A-0,
+  Appendix R).
+
+**Consequence.** Pathway A's motivation is withdrawn. Its mechanism —
+changing a level's effective capacity through its compaction score — survives as
+one of the controller's actions (Pathway A), with its theory corrected.
+
+### §0.2 What D-12 and the audit established
+
+- **The first run with correct instruments found no read gain at write parity**
+  on `Assoc` at 10M. At T=2 all of the extra writing (+0.68 GB per run) fell in
+  the first 30 s after the controller resumed, before the first gradient step
+  (38–42 s), while random exploration deferred due levels during the post-load
+  backlog. After 30 s the learner wrote 0.07 GB *less* than native. Part of the
+  T=2 deficit was session drift: the same static setting writes 2.9–4.1% more
+  in later sessions.
+- **The constrained objective had almost no room at its comparators.** At T=2
+  and T=10 the comparator was already the lowest-read static setting within +2%
+  write, and at T=10 the lowest-read of all 38 static settings (audit §2).
+- **Stale answers were real but not the cause.** 27–39% of controller answers
+  were rejected over a run because the tree had changed since the snapshot. The
+  prior-only arm makes the same round trip and matched native at T=10 (audit §6).
+- **Several instruments carried the post-load transient:** the write and scan
+  multipliers and the guard's limits. The guard's conditional override rate was
+  6–17 times its limit over the whole run and 0–1.4% after the first 30 s.
+- **The Double-DQN target ignored the next state's action mask** (`agent.py`
+  `train_step`); its effect was never measured.
+- **Static capacity expansion never lowered write cost** in 27 runs (merges out
+  of L0 grew 34–74%), and lowered read cost only by removing a level.
+
+### §0.3 The objective changes
+
+The constrained objective — minimise point-read amplification subject to write
+parity at a 2% margin and to space, latency and stall bounds — is replaced by a
+**priced cost with a priority mode** (Pathway D). The controller trades the three
+amplifications at stated prices and weights the prioritised one by a factor
+$\beta^\star$. There are no hard limits. Constraints, the guard and latency
+bounds move to Programme 2.
+
+### §0.4 Fixes adopted from the parallel stream
+
+- **Measure only a settled tree.** After the load, no operation is issued
+  until compaction has caught up and the tree has stayed settled for a hold
+  window; the measured phase and the controller both start at the first
+  `mixgraph` operation (H §5). This removes the start-up exploration damage of
+  D-12, and every `mixgraph` operation is scored.
+- **In-process inference.** Inference runs in C++ inside the RocksDB process;
+  Python only trains, and pushes weights at a fixed period (H §6). No answer can
+  be stale by more than one decision.
+
+### §0.5 Corrections to the 2026-09-11 revision
+
+| # | 2026-09-11 statement | Correction | Where |
+| --- | --- | --- | --- |
+| 1 | Pathway A lets the controller "defer without the depth cascade" of §10.7 | The cascade was produced by the misaligned controller and was absent in D-12 | §0.1 |
+| 2 | Theorem A.1: a released burst is $\kappa C_i$ | The burst is $(\kappa-1)C_i$ at $m_i=1$; in general $(\varphi_i - m_i)^+C_i$ | Theorem A.1 |
+| 3 | Theorem A.2(iii): the survival-weighted optimal profile | Needs some multipliers below 1, which $s \ge 1$ could not express; multipliers below 1 are now allowed. The profile is static | Theorem A.2 |
+| 4 | Corollary A.3: removing a level needs $s = T$ | Premise failed: $s=2$ removed a level at T=10. Superseded: depth cannot fall during a run, so removal is static | Lemma A.6, Corollary A.7 |
+| 5 | Corollary A.4 and P0-7: write-accounting convention M3 | Replaced by an exact accounting identity whose one modelled quantity, the overlap constant, is measured | Lemmas D.7, D.8 |
+| 6 | Theorem B.1: elision ceiling on $W-1$ | The proof evaluates a constant-survival formula at a pooled floor, which the floor does not justify. In the stage model without trivial moves the saving is limited by the garbage available: about 26–32% of whole-run $W-1$ on `Assoc` at T = 2, about half the formula's 58%. In the measured phase the budget is weak, native already drops most of it, and where drops happen binds | Propositions B.1′, B.1″ |
+| 7 | B.1 and B.2 tables, $\kappa$ values | Measured on the uniform workload with the defective live-data estimate (D-3); replaced by measured values | Pathway B |
+| 8 | §B and §D: cumulative garbage "is large"; §C: "almost no resident garbage" | Resolved by D-3: on `Assoc`, resident $S$ is 1.03–1.09 and $g_{\text{flow}} = 0.278$ | Pathway B |
+| 9 | Commentary on Proposition B.3: a state-dependent policy "can strictly beat every member of $\Theta$" | Unproven; no learned or hand-written policy on record lies below the static frontier | Conjecture B.3′ |
+| 10 | Gate 3b runs on the uniform workload | Contradicted D-1 (every gate on `Assoc`) | Execution order |
+| 11 | D-4: $\lambda_W$ diverges where the write constraint is infeasible | Could never apply, since native RocksDB always meets its own bound; retired with the constrained objective | Appendix R |
+| 12 | Gate costs | 5–7 times too high (audit §4); new gates are priced by run count once run length is fixed | Execution order |
+| 13 | D-12 verdict: the T=2 extra writing is a learned deferral lever | Start-up exploration during the backlog plus session drift | Appendix R |
+| 14 | Proposition F.2 bounds the anticipation term by the read-phase cost over the first $\max(0, \Delta_{\text{shape}} - \ell)$ | That quantity is the loss a predictor still leaves, not the anticipation term; restated with proof | Proposition F.2 |
+
+### §0.6 Dated decisions this revision requires before any run
+
+These belong in `docs/PREREGISTRATION.md`, each dated and committed before the
+run it governs. This document states the theory; it does not substitute for the
+dated record.
+
+1. The objective change (§0.3), the headline priority factor $\beta^\star$,
+   the reference operation rate $\bar q$ per workload, and the two money
+   prices the others are converted with: the instance price per device-second
+   and the storage price $c_s > 0$ per byte-second (D §1).
+2. An amendment to P0-7 (write accounting): exact identity plus measured
+   overlap constant.
+3. The actuation option and its bounds (Pathway A).
+4. The workload suite and its fingerprint fields (Pathway B).
+5. The static comparator class $\Theta_s$ (Pathway C).
+6. The settle rule and its hold window $h_w$ (H §5).
+7. Run length, and the admission test's fixed parameters: reference level,
+   statistics, margins $\delta_{\text{adm},s}$ and $\omega_{\max}$, block length
+   $b$, minimum turnovers per level $n_{\min}$ (Gate N1), and PROP-1b's
+   one-step model and margin $\delta_{\text{kern}}$.
+8. Repeat counts per cell (C §3).
+9. Retirement, for this fork, of P0-1 as a constraint (scans are now priced),
+   P0-3, P0-6, P1-15, P1-16, P1c-22 and P1c-23; P0-4 (latency) moves to
+   Programme 2.
+10. The claim the paper will make (Global acceptance), recorded before Gate N5.
+11. Whether the neighbour charge of H §3 uses the neighbour's full value or a
+    head fitted to its attributed cost alone (the echo).
+12. The stall rule's margins $\delta_{\text{stall}}$ and $\delta_{\text{thr}}$
+    (Global acceptance).
+
+---
+
+## 1. Notation and standing assumptions
+
+### §1.1 Notation
+
+| Symbol | Meaning | Source |
 | --- | --- | --- |
-| $N$ | live logical entries (unique keys currently valid) | `live_logical_bytes` / entry size |
-| $N_{res}$ | resident entries (live + obsolete, settled) | `settled_sst_bytes` / entry size |
-| $N_{\text{written}}$ | user logical entries written over the run | `user_logical_bytes_written` / entry size |
-| $M$ | write buffer capacity | `write_buffer_size` |
-| $T$ | size ratio between adjacent levels | `max_bytes_for_level_multiplier`, `-T` |
-| $L$ | number of populated levels | `levelstats` populated depth |
-| $C_i = M T^i$ | nominal capacity of level $i$ | derived from `max_bytes_for_level_base` |
-| $s_i \ge 1$ | **capacity expansion scale** at level $i$ | `capacity_scale_[i]`, Pathway A |
-| $\hat C_i = s_i C_i$ | effective capacity of level $i$ | — |
-| $f_i = \hat C_{i+1} / \hat C_i$ | effective fanout from level $i$ to $i+1$ | — |
-| $\phi_i$ | occupancy fraction of level $i$, occupancy / $C_i$ | `levelstats` |
-| $\kappa_i \ge 1$ | **deferral factor**: occupancy reached, as a multiple of $C_i$, before release | derivable from per-level compact rates |
-| $\eta_i \in (0,1]$ | **merge survival**: compaction output bytes / input bytes at level $i$, trivial moves excluded | Gate 0 instrument |
-| $W$ | write amplification | §2.3 definition |
-| $R$ | logical point-read amplification | §2.3 definition |
-| $S = N_{res}/N$ | space amplification (settled snapshot) | §2.3 definition |
-| $g = 1 - 1/S$ | resident garbage fraction (snapshot) | derived |
-| $S_{\text{flow}} = N_{\text{written}}/N$ | **flow space ratio**; $S_{\text{flow}} \ge S$ | $W$ denominator / $S$ denominator, both already recorded |
-| $g_{\text{flow}} = 1 - 1/S_{\text{flow}}$ | **cumulative garbage fraction**: share of user-written bytes obsolete by run end. This, not $g$, bounds elision | derived |
-| $D_{\text{depth}}$ | write bytes an arm wrote at levels the paired `regular` run never populated | per-level `compaction_bytes_written`, A-0 |
-| $D_{\text{eager}}$ | write-byte excess over the paired `regular` run at levels both populated | per-level `compaction_bytes_written`, A-0 |
-| $\Theta$ | class of static RocksDB configurations reachable by the sweep | §3.1 sweep space |
-| $\theta^\star$ | cost-minimising static configuration | current `regular` arm |
-| $\pi$ | the learned controller | `rl` arm |
-| $J(\cdot)$ | scalar cost under the chosen objective | — |
-| $c$ | write-accounting convention constant | see below |
+| $L$ | index of the last populated level; levels are $0..L$ | `levelstats` |
+| $T$ | size ratio between adjacent level targets | `max_bytes_for_level_multiplier` |
+| $C_i = C_1T^{i-1}$ | nominal target of level $i \ge 1$; $C_1$ = `max_bytes_for_level_base` | options |
+| $m_i$ | target multiplier of level $i$; $m_0 \equiv 1$ | `level_target_multipliers` (Pathway A) |
+| $K_0$ | L0 compaction trigger (file count) | `level0_file_num_compaction_trigger` |
+| $k_0(t)$, $F$ | L0 file count; flush file size | telemetry |
+| $F_{\text{sst}}$ | SST target file size (`target_file_size_base`, 512 KiB here) | options |
+| $B_i$ | bytes at level $i$ not being compacted | telemetry |
+| $\varphi_i = B_i/C_i$ | fill of level $i$ against its nominal target | derived |
+| $s_i = \varphi_i/m_i$ | compaction score of level $i \ge 1$ | RocksDB |
+| $S, O, X$ | per compaction: source bytes, overlap bytes read from the level below, output bytes | event log |
+| $\rho_i = (X-O)/S$ | pass-through of level $i$: net bytes landing below per source byte of a merge, summed over merges with trivial moves excluded; 1 if nothing is dropped | event log |
+| $o_i = O/S$ | overlap ratio of level $i$ | event log |
+| $d = S + O - X = (1-\rho_i)S$ | bytes dropped by one compaction | event log |
+| $\lambda_i$, $\mu_i$ | inflow to level $i$ (net bytes added by compactions from above) and outflow (source bytes leaving), bytes/s | event log |
+| $\bar\lambda_i$ | mean inflow over a window | derived |
+| $\tau_i = C_i/\bar\lambda_i$ | turnover time: time for the inflow to deliver one nominal level of bytes | derived |
+| $\theta_i = t/\tau_i$ | the level's own clock, in turnovers | derived |
+| $a_i$ | source bytes leaving level $i$ per user byte, by merge or by trivial move ($a_0$: bytes leaving L0) | derived |
+| $a_F$ | flush bytes per user byte; $a_F = a_0$ unless an intra-L0 compaction drops entries | derived |
+| $t_i$, $\xi_i = t_i/a_i$ | bytes leaving level $i$ by trivial move (a file relinked into level $i+1$ without being rewritten) per user byte, and their share of $a_i$ | event log |
+| $\tilde\rho_i = \xi_i + (1-\xi_i)\rho_i$ | net pass-through of level $i$, trivial moves included; $= a_{i+1}/a_i$ in steady state | derived |
+| $\pi_i = \prod_{k=1}^{i-1}\tilde\rho_k$ | share of L1's inflow that reaches level $i$; $= a_i/a_1$ in steady state | derived |
+| $f_i$ | effective fanout: $f_0 = m_1C_1/(K_0F)$; $f_i = Tm_{i+1}/m_i$ for $1 \le i \le L-2$; $f_{L-1} = B_L/(m_{L-1}C_{L-1})$ | derived |
+| $c_i = o_i/f_i$ | overlap constant of level $i$ | measured |
+| $W$ | write amplification: (flush + compaction bytes written) / user bytes written | evaluator |
+| $R_f$ | filter probes per Get (the 2026-09-11 "point-read amplification") | existing counter |
+| $R_{blk}$ | probes per Get that pass the filter and read a data block | Pathway D |
+| $R_{sk}$ | sorted runs seeked per scan (P1c-20) | existing counter |
+| $S$ (metric) | settled SST bytes / garbage-free bytes (D-3) | evaluator |
+| $H(t)$ | SST bytes of the current version (`rocksdb.live-sst-files-size`): a running compaction's inputs count until it installs and its outputs from then on; obsolete files still pinned by older versions or awaiting deletion do not count | telemetry |
+| $u$, $q_{pt}$, $q_{sc}$ | user bytes written, Gets and scans, per second | telemetry |
+| $q$, $\bar q$ | all operations per second; a reference operation rate, fixed in advance per workload and recorded with the prices (OBJ-2), since it sets the weight of space against the other terms | telemetry; preregistration |
+| $N_i = C_i\,q/\bar\lambda_i$ | operations served per turnover of level $i$ ($q$ and $\bar\lambda_i$ over the same window) | derived |
+| $c_w, c_f, c_{blk}, c_{sk}, c_s$ | prices: per byte written, per filter probe, per block-reading probe, per run seek, per byte held per second | measured once per machine |
+| $\beta = (\beta_W, \beta_R, \beta_S)$ | priority weights; $\beta^\star > 1$ is the factor on the prioritised term | run configuration |
+| $J_\beta(\pi)$ | priced, priority-weighted cost of policy $\pi$ over the measured phase | Pathway D |
+| $\mathcal C_W, \mathcal C_R, \mathcal C_S$ | unweighted priced run costs of writes, reads (three terms together) and space; $J_\beta = \beta_W\mathcal C_W + \beta_R\mathcal C_R + \beta_S\mathcal C_S$ | Pathway D |
+| $\Theta_s$ | the static configuration class | Pathway C |
+| $\theta^\star_\beta$ | the static configuration minimising $J_\beta$ on a workload | Pathway C |
+| $S_{\text{flow}} = N_{\text{written}}/N_{\text{live}}$, $g_{\text{flow}} = 1 - 1/S_{\text{flow}}$ | flow space ratio and cumulative garbage fraction | as 2026-09-11, measured denominator (D-3) |
 
-**Write-accounting models.** Three conventions exist in the literature and
-they do not share optima:
+### §1.2 Standing assumptions
 
-- **M1** $w_i = c f_i$, $c = 1$ — plain per-level fanout (Monkey, Dostoevsky).
-- **M2** $w_i = c f_i$, $c = \tfrac12$ — averaged partial compaction (HotRAP).
-- **M3** $w_i = c(f_i + 1)$, $c = \tfrac12$ — partial compaction with the
-  promoted run counted ("How to Grow an LSM-tree", SIGMOD 2025).
-
-M1 and M2 differ by a constant and share every optimum; M3 does not
-(Corollary A.4). The paper uses **M3** (P0-7) and states it in §2.3.
-
-### Standing assumptions
-
-- **A1.** Effective fanout is $f_i = \hat C_{i+1}/\hat C_i$.
-- **A2.** Bytes physically written while operating level $i$, per byte
-  *entering* level $i$, are $w_i = c\,f_i$. Survival is applied to the volume
-  reaching each level: $v_i = v_0\prod_{j<i}\eta_j$. The conservation identity
-  in Theorem A.2 does not depend on A2; only the optimality half does. State
-  this in the paper.
-- **A3.** A level whose occupancy exceeds its effective capacity becomes
-  **eligible** for outward compaction (score $\ge 1$). This is RocksDB's leveled
-  score rule for levels $\ge 1$. It is not a scheduling law: RocksDB ranks
-  eligible levels by score and admission depends on free compaction slots and
-  `NeedsCompaction`. Every theorem uses only eligibility.
-- **A3′.** For L0 under `kCompactionStyleLevel` with `num_levels() > 1`, the
-  score is $\max(\text{runs}/\texttt{level0\_file\_num\_compaction\_trigger},\;
-  \text{bytes}/\texttt{max\_bytes\_for\_level\_base})$. L0 has a byte-sensitive
-  branch; A3 does not apply to it unmodified.
-- **A4.** In leveled RocksDB, levels $1..L$ hold exactly one sorted run each;
-  only L0 holds multiple runs. Exceptions to note in the paper: intra-L0
-  compaction, subcompactions, trivial moves, SST ingestion, leveled-N. Under
-  `level_compaction_dynamic_level_bytes` the invariant holds for non-empty
-  levels but upper levels may be deliberately kept empty.
-- **A5.** All experiments pin `level_compaction_dynamic_level_bytes = false`.
-  This deviates from the RocksDB default since v8.4 and must be declared in the
-  paper with the justification in A-Impl-2.
+- **A1 (static ladder).** Leveled compaction with
+  `level_compaction_dynamic_level_bytes = false`; the nominal targets $C_i$ are
+  fixed for the run. The multiplier option is rejected otherwise (Pathway A).
+  This deviates from the RocksDB default since v8.4 and is declared in the paper.
+- **A2 (one run per level).** Levels $\ge 1$ each hold one sorted run, so one
+  version per key per level; L0 holds $k_0$ overlapping runs. Exceptions to
+  state in the paper: intra-L0 compaction, subcompactions, trivial moves, SST
+  ingestion.
+- **A3 (eligibility).** Level $i \ge 1$ is eligible for compaction iff
+  $s_i = B_i/(m_iC_i) \ge 1$. RocksDB ranks eligible levels by score, and
+  admission depends on free compaction slots. Results use eligibility only
+  unless they say otherwise.
+- **A3′ (L0).** L0's score is
+  $\max(k_0/K_0,\; \text{L0 bytes}/C_1)$. Multipliers do not enter it. The byte
+  branch caps the effective trigger at about $C_1/F$.
+- **A4 (downward movement).** Compactions move data from level $i$ to $i+1$, or
+  within L0 or within the last level; never upward.
+- **A5 (fluid approximation).** Where a result treats flows as continuous it
+  says so; per-compaction granularity is noted where it matters.
+- **A6 (entries).** Unless stated otherwise: fixed entry size, no deletes or
+  tombstones, and compression that does not depend on how entries are grouped
+  into files.
+- **A7 (steady state).** A window in which each level's mean fill is constant,
+  so that each level's mean inflow equals its mean outflow.
+- **A8 (same-phase measurement).** All compared arms are scored over the same
+  operations — every `mixgraph` operation, from the first ($n_w$) to the last,
+  then the drain — with same-session twins (C §3). Each arm reaches $n_w$ on
+  the settled tree its own load left (H §5); an arm not settled by then is
+  invalid. Costs are totals over these operations.
 
 ---
 
-## Pathway A — Capacity Co-Design
+## Pathway D — Objective: a priced cost with a priority mode
 
-### Purpose
+### §0 Purpose, and the model this pathway starts from
 
-Give the controller authority over level capacity, not only compaction timing.
-This is the half of the original plan — "if compactions are deferred, the level
-size could be temporarily increased" — that was never implemented.
+This pathway defines what the controller minimises, how "prioritise reads",
+"prioritise writes" and "prioritise space" are expressed, and the cost model the
+rest of the document uses. It replaces the constrained objective of the
+2026-09-11 revision. Of that revision's Pathway D results, the shaping result
+is retained as Proposition H.4; the hinge and two-timescale results are retired
+with the constraints.
 
-### Description
+**The starting model.** The draft of 2026-09-29 adapted the cost form of
+Dostoevsky's Fluid LSM-tree [Dostoevsky]. With $K$ runs per upper level, $Z$ at
+the last level and $L$ levels:
 
-Extend the per-level action set from two actions to three:
+$$\text{RA} = K(L-1) + Z,\qquad \text{WA} = \frac{T}{K}(L-1) + \frac{T}{Z},\qquad \text{SA} = \frac{ZT}{T-1},$$
+$$C = w\cdot\text{WA} + r\cdot\text{RA} + s\cdot\text{SA},$$
 
-```
-0 = defer, capacity unchanged
-1 = compact
-2 = defer and expand this level's effective capacity
-```
+where $w$ is the ingest rate times the cost of writing one byte, $r$ the lookup
+rate times the cost of checking one run, and $s$ the live data size times the
+cost of holding one byte for one second. The prices turn three quantities in
+different units into one currency (device time per second, or money per
+second [Cosine]).
 
-Action 2 sets $s_i \leftarrow \min(s_i \cdot \alpha, s_{\max})$ for a fixed
-step $\alpha$ (start at $1.25$). All $s_i$ decay geometrically toward $1.0$
-with time constant $\tau$ when not re-expanded, preventing ratchet.
+*Check of the plotted example.* With $Z = K$ and $s = 0$,
+$C = wTL/K + rKL$, minimised at $K^\star = \sqrt{wT/r}$. At $T = 16$ and
+$w = r = 1$ this gives $K^\star = 4$; with $L \approx 3.33$, $\text{WA} = \text{RA}
+= 13.3$ and $\text{SA} = 4\cdot16/15 = 4.27$, matching the plot.
 
-**$s_0 \equiv 1$.** L0's runs overlap, so "capacity" at L0 does not have the
-single-sorted-run meaning the theory uses (A4), and Theorem A.1's absorption
-argument does not apply. Operationally, the L0 byte term reads
-`max_bytes_for_level_base` — the option that also sets L1's target — so any
-mechanism scaling it would couple L0 and L1. The scale vector is defined on
-levels $1..L-1$ and must not leak into L0's byte term (A-Impl-1).
+**Five issues, and where each is fixed.**
 
-**What action 2 does that action 0 does not.** Under trigger-only v2 the
-controller's gate decides whether level $i$ compacts, so in the instant they are
-taken, actions 0 and 2 are the same physical move. Expansion's entire content is
-downstream, through `target_bytes`:
+1. **The controller's knobs do not change $K$.** Every level $\ge 1$ of leveled
+   RocksDB holds one run (A2), so $K = Z = 1$ whatever the multipliers are. $K$
+   exists only at L0, where the trigger $K_0$ plays its role. *Fixed* by
+   writing the model in the actual knobs: $K_0$, the multipliers, and depth
+   (§3).
+2. **RA priced every run check as a random page read.** With Bloom filters,
+   most checks are an in-memory filter probe. $K(L-1)+Z$ is right for scans,
+   which seek every run, and for lookups without filters. *Fixed* by pricing
+   filter probes, block-reading probes and scan seeks separately (§1,
+   Lemma D.10).
+3. **The write term used one convention (T per level) and the frozen P0-7 used
+   another (M3).** *Fixed* by an exact accounting identity whose only modelled
+   quantity, the overlap constant, is measured (Lemmas D.7, D.8).
+4. **SA is a worst case.** $ZT/(T-1)$ assumes every upper-level entry updates a
+   key in the last level: 2.0 at T=2, where `Assoc` measures 1.07–1.09.
+   *Fixed*: the evaluation uses measured space and the per-level reward the
+   shadowed-garbage estimate of §4 (OBJ-3); the model is used only as a bound
+   (Lemma D.14).
+5. **"Min-max" named a weighted sum.** *Fixed*: the objective is a priced cost
+   with a priority factor (§2). The true min–max form appears only where it
+   belongs: the Chebyshev alternative (Remark D.6) and suite robustness
+   (Definition C.5).
 
-1. **Due-ness.** At occupancy $\kappa C_i$, action 0 leaves score $\kappa > 1$
-   (due, held only by the gate). Action 2 leaves score $\kappa/s_i \le 1$ (not
-   due).
-2. **The safety envelope.** §6.4's safeguards force a due level open on due-age,
-   held excess pressure, instantaneous score, or normalised debt. Under action 0
-   those clocks run and fire; under action 2 they are rescaled and do not.
-3. **Debt and stall accounting.** Pending compaction bytes are computed against
-   target; expansion reduces measured debt.
-4. **The prior's input.** §6.2's per-level urgency is bytes / target bytes, so
-   expansion changes what the analytic prior sees.
+### §1 Metrics and prices
 
-Pathway A is therefore **authority over the debt and safety envelope, not over
-physical capacity**. State in the paper that expansion is score-mediated, or a
-RocksDB-literate reviewer will conclude action 2 is a no-op. Expansion and the
-shield write to the same envelope, so E-3's spanning requirement covers
-contraction of $s_i$ as well as gate forcing.
+**Metrics**, all over the measured phase (A8):
 
-By A4, deferring at a deep level does not create additional sorted runs — it
-pushes the level past its target, which cascades data downward. §10.7 measured
-that cascade: one to three extra populated levels, and with them the read
-regression of Finding 3. Deferral bought space ($-29.0/-9.9/-4.5\%$ against the
-prior) but through depth, and depth is what the read criterion pays for.
-Expansion lets the controller defer without the cascade.
+| Metric | Definition | Instrument |
+| --- | --- | --- |
+| $W$ | (flush + compaction bytes written) / user bytes written. SST output only (flush `table_file_creation` sizes, compaction `total_output_size`): the OPTIONS file every `SetOptions` call writes (A-Impl-5), and MANIFEST, WAL and info-log writes, are not counted | event log, as D-11 |
+| $R_f$ | filter probes per Get: tables whose key range covers the key and whose filter is consulted, including filter-rejected ones | existing counter |
+| $R_{blk}$ | probes per Get that pass the filter and read a data block (true plus false positives) | `rocksdb.bloom.filter.full.positive`; per level through counters keyed by the version's level (§4, Gate N0) |
+| $R_{sk}$ | sorted runs seeked per scan (P1c-20) | existing counter |
+| $S$ | settled SST bytes / garbage-free bytes (D-3), at run end | evaluator |
+| $\mathcal C_S$ | $(c_s/\bar q)\sum_n H(n)$ over the measured phase, computed exactly as the sum, over the intervals between version installs, of $H$ times the operations served in the interval; $H$ is sampled with the operation count at every install, on every arm, native included | telemetry, evaluator |
 
-**What expansion does not do.** It does not address the prior's top-of-tree
-eagerness, which A-0 shows is the dominant component of the write excess in
-every cell (see "What A delivers").
+Block-reading probes are counted logically, whether or not the block was cached,
+so the metric does not depend on the page cache.
 
-### Theory
+**Prices.** One currency throughout: money, as in Cosine [Cosine]. $c_w$ per
+byte written; $c_f$ per filter probe, a CPU cost that is not negligible on fast
+storage [Zhu et al.]; $c_{blk}$ per block-reading probe; $c_{sk}$ per run seek:
+each is the device time the operation takes, measured once per machine,
+converted at a fixed instance price per device-second. $c_s$ per byte held per
+second is a storage price, and $c_s > 0$ always. At $c_s = 0$ the space term
+vanishes: space priority becomes balanced mode, and in every mode expanding
+levels and holding garbage cost nothing. The two money prices are fixed in
+advance (§0.6) and every price is recorded in the fingerprint (OBJ-2). Since
+the weight of space against the other terms is set by a price choice, results
+are also reported at $c_s/2$ and $2c_s$. The operation rates $u$, $q$,
+$q_{pt}$ and $q_{sc}$ are measured online; the reference rate $\bar q$ is fixed
+in advance per workload (§0.6).
 
-**Theorem A.1 (Depth invariance).**
-*Let $\phi_i(t) = \text{occupancy}_i(t)/C_i$. If the controller defers at level
-$i$ over $[t_0,t_1]$ and maintains $s_i(t) \ge \phi_i(t)$ throughout, then level
-$i$ is not eligible for outward compaction on $[t_0,t_1]$, no burst is released,
-and populated depth $L$ is unchanged relative to the eager policy over that
-interval.*
+**Cost rate.**
+$$c(t) = c_w\,\dot w(t) + q_{pt}(t)\big(c_f R_f + c_{blk}R_{blk}\big)(t) + q_{sc}(t)\,c_{sk}R_{sk}(t) + c_s H(t)\,\frac{q(t)}{\bar q},$$
+where $\dot w$ is bytes written per second. Relation to the draft: $w\cdot
+\text{WA} = c_w u W$; $r\cdot\text{RA}$ becomes the three read terms;
+$s\cdot\text{SA} = c_s N_{\text{live}}S = c_s H$ at the reference rate.
 
-*Proof.* Without expansion, occupancy $\kappa_i C_i$ against capacity $C_i$
-gives score $\kappa_i > 1$; by A3 the level is eligible and once admitted
-releases $\kappa_i C_i$ bytes downstream. A released burst is absorbed by the
-*headroom* below, not by nominal capacity, so it is contained at the smallest
-$m$ with
+**Space is charged per operation served, not per second.** Every arm serves the
+same operation sequence (one client thread, a fixed seed, `mixgraph` stopped by
+operation count) and is scored over the same operations (A8), so the write and
+read terms integrate to counts that do not depend on how long the run takes. A
+space term of $c_sH$ per second would not: a run that takes longer holds the
+same live bytes for longer and pays for it. With the factor $q/\bar q$,
+$\int c_sH\,(q/\bar q)\,dt = (c_s/\bar q)\sum_n H(n)$, where $H(n)$ is $H$ when
+operation $n$ is served. $H$ changes only when a version is installed, so the
+sum is computed exactly as the sum, over the intervals between installs, of $H$
+times the operations served in the interval. Space is priced by what is held
+while the store serves each operation (Lemma D.15). $c_s$ keeps its meaning —
+the price of holding one byte for one second — when the store serves $\bar q$
+operations per second.
 
-$$\kappa_i C_i \;\le\; \sum_{j=1}^{m} (1 - \phi_{i+j})\, \hat C_{i+j},
-\qquad \delta L = \max(0,\; m - 1).$$
+$J_\beta$ therefore contains no time. Stalls, slowdowns, foreground throughput
+and the controller's own overhead are not priced in Programme 1; they are
+reported per arm as paired diagnostics (OBJ-6), and pricing them belongs to
+Programme 2. Because they are unpriced, a policy could lower $J_\beta$ by
+deferring work until writes stall; the stall rule (Global acceptance) bars any
+claim that does. The drain serves no operations, so it carries no space cost; its
+bytes written are counted. A controller arm drains under its fallback settings
+($m \equiv 1$, $K_0$ as configured; A-Impl-8), the configuration it started
+from, and a static arm under its own configuration, so every arm drains to the
+targets it would hold without a controller and no deferred work leaves the run
+uncharged. Draining a static profile at $m \equiv 1$ instead would charge it a
+compaction its configuration never performs. The rule errs against the
+controller: one that ends with anchors above 1 pays for the drain, while a
+static profile holding the same multipliers does not.
 
-With $s_i(t) \ge \phi_i(t)$, score $\le 1$; by A3 the level is not eligible; the
-accumulation is absorbed horizontally at level $i$; $m = 0$; $L$ unchanged.
+**Lemma D.1 (the flow form is exact).** Let the reward of an interval
+$[t, t+\Delta t)$ be $-\int_t^{t+\Delta t} c$. For any partition of the measured
+phase into intervals, the rewards sum to minus the run's priced cost:
+$c_w\cdot(\text{bytes written}) + \sum(\text{read price} \times \text{count}) +
+(c_s/\bar q)\int H\,q\,dt$.
+
+*Proof.* Counts and integrals are additive over disjoint intervals. $\blacksquare$
+
+*Consequence.* No run-to-date ratio enters the reward, so a start-up transient
+cannot inflate a multiplier the way it inflated $\lambda_W$ and
+$\lambda_{\text{scan}}$ in D-12. The transient still enters the cost itself,
+which is why the measured phase starts only after the tree settles (H §5).
+
+*Scope.* Lemma D.1 is about the global cost. The agents of Pathway H are
+trained on a different quantity: each level's attributed, priority-weighted
+cost divided by $c_wC_i$, plus counterfactual neighbour charges (H §3). Summed
+over levels, those rewards do not give minus the priced cost, for four
+reasons. Each level is divided by a different constant. Space is charged per
+level as shadowed garbage $g_i$ (§4), an estimate that leaves out live bytes,
+not as held bytes $H$. The block read of the table where a Get finds its key
+goes to a shared bucket no agent is rewarded on (§4). And a neighbour charge $X_{i+1}$ is a signed estimate of
+how level $i$'s action, against holding, changes level $i+1$'s future cost;
+level $i+1$ pays the realised change again in its own attributed cost, so the
+sum carries each action's effect on its neighbours twice — once realised, once
+estimated — above the cost when actions burden neighbours and below it when
+they relieve them. The identity that can be checked on a run is Proposition
+D.16's: the attributed write and read costs, summed over levels and over every
+interval of the measured phase, plus the shared hit-read bucket, before
+normalisation and without neighbour charges, equal the global write and read
+costs (OBJ-1, OBJ-4). The agents'
+discounted per-level returns are a training surrogate: a joint policy that every
+agent's return rates optimal need not minimise $J_\beta$ (H §3), and every run
+is judged on $J_\beta$.
+
+### §2 Priority modes
+
+**Definition (priced cost with priority).** For weights $\beta = (\beta_W,
+\beta_R, \beta_S) > 0$:
+$$C_\beta(t) = \beta_W\,c_w\dot w + \beta_R\big[q_{pt}(c_fR_f + c_{blk}R_{blk}) + q_{sc}c_{sk}R_{sk}\big] + \beta_S\,c_sH\,q/\bar q,$$
+and $J_\beta(\pi) = \mathbb{E}\int C_\beta\,dt$ over the measured phase, the
+expectation over seeds. Write $\mathcal C_W(\pi)$, $\mathcal C_R(\pi)$, $\mathcal C_S(\pi)$ for the
+three unweighted priced run costs (write, the three read terms together,
+space), so $J_\beta = \beta_W \mathcal C_W + \beta_R \mathcal C_R + \beta_S \mathcal C_S$.
+
+**Modes.** $\beta^\star > 1$ is the priority factor.
+
+| Mode | $(\beta_W, \beta_R, \beta_S)$ |
+| --- | --- |
+| balanced (pure priced cost) | $(1, 1, 1)$ |
+| read priority | $(1, \beta^\star, 1)$ |
+| write priority | $(\beta^\star, 1, 1)$ |
+| space priority | $(1, 1, \beta^\star)$ |
+
+**Proposition D.2 (gain–loss form).** Fix any reference policy $\pi_0$, for
+example native RocksDB with the same options. For a mode with prioritised term
+$P \in \{W, R, S\}$, define
+$$G_P(\pi) = \beta^\star\big[\mathcal C_P(\pi_0) - \mathcal C_P(\pi)\big] - \sum_{X \ne P}\big[\mathcal C_X(\pi) - \mathcal C_X(\pi_0)\big].$$
+Then $J_\beta(\pi) = J_\beta(\pi_0) - G_P(\pi)$. Minimising $J_\beta$ is therefore
+the same as maximising "$\beta^\star$ times the decrease of the prioritised cost,
+minus the increases of the other two costs", and the reference cancels out of
+the choice.
+
+*Proof.* Expand $J_\beta(\pi_0) - J_\beta(\pi) = \beta^\star(\mathcal C_P(\pi_0) -
+\mathcal C_P(\pi)) + \sum_{X\ne P}(\mathcal C_X(\pi_0) - \mathcal C_X(\pi))$. $\blacksquare$
+
+*The three modes written out.* "Increase" is signed: if a non-prioritised cost
+falls, that counts in the policy's favour at its price.
+
+- **Read priority:** maximise $\beta^\star\cdot$(read-cost decrease) $-$
+  (write-cost increase) $-$ (space-cost increase).
+- **Write priority:** maximise $\beta^\star\cdot$(write-cost decrease) $-$
+  (read-cost increase) $-$ (space-cost increase).
+- **Space priority:** maximise $\beta^\star\cdot$(space-cost decrease) $-$
+  (read-cost increase) $-$ (write-cost increase).
+
+No reference policy is needed online: by Lemma D.1 and Proposition D.2, a
+global per-interval reward $-\int C_\beta$ would implement all three modes. The
+agents of Pathway H receive per-level rewards built from it instead (H §3):
+attributed write and read costs, a garbage charge for space, and neighbour
+charges. $\beta$ enters every one, so the mode reaches every agent, but the per-level rewards
+implement it only as far as they approximate the difference reward (H §3, "The
+approximation"). Runs are scored on $J_\beta$.
+
+**Proposition D.3 (exchange rate).** Suppose that near an optimum the achievable
+operating points form a smooth curve along which only the prioritised cost $\mathcal C_P$
+and one other cost $\mathcal C_X$ change. At an interior minimiser of $J_\beta$,
+$-d\mathcal C_P/d\mathcal C_X = 1/\beta^\star$. In metric units,
+$-dP/dX = \text{price}_X / (\beta^\star\,\text{price}_P)$.
+
+*Proof.* First-order condition along the curve: $\beta^\star\,d\mathcal C_P + d\mathcal C_X = 0$.
 $\blacksquare$
 
-Three points about the statement. (1) Downstream inflow is *deferred*, not
-equal to the eager policy's — over the whole run it is also reduced by whatever
-the deferred merge elides. (2) The hypothesis is a condition on the whole
-interval: the decay schedule (A-Impl-8) can drive $s_i$ below $\phi_i$ while the
-level is still over-full, restoring eligibility and firing the burst late. Depth
-invariance is a property of *sustained* expansion; A-4 tests the conjunction.
-(3) The headroom form requires per-level occupancy $\phi_j$ at the moment of
-release, which existing logs do not retain. **Theorem A.1 is untested**; Gate 3a
-is its first test and must log $\phi_j$ at release time (Gate 0).
+In plain terms, the controller accepts one extra unit of another cost only if it
+buys at least $1/\beta^\star$ units of reduction in the prioritised cost.
+$\beta^\star$ says how much more the prioritised metric is worth than its price.
+
+**Proposition D.4 (a large enough factor gives strict priority on a finite
+class).** Let $A$ be a finite set of operating points, such as the static
+class. There is a finite $\bar\beta$ such that for every $\beta^\star > \bar\beta$,
+every minimiser of $J_\beta$ over $A$ minimises $\mathcal C_P$ over $A$ and, among those
+points, minimises $\sum_{X\ne P}\mathcal C_X$.
+
+*Proof.* If every point has the same $\mathcal C_P$ the claim is immediate.
+Otherwise let $P_{\min} = \min_A \mathcal C_P$, $\Delta = \min\{\mathcal C_P(a) - P_{\min} :
+\mathcal C_P(a) > P_{\min}\} > 0$ (finite set), and $M = \max_A\Sigma - \min_A\Sigma$
+with $\Sigma = \sum_{X\ne P}\mathcal C_X$. Take $\bar\beta = M/\Delta$. If $\mathcal C_P(a) >
+P_{\min}$ then $J_\beta(a) \ge \beta^\star(P_{\min} + \Delta) + \min_A\Sigma >
+\beta^\star P_{\min} + \max_A\Sigma \ge J_\beta(a')$ for every $a'$ with
+$\mathcal C_P(a') = P_{\min}$. Among such $a'$, $J_\beta$ differs only through $\Sigma$.
+$\blacksquare$
+
+*Use.* A large $\beta^\star$ reads "prioritise reads first, then keep writes and
+space as low as possible"; a moderate one reads "trade at this rate". Report
+$\bar\beta$ per workload so readers know which regime a result is in. The
+headline $\beta^\star$ is fixed in advance (§0.6), with $\beta^\star \in \{2, 5,
+10\}$ reported.
+
+**Proposition D.5 (weighted costs select only supported points).** A minimiser
+of $J_\beta$ over a set $A$ lies on the lower boundary of the convex hull of $A$'s
+priced-cost vectors. A Pareto-optimal point of $A$ strictly above that boundary
+minimises $J_\beta$ for no $\beta > 0$.
+
+*Proof.* $J_\beta$ is linear in the priced-cost vector, and the minimum of a
+linear function over $\operatorname{conv}(A)$ is attained at points of $A$. If
+$x$ minimises it for some $\beta > 0$, the hyperplane $\{y : \langle\beta, y\rangle
+= \langle\beta, x\rangle\}$ supports $\operatorname{conv}(A)$ at $x$. A point
+strictly above the lower boundary has, for every $\beta$, a point of the hull
+with a smaller value. $\blacksquare$ [Das & Dennis; Miettinen]
+
+*Consequences.* The comparator for every mode is a vertex of one hull
+(Proposition C.4). A trade that lies in a dent of the frontier is reachable by
+no choice of weights.
+
+**Remark D.6 (the actual min–max form).** Minimising the worst weighted gap to an
+ideal point, $\max_X \beta_X(\mathcal C_X - \mathcal C_X^{\text{ideal}})$ (the weighted Chebyshev
+form), reaches every Pareto-optimal point for suitable weights, including points
+in dents [Miettinen]. It needs the ideal point — the best achievable value of
+each cost separately — which a cold-started controller does not have. Programme
+1 therefore uses the weighted form. The Chebyshev form may be used offline to
+select among measured configurations.
+
+### §3 Cost model in the actual knobs
+
+Levels $0..L$; knobs $K_0$, $m_1..m_L$, and depth. The model explains and
+bounds; the attributed costs in the reward are always measured (only the
+neighbour charge of H §3 uses a one-step model prediction and learned values).
+
+**Lemma D.7 (write accounting identity).** In steady state (A7), with $a_F$
+the flush bytes per user byte, $a_0$ the bytes leaving L0 per user byte (equal
+to $a_F$ unless an intra-L0 compaction drops entries), $t_i$ the
+bytes leaving level $i$ by trivial
+move per user byte, $\rho_i$ and $o_i$ measured over merges only, and
+$a_{i+1} = (a_i - t_i)\rho_i + t_i$,
+$$W = a_F + \sum_{i=0}^{L-1} (a_i - t_i)(\rho_i + o_i),$$
+plus, listed separately, any intra-L0 or last-level self-compaction bytes.
+
+*Proof.* A merge sourced at level $i$ writes $X = (X - O) + O = \rho_iS + O
+= S(\rho_i + o_i)$ bytes. A trivial move relinks its file into level $i+1$ and
+writes nothing. In steady state the bytes leaving level $i$ per user byte equal
+those entering it, $a_i$: $a_i - t_i$ by merge and $t_i$ by trivial move. The
+net bytes landing in level $i+1$ per user byte are $(a_i - t_i)\rho_i + t_i =
+a_{i+1}$. Summing flush bytes and the bytes written by every level's merges, per
+user byte, gives the identity. $\blacksquare$
+
+The identity is exact given measured $\rho_i$, $o_i$ and $t_i$; no convention
+enters. The expression for $W$ needs no steady state: with $a_i - t_i$ read as
+the merged source bytes measured in the window, it holds over any window, the
+measured phase included; only the recursion for $a_{i+1}$ needs A7. A RocksDB
+job is either a trivial move or a merge, never part of each
+(`Compaction::IsTrivialMove` accepts or rejects the whole input set), so $t_i$
+is well defined per job. Counting trivially moved bytes as merged would
+overstate $W$ by $\sum_i t_i(\rho_i + o_i)$. How large $t_i$ is must be
+measured (Pathway B §2 item 4), not assumed. Trivial moves happen where the
+level below has gaps in its key coverage: while the tree grows, in the holes a
+compaction leaves behind, and while a backlog drains, which native RocksDB does
+with trivial moves (audit 2026-09-23, §1). On thirty 2026-09 uniform runs of
+the hand-written prior (`unconstrained_prior_only`, 10M, T = 2/6/10), whole run
+with the load, 42–71% of the bytes leaving levels $\ge 1$ moved trivially,
+and charging them as merges would have overstated bytes written by 26–70%.
+Their share in the measured phase on `Assoc` has not been measured.
+
+**Lemma D.8 (overlap with uniformly spread keys).** If keys are spread uniformly
+within each level and a compaction's source range covers a fraction $x$ of level
+$i$'s key space, then $o_i = B_{i+1}/B_i$ at that moment. With both levels at
+their effective targets, $o_i = f_i$. For L0 → L1 with L0 files spanning the key
+range, $o_0 = B_1/(k_0F) = m_1C_1/(K_0F) = f_0$ at the trigger.
+
+*Proof.* The source holds $xB_i$ bytes and overlaps $xB_{i+1}$ bytes below.
+$\blacksquare$
+
+*The overlap constant.* Define $c_i = o_i/f_i$, measured per level. RocksDB's
+`kMinOverlappingRatio` picks files with below-average overlap [Sarkar et al.],
+so $c_i \le 1$ is expected, and skewed keys lower it further. The conventions of the 2026-09-11
+revision (M1: $c f$ with $c = 1$; M2: $c = \tfrac12$; M3: $c(f+1)$ with
+$c = \tfrac12$ [How to Grow]) differ in how they count the source rewrite and the overlap; the
+identity counts both exactly and leaves $c_i$ to measurement. This resolves
+issue 3 and amends P0-7 (§0.6).
+
+**Corollary D.9 (garbage-free steady state).** With $\rho_i = 1$, $a_F = a_0 = 1$,
+no trivial moves ($t_i = 0$), levels at their effective targets and a common
+overlap constant $c$,
+$$W = 1 + L + c\sum_{i=0}^{L-1} f_i,\qquad \prod_{i=0}^{L-1} f_i = \frac{B_L}{K_0F},$$
+and the product does not depend on $m_1, \dots, m_{L-1}$.
+
+*Proof.* Lemma D.7 with $a_i = 1$ and Lemma D.8. The product telescopes:
+$\frac{m_1C_1}{K_0F}\cdot\prod_{i=1}^{L-2}\frac{m_{i+1}C_{i+1}}{m_iC_i}\cdot
+\frac{B_L}{m_{L-1}C_{L-1}} = \frac{B_L}{K_0F}$. $\blacksquare$
+
+**Lemma D.10 (read terms).** Runs are searched newest to oldest (L0 files, then
+L1 to L), after the memtables. A Get answered from the memtables probes no
+table, so $R_f = R_{blk} = 0$. Otherwise consider a Get whose newest version is
+in the $n$-th table run whose key range covers the key (a hit), or that finds no
+version in any table (a miss), and let $\varepsilon$ be the probability that a
+covering run which does not hold the key passes its filter. Then:
+
+- $R_f = n$ for a hit, and the number of covering runs for a miss;
+- $\mathbb{E}[R_{blk}] = \mathbf 1_{\text{hit}} + \varepsilon\,(R_f - \mathbf 1_{\text{hit}})$;
+- for a scan, $R_{sk} = k_0 + $ (number of levels $1..L$ with a file at or
+  after the seek key); a `DBIter` reseek, after more than
+  `max_sequential_skip_in_iterations` hidden versions of one key, counts them
+  again, which is rare here and checked with `rocksdb.number.reseeks.iteration`.
+
+On `Assoc` there are no misses: the load writes every key below `num`, and
+`mixgraph` draws only such keys. With a per-level allocation such as Monkey
+[Monkey], $\varepsilon$ becomes $\varepsilon_j$ inside the sum.
+
+*Proof.* Filters have no false negatives, so every covering run before the hit
+is probed and does not hold the key; each of those reads a block with
+probability $\varepsilon$, by linearity of expectation (no independence between
+runs is needed), and the hit run reads one. A scan seeks each L0 file and each
+level that has a file at or after the seek key, once per level however many of
+its files the scan then enters (P1c-20: at the recorded RocksDB commit the table
+iterator ticks only on a keyed seek, and a level iterator moving to its next
+file does not tick again). $\blacksquare$
+
+**Proposition D.11 (static optimum of the L0 trigger).** Assume no garbage
+dropped at L0 ($\rho_0 = 1$), uniform-key overlap at L0 (Lemma D.8; each L0 file then overlaps L1, so none moves trivially and $t_0 = 0$), a time-average L0 file count $\bar k_0 = K_0/2 +
+\delta_0$ with $\delta_0$ not depending on $K_0$ (it accounts for flushes that
+arrive during an L0 compaction, and while the single compaction slot runs
+another level's job; independence from $K_0$ is an assumption, checked on the
+static sweep of Gate N2), Gets and scans that probe every L0 run, and
+fixed prices and rates. The part of $C_\beta$ that depends on $K_0$ is
+$$\frac{\beta_W c_w u\,m_1C_1}{K_0F} + \beta_R\frac{K_0}{2}\big[q_{pt}(c_f + \varepsilon c_{blk}) + q_{sc}c_{sk}\big],$$
+minimised over real $K_0 > 0$ at
+$$K_0^\star = \sqrt{\frac{2\,\beta_W c_w u\,(m_1C_1/F)}{\beta_R\big[q_{pt}(c_f + \varepsilon c_{blk}) + q_{sc}c_{sk}\big]}}.$$
+Admissible triggers are the integers in $[2, K_{\text{cap}}]$ with $K_{\text{cap}}
+= \min(\lfloor C_1/F\rfloor, K_{\text{slow}} - 1)$ (A3′), and the best admissible
+trigger is one of the two integers next to $K_0^\star$, clamped to that range.
+
+*Proof.* By Lemma D.7 only the overlap term $a_0o_0 = m_1C_1/(K_0F)$ of the
+L0-sourced writes depends on $K_0$; by Lemma D.10 each L0 run adds one filter
+probe and $\varepsilon$ block reads per Get and one seek per scan. So the cost
+is $g(K) = A/K + BK$ with $A, B > 0$, strictly convex on $K > 0$ with minimiser
+$\sqrt{A/B}$. Strict convexity makes the best integer one of the two neighbours
+of the real minimiser. $\blacksquare$
+
+This has the same shape as the draft's $K^\star = \sqrt{wT/r}$, with the L1-to-flush
+fanout $m_1C_1/F$ in place of $T$. $K_0^\star \propto \sqrt{\beta_W/\beta_R}$:
+read priority lowers the trigger and write priority raises it.
+
+**Corollary D.12 (a provable adaptivity gap for the L0 trigger).** Suppose the
+workload alternates between phases whose rates $(u, q_{pt}, q_{sc})$ give
+different best admissible triggers under Proposition D.11. Then any fixed
+trigger costs strictly more than the trigger switched per phase, not counting
+the cost of each switch.
+
+*Proof.* Each phase's cost is strictly convex in $K_0$ with its own minimiser. A
+fixed $K_0$ is at most one phase's minimiser, so it is strictly worse in at
+least one phase and no better in any. $\blacksquare$
+
+This predicts, in advance, a positive phase-adaptivity gap $\mathcal G$
+(Pathway B) for one knob. A real controller also pays the switching transient:
+the L0 contents at the switch.
+
+**Proposition D.13 (interior multipliers and depth in steady state).** Under
+Corollary D.9's assumptions, with $L$ and $K_0$ fixed:
+
+- (i) $W$ is minimised over the interior multipliers exactly when all fanouts
+  are equal, $f_i = (B_L/(K_0F))^{1/L}$. That profile is static.
+- (ii) (This part does not use Corollary D.9's assumptions.) Up to the L0 run
+  count, $R_{sk}$ does not depend on the interior
+  multipliers unless a level empties, and $R_f$ and $R_{blk}$ depend on them
+  only through where Gets find their key. Raising $m_i$ delays every version's
+  descent below level $i$, so a Get whose key's newest version would already
+  have crossed a boundary at or below level $i$ finds it one level higher,
+  saving one filter probe (and $\varepsilon$ block reads) per level it no longer
+  passes. Under uniform access the moved share is small for the upper levels,
+  which hold little of the data; for the levels just above the last it is the
+  same shift that, taken far enough, empties the last level (audit §3). Under
+  skew it can be material at the upper levels too, but only for Gets whose key
+  is rewritten during the run. In db_bench's `mixgraph` the key and the
+  operation type come from one random draw, so on `Assoc` about 44% of Gets read
+  keys that no Put writes during the measured phase, and on the uniform control
+  no Get ever does. The moved share is measured from per-level hit shares with
+  Gate N0's counters (§4), not assumed. The interior multipliers also reach the
+  L0 run count through $\delta_0$ (Proposition D.11): $m_1$ directly, since it
+  sets the size, and so the duration, of every L0→L1 merge, and every $m_i$
+  through the single compaction slot, whose busy time depends on each level's
+  merge sizes. Flushes that arrive meanwhile raise the mean L0 run count, adding
+  probes to every Get that reaches the tables and seeks to every scan; merges
+  out of L0 grew 34–74% at $s = 1.5$–2 (audit §3). For a fixed profile all of
+  this is static.
+- (iii) The space bound of Lemma D.14 increases in every $m_i$.
+- (iv) Treat $L$ as continuous with equal fanouts $f = (B_L/(K_0F))^{1/L}$. The
+  $C_\beta$-optimal fanout solves
+  $$c\,f(\ln f - 1) = 1 + b/A,$$
+  where $A = \beta_Wc_wu$ and $b = \beta_R[q_{pt}(c_f + \varepsilon c_{blk})h +
+  q_{sc}c_{sk}]$ is the read cost rate one more level adds, with $h$ the share
+  of Gets that probe it. Read priority raises $f^\star$ (fewer levels). At
+  $b = 0$ and $c = 1$, $f^\star \approx 3.59$.
+
+*Proof.* (i) Minimise $\sum f_i$ with the product fixed; by the AM–GM
+inequality equality of the terms is necessary and sufficient. (ii) Lemma D.10:
+the read counts depend on the number of runs and the hit position. Interior
+multipliers change the number of runs at levels $\ge 1$ only if a level
+empties, the hit position only by delaying descent, and $k_0$ only through
+$\delta_0$, directly through $m_1$ and through the shared compaction slot.
+(iii) Lemma D.14. (iv) The $L$-dependent cost is
+$A(1 + L + cLf) + bL$. Since $\ln f = \ln(B_L/(K_0F))/L$,
+$\frac{d}{dL}(Lf) = f(1 - \ln f)$, so the derivative is
+$A(1 + cf(1 - \ln f)) + b$; setting it to zero gives the equation. At $c = 1$,
+$b = 0$: $3.59\,(\ln 3.59 - 1) = 1.00$. $\blacksquare$
+
+*Consequences.* Everything in (i)–(iv) is a static choice: an interior profile,
+a depth fixed by base size at load time, and $K_0$ at fixed prices. All of it
+belongs to the static comparator (Corollary C.3). Depth cannot be reduced during
+a run (Lemma A.6), so (iv) is a design and comparator result only. The
+2026-09-11 Corollary A.4 ($f^\star \approx 3.59$ under M3) is the special case
+$c = 1$, $b = 0$; the optimum moves with the measured $c$ and with the priority.
+
+**Lemma D.14 (space bound).** Under A2 and A6,
+$$S \le 1 + \sum_{i<L}\frac{B_i}{B_L} \le 1 + \frac{k_0F}{B_L} + \sum_{i=1}^{L-1}\frac{m_iC_i}{B_L},$$
+the second inequality holding outside release transients, when $B_i \le m_iC_i$.
+
+*Proof.* Level $L$ holds one version per key (A2), so the number of distinct keys
+is at least the number of keys at level $L$, and with fixed entry size the live
+bytes are at least $B_L$. Total bytes are $\sum_i B_i$, so $S \le \sum_iB_i/B_L$.
+$\blacksquare$
+
+For a full geometric ladder at $m \equiv 1$ the bound is about $1 + 1/(T-1)$,
+which is the draft's $ZT/(T-1)$ at $Z = 1$. It is a worst case (every upper
+entry updates a last-level key): about 2.0 at T=2 against a measured 1.07–1.09
+on `Assoc`. It is used only to bound the space cost of expansion,
+$\partial(\text{bound})/\partial m_i = C_i/B_L$.
+
+**Lemma D.15 (live bytes do not depend on the policy).** Index the measured
+phase by operation number $n$ (A8). Suppose the arms serve the same operation
+sequence, and that the bytes an entry occupies in a table do not depend on which
+entries share its block or file (A6's last clause; with compression off it fails
+only through per-file metadata, index and filter blocks and restart points, a
+small fraction of a percent — the garbage-free size of 108 `Assoc` runs spanned
+0.006%, D-3). Then the live bytes after operation $n$ are the same under every
+compaction policy, and with space charged per operation served (§1) two
+policies' space costs differ only through the garbage they hold:
+$(c_s/\bar q)\sum_n\big(H_\pi(n) - H_{\pi_0}(n)\big) = (c_s/\bar q)\sum_n\big(G_\pi(n) - G_{\pi_0}(n)\big)$,
+up to the live bytes of a memtable whose flush completes after a different
+operation under different policies: at most one write buffer at any operation
+(2 MiB here, with two memtables), and on average far less, against about 3 GiB
+held. Entry sizes may vary; with deletes the lemma holds with tombstones counted
+as garbage.
+
+*Proof.* Compaction never changes the result of a read, so the newest version
+of every key after operation $n$, and therefore the live set, is fixed by the
+operations. The current version's table files ($H$) hold every live entry not
+in the memtables, plus garbage; which entries the memtables hold after
+operation $n$ is fixed by the write sequence except for flushes still in
+progress. $\blacksquare$
+
+*Why per operation and not per second.* Under a per-second charge the lemma
+fails: two policies spend different times on the same operations, so the
+difference gains $c_s\sum_n L(n)(\Delta t^\pi_n - \Delta t^{\pi_0}_n) \approx
+c_sN_{\text{live}}(T_\pi - T_{\pi_0})$, with $L(n)$ the live bytes and
+$\Delta t_n$ the time spent at operation $n$. On record, runtime moves more
+than space. The four base-16 MiB static triggers on `Assoc` held within
+0.6–0.8% of one another's space (D-3), while the runtime winner led by 4.2% at
+T=2 and 2.6% at T=10 (D-5). In the 2026-08-24 uniform matrix, learned and prior
+arms ran 3.6–6.3% longer than native (history §10.6; its space figures used the
+live-data estimate D-3 retired, so only the runtimes carry over). Per second,
+the runtime term would be 3–7 times the space difference. A space-priority
+controller would chase speed.
+
+*Consequence.* Space needs no online estimate of live data — the estimate D-3
+retired. The evaluator prices held bytes $H$ directly; the per-level rewards
+need only the policy-dependent part, garbage, of which §4 attributes the
+adjacent-level part as shadowed garbage $g_i$ (an estimate that undercounts;
+OBJ-3 checks how it tracks measured garbage).
+
+### §4 Per-level attribution
+
+The agents of Pathway H each need their own share of the cost:
+
+- **Writes** are charged to the source level of the compaction that wrote them
+  (the job's start level, not RocksDB's per-level compaction statistics, which
+  are keyed by output level); flush writes to L0. This is exact.
+- **Reads:** each filter probe, false-positive block read and run seek is
+  charged to the level where it happens. The block read of the table where a
+  Get finds its key is charged to no level. It goes to a shared *hit-read
+  bucket* that no agent is rewarded on. Every Get that reaches the tables makes
+  exactly one such read, wherever its key is found (Lemma D.10), and the share
+  of Gets answered from the memtables depends on the policy only through Lemma
+  D.15's memtable caveat. Charging it to the level that holds the key would
+  charge that level for a read that merely moved up from a deeper level, and
+  teach it to avoid holding recently written keys. This is exact, given
+  per-level counters that take the level from the version being read —
+  `FilePicker`'s hit level in `Version::Get`, and for seeks the level at which
+  the version builds the iterator (0 for each L0 file, the level iterator's
+  level otherwise) — that separate the hit's block read from false-positive
+  ones, and that aggregate across threads (Gate N0). RocksDB's per-level perf context does not qualify as it stands: it
+  is thread-local, needs `perf_level` at least `kEnableCount`, has no seek
+  counter, and keys its filter counters by the level at which a table reader was
+  first opened, which is stale after a trivial move.
+- **Slot blocking.** There is one compaction slot (G.4). While L0 is due
+  (score at least 1) but cannot compact because a job sourced at level
+  $i \ge 1$ holds the slot, the share $(k_0 - K_0)^+/k_0$ of L0's filter probes,
+  false-positive block reads and seeks — the files beyond its trigger — is
+  charged to level $i$ instead of to L0, for every operation served in that
+  span. The rule moves cost between levels and leaves the total unchanged. It
+  is an attribution rule, not an exact counterfactual: had the slot been free,
+  flushes arriving during L0's own merge would still have added files. It is
+  the channel through which an interior level changes read cost during a run
+  (Proposition D.13(ii)'s $\delta_0$), and it lets interior agents in read
+  priority learn to keep the slot free while L0 is due or about to be. The
+  share is exact in expectation when every L0 file covers the key
+  (Lemma D.8's uniform-key L0 files).
+- **Space:** level $i$ is charged its *shadowed garbage*
+  $g_i = (1 - \hat{\tilde\rho}_i)B_i$ at the rate $c_sg_i\,q/\bar q$ (§1): the
+  bytes its next compactions would drop at the recent net pass-through
+  $\hat{\tilde\rho}_i$ (trivial moves drop nothing). This is an estimate, and it
+  counts only garbage in level $i+1$ shadowed by level $i$. A version two or
+  more levels below its next-newer version is dropped only after that version
+  descends, and no $g_k$ counts it, so $\sum_ig_i$ undercounts resident garbage
+  whenever upper-level keys also live deeper than the next level. Live bytes are
+  not attributed: they are the same under every policy (Lemma D.15).
+
+**Proposition D.16 (decomposition).** The per-level charges, plus the shared
+hit-read bucket, sum to the global cost rate $c(t)$ exactly for the write and
+read terms. For space, $\sum_i g_i$ counts only adjacent shadowing and so
+undercounts total garbage; it is reported against measured garbage at run end
+(OBJ-3).
+
+*Proof.* Every written byte has exactly one source (a flush or one compaction).
+Every probe, seek and false-positive block read happens at exactly one level and
+is charged in full either there or, under slot blocking, split between L0 and
+one other level in shares that sum to 1. Every hit's block read goes to the
+bucket. $\blacksquare$
+
+### §5 Room by mode: predictions recorded before any run
+
+- **Read priority.** On `Assoc` at the old comparators there was almost no room
+  in steady state (audit §2). The read levers are the L0 trigger — static at
+  fixed prices, dynamic when prices move (Corollary D.12) — and depth, which is
+  static (Corollary A.7); under skew the interior profile is a third read lever,
+  also static (Proposition D.13(ii)). Two further levers act during a run,
+  both through the single compaction slot: the L0 agent compacting early while
+  the slot is idle and reads are heavy (Pathway A §4 (e)), and interior levels
+  keeping the slot free while L0 is due or about to be (Pathway A §4 (f), priced
+  by the slot-blocking charge of §4). Their size is unmeasured. Room is expected mainly on
+  phased or changing workloads.
+- **Write priority.** A static profile gains $O((1-\eta)^2)$ (Theorem A.2(iii),
+  where $\eta$ is a ratio of merged volumes, not merge survival), plus what
+  timing merges against garbage can add, bounded by Proposition B.1″ and its
+  native-relative form (Pathway B §3). On `Assoc` garbage is not scarce in the
+  measured phase, since every Put overwrites, but native compaction already
+  drops 77–92% of it, much of it high in the tree (merge survival
+  $X/(S+O)$ at L1 0.84–0.93, D-4). First overwrites meet their loaded versions
+  in the deepest levels, where a drop saves the fewest later stages. The room is
+  what holding a level adds to high drops beyond native; Gate N3 measures it.
+- **Space priority.** On `Assoc`, $S$ is 1.03–1.09, so garbage is $(S-1)/S$ =
+  3–8% of held bytes; even a policy that held no garbage at all could remove no
+  more than that. High-garbage workloads are needed.
+
+### §6 Acceptance
+
+| # | Criterion | Threshold | Instrument |
+| --- | --- | --- | --- |
+| OBJ-1 | Flow identity (Lemma D.1, Proposition D.16) | on every arm that runs the plugin: the attribution log's per-level write bytes (flushes to L0, each compaction to its start level, by completion time), summed over levels and over every interval from $n_w$ to the end of the drain — intervals excluded from replay included — equal the evaluator's flush and compaction bytes for the same window, with the log opening a partial interval for every level at $n_w$ and closing one at the end of the drain; any residual is listed by job and must consist only of jobs whose completion the two sources place on different sides of a boundary stamp. The log's per-level read counts, taken before the slot-blocking rule moves any of them and with each level's hit block reads logged apart from its false-positive ones, equal the per-level counters' totals over the same window (their difference between the $n_w$ stamp and the end of the drain); after the rule, per-level read charges plus the hit-read bucket still sum to the global read cost. Space is not checked here: the per-level charge is a garbage estimate (OBJ-3) | attribution log, event log |
+| OBJ-2 | Prices calibrated | all prices in money: device times for $c_w, c_f, c_{blk}, c_{sk}$ measured on the node and converted at the instance price, the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; re-measured on any hardware change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
+| OBJ-3 | Space attribution | $\sum_ig_i$ and measured garbage at run end reported per arm. $\sum_ig_i$ targets only adjacent shadowing and undercounts (§4), so the criterion is on differences: across $\Theta_s$ at Gate N2, the ratio's spread and the slope of $\Delta\sum_ig_i$ on $\Delta$(measured garbage) are reported, and a tolerance on the ratio is fixed from them before Gate N4; at Gate N4 the learner's paired $\Delta\sum_ig_i$ against its comparator must agree in sign with $\Delta$(measured garbage) whenever that difference's paired interval excludes zero, and its ratio must lie within that tolerance | reference compaction, event log |
+| OBJ-4 | Per-level read counters | per-level counters taken at the sites of §4 (the version's level: `FilePicker` hits in `Version::Get`; seeks per L0 file and per level iterator), so that a trivially moved file's reads are charged to its new level; block reads split into the hit's read and false-positive reads (§4); their sums match the global counters within 1% (the read half of Proposition D.16) | per-level counters, tickers |
+| OBJ-5 | Mode recorded | $\beta$, mode and $\bar q$ in every arm's manifest and fingerprint | `metadata.env` |
+| OBJ-6 | Unpriced time reported | measured-phase throughput, stall seconds and controller CPU per arm, paired against the comparator; not part of $J_\beta$, but the first two decide the stall rule (Global acceptance) | db_bench, event log, per-thread CPU clocks (plugin thread, trainer process) |
 
 ---
 
-**Theorem A.2 (Fanout conservation and the survival-weighted optimum).**
-*Let $\rho = \hat C_L / \hat C_0$.*
+## Pathway A — Actuation: level target multipliers and the L0 trigger
 
-*(i) Conservation.* $\prod_{i=0}^{L-1} f_i = \rho$ independently of the interior
-profile $\{s_1,\dots,s_{L-1}\}$.
+### §0 Purpose
 
-*(ii) Write amplification.* Under A2 with per-level survival $\eta_j$,
-$$W \;=\; 1 + c\sum_{i=0}^{L-1} f_i \prod_{j<i}\eta_j
-\;\;\xrightarrow{\;\eta_j \equiv \eta\;}\;\; 1 + c\sum_{i=0}^{L-1} f_i\,\eta^{i}.$$
+Give the controller three moves per level — compact now, defer, and defer while
+expanding the level's capacity — through RocksDB's own compaction scores, so that
+RocksDB keeps sole authority over which files are compacted (history §3.3). The
+2026-09-11 motivation, avoiding a depth cascade, is withdrawn (§0.1).
 
-*(iii) Optimal profile.* Minimising $\sum_i f_i\eta^i$ subject to $\prod_i f_i =
-\rho$ gives $f_i^\star = \rho^{1/L}\eta^{(L-1)/2 - i}$, with minimum value
-$L\rho^{1/L}\eta^{(L-1)/2}$. At $\eta = 1$ this is uniform fanout and AM–GM.
+### §1 Mechanism
 
-*(iv) Departure from uniform.*
-$$\frac{J^\star}{J_{\text{unif}}}
-= \frac{L\,\eta^{(L-1)/2}\,(1-\eta)}{1-\eta^{L}} \;=\; 1 - O\!\big((1-\eta)^2\big).$$
+**New option `level_target_multipliers`** (mutable column-family option):
 
-*Proof.* (i) The product telescopes. (ii) is A2 plus the definition of $v_i$.
-(iii) Lagrange on $\min \sum a_i f_i$ s.t. $\prod f_i = \rho$ with $a_i =
-\eta^i$ gives $a_i f_i = \lambda$, so $f_i \propto \eta^{-i}$; the constraint
-fixes $\lambda = \rho^{1/L}\eta^{(L-1)/2}$ and the objective is $L\lambda$. (iv)
-is division; first-order terms in $(1-\eta)$ cancel. $\blacksquare$
+- a `vector<double>` with one entry per level; entry 0 must be 1.0;
+- rejected when `level_compaction_dynamic_level_bytes = true` or when the
+  compaction style is not leveled;
+- changeable at run time through `SetOptions`;
+- in `ComputeCompactionScore`, level $i \ge 1$ is scored as
+  $$s_i = \frac{\text{bytes\_not\_compacting}_i}{\texttt{MaxBytesForLevel}(i)\times m_i}.$$
 
-| $\eta$ | $L$ | $J^\star/J_{\text{unif}}$ | available gain |
+**L0** keeps its native scoring. The controller changes only the mutable
+`level0_file_num_compaction_trigger` ($K_0$), through `SetOptions`.
+
+### §2 Actions
+
+For level $i \ge 1$ the effective multiplier is $m_i = \bar m_i\,d_i$: a
+persistent **anchor** $\bar m_i$ (the level's capacity) and a short-lived
+**timing factor** $d_i$ that relaxes back to 1 with time constant
+$\kappa_d\tau_i$.
+
+| Action | Effect | Allowed when |
+| --- | --- | --- |
+| hold | nothing: RocksDB proceeds natively under the current $m_i$ | always |
+| compact | $d_i \leftarrow \varphi_i/(\bar m_i(1+\epsilon))$, so $s_i > 1$ now | $s_i < 1$ and $\varphi_i \ge \varphi_{\min}$ |
+| defer | $d_i \leftarrow \varphi_i(1+\epsilon)/\bar m_i$, so $s_i < 1$ now | $s_i \ge 1 - \epsilon$ |
+| expand (defer and increase capacity) | $\bar m_i \leftarrow \min(\alpha\bar m_i, m_{\max})$, $d_i \leftarrow 1$ | $\bar m_i < m_{\max}$ |
+
+- **Hold is the default.** It means "let RocksDB act natively", so a controller
+  that always holds is native RocksDB (ACT-4).
+- **Anchors decay.** When not re-expanded,
+  $\bar m_i \leftarrow 1 + (\bar m_i - 1)e^{-\Delta t/(\kappa_a\tau_i)}$, so
+  expansion cannot ratchet (ACT-5).
+- **Bounds.** Every $m_i$ stays in $[m_{\min}, m_{\max}]$ (A-Impl-7).
+- **Masks.** An action not allowed in a state is excluded both when the action
+  is chosen and in the learning target (Proposition H.2).
+
+**L0 analogues**, acting on $K_0$: hold; compact, $K_0 \leftarrow \max(2, k_0)$ so
+L0 is due now; defer, $K_0 \leftarrow \min(K_{\text{cap}}, k_0 + 1)$ temporarily;
+expand, raise the L0 anchor $\bar K_0$ by one within $[2, K_{\text{cap}}]$,
+decaying back to the configured value.
+
+**Lemma A.5 (what an action does).** Under A3, "compact" makes level $i$
+eligible at the next score computation and "defer" makes it ineligible. Neither
+guarantees admission: RocksDB admits the eligible level with the highest score
+when a compaction slot is free.
+
+*Proof.* A3 and RocksDB's ranking of eligible levels by score. $\blacksquare$
+
+*Consequence.* Actions at different levels interact through score ranking. That
+is why neighbour and global state are inputs (H §2), and why each level is
+charged for what actually ran (Proposition D.16), not for what it requested.
+
+### §3 Theory
+
+**Theorem A.1 (no release while held; corrected).** If $\varphi_i(t) < m_i(t)$
+throughout $[t_0, t_1]$, level $i$ is not eligible and releases nothing in that
+interval. When it is released at fill $\varphi_i \ge m_i$, RocksDB compacts it
+until its score falls below 1, so it sends down about $(\varphi_i - m_i)C_i$
+source bytes (to within one file), of which about $\tilde\rho_i(\varphi_i -
+m_i)C_i$ net bytes land below (trivially moved files land whole; here
+$\tilde\rho_i$ is the pass-through of the released files, which after a hold can
+differ from the window mean in either direction: a backlog clears partly by
+trivial moves, but in D-12 deferrals during the post-load backlog turned
+would-be moves into merges, audit 2026-09-23, §1).
+
+*Proof.* A3, and RocksDB re-scores after each compaction and keeps picking the
+level while its score is at least 1 and highest. $\blacksquare$
+
+*Correction.* The 2026-09-11 statement charged a burst of $\kappa C_i$. At
+$m_i = 1$ the burst is $(\kappa-1)C_i$ (audit §3).
+
+*Containment (fluid, A5).* A burst of $b$ net bytes landing at level $i+1$ makes
+level $j > i$ due only if $b$ exceeds the combined headroom
+$\sum_{k=i+1}^{j}(m_kC_k - B_k)^+$. Populated depth grows only if a burst passes
+the last populated level's headroom $(m_LC_L - B_L)^+$. At T=10 on `Assoc` the
+last level's nominal target (about 16 GiB) is far above its content (about
+1 GB), so no burst can deepen the tree there.
+
+**Theorem A.2 (fanout conservation; corrected and extended).**
+
+- (i) $\prod_{i=0}^{L-1}f_i = B_L/(K_0F)$, independent of $m_1, \dots, m_{L-1}$
+  (Corollary D.9's product, which uses only the definitions of the $f_i$ and
+  none of that corollary's assumptions).
+- (ii) With weights $v_i = a_i - t_i$, the merged bytes leaving level $i$ per
+  user byte (Lemma D.7), held fixed, and a common overlap constant $c$, the
+  fanout part of the write cost, $c\sum_iv_if_i$, is minimised under (i) at
+  $f_i \propto 1/v_i$, with minimum $cL\,(B_L/(K_0F))^{1/L}(\prod_i
+  v_i)^{1/L}$.
+- (iii) For $v_i = \eta^i$, that is a constant ratio $\eta = v_{i+1}/v_i =
+  \tilde\rho_i(1-\xi_{i+1})/(1-\xi_i)$ of merged volumes (not the merge survival
+  $\eta_i = X/(S+O)$ of Pathway B §2), the relative gain over equal fanouts is
+  $$1 - \frac{L\,\eta^{(L-1)/2}(1-\eta)}{1-\eta^{L}} = O\big((1-\eta)^2\big).$$
+
+| $\eta$ | $L$ | optimum / equal fanouts | available gain |
 | ---: | ---: | ---: | ---: |
-| 0.95 | 4 | 0.9983 | 0.2% |
+| 0.95 | 4 | 0.9984 | 0.2% |
 | 0.90 | 4 | 0.9931 | 0.7% |
 | 0.80 | 5 | 0.9519 | 4.8% |
 | 0.60 | 5 | 0.7807 | 21.9% |
 
-**Consequences.** Geometry does not forbid sub-parity $W$; it bounds it at
-$O((1-\eta)^2)$, under 1% at the measured $\eta$. And $f^\star$ is a **static**
-profile, so any gain it offers belongs to Hull$_s$ (Corollary C.3), not to the
-learner. It is a design result, not an adaptivity result.
+*Proof.* (i) Corollary D.9. (ii) With a multiplier on the product constraint,
+stationarity gives $v_if_i = \lambda$ for every $i$. The constraint then gives
+$\lambda = (B_L/(K_0F)\cdot\prod_iv_i)^{1/L}$, and the minimum of $\sum v_if_i$
+is $L\lambda$. (iii) With $v_i = \eta^i$, $\prod_i v_i = \eta^{L(L-1)/2}$, and
+equal fanouts give $(B_L/(K_0F))^{1/L}\sum_i\eta^i$; divide. The first-order
+terms in $1-\eta$ cancel. $\blacksquare$
 
-**Corollary A.3 (Level removal is never profitable for $T \ge 2$).**
-Expanding uniformly by $s = T$ to delete one level pins $f_0 = T^2$ (since $s_0
-= 1$) with $f_i = T$ below, giving $\Delta W / c = T^2 - T(1 + \eta^{L-1})$,
-strictly positive for every $T \ge 2$ when $\eta < 1$ (and $T(T-2)$ at $\eta =
-1$). Removing a level places the largest fanout at the position with the largest
-survival weight.
+*Assumption behind (ii) and (iii).* The weights are held fixed while the profile
+varies, but they depend on it. Levels $\ge 1$ hold one version per key, so an
+overwrite is absorbed when the newer version arrives: a larger level $i$ holds
+more keys, the merges into it (sourced at $i-1$) drop more, and $\rho_{i-1}$
+falls, and with it the weight $v_i$ of level $i$'s own merges; fewer duplicates
+are left for the merges out of level $i$, so $\rho_i$ may rise. The trivial-move
+shares can move too (in one simulation with a round-robin picker, by more than
+$\rho$: enlarging level $i$ lowered $\xi_{i-1}$ and raised $\xi_i$; under
+min-overlap picking, the pinned `kMinOverlappingRatio`, they barely moved). The overlap constant moves with the
+fanouts. (ii) is therefore the optimum for fixed weights. The joint optimum
+needs survival measured as a function of the profile. $\Theta_s$ supplies it
+only at its own profiles: three of them are uniform scalings, which move $m_i$
+and $m_{i+1}$ together, so their separate effects on $\rho_i$ (a larger level
+$i+1$ lowers it) cannot be told apart, and its survival-weighted profile is computed from weights measured at
+uniform 1. Treat that profile as one step of a fixed-point iteration:
+re-measure the weights under it and recompute; if the profile moves by more
+than its measurement interval, add the second profile to $\Theta_s$ before the
+comparator is fixed (§0.6).
 
-**Corollary A.4 (Write-optimal size ratio) — convention-dependent.**
-Under M1/M2 the write-optimal fanout is $f^\star = e$ and $W - 1 \propto
-T/\ln T$; under M3 it solves $f \ln f = f + 1$, $f^\star \approx 3.59$. $e$ is
-not a universal constant and must not be quoted as one. **The empirical
-comparison against §10.7 `regular` is suspended** until recomputed as ratios of
-$W - 1$ with the denominator stated (P0-8); the earlier "1.7% agreement" mixed
-$W$ and $W-1$. $L$ is integer-valued in RocksDB, which the continuous derivation
-does not capture.
+*Corrections.* The optimal profile needs some multipliers below 1, which the
+2026-09-11 scale ($s \ge 1$) could not express (audit §3); multipliers below 1
+are now allowed. The profile is static, so its gain belongs to the comparator
+(Corollary C.3). The accounting in (ii) is Lemma D.7's, not a convention.
 
-### What A therefore does and does not deliver
+**Corollary A.3 (2026-09-11: level removal is never profitable).** *Superseded.*
+Its premise, that removing a level needs $s = T$, failed at T=10 where $s = 2$
+removed one (audit §3). Whether fewer levels pay depends on the priority
+(Proposition D.13(iv)), and removal is static in any case (Corollary A.7).
 
-The §10.7 arm table does not support attributing the learner's write excess to
-depth inflation:
+**Corollary A.4 (2026-09-11: write-optimal size ratio).** *Superseded* by
+Proposition D.13(iv), in which the optimum depends on the measured overlap
+constant and the priority.
 
-| cell | `prior_only` vs `regular` | `rl` vs `regular` | `rl` vs `prior_only` | levels added by `rl` |
-| --- | ---: | ---: | ---: | ---: |
-| 10M T=2 | +18.3% | +15.9% | **−2.1%** | +3 |
-| 10M T=6 | +15.3% | +22.9% | +6.5% | +1 |
-| 10M T=10 | +13.9% | +9.8% | **−3.6%** | +1 |
+**Lemma A.6 (depth never falls during a run).** Under A4 and without deletes,
+the index of the deepest non-empty level never decreases.
 
-`prior_only` never inflates depth and still writes 14–18% more than the tuned
-baseline; the learner writes *less* than the prior in two cells of three,
-including the one where it added three levels. The dominant component of the
-excess is the prior's eagerness at the top of the tree (L2 compaction rates
-0.30 / 0.42 / 0.51), which expansion does not touch.
+*Proof.* Compactions move bytes from level $i$ to $i+1$ or within a level. The
+deepest non-empty level can only receive bytes or push them deeper, and without
+deletes no compaction removes all of its data. $\blacksquare$
 
-**A-0 measured (Gate 0, 2026-09-11, `14_gate0_reanalysis.py`).** Paired means
-over five repeats; per-level bytes from the 0.1 GB stats table, reconciled to
-the exact tickers within 0.8%.
+**Corollary A.7 (level removal is a static effect).** A controller can prevent
+depth growth but cannot remove a level during a run. Removing a level — the
+largest read benefit static expansion showed (audit §3; at $s = 1.5$, with depth
+unchanged, reads also fell 6.3% at T=2 and 3.4% at T=10, the static hit shift of
+Proposition D.13(ii)) — is a property of the
+configuration the tree was loaded under (base size, multipliers at load time),
+and so belongs to the static comparator.
 
-| cell | arm | excess | $D_{\text{depth}}$ (GiB) | $D_{\text{eager}}$ (GiB) | depth share |
+### §4 What actuation can and cannot deliver
+
+**Static, so the comparator has it too:** the equal-fanout or survival-weighted
+profile (Theorem A.2), depth fixed at load (Corollary A.7), $K_0$ at fixed
+prices (Proposition D.11), and the interior profile's read effect
+(Proposition D.13(ii)).
+
+**Dynamic, so this is the controller's only case.** Each item is a hypothesis
+tested without a learner at Gate N3:
+
+- (a) tracking $K_0^\star$ and the profile as prices change with the workload
+  (Corollary D.12);
+- (b) timing a release against the neighbours: overlap per source byte is about
+  $T\varphi_{i+1}/\varphi_i$ (Lemma D.8), and a burst may be arriving from above;
+- (c) holding a level so its merges drop more garbage, bounded by the garbage
+  native leaves and by how much higher the drops can move (Pathway B §3);
+- (d) preventing depth growth (Theorem A.1);
+- (e) L0 compacting early (the L0 "compact" action) while the compaction slot
+  is idle and reads are heavy, and holding while it is busy;
+- (f) interior levels holding their releases while L0 is due or about to be,
+  so that L0 is not kept waiting for the slot (the slot-blocking charge,
+  Pathway D §4).
+
+(e) and (f) are read levers that act during a run. A fixed trigger or profile
+can express neither, because each depends on the slot's state at the moment of
+the decision.
+
+### §5 Implementation
+
+- **A-Impl-1. Scale inside the score only.** Never route the multiplier through
+  `max_bytes_for_level_base`. That option is also L0's byte threshold and L1's
+  base, so routing through it would silently change L0's trigger. The
+  implementation folds $m_i$ into `MaxBytesForLevel(i)` through the fork's
+  existing per-level `capacity_scales_` (which already leaves level 0
+  unscaled). That gives the score of §1 exactly, and makes A-Impl-3 automatic.
+  The only other reader of `MaxBytesForLevel` that affects file picking is the
+  round-robin input expansion in `compaction_picker_level.cc`, which the pinned
+  `kMinOverlappingRatio` never runs. Tested (ACT-1): L0's score is
+  unchanged under any multiplier vector.
+- **A-Impl-2. Static ladder.** `level_compaction_dynamic_level_bytes = false`
+  is pinned, and option validation rejects multipliers otherwise (A1).
+- **A-Impl-3. Pending-compaction estimate.**
+  `EstimateCompactionBytesNeeded` computes pending bytes from level targets. It
+  must apply $m_i$ too, or RocksDB holds two different notions of what is due,
+  and the pending-bytes slowdown and speed-up logic reads unscaled targets. It
+  reads `MaxBytesForLevel`, so the implementation of A-Impl-1 satisfies this
+  (verified at `25468bbaa`). Re-check the soft and hard pending-bytes limits.
+- **A-Impl-4. When a change takes effect.** Verified at `25468bbaa`
+  (`DBImpl::SetOptions`): the call appends a new Version without a MANIFEST
+  write, which recomputes every score, before it returns, waiting its turn
+  behind any flush or compaction install. An action is therefore in the
+  published scores at once, with or without writes.
+- **A-Impl-5. Cost of `SetOptions`.** Verified at `25468bbaa`: each call
+  appends that Version and installs a new SuperVersion under the DB mutex, then
+  writes and renames a full OPTIONS file with the mutex released
+  (`WriteOptionsFile`; RocksDB has no switch to skip it). The OPTIONS file is
+  not an SST, so it enters none of $W$, $H$ or $J_\beta$ (D §1); its time cost
+  is measured by ACT-2 and reported, not priced. Call `SetOptions` only when a
+  value changes (hold makes no call), send all levels' changes in one call,
+  and cap the call rate.
+- **A-Impl-6. L0 trigger range.** $[2, K_{\text{cap}}]$ with $K_{\text{cap}} =
+  \min(\lfloor C_1/F\rfloor, K_{\text{slow}} - 1)$ (A3′). Gate 1 found triggers
+  8 and 16 identical at an 8 MiB base.
+- **A-Impl-7. Multiplier bounds.** $m_i \in [m_{\min}, m_{\max}]$, fixed in
+  advance; $m_{\min} = 0.5$ is suggested. $m_{\max} \le 2.0$ unless larger values
+  are measured, since 2.0 is only the edge of the tested static grid (audit §3).
+  Level targets must also never shrink going down the tree:
+  $m_{i+1}C_{i+1} \ge m_iC_i$, i.e. $m_{i+1}T \ge m_i$. RocksDB assumes this
+  ordering (`version_set.cc` asserts it over non-empty levels), and the fork's
+  capacity code already rejects vectors that break it. At $T = 2$ the bounds
+  $[0.5, 2]$ alone do not guarantee it, so option validation rejects such a
+  vector, and the controller's masks exclude any action that would produce one.
+- **A-Impl-8. Attribution and fallback.** Log every change with level, old and
+  new value, action, decision id and reason. If the controller is absent or its
+  weights are invalid, reset $m \equiv 1$ and $K_0$ to its configured value, and
+  log it as a fallback.
+- **A-Impl-9. Ruled out: `max_bytes_for_level_multiplier_additional`.** It is an
+  integer vector, its effect accumulates down the tree, and it is ignored under
+  dynamic level sizing (as in 2026-09-11).
+- **A-Impl-10. Native parity.** With $m \equiv 1$ and $K_0$ at its configured
+  value, the patched binary must reproduce stock RocksDB (ACT-4).
+
+### §6 Acceptance
+
+| # | Criterion | Threshold | Instrument |
+| --- | --- | --- | --- |
+| ACT-1 | Option correctness | the fork's test file `level_target_multipliers_test` is green (Debug build), and the same checks pass on the Release binary in the preflight: L0 score invariance, rejection under dynamic sizing and of vectors whose targets shrink going down, scaled pending estimate, recompute after `SetOptions` | fork gtest; preflight check script over `db_bench` output and LOG |
+| ACT-2 | `SetOptions` overhead | foreground throughput cost ≤ 1% at the planned call rate, paired, OPTIONS-file writes included; a diagnostic of overhead, not part of $J_\beta$ | db_bench |
+| ACT-3 | Action fidelity | a requested $m_i$ appears in the published score within one control interval for ≥ 99% of changes | policy log, score observer |
+| ACT-4 | Native parity | patched binary at $m \equiv 1$ inside the oracle-parity envelope of stock RocksDB (the checks of the 2026-08-22 gate) | paired evaluator |
+| ACT-5 | No ratchet | anchors return to within $\epsilon$ of 1 after $5\kappa_a\tau_i$ without re-expansion | policy log |
+
+The 2026-09-11 criteria A-0 to A-5 are retired (Appendix R).
+
+---
+
+## Pathway G — Propagation across levels (turnover normalisation)
+
+### §0 Purpose and scope
+
+Deep levels complete few outcomes per run, so a learner at a deep level has too
+little data. RusKey reports the same for its FLSM-tree: training every level
+separately failed from Level 3 onward [RusKey, §7]. This pathway lets deep
+levels use what upper levels learn, without copying decisions downward and
+without stopping deep levels from learning.
+
+**Scope.** Only *interior* levels, $1 \le i \le L-1$, which have a level below
+them, can be pooled. L0 is tiered and has its own trigger action (A3′). The last
+level has no output level, and its only role is whether the tree deepens
+(Lemma A.6). Both are separate, unpooled agents (Pathway H).
+
+### §1 Related work: RusKey's policy propagation
+
+What RusKey does [RusKey, §5]:
+
+- **Why deep levels lack data.** Compaction at a deeper level is exponentially
+  less frequent, because FLSM merges a whole level at a time.
+- **Case 1, uniform bits-per-key.** Only Level 1's policy $K_1$ is learned, with
+  the other levels held fixed; every deeper level is then set to $K_1$.
+- **Case 2, Monkey filters.** Levels 1 and 2 are learned until stable. Deeper
+  levels are then set by a closed-form recurrence (their Lemma 5.1), derived by
+  minimising a per-level cost in which false-positive rates grow by $T$ per level,
+  and rounded to an integer.
+- **After the transfer,** deep levels are not learned.
+- **Also in Lerp:** one independent DDPG agent per level; actions limited to
+  $K-1$, $K$, $K+1$; reward $\alpha\cdot(\text{level latency}) + (1-\alpha)\cdot
+  (\text{end-to-end latency})$.
+
+Two passages in the paper are inconsistent with the rest; describe the method
+from the lemma and the figure, not from these sentences:
+
+- The Case 2 bullet says Level $i$ has *lower* bits-per-key than Level $i+1$,
+  while the Monkey description and the lemma have false-positive rates *rising*
+  with depth.
+- The Fig. 9 text says the policy gets lazier with depth, while the figure
+  (10, 8, 3, 1) and the lemma's worked example (9, 7, 3, 1) show $K$ falling
+  with depth, i.e. more aggressive deeper.
+
+**How this pathway differs.**
+
+| | RusKey (Lerp) | This pathway |
+| --- | --- | --- |
+| What propagates | the chosen $K$, copied (Case 1) or extrapolated by a closed form (Case 2) | a value estimate in level-free units; each level still decides from its own state |
+| Justification | the closed-form optimum of a per-level analytic cost | each level faces the same problem on its own clock (Proposition G.1) at its own prices (Proposition G.2); differences between levels are measured inputs |
+| Deep levels after propagation | fixed | keep learning; their own correction grows with their own data (Lemma G.5) |
+| Timing | sequential: learn L1 (and L2) to convergence, then transfer once | concurrent and continuous |
+| Why deep data is scarce | deeper compactions are exponentially rarer (whole-level merges) | with RocksDB's file-by-file compaction, job counts are similar across levels; completed *turnovers* are about $T/\tilde\rho$ times rarer per level |
+| Knob | runs per level, $K \in [1, T]$, in FLSM | target multiplier on leveled RocksDB ($K = 1$); L0 trigger separately |
+| Neighbours | level statistics and all levels' policies in the state | the burst about to land from above, as an explicit forecast input |
+| Reward | $\alpha$-mix of level and end-to-end latency | attributed priced cost plus a counterfactual neighbour charge (H §3) |
+
+**Shared ideas, cited to RusKey:** one agent per level, and actions limited to one
+step at a time.
+
+### §2 Two propositions: the level clock and the price per turnover
+
+Definitions are in §1.1: pass-through $\rho_i$ over merges, trivial-move share
+$\xi_i$, net pass-through $\tilde\rho_i$, overlap $o_i$, inflow $\lambda_i$,
+outflow $\mu_i$, turnover time $\tau_i$, level clock $\theta_i$, survival to
+level $i$ $\pi_i$. In addition, per level: $e^f_i$ filter probes per Get at level
+$i$, $e^b_i$ false-positive block reads per Get at level $i$ (the hit's block
+read goes to the hit-read bucket, Pathway D §4), $\nu_i$ runs seeked per
+scan at level $i$ (1 if the level has a file at or after the seek key), and the
+holding price
+$\sigma_i = c_sN_i/(c_w\bar q)$, with $N_i$ the operations served per turnover
+of level $i$ (§1.1): the cost of holding one byte while level $i$ turns over
+once (space is charged per operation served, Pathway D §1), in units of the
+cost of writing one byte.
+
+**Proposition G.1 (each level runs on its own clock).**
+
+- (a) $\dfrac{d\varphi_i}{d\theta_i} = \dfrac{\lambda_i - \mu_i}{\bar\lambda_i}$.
+- (b) In steady state, $\tau_{i+1} = (T/\tilde\rho_i)\,\tau_i$.
+
+*Proof.* (a) $dB_i/dt = \lambda_i - \mu_i$; substitute $B_i = \varphi_iC_i$ and
+$dt = \tau_i\,d\theta_i$ with $\tau_i = C_i/\bar\lambda_i$. (b) In steady state
+$\bar\mu_i = \bar\lambda_i$, and by the definition of $\tilde\rho_i$ as the net
+share of level $i$'s outflow that lands in level $i+1$ (merged bytes that
+survive plus trivially moved bytes), $\bar\lambda_{i+1} = \tilde\rho_i\bar\mu_i$.
+Hence $\tau_{i+1}/\tau_i = (C_{i+1}/C_i)(\bar\lambda_i/\bar\lambda_{i+1}) =
+T/\tilde\rho_i$. $\blacksquare$
+
+In plain terms: on its own clock every interior level fills at the same average
+rate, one level's worth per turnover. What differs between levels is how many
+seconds one tick takes — about $T$ times longer per level down.
+
+*Evidence that jobs are not the scarce quantity.* In D-7 at T=2, L1, L2 and L3
+released 935, 1,079 and 927 times (history §14.20). That arm compacted early, so
+treat the numbers as indicative. At the old measured-phase ingest rate
+(about 7 MB/s), T=10 gives $\tau \approx 2$ s at L1, 23 s at L2 and 230 s at L3,
+so the old 160 s runs completed no turnover at L3.
+
+**Proposition G.2 (price per turnover).** In steady state, level $i$'s attributed
+part of $C_\beta$ (Pathway D §4: its write and read shares, and for space its
+shadowed-garbage charge, which is not a share of $C_\beta$'s space term)
+accumulated over one turnover, divided by $c_wC_i$ (the price of
+writing one level's worth of bytes), is
+$$\hat c_i = \beta_W(1-\xi_i)(\rho_i + o_i) + \frac{\beta_R\big(\tilde R^f e^f_i + \tilde R^b e^b_i + \tilde R_{sk}\nu_i + \tilde y_i\big)}{\pi_i} + \beta_S\,\sigma_i\,(1-\tilde\rho_i)\bar\varphi_i,$$
+with the workload price ratios, the same at every level,
+$$\tilde R^f = \frac{q_{pt}c_f}{c_w\bar\lambda_1},\qquad \tilde R^b = \frac{q_{pt}c_{blk}}{c_w\bar\lambda_1},\qquad \tilde R_{sk} = \frac{q_{sc}c_{sk}}{c_w\bar\lambda_1},$$
+and $\tilde y_i = y_i/(c_w\bar\lambda_1)$, where $y_i$ is the mean unweighted L0
+read cost per second charged to level $i$ by the slot-blocking rule (Pathway
+D §4).
+
+*Proof.* Over one turnover the level releases $\bar\mu_i\tau_i = C_i$ source bytes
+in steady state. A share $1-\xi_i$ of them is merged and writes
+$(1-\xi_i)C_i(\rho_i + o_i)$ bytes; trivially moved bytes write nothing
+(Lemma D.7). Reads charged to the level cost $\beta_R\tau_i[q_{pt}(c_fe^f_i +
+c_{blk}e^b_i) + q_{sc}c_{sk}\nu_i + y_i]$. The level's attributed garbage
+$(1-\tilde\rho_i)B_i$ (Pathway D §4) costs $\beta_S(c_s/\bar q)
+(1-\tilde\rho_i)\bar\varphi_iC_iN_i$ over the $N_i$ operations of the turnover.
+Divide by $c_wC_i$ and use $\tau_i/C_i = 1/\bar\lambda_i =
+1/(\bar\lambda_1\pi_i)$. $\blacksquare$
+
+In plain terms: the write part has the same form at every level, with $\rho_i$,
+$\xi_i$ and $o_i$ as measured inputs. The levels differ through those inputs,
+through the read share they carry ($e_i$, and $\pi_i$) and through the holding
+price $\sigma_i$, which grows about $T$ times per level down. These become
+*inputs* to a shared model rather than things it must learn.
+
+### §3 The propagation law
+
+**Definition (law).** For an interior level $j$ in the pool $\mathcal P$, with
+normalised state $\hat x_j$ and action $a$, the action value (expected future
+normalised reward, rewards being negative costs) is
+$$Q_j(\hat x_j, a) = b(\hat x_j, a) + f_\theta(\hat x_j, a) + \delta_j(\hat x_j, a),$$
+where $b$ is the analytic prior (code, H §7), $f_\theta$ is a learned correction
+shared by the pool, and $\delta_j$ is a small per-level correction. Both learned
+parts start at zero (cold start, H §4). The law has five rules:
+
+- **(G-i) Pooled training in level-free units.** Every pooled level's transitions
+  enter one training set after conversion: reward
+  $\hat r = -(\text{level cost over the transition})/(c_wC_j)$, the level
+  cost being H §3's (attributed cost plus neighbour charge), and discount
+  $\gamma_j = \exp(-\Delta N/(n_HN_j))$, where $\Delta N$ is the number of
+  operations served over the transition, $N_j$ the operations per turnover of
+  level $j$ (§1.1), and $n_H$ the look-ahead in turnovers, the same at every
+  level. The discount runs on operations, like $J_\beta$: on the wall clock, any
+  action that delays operations — a stall, or compaction that slows the
+  foreground — would lower every later discounted cost by about the delay's
+  share of the horizon, a gain $J_\beta$ does not contain. $f_\theta$ is fitted
+  on this pooled set. Pooling
+  converted transitions is the "shared experience" option; the level-specific
+  inputs keep it from imposing one level's garbage rate on another. Every length
+  "in turnovers" in Pathways G and H — a transition's length, the time since a
+  release, the exploration spend, $n_{\text{turn}}$ — is counted in operations,
+  $\Delta N/N_j$; it equals $\Delta t/\tau_j$ while the operation rate is
+  steady, which is the sense of the level clock $\theta_i$ in Proposition G.1.
+- **(G-ii) Per-level correction.** $\delta_j$ is fitted only on level $j$'s own
+  transitions, pulled toward zero with a strength of $n_0$ turnovers
+  (Lemma G.5). Each transition is counted by its duration in turnovers, because
+  decisions inside one turnover are strongly correlated.
+- **(G-iii) Own decisions.** Each level acts on its own $Q_j$ and its own state.
+  Nothing is copied between levels.
+- **(G-iv) Cadence.** Level $j$ decides every $N_j/k$ operations, with $k$ fixed
+  in advance, so every transition serves the same number of operations and
+  carries the same discount, $e^{-1/(n_Hk)}$. During a write stop no decision
+  falls due; RocksDB's own triggers act. Decisions that fall due together go
+  into one `SetOptions` call (A-Impl-5).
+- **(G-v) Membership.** A level joins $\mathcal P$ only if it passes the
+  admission test (§4). A level that fails keeps its own model.
+
+**Normalised state** of level $j$, all dimensionless:
+
+- own: $\varphi_j$, $\bar m_j$, $d_j$, $s_j$, and time since its last release in
+  turnovers;
+- neighbours: $\varphi_{j\pm1}$, $m_{j\pm1}$;
+- incoming burst, for $j \ge 2$:
+  $b_j = \tilde\rho_{j-1}(\varphi_{j-1} - m_{j-1})^+/T$, the share of level $j$'s
+  capacity about to land from above;
+- slot contention $\chi_j = (\hat\omega_j, \zeta)$: over the last decision
+  interval, level $j$'s mean wait per release for the compaction slot, counted
+  in operations served meanwhile and in units of the decision interval, and the
+  share of the interval's operations served while the slot was busy
+  (Proposition G.4). A job's wait runs from the later of the level's score
+  reaching 1 and its previous job ending, to the job starting; $\hat\omega_j$
+  is carried forward from the last interval with a release. These are averages
+  over the interval, not snapshots: the slot changes state several times a
+  second, far faster than any interior level's decision interval;
+- inflow ratio $\ell_j = \lambda_j^{\text{recent}}/\bar\lambda_j$: whether
+  inflow is running above or below its average;
+- queue position: the number of due levels (L0 included) whose score exceeds
+  $\max(s_j, 1+\epsilon)$, i.e. how many levels RocksDB's score order would try
+  before a compaction at $j$, now or after "compact" (Lemma A.5: an action
+  changes eligibility, not admission); and where the running compaction's
+  start level lies relative to $j$ (none, above, same, below);
+- backlog: RocksDB's pending-compaction estimate, with the multipliers applied
+  (A-Impl-3), over the held SST bytes $H$; and L0's distance to the slowdown
+  trigger, $(K_{\text{slow}} - k_0)/K_{\text{slow}}$. Both are the same at every
+  level. The estimate is divided by $H$, not by the soft pending-bytes limit,
+  which here is 64 GiB against about 3 GiB held and would read near 0;
+- two levels down, and the bottom: $\varphi_{j+2}/m_{j+2}$ (the last level's
+  value when $j+2 = L$; 0 with an absent flag when $j+2 > L$), and the last
+  level's free room $(m_LC_L - B_L)^+/(m_LC_L)$. A burst that overflows level
+  $j+1$ reaches $j+2$ next (Theorem A.1, containment), and the last level's
+  room decides whether the tree deepens (Lemma A.6);
+- level terms: $\hat\rho_j$, $\hat\xi_j$, the overlap constant $c_j$, $\pi_j$,
+  $e^f_j$, $e^b_j$, $\nu_j$, $\sigma_j$;
+- workload price ratios $\tilde R^f$, $\tilde R^b$, $\tilde R_{sk}$;
+- the priority vector $\beta$, and L0's $k_0/K_0$.
+
+**Proposition G.3 (normalisation does not change a level's decisions).** Define
+level $j$'s objective with the discount of (G-i). Then its action values in
+currency equal $c_wC_j$ times its normalised action values, so every ranking of
+actions, and every greedy choice, is the same in both units.
+
+*Proof.* Every reward of level $j$ is divided by the same positive constant, and
+the discount depends on $\Delta N/N_j$ in both. The Bellman equation is
+therefore scaled by that constant, and so is its unique fixed point. Ranking is
+invariant under positive scaling. $\blacksquare$
+
+*The modelling choice this rests on.* Discounting per turnover, counted in
+operations, rather than per second is a choice, justified by Proposition G.1:
+a level's outcomes arrive on
+its own clock. It gives deep levels a longer horizon in seconds, which the
+2026-09-11 controller lacked (0.98 per second, about 50 s of look-ahead at every
+level).
+
+**Proposition G.4 (when two levels can share one value function).** Write
+level $j$'s normalised state as $\hat x_j = (z_j, \vartheta_j)$: $z_j$ the
+dynamic part (fills, multipliers, time since release, neighbours, burst, inflow
+ratio, contention, queue position, backlog, the fills two levels down and at the
+bottom) and $\vartheta_j$ the level terms and prices, which are fixed
+within a run and include the overlap constant $c_j$. Hold the other agents'
+policies fixed. Let levels $i$ and $j$ satisfy:
+
+- (c1) conditional on $(\hat x, a)$, the law of the next normalised state and of
+  the transition's length in turnovers is the same function at both levels. In
+  particular $\hat x$ is Markov: the next state depends on the rest of the tree
+  only through $\hat x$;
+- (c2) the reward over a transition is the same function of $(\hat x, a, \hat
+  x')$ at both levels. The attributed cost is, by the per-transition form of
+  Proposition G.2's accounting, once $c_j \in \vartheta_j$. The neighbour
+  charges of H §3 are the same function only if both levels' neighbours are
+  pool members; at the pool's edges (next to L1 or the last level) the
+  difference enters $\varepsilon_r$ below;
+- (c3) one compaction job moves or delivers a negligible share of the level
+  (source file and incoming batch $\ll C_i$).
+
+Then the two levels' optimal normalised action values are the same function of
+$\hat x$.
+
+*Proof.* Under (c1) and (c2), and with the same admissible actions as a
+function of $\hat x$ (the masks' $\varphi_{\min}$, $\epsilon$, $m_{\min}$,
+$m_{\max}$ and $\alpha$ equal at both levels), the two normalised problems are
+one semi-Markov decision problem. With the cadence of (G-iv) every transition
+serves $N_j/k$ operations, so its discount is $\gamma = e^{-1/(n_Hk)} < 1$. The
+Bellman operator is a contraction with a unique fixed point. (c3) is what makes
+(c1) plausible on the level's own clock (A5). $\blacksquare$
+
+*When the conditions hold only approximately.* Let the expected rewards given
+$(\hat x, a)$ differ by at most $\varepsilon_r$, and let $|r| \le R$. If the
+laws of the next state differ by at most $\varepsilon_P$ in total variation,
+uniformly in $(\hat x, a)$, then $\lVert Q^\star_i - Q^\star_j\rVert_\infty \le
+\varepsilon_r/(1-\gamma) + 2\varepsilon_PR/(1-\gamma)^2$ [Kearns & Singh,
+simulation lemma], with $1/(1-\gamma) = n_Hk + \tfrac12 + O(1/(n_Hk))$. Total
+variation has no scale: a variable averaged over the level's own decision
+interval ($\zeta$, $\hat\omega_j$, $\ell_j$) has a law that tightens with depth,
+which drives $\varepsilon_P$ toward 1. The useful form assumes $\gamma V^\star_j$
+is $L$-Lipschitz in the next state and uses the Wasserstein-1 distance
+$\varepsilon_W$ instead: $\lVert Q^\star_i - Q^\star_j\rVert_\infty \le
+(\varepsilon_r + L\varepsilon_W)/(1-\gamma)$. Lipschitz continuity is itself an
+assumption; the mask thresholds can make $V^\star$ jump.
+
+*Contention is where (c1) is only approximate.* With `max_background_jobs = 2`
+and `max_background_flushes = max_background_compactions = −1` (db_bench's
+defaults; the pipeline sets only the first, fingerprint field `bg2`),
+`DBImpl::GetBGJobLimits` gives one flush slot, $\max(1, \lfloor 2/4\rfloor)$,
+and one compaction slot, $\max(1, 2-1)$. The speed-up path can only set the
+compaction count to one, so it is one in every state. The bottom-priority pool
+counts against the same limit and db_bench starts it with no threads, and
+`max_subcompactions` is 1 (`db/db_impl/db_impl_compaction_flush.cc`,
+`GetBGJobLimits` and `MaybeScheduleFlushOrCompaction`; unchanged from the
+pinned base `7ea2d73` to the recorded commit `25468bbaa`). A level that becomes
+due while the slot is busy, or while a level with a higher score is due, waits.
+The wait cannot be made level-free: the slot changes state on the wall clock,
+several times a second at every depth, so on level $j$'s clock its dynamics run
+about $T/\tilde\rho$ times faster per level down. What makes pooling possible is
+that the wait is short on a deep level's clock. Let $\omega_j$ be the mean of
+$\hat\omega_j$: the mean wait per release in units of level $j$'s decision
+interval $N_j/k$. The contention part of $\varepsilon_W$ (per unit of $L$)
+between two levels is then at most about
+$\omega_i + \omega_j$ (a heuristic: a delay moves outflow across a decision
+boundary with probability about its length over the interval, if decisions are
+not synchronised with releases). $\omega_j$ falls roughly $T/\tilde\rho$-fold
+per level down and is largest at L1, one reason L1 is expected to fail. It is
+measured (Gate N0, item 3) and bounded in the admission test (§4).
+
+The content is in (c1) and (c2). The admission test screens them on native
+runs; PROP-1b re-checks (c1) under the controller.
+
+**Lemma G.5 (how a level's trust in its own data grows).** Let $\delta_j$ be
+linear in $k$ standardised, mutually orthogonal features, fitted by least squares
+with penalty $n_0\lVert w\rVert^2$ on $n_j$ own samples. Each fitted coefficient
+equals the own-data least-squares coefficient times $n_j/(n_j + n_0)$.
+
+*Proof.* With $X^\top X = n_jI$, the penalised solution is $w = (n_jI +
+n_0I)^{-1}X^\top y = \frac{n_j}{n_j+n_0}\cdot\frac{X^\top y}{n_j}$, and
+$X^\top y/n_j$ is the unpenalised solution. $\blacksquare$
+
+In plain terms: with no data of its own a level uses the shared model; after
+$n_0$ turnovers of its own, half of its correction comes from its own data. Keep
+$\delta_j$ to a few features so it can be fitted from little data.
+
+### §4 Admission test (the collapse test)
+
+From static runs ($m \equiv 1$, one configuration per (workload, $T$, $K_0$)),
+compute for each interior level, on the level's own clock:
+
+- the fill sampled at fixed points of the level clock (every $1/k$ turnover),
+  and the fill at release;
+- bytes released per turnover, in units of $C_i$;
+- $(1-\xi_i)(\rho_i + o_i)$ and $\tilde\rho_i$ per turnover;
+- the normalised inflow ratio $\ell_i$;
+- the mean slot wait per release, $\omega_i$, in decision intervals (G.4).
+
+$(1-\xi_i)(\rho_i + o_i)$ and $\tilde\rho_i$ are model inputs; comparing them is
+a support screen, so that $f_\theta$ is not extrapolated beyond the levels it was
+fitted on.
+
+Statistics whose scale is set by the file size rather than the level are (c3)
+diagnostics, reported but not compared: jobs per turnover, and time between
+jobs in turnovers, both fall by about $T/\tilde\rho$ per level whatever the
+controller does.
+
+A level joins the pool only if it is shown equivalent to the reference level,
+named in advance (the shallowest candidate interior level). For each compared
+statistic $s$, the differences in mean and in the 10th and 90th percentiles, in
+the statistic's own units, must have 90% intervals inside
+$\pm\delta_{\text{adm},s}$. Margins are fixed in advance in those units; for
+statistics in fill units they are no smaller than the file granularity
+$F_{\text{sst}}/C_i$ of the shallower level. The upper 95% bound on $\omega_i$ must be below $\omega_{\max}$. Intervals
+come from a moving-block bootstrap over whole turnovers (all events of a
+turnover together), resampled within each run, with block length $b$ fixed in
+advance. Requiring every statistic to pass is an intersection–union test, so the
+chance of admitting a level that differs by more than its margin on any one of
+them is at most 5% without a multiplicity correction (asymptotically; the
+intervals are bootstrap intervals). The minimum number of turnovers per level,
+$n_{\min}$, is fixed in advance by simulation: resample the reference level's
+own turnovers into two pseudo-levels, which must pass with probability at least
+0.8; shift one statistic at a time to its margin, the others unshifted, and in
+each case the pair must pass with probability at most 0.05.
+
+A Kolmogorov–Smirnov distance is reported but is not the criterion. It has no
+scale, so it rejects tight distributions that differ by less than one file. Its
+plug-in value is also biased upward: at 30 turnovers, the upper 95% bootstrap
+bound between identical distributions has a median of 0.43, so identical levels
+would almost never pass.
+
+A test that merely fails to reject a difference is not evidence of sameness:
+with few turnovers it passes for lack of data. Static runs measure native
+dynamics, while (c1) must hold under the controller, so membership is re-checked
+on the learner's own transitions by the conditional check PROP-1b.
+
+Expected failures: L1, which is fed in L0-sized batches and whose job size is
+comparable to $C_1$ at small base sizes; the last level; and the level above the
+last whenever the last level is far from its target, since its fanout
+$f_{L-1} = B_L/(m_{L-1}C_{L-1})$ is set by the last level's fill (at T=10 on
+`Assoc`, $f_3 \approx 0.6$ against $f_2 = 10$), so the T=10 pool may be L2
+alone. Existing artifacts already cover levels that complete at least two
+turnovers per run — roughly L1–L6 at T=2 and L1–L2 at T=10. Levels without
+enough turnovers in existing artifacts (L3 at T=10) are decided on Gate N2's
+static runs.
+
+**Scope decision (2026-09-29): propagation is claimed only where the tree is
+deep enough to pool.** A pool needs at least two admitted levels. L1 and the
+last level never qualify, and the level above the last qualifies only when the
+last level is near its target, so a pool needs the last populated level at L5
+or deeper, or at L4 when L4 is near its target. With
+about 3 GiB of `Assoc` data that means T=2 (populated to L8, candidates L2–L6);
+T=6 is decided by the admission test. At T=10 the tree reaches L4 with L4 far
+below target, so the pool is at most L2 alone and nothing propagates. Every
+level then keeps its own model, and L3, which completes about one turnover per
+run, learns little and stays close to its prior and to hold. Pooling a level
+that failed admission (starting it from $f_\theta$) is not done: at T=10 it
+would amount to copying L2's policy into a level whose merges write about
+1.6 bytes per byte moved against L2's 11, and it would use $f_\theta$ outside
+the levels it was fitted on. More data at T=10 (about 17 GiB, so that L4 nears
+its target and L3 can join L2) is the escalation path, to be decided by one
+static run at that size before any other.
+
+### §5 What propagation does and does not deliver
+
+By Lemma D.10, an interior level's own filter probes do not depend on its
+multiplier (except through the L0 run count: directly for L1, weakly for every
+level through the shared compaction slot), and a scan seeks each level
+with a file at or after the seek key once however full it is. Raising $m_i$
+moves hits up from deeper levels (Proposition D.13(ii)): level $i$ takes over
+hit reads, which go to the hit-read bucket and are charged to no level
+(Pathway D §4), and the probes at levels $i+1..L$ fall. The saving, which can
+be material under skew, lands in other levels' attributed costs; the neighbour
+charges of H §3 do not carry it, since their one-step prediction models bursts
+and overlap only. It is a static effect of the profile and belongs to
+$\Theta_s$. Pooled interior agents
+therefore mainly save write and space cost — timing releases against neighbour
+fills and incoming bursts, and holding data so merges drop more garbage — and,
+in read priority, keep the compaction slot free while L0 is due or about to be
+(Pathway A §4 (f)), which the slot-blocking charge prices.
+
+The dynamic read levers are the L0 trigger, L0's use of an idle slot, interior
+levels' yielding of the slot, and depth. Only slot yielding involves the pool.
+The interior profile's read effect is static. In read priority any read gain
+comes mainly from the L0 agent, from slot timing and from not deepening the
+tree. This agrees with the 2026-09-11 record.
+
+### §6 Acceptance
+
+| # | Criterion | Threshold | Instrument |
+| --- | --- | --- | --- |
+| PROP-1 | Admission recorded | collapse test run and pool membership recorded per (workload, $T$) before any learner run | Gate N1 |
+| PROP-1b | Membership under control | for each pooled level, a one-step model of the normalised transition ($\hat x' \mid \hat x, a$: fill change, bytes released, time to next release) fitted on the pool has, on that level's held-out learner transitions, a mean residual whose 90% block-bootstrap interval lies inside $\pm\delta_{\text{kern}}$; and adding a level indicator lowers held-out error by less than $\delta_{\text{kern}}$. A level that fails leaves the pool at the next weight push, and the removal is logged. The check is conditional, not marginal, because each level's own policy changes its marginals | training log |
+| PROP-2 | Transfer helps prediction | on each pooled level's held-out transitions, reported per level, the pooled model's normalised prediction error is below that of a model trained only on that level's data, paired over seeds | training log |
+| PROP-3 | No harm | $J_\beta$ with the pooled deep-level agents acting is not worse than with those levels held (paired interval upper bound ≤ 0, or a margin fixed in advance); their attributed cost is reported alongside | paired evaluator |
+| PROP-4 | Ablation | propagation on versus off (off = per-level models on own data), per mode | Gate N6 |
+| PROP-5 | Related work | the §1 comparison with RusKey appears in the paper's related work | paper |
+
+---
+
+## Pathway H — RL architecture (Programme 1)
+
+### §0 Overview
+
+```
+ workload (db_bench mixgraph / suite, Pathway B)
+        |
+        v
+ RocksDB (pinned base + level_target_multipliers)  <-- SetOptions, batched (A-Impl-5)
+        |  state read in-process                              ^
+        v                                                      |
+ C++ controller plugin (separately fingerprinted library)  ----+
+   - L0 agent (K0), interior agents (pooled, Pathway G), last-level agent
+   - masks, analytic prior b, fallback to native
+        |  transitions out                ^  weights in, every Δ_push
+        v                                 |
+ Python trainer: shared model f_θ + per-level corrections δ_j, Double DQN
+```
+
+Inference happens where the state is. Training happens off the critical path.
+Every learned quantity starts at zero at the start of each run (cold start).
+
+### §1 Agents
+
+- **L0 agent.** Actions on $K_0$ (Pathway A §2). Not pooled (A3′). It holds the
+  main read lever (Proposition D.11).
+- **Interior agents, levels $1..L-1$.** Actions on $m_i$. Levels that pass the
+  admission test share one model (Pathway G); the others keep their own.
+- **Last-level agent.** Actions hold and expand only; compact and defer have no
+  meaning for a level far below its target. Its job is to stop the tree
+  deepening when the last level nears its target (Theorem A.1). On `Assoc` at
+  10M and T=10 it is idle, since the last level is far below its target
+  (Theorem A.1, containment).
+- **All agents** see the same priority vector $\beta$ and workload prices, and
+  all start from hold.
+
+### §2 State
+
+- **Interior agents:** the normalised state of G §3.
+- **L0 agent:** $k_0/K_0$, $\bar K_0$, flush rate over its mean, L1 fill
+  $\varphi_1$, the Get-to-write and scan-to-write rate ratios, the price ratios
+  $\tilde R$, $\beta$, and the compaction slot's busy share over the last
+  interval (L0 is the level most exposed to the single slot, G.4); and, as
+  for interior agents (G §3), queue position, backlog and L2's fill
+  $\varphi_2/m_2$. For lever (e) of Pathway A §4 it also sees whether the slot
+  is idle now (the queue position's "none"), and the active memtable's fill
+  over `write_buffer_size` (how soon the next flush adds an L0 file; RocksDB
+  property `rocksdb.cur-size-active-mem-table`).
+- **Last-level agent:** $\varphi_L/m_L$, headroom $(m_LC_L - B_L)/C_L$, the
+  incoming burst, queue position and backlog.
+
+**Removed** from the 2026-09-11 state: the eleven stall-era pressure inputs, the
+Lagrange multipliers, and the scan-work and space-estimate inputs (the scan
+metric sat at its floor; the space estimate was retired by D-3).
+
+### §3 Reward: attributed cost plus a counterfactual neighbour charge
+
+For agent $i$ over a decision interval,
+$$r_i = -\frac{c^\beta_i(\Delta t) + X_{i+1} + X_{i-1}}{c_wC_i},$$
+
+- $c^\beta_i(\Delta t)$ is level $i$'s attributed, priority-weighted cost over
+  the interval (Pathway D §4);
+- $X_{i\pm1} = \bar V_{i\pm1}(x'_{i\pm1}\mid a_i) - \bar V_{i\pm1}(x'_{i\pm1}\mid
+  \text{hold})$ is the change in the neighbour's expected future cost caused by
+  level $i$ taking $a_i$ instead of holding. It is evaluated with the neighbour's
+  current value estimate, converted to currency by $c_wC_{i\pm1}$, and a one-step
+  prediction of the neighbour's state: the burst $i$ releases or keeps
+  (Theorem A.1) and the overlap that implies (Lemma D.8).
+- $X = 0$ when $a_i$ is hold.
+- The divisor is a constant per agent. For the L0 agent it is
+  $C_0 := K_0^{\text{cfg}}F$, the bytes L0 holds at its configured trigger, with
+  $F$ as measured at $n_w$ and then held fixed; for the last-level agent it is
+  $C_L$. A constant divisor leaves the agent's ranking of actions unchanged
+  (Proposition G.3). The live $K_0F$ would not, since $K_0$ is the L0 agent's
+  own action.
+
+The charges do not model read shifts. A level that expands no longer pays the
+block reads of the hits it takes over from deeper levels, since those go to the
+hit-read bucket (D §4), but it is credited nothing for the filter probes saved
+below it (G §5). The read effect of the profile is static and belongs to
+$\Theta_s$. The one read effect an interior level has during a run, keeping L0
+waiting for the compaction slot, is in its attributed cost $c^\beta_i$ through
+the slot-blocking charge (D §4).
+
+In plain terms: a level pays for what it spends, and also for what its choice
+makes its neighbours spend later. That is how a compaction that is good for one
+level but bad for the next one is discouraged.
+
+**Proposition H.1 (why a counterfactual charge, not a shaping term).**
+
+- (a) Adding $\gamma\Phi(s') - \Phi(s)$ to the reward, for any function $\Phi$ of
+  the state, cannot change which policy is optimal [Ng et al.]. So charging a
+  level for how its neighbour's value changes over time — a function of state
+  that level $i$ observes — cannot make it take the neighbour into account.
+- (b) The difference reward $D_i = G(a_i, a_{-i}) - G(\text{hold}, a_{-i})$, with
+  $G$ the global cost and $a_{-i}$ the other agents' actions, changes by exactly
+  $G$'s change when agent $i$ alone changes its action:
+  $D_i(a') - D_i(a) = G(a', a_{-i}) - G(a, a_{-i})$ [Wolpert & Tumer].
+
+*Proof.* (a) Ng et al., Theorem 1; for transitions of variable duration use
+Proposition H.4. (b) The subtracted term does not depend on $a_i$. $\blacksquare$
+
+*The approximation.* The reward above approximates $D_i$ in two ways: it
+restricts $G$'s change to level $i$ and its two neighbours, and it estimates the
+neighbours' change with learned values. ARCH-3 measures the one-step state
+prediction the charge relies on. The design follows counterfactual credit
+assignment in cooperative multi-agent learning [Wolpert & Tumer; Foerster et
+al.]. It is not RusKey's $\alpha$-mix of level and end-to-end latency.
+
+Two further gaps separate these rewards from $J_\beta$ even if every value were
+exact. First, $\bar V_{i\pm1}$ is the neighbour's value under its own reward,
+which includes the neighbour's charge for its effect on level $i$; so
+$X_{i\pm1}$ carries back part of level $i$'s own future cost, which level $i$
+also pays directly. A value head fitted to the neighbour's attributed cost alone
+avoids this echo; which of the two is used is fixed in advance (§0.6), and a
+Gate N6 ablation compares the two. Second,
+a difference reward aligns one agent's unilateral
+change with $G$ (Proposition H.1(b)), but agents that each maximise their own
+return — discounted per turnover of their own level (G-i), while $J_\beta$ is an
+undiscounted sum over the measured phase — can settle where no agent can
+improve its own return and $J_\beta$ is still not minimal. The per-level returns
+are therefore a training surrogate; every claim is scored on $J_\beta$ (Global
+acceptance).
+
+### §4 Learning rule
+
+- **Double DQN** [van Hasselt et al.; Mnih et al.] on normalised rewards with
+  the turnover discount of (G-i); Huber loss, a target network and gradient
+  clipping.
+- **Masked target** (fixes the defect found in the audit):
+  $y = r + \gamma\,Q_{\text{target}}\big(s', \arg\max_{a' \in \mathcal A(s')}
+  Q_{\text{online}}(s', a')\big)$, the $\arg\max$ taken only over the actions
+  allowed in $s'$.
+- **Residual form.** $Q = b + f_\theta + \delta_j$ (Pathway G). $f_\theta$ and
+  $\delta_j$ start at zero; $b$ is code.
+- **Replay** keeps only transitions with valid attribution; fallback intervals
+  are excluded.
+
+**Proposition H.2 (an unmasked target overestimates).** Let $\mathcal A(s')
+\subsetneq \mathcal A$ for some reachable $s'$. If the target maximises over all
+of $\mathcal A$, its fixed point $\tilde Q$ satisfies $\tilde Q \ge Q^\star$
+pointwise, where $Q^\star$ is the masked fixed point. The inequality is strict at
+every $(s, a)$ that reaches, with positive probability, a state $s'$ in which a
+forbidden action has the highest value.
+
+*Proof.* A maximum over a superset is at least the maximum over the subset, so
+the unmasked Bellman operator dominates the masked one pointwise. Both are
+monotone contractions, so iterating from the same start keeps the order, and the
+limits satisfy $\tilde Q \ge Q^\star$. Strictness follows from the
+positive-probability state. $\blacksquare$
+
+In plain terms: the learner credits states with the value of actions it will
+never be allowed to take there.
+
+### §5 Timing, exploration, and the measured phase
+
+- **Settle, then measure** (adopted from the parallel stream; amended
+  2026-09-30, `docs/PREREGISTRATION.md` D-13). After the load, `db_bench`
+  issues no operation until RocksDB's `WaitForCompact`, flushes included,
+  returns. It then holds for $h_w$ = 10 s, during which every level's score
+  must stay below 1 and $k_0 < K_0$. The measured phase starts at $n_w$, the
+  first `mixgraph` operation, on the tree the arm's own load left. Every arm,
+  native included, is scored from $n_w$ (A8), and the controller starts at
+  $n_w$, so no controller action falls outside the scored phase. An arm not
+  settled at the end of the hold is invalid. The earlier rule drained the
+  backlog under live traffic and set $n_w$ from pilot runs with a margin,
+  leaving the operations before $n_w$ unscored; this one needs no pilots and
+  scores every `mixgraph` operation.
+- **Default is hold.** Exploration departs from hold with probability $p_x$ per
+  decision and never takes a masked action. $p_x$ keeps a floor after training,
+  so the policy cannot freeze. The exploration spend is counted per level in
+  turnovers.
+- **Units.** The prior's action differences are expressed in the same normalised
+  units as $Q$. This fixes the D-7 mismatch, where prior terms of about ±2 were
+  added to $Q$ values in the thousands.
+
+**Proposition H.3 (exploration has a cost; the 2026-09-11 Proposition B.3).**
+Let the best static configuration $\theta^\star$ be constant over the run, and
+suppose the optimal policy for the control problem is realisable as a constant
+action. Then any online controller $\pi$ that does not know $\theta^\star$ and
+explores non-degenerately has, over a finite horizon,
+$J(\pi) = J(\theta^\star) + \mathcal R$ with $\mathcal R > 0$.
+
+*Proof.* As 2026-09-11: under the hypothesis, $\pi$'s cost is $\theta^\star$'s
+cost plus regret on every interval where its action differs, and any schedule
+with a positive probability of a suboptimal action on a set of positive measure
+contributes strictly positive regret. $\blacksquare$
+
+The hypothesis — that a constant action is optimal — is exactly what Conjecture
+B.3′ doubts.
+
+*Consequence.* Exploration is reported as a cost, and the first $N_x$
+turnovers after $n_w$ are logged separately.
+
+**Proposition H.4 (shaping with variable durations; the 2026-09-11
+Proposition D.1).** For semi-Markov transitions of duration $\tau$, the term
+$F = \gamma^{\tau}\Phi(s') - \Phi(s)$ leaves optimal policies unchanged; the
+single-step form $\gamma\Phi(s') - \Phi(s)$ does not when $\tau$ varies.
+
+*Proof.* As 2026-09-11, following Ng et al. with the discount of each transition
+raised to its duration. $\blacksquare$
+
+It applies to any shaping term added later.
+
+### §6 Where inference and training run
+
+- **C++ plugin inside the RocksDB process.** It reads the state in-process at
+  decision time, evaluates the per-level models, and applies `SetOptions` in one
+  batched call. There is no socket round trip per decision, so the
+  stale-answer rejection of D-12 (27–39% of answers) cannot occur.
+- **Python trainer.** It receives transitions, trains, and pushes weights every
+  $\Delta_{\text{push}}$ (fixed in advance). The deployed policy lags training by
+  at most $\Delta_{\text{push}}$. The learning rule is off-policy, so it
+  tolerates the lag. The weight version is logged with every decision.
+- **A separately fingerprinted library.** Changing the controller does not
+  change the database binary's hash, so the static comparator stays valid
+  (audit §6). ARCH-5 checks that the plugin at $m \equiv 1$ reproduces native.
+- **Fallback.** Plugin absent or weights invalid: $m \equiv 1$ and $K_0$ at its
+  configured value (A-Impl-8).
+
+### §7 Analytic prior $b$
+
+$b(\hat x, a)$ is the expected change in normalised cost over one turnover from
+taking $a$ instead of hold, computed from Lemmas D.7–D.10 and Proposition G.2
+with the current measured inputs. It prices:
+
+- a compaction now, at the current overlap (Lemma D.8), plus the slot-blocking
+  charge it would incur if L0 falls due while its job holds the slot (Pathway D
+  §4), from L0's fill and the active memtable's fill;
+- a deferral, by the garbage it keeps (Pathway D §4) and the burst it builds
+  (Theorem A.1);
+- an expansion, by its space bound (Lemma D.14);
+- for the L0 agent, an early compaction, by the extra L0 → L1 overlap it writes
+  (Proposition D.11) against the probes and seeks saved while the slot is idle.
+
+It is clipped to $\pm b_{\max}$ in normalised units. It is code, not trained
+weights, so cold start is preserved.
+
+### §8 Removed from the 2026-09-11 architecture
+
+- Lagrange multipliers, dual ascent and windowed hinges: Programme 1 has no hard
+  constraints.
+- The guard, which moves to Programme 2. RocksDB's own slowdown and stop
+  triggers and pending-bytes limits remain the only safety mechanism.
+- Socket-based inference and the snapshot staleness check.
+- The per-second discount; the stall-era state inputs.
+
+### §9 Acceptance
+
+| # | Criterion | Threshold | Instrument |
+| --- | --- | --- | --- |
+| ARCH-1 | Learning health | TD error in normalised units bounded, final value below twice the reward scale; no NaN; residual magnitudes reported | training log |
+| ARCH-2 | Masks | unit test of the masked target green (`rl_agent/tests/test_agent.py`); the training log's masked-target audit counts zero target argmaxes over a masked action; zero masked actions executed | tests, training log, policy log |
+| ARCH-3 | Counterfactual input | one-step prediction of neighbour fill after an action versus realised, error reported per level pair; if above a tolerance fixed in advance, that pair uses the local reward only | policy log |
+| ARCH-4 | Exploration and no freeze | exploration share and cost reported per level; the chosen action varies with state (flip rate and correlation with $\varphi$ reported where a level has ≥ 10 turnovers) | policy log |
+| ARCH-5 | Plugin parity | plugin at $m \equiv 1$ inside the oracle-parity envelope | paired evaluator |
+| ARCH-6 | Inference agreement | C++ inference and Python evaluation of the same weights agree on ≥ 99.9% of logged decisions | replay |
+
+---
+
+## Pathway B — Workloads and garbage
+
+### §0 Purpose
+
+Programme 1 is measured across a suite of workloads, for two reasons. No static
+setting is best everywhere, which is what gives a controller something to add
+across workloads (Definition C.5). And each priority mode needs a workload on
+which it has room (Pathway D §5).
+
+### §1 The suite
+
+| Family | Construction | Label in the paper |
+| --- | --- | --- |
+| UDB `Assoc` (primary) [Cao et al.] | `db_bench` mixgraph with the published fit (B1), with the deviations of §2 | "Assoc key distribution and operation mix at the project's record size" |
+| Other Cao et al. mixes | published fits where available, e.g. the ZippyDB mix | realistic |
+| Zipfian mixes in the style of YCSB A, B, C and F [Cooper et al.] | `db_bench` or YCSB | standard |
+| Read-heavy / write-heavy / mixed | operation mix swept | synthetic |
+| Garbage level | overwrite share and key-space size swept, giving low and high $g_{\text{flow}}$ | synthetic |
+| Hot ranges | `keyrange_num` $\in \{5, 30, 100\}$ | synthetic |
+| Deletes (B3) | `mix_delete_ratio` $\in \{0, 3, 6\}\%$ | synthetic |
+| Phases (B2) | two phases first, more later; in-process `db_bench` phase patch | synthetic |
+
+Every run records its family and parameters in the fingerprint. A static
+comparator measured on one family is never a comparator for a policy measured on
+another (the workload form of the knob-parity rule).
+
+### §2 Implementation notes carried forward
+
+1. **(Done 2026-09-20.)** `WORKLOAD_SKEW` selects the family. Deviations from the
+   published `Assoc` fit: `value_theta` is 925.5, not 0, keeping the mean value
+   size at the project's 960 bytes so the level ladder and the $T$ sweep stay
+   comparable; `mix_max_value_size` is 65536, because `db_bench` applies it as
+   `val_size % value_max` and the default 1024 wraps 6.85% of draws down to as
+   little as one byte, pulling the mean to 890.2.
+2. **Phases (B2)** as a `db_bench` phase patch. Trap:
+   `QueryDecider::Initiate` resets its range total but appends to `type_` and
+   `ratio_` without clearing them, and `GetType` returns the first threshold
+   the draw falls below (`tools/db_bench_tool.cc`). A second `Initiate` for a
+   new phase leaves the first phase's thresholds in front, so the old mix keeps
+   running and nothing reports it. Clear both vectors, or build a new
+   `QueryDecider`, at each phase boundary. Phase boundaries go in the manifest
+   and fingerprint.
+3. **Deletes (B3)** as a fourth operation type in the same patch, appended at
+   index 3 after Get, Put and Seek. `GetType` returns a position in the ratio
+   vector, so reordering the vector would remap every existing mix; a delete
+   ratio of 0 leaves the existing thresholds unchanged.
+4. **Per-level survival.** Per compaction record $S$, $O$, $X$ and the source
+   level, excluding trivial moves (whose output equals input and would bias the
+   ratios toward 1), and record trivially moved bytes per source level
+   separately. Derive $\rho_i$, $o_i$, $t_i$ and $\xi_i$, dropped bytes, and
+   the 2026-09-11 merge survival $\eta_i = X/(S+O)$.
+5. **Hindsight-oracle runner.** Per phase, run the static sweep and record the
+   best static cost; compose them into $\mathcal G$.
+
+### §3 Theory
+
+**Proposition B.1′ (pooled survival floor; the part of the 2026-09-11
+Theorem B.1 that is proved).** Suppose total compaction input over the run is at
+least the bytes the user wrote. Then pooled merge survival — total compaction
+output over total compaction input — is at least $1/S_{\text{flow}}$.
+
+*Proof.* Each compaction's output is its input minus what it drops. Each obsolete
+byte is dropped at most once, so total drops are at most $N_{\text{written}} -
+N_{\text{live}}$. Hence output/input $\ge 1 - (N_{\text{written}} -
+N_{\text{live}})/\text{input} \ge N_{\text{live}}/N_{\text{written}}$, using
+input $\ge N_{\text{written}}$. $\blacksquare$
+
+**Status of the 2026-09-11 ceiling.** Theorem B.1 went on to evaluate the
+formula $\sum_i\eta^i$, whose $\eta$ is a ratio of merged volumes as in
+Theorem A.2(iii), at $\eta = 1/S_{\text{flow}}$, and called the result a
+ceiling on the achievable reduction of $W - 1$. The floor justifies neither
+step. It bounds pooled merge survival $X/(S+O)$, whose denominator holds the
+overlap, so a dropped byte lowers the volume ratio $1 + o_i$ times as much as it
+lowers merge survival. And it limits pooled survival, not how survival is
+spread over the merge stages. The first draft of this revision offered a
+counterexample in which the first stage keeps 0.245 of its input and every later
+stage keeps all of it. That counterexample is withdrawn: every flushed byte
+enters stage 0, so it drops 0.755 bytes per byte written, while only
+$g_{\text{flow}} = 0.278$ bytes of garbage exist per byte written. It met the
+floor because its drops are 0.278 of its *total* compaction input (2.71 per
+byte written); the floor sees only total input and cannot tell the two apart,
+which is why it bounds nothing about where survival goes. The bound that holds
+in the stage model is the following.
+
+**Proposition B.1″ (the drop budget bounds the elision saving; stage model).**
+Fix a window in which A7 holds. Model the tree as merge stages $0..L-1$ with the
+accounting of Lemma D.7 and no trivial moves: bytes that are not dropped pass
+through the stages in order; a stage-$i$ merge writes $w_i = 1 + o_i$ bytes per
+source byte, less one byte for each byte it drops, from the source or from the
+overlap; the $o_i$ are held fixed, as Theorem A.2(ii) holds its weights. Let $V$
+be the bytes entering stage 0 in the window (the flushed bytes), and $G$ the
+obsolete bytes available to compaction in it: garbage resident at the window's
+start plus obsolete versions flushed during it. Against the same flow with
+nothing dropped, the compaction write cost saved is at most
+$G\,(1 + \sum_{i=1}^{L-1}w_i)$, so the relative saving is at most
+$$\frac{G}{V}\cdot\frac{1 + \sum_{i\ge1}w_i}{\sum_{i\ge0}w_i} \;\le\; \frac{G}{V},$$
+the last step because $w_0 \ge 1$. With equal weights $w$ the factor is
+$(1 + (L-1)w)/(Lw)$, between $(L-1)/L$ and 1.
+
+*Proof.* Let $D_j$ be the bytes dropped by stage-$j$ merges. In steady state a
+level releases what reaches it, so the volume entering stage $i$ is
+$V_i = V - \sum_{j<i}D_j$, and by Lemma D.7 stage $i$ writes $w_iV_i - D_i$.
+With nothing dropped the cost is $V\sum_iw_i$, so the saving is
+$\sum_jD_j\,(1 + \sum_{i>j}w_i) \le \big(\sum_jD_j\big)(1 + \sum_{i\ge1}w_i)$.
+Every obsolete version is dropped at most once, so $\sum_jD_j \le G$.
+$\blacksquare$
+
+*Scope.* This is a statement about the stage model. Three things lie outside
+it. The comparison flow keeps every stale version at the bottom, so $B_L$ and
+$o_{L-1}$ would grow, and the model holds them fixed. Trivial moves write
+nothing: a heavy share at stage 0 would make the effective $w_0$ fall below 1,
+and a heavy share at later stages, as over a window that contains the load
+(Lemma D.7), lowers the no-drop cost, so every relative figure below assumes
+that trivial moves are rare; with up to 71% of the bytes leaving levels $\ge 1$
+moving trivially, as on the uniform whole run, a bound valid for any placement
+of drops can exceed 58%. A window that contains the
+load is not steady.
+
+*Values on `Assoc`.*
+
+- **Whole run, load included** (the view in which $S_{\text{flow}}$ is
+  measured): memtable drops remove the same bytes from $G$ and $V$, so
+  $G/V \le g_{\text{flow}} = 0.278$. The window is not steady: the load grows
+  the tree from empty, and bytes that end in L1–L7 never cross the later stages.
+  Because levels $1..L-1$ end at target in both flows, the saving is still at
+  most $G(1 + \sum_{i\ge1}w_i)$, but the no-drop cost is
+  $\sum_iw_i(V - R_{\le i})$, with $R_{\le i}$ the bytes resident in levels
+  $1..i$ at the end. With that growth counted and no trivial moves, the bound is
+  about 26–32% of whole-run $W - 1$ at T = 2 (27–29% at T = 6, 25–32% at
+  T = 10) for overlap constants from 1 to 0, about half the 58% of the
+  2026-09-11 formula at T = 2.
+- **Measured phase** (the view the objective scores, A8): every Put overwrites a
+  live key, so each user byte creates an obsolete byte, and the tree the load
+  leaves holds almost none, since its keys are unique. $G/V$ is then close to 1
+  and so is the bound: it says little. Native compaction also spends most of the
+  budget. Resident $S$ of 1.03–1.09 at run end leaves 0.09–0.27 GB of the
+  phase's 1.17 GB of obsolete bytes, so native drops 77–92% of them.
+
+What binds in the measured phase is *where* drops happen. A stale version can be
+dropped only in a merge that also holds a newer version of its key, and on
+`Assoc` the loaded versions sit in the deepest levels (at T = 2, L6–L8 hold
+about 84% of them and L8 alone about a third). So a first overwrite drops its
+loaded version deep, while repeat overwrites of hot keys can meet high: merge
+survival $X/(S+O)$ at L1 was 0.84, 0.86 and 0.93 at T = 2, 6 and 10 (D-4).
+Against native rather than against no drops, a controller can add at most the
+garbage native leaves, $G_{\text{res}} = (S-1)N_{\text{live}}$, and can
+otherwise only move native's drops higher. In the stage model its saving over
+native is therefore at most
+$$\sum_j D^{\text{nat}}_j\sum_{i=1}^{j}w_i \;+\; G_{\text{res}}\Big(1 + \sum_{i\ge1}w_i\Big),$$
+with $D^{\text{nat}}_j$ native's dropped bytes per level (§2 item 4). It
+follows from $\sum_jD^\pi_j \le G = \sum_jD^{\text{nat}}_j + G_{\text{res}}$,
+with every drop placed at stage 0 where it saves the most. This ignores
+locality, so it is an upper bound, and it is computable from the Hull-0
+artifacts. A bound that uses locality needs a model of where overwrites of one
+key meet, and is open. The proof also shows where elision pays most: a byte
+dropped at stage $j$ saves one byte there and every later stage, so drops high
+in the tree are worth the most.
+
+**Measured on `Assoc`** (D-3, measured denominator): $S_{\text{flow}} = 1.386$ at
+T = 2, 6 and 10; $g_{\text{flow}} = 0.278$; resident $S$ 1.03–1.09. The
+constant-survival *estimate* — not established by its proof, and above what
+B.1″ allows for the whole run at every ratio when trivial moves are rare — is
+58%, 35% and 35% (audit §4).
+The B.1 and B.2 tables of 2026-09-11 (uniform workload, defective live-data
+estimate) are withdrawn; Lemma D.14 replaces B.2's space budget.
+
+**Conjecture B.3′ (state-dependent value on a stationary workload).** On a
+stationary workload there is a state-dependent trigger policy $\pi$ with
+$J_\beta(\pi) < \min_{\theta\in\Theta_s}J_\beta(\theta)$.
+
+*Status.* Unproven. The 2026-09-11 revision asserted it in its commentary on
+Proposition B.3 (now Proposition H.3); B.3 does not imply it. No learned or hand-written policy on record lies
+below the static frontier (audit §2). The candidate mechanisms are items (b)–(d)
+of Pathway A §4. They are tested without a learner at Gate N3; if none works,
+the claim narrows to suite robustness and changing workloads (Global
+acceptance).
+
+**Definition (phase-adaptivity gap), retained.**
+$$\mathcal G = \min_{\theta\in\Theta_s}J_\beta(\theta) - \sum_p\frac{n_p}{N}\min_{\theta\in\Theta_s}J_{\beta,p}(\theta),$$
+the excess cost of the best single static configuration over a hindsight oracle
+that switches static configuration per phase, where $n_p/N$ is phase $p$'s share
+of the measured operations; time shares would depend on each configuration's
+speed.
+
+**Corollary B.4 (retained).** $\mathcal G > 0$ is sufficient evidence that
+adaptivity has value on that workload. $\mathcal G = 0$ is not evidence that it
+has none, because $\mathcal G$ sees only the phase component of adaptivity.
+Corollary D.12 now predicts $\mathcal G > 0$ in advance for the L0 trigger
+whenever phases' best triggers differ.
+
+### §4 Acceptance
+
+| # | Criterion | Threshold | Instrument |
+| --- | --- | --- | --- |
+| B-1 | Skew raises resident garbage (retained) | garbage fraction under skew exceeds a skew-free control by ≥ 10 pp, on the measured denominator | evaluator |
+| B-3 | Survival is measurable and responds (retained) | $\rho_i$ and $\eta_i$ per level, trivial moves excluded; lower under holding than under native at the held level | compaction log |
+| B-4 | Shift produces a phase-adaptivity gap (retained) | $\mathcal G > 0$ with the 95% interval excluding 0 | hindsight-oracle runner |
+| B-5 | Deletes activate compensated size (retained) | non-zero tombstone-driven file selections in the RocksDB LOG | LOG parse |
+| WL-1 | Garbage is reported where it acts (replaces B-2) | per-level $\rho_i$ and dropped bytes per workload and mode | compaction log |
+| WL-2 | The suite exercises every mode | for each mode, at least one workload whose best static setting differs from the balanced-mode best | Gate N2 |
+
+B-2 is retired: its threshold used Theorem B.1's ceiling, which its proof does
+not establish.
+
+---
+
+## Pathway C — Comparator
+
+### §0 Purpose
+
+Compare the controller with the best static setting for the same priced cost,
+measured on the same workload and binary, in the same session. The claim is then
+about a class of static settings rather than one tuned point.
+
+### §1 The static class and the comparator
+
+**$\Theta_s$ (fixed in advance, §0.6):**
+
+- L0 trigger $\in \{2, 4, 8\}$, restricted to admissible values
+  (A-Impl-6), so that triggers the byte branch makes identical are not counted
+  twice;
+- base size $\in \{8, 16, 32\}$ MiB;
+- static multiplier profiles: uniform 1; the equal-fanout or survival-weighted
+  profile at the measured $c$ and $v_i = a_i - t_i$ (Theorem A.2); a last-level-emptying
+  profile that holds upper levels at 1.5–2 times from load (audit §3); uniform
+  0.75;
+- `compaction_pri = kMinOverlappingRatio`, pinned;
+- $T \in \{2, 6, 10\}$, with 14 and 20 at one point for the cross-$T$ check.
+
+**Comparator.** For each workload $w$ and mode $\beta$,
+$\theta^\star_\beta(w) = \arg\min_{\theta\in\Theta_s}J_\beta(\theta, w)$, from
+measured, seed-paired runs.
+
+### §2 Theory
+
+**Proposition C.1 (comparator validity; retained, restated for priced cost).** If
+some $\theta \in \Theta_s$ has priced cost at most $\pi$'s on every term, then a
+static configuration is at least as good as $\pi$ in every mode, and $\pi$'s
+contribution is nil whatever it achieves against any single setting.
+
+*Proof.* Immediate from dominance, since every $J_\beta$ has positive weights.
+$\blacksquare$
+
+**Corollary C.2 (retained).** "$\pi$ beats the native setting" is strictly weaker
+than "$\pi$ beats $\theta^\star_\beta$".
+
+**Corollary C.3 (steady-state gains belong to the static class; extended).** The
+steady-state optima of Proposition D.11 ($K_0$ at fixed prices), Proposition
+D.13 (interior profile, depth) and Theorem A.2 (survival-weighted profile) are
+static settings. Any gain they explain belongs to $\Theta_s$, not to the
+controller.
+
+**Proposition C.4 (one hull serves every mode).** For every $\beta > 0$,
+$\theta^\star_\beta$ is a vertex of the lower convex hull of the static points'
+priced-cost vectors $(\mathcal C_W, \mathcal C_R, \mathcal C_S)$. The hull extracted once per workload
+therefore contains every mode's comparator.
+
+*Proof.* Proposition D.5 applied to the finite set $\Theta_s$. $\blacksquare$
+
+**Definition C.5 (regret and suite robustness).** The regret of $\pi$ on
+workload $w$ in mode $\beta$ is
+$$\text{Reg}_\beta(\pi, w) = \frac{J_\beta(\pi, w)}{J_\beta(\theta^\star_\beta(w), w)} - 1.$$
+$\pi$ is *suite-robust* in mode $\beta$ if
+$$\max_w \text{Reg}_\beta(\pi, w) < \min_{\theta\in\Theta_s}\max_w\text{Reg}_\beta(\theta, w),$$
+i.e. its worst regret across the suite is below the best worst-case regret of
+any single static setting. This is where a min–max criterion properly belongs.
+It is the regret form of robust tuning under workload uncertainty
+[Endure].
+
+A controller can be suite-robust without beating $\theta^\star_\beta(w)$ on any
+single workload: it only has to avoid being far from the best static setting
+everywhere, which no one static setting may manage.
+
+### §3 Drift and repeats
+
+- **Same session.** Comparator arms run in the same session as policy arms, in
+  interleaved order, and the session id is recorded. The same static setting
+  wrote 2.9–4.1% more at T=2 in later sessions (audit).
+- **Repeats.** For the paired difference $d$ between an arm and its comparator,
+  the interval half-width is $t_{n-1}\sigma_d/\sqrt n$, so the repeat count per
+  cell is the smallest $n$ with
+  $$n \ge \left(\frac{t_{0.975,\,n-1}\,\sigma_d}{h}\right)^2,$$
+  where $\sigma_d$ is estimated at Gate N2 and $h$ is the half-width required —
+  a quarter of the gap between $\theta^\star_\beta$ and the next-best static
+  point, or an effect size fixed in advance.
+
+### §4 Acceptance
+
+| # | Criterion | Threshold | Instrument |
+| --- | --- | --- | --- |
+| C-1 | Static class sampled (retained, extended) | every knob level of $\Theta_s$ present; ≥ 4 hull vertices per (workload, $T$) | sweep output |
+| C-2 | Hull points decidable (retained) | repeats until the interval width is under half the spacing between neighbouring hull points | paired evaluator |
+| CMP-3 | Per-workload comparison | $J_\beta(\pi) - J_\beta(\theta^\star_\beta)$ with paired interval, per (workload, mode, $T$) | paired evaluator |
+| C-6 | Cross-$T$ (retained) | comparison repeated with $\theta^\star_\beta$ taken over $T \in \{2, 6, 10, 14, 20\}$ | cross-$T$ sweep |
+| CMP-7 | Suite robustness | Definition C.5 reported per mode | suite evaluator |
+| CMP-8 | Same-session twins | every comparison paired within one session, session id recorded | run manifest |
+
+The 2026-09-11 criteria C-3, C-4 and C-5 are historical (Appendix R).
+
+---
+
+## Pathway E — Guard (Programme 2; on hold)
+
+Programme 1 has no service-level objective, so it has no guard. RocksDB's own
+slowdown and stop triggers and pending-bytes limits are the only safety
+mechanism, together with the multiplier and trigger bounds of A-Impl-6 and
+A-Impl-7.
+
+**Retained for Programme 2:** the 2026-09-11 Proposition E.1 (the realised
+policy is a mixture of the policy and its projection onto the shield's action
+set, so a shield that fires often replaces the policy) and Corollary E.2 (the
+shield's influence is bounded by its override probability, and a shield action
+set narrower than the policy's biases every override the same way), the
+criteria E-1 to E-5 as defined there, and three calibration lessons:
+
+- limits must be calibrated in the unit the criterion scores — frames, not
+  episodes (the inspection-paradox finding of 2026-09-14);
+- every term of the force condition must be calibrated, not only the per-level
+  ones;
+- calibration windows must exclude the post-load transient. E-5 was 6–17 times
+  its limit over whole runs and 0–1.4% after the first 30 s (audit).
+
+Verdicts to date are in Appendix R.
+
+---
+
+## Pathway F — Phase-aware objective switching (Programme 2)
+
+**Status:** second programme. Its 2026-09-11 description — a layer above the
+controller that switches a parameter set per detected or forecast phase; the
+F-detect and F-forecast versions; the leak guard; switchable knobs only — is
+retained. Three changes:
+
+- Under Programme 1, what switches per phase is the priority vector $\beta$ (and
+  $K_0$ at its phase optimum, Corollary D.12), not an SLO manifest. SLO manifests
+  return with Programme 2.
+- Corollary D.12 predicts $\mathcal G > 0$ for the L0 trigger in advance whenever
+  the phases' best triggers differ.
+- The audit's suggestion of a slow tuner above native RocksDB is this layer.
+
+**Definition (three controllers over one schedule; retained).** For phases
+$p = 1..P$ with boundaries known to the evaluator: $J_{\text{oracle}}$ switches
+the best static setting per phase exactly at the boundaries (its advantage over
+the best single static setting is $\mathcal G$); $J_{\text{react}}$ chooses from
+the current window's measured mix, with no look-ahead; $J_{\text{pred}}$ chooses
+from a predicted class for the next episode, with lead time $\ell$.
+
+**Proposition F.1 (decomposition; retained).**
+$\mathcal G = (J_{\text{static}} - J_{\text{react}}) + (J_{\text{react}} -
+J_{\text{pred}}) + (J_{\text{pred}} - J_{\text{oracle}})$: the value of reacting,
+the value of anticipating, and the remaining loss.
+
+*Proof.* Telescoping. $\blacksquare$
+
+**Proposition F.2 (catch-up bounds the value of anticipation; corrected).**
+Suppose $J_{\text{react}}$ and $J_{\text{pred}}$ choose the same settings except
+that the predictor switches $\ell$ earlier at each transition. Let
+$e_r(t) \ge 0$ be the reactive controller's excess cost rate over the new
+setting's steady cost during the first $\Delta_{\text{shape}}$ after a
+transition (the catch-up), and assume the new setting's steady cost is a floor
+for both controllers after the transition, and that running the new setting
+early costs the predictor $w(t) \ge 0$ before the transition. Then, per
+transition,
+$$J_{\text{react}} - J_{\text{pred}} \;\le \int_0^{\Delta_{\text{shape}}} e_r(t)\,dt.$$
+The difference can be negative if the pre-transition cost outweighs the saving.
+A predictor reaches the bound only if it completes the reshaping before the
+transition ($\ell \ge \Delta_{\text{shape}}$) at no pre-transition cost.
+
+*Proof.* The two controllers differ only in $[-\ell, \Delta_{\text{shape}}]$
+around a transition. There $J_{\text{react}} - J_{\text{pred}} = \int e_r -
+\int e_p - \int w$, with $e_p \ge 0$ by the floor assumption and $w \ge 0$, so
+the difference is at most $\int e_r$. $\blacksquare$
+
+*Correction.* The 2026-09-11 statement bounded the anticipation term by the cost
+over the first $\max(0, \Delta_{\text{shape}} - \ell)$ of the read phase. That
+quantity is what a predictor with lead $\ell$ still leaves — part of the third
+term of F.1 — not the anticipation term. The conclusion stands: on a gradual
+transition the catch-up excess is small, so the anticipation term is small;
+transition abruptness is the axis to sweep.
+
+**Acceptance (retained, Programme 2):** F-1 ($\mathcal G > 0$; this is B-4), F-2
+(reacting captures a measured share of $\mathcal G$), F-3 (anticipation adds
+value on the abrupt schedule), F-4 (whole-run bounds hold under switching), F-5
+(no churn), F-6 (forecaster is honest), F-7 (lead-time dependence shown), as
+defined in the 2026-09-11 revision. F-4's bounds are re-stated when Programme 2's
+constraints are.
+
+---
+
+## Execution order (Programme 1)
+
+Each gate's cost is stated in runs. Node-hours follow once Gate N1 fixes run
+length.
+
+**Gate N0 — code, instruments and tests (node time only for builds, tier-2
+tests and the preflight).**
+
+1. **(Done 2026-09-25, `1fc8852`.)** Commit the D-10 to D-12 work, the D-12
+   verdict and the audit (audit §5, item 1).
+2. `level_target_multipliers` with its tests (ACT-1; the implementation plan
+   is `docs/IMPLEMENTATION_PLAN_PROGRAMME1.md`).
+3. Per-level read counters, keyed by the version's level and aggregated
+   across threads, with each level's block reads split into the hit's read and
+   false-positive reads (D §4), and $R_{blk}$; the slot-blocking spans (L0 due
+   but waiting, and the start level of the job holding the slot) with the
+   operations served in them, for the slot-blocking charge (D §4); the active
+   memtable's fill at every L0 decision (H §2); $\rho_i$, $o_i$, dropped bytes and
+   trivially moved bytes $t_i$ per source level, per compaction; turnover
+   logging; per-release slot wait (from the later of a level's score reaching 1
+   and its previous job ending, to the job starting) and slot occupancy, for
+   $\hat\omega_j$, $\omega_j$ and $\zeta$ (G.4); at every decision, the score
+   order, the running compaction's start level and the pending-compaction
+   estimate with the multipliers applied (A-Impl-3), read in-process from the
+   current version, for the queue-position and backlog inputs (G §3). Repair the
+   existing per-level telemetry counters `trivial_move_jobs` and
+   `trivial_move_bytes`, which read zero: `NotifyOnCompactionCompleted` passes
+   `Compaction::is_trivial_move()`, a flag only the universal picker sets, and
+   the trivial-move branch of `BackgroundCompaction` never fills
+   `total_input_bytes`. $\hat\xi_j$ (G §3) must not be read from them until
+   then.
+4. The settle step after the load (`WaitForCompact`, then the $h_w$ hold) and
+   the measured-phase stamp at the first `mixgraph` operation (A8, H §5).
+5. Evaluator: $\mathcal C_W$, $\mathcal C_R$, $\mathcal C_S$ and $J_\beta$
+   over the measured phase, from operation $n_w$ to the end of the drain — a
+   ticker snapshot and an internal-stats stall snapshot at $n_w$, $R_{blk}$ from
+   `rocksdb.bloom.filter.full.positive`, compactions windowed by completion
+   time, and $H$ sampled with the operation count at every version install on
+   every arm, native included. Self-check on every arm: the per-interval
+   operation counts sum to the measured operations, and the last sampled $H$
+   equals `rocksdb.live-sst-files-size` at the end of the drain. And the OBJ-6
+   diagnostics.
+6. The C++ inference plugin, weight push, masked target and fallback (H §4,
+   H §6).
+7. Device price calibration: $c_w$, $c_f$, $c_{blk}$, $c_{sk}$, $c_s$ (OBJ-2).
+8. The dated `PREREGISTRATION.md` entries of §0.6.
+9. Test suites for every item above, and the preflight (CLAUDE.md "Tests";
+   plan §6). Every later gate that needs a long node run starts only with a
+   preflight marker matching the current `db_bench`, plugin and code hashes.
+
+**Gate N1 — admission test on existing artifacts (no node time).** PROP-1 for
+the levels existing runs cover. It fixes the run length: the measured phase must
+contain at least $n_{\text{turn}}$ turnovers of the deepest pooled level, with
+$n_{\text{turn}}$ fixed in advance (10 suggested). A cell with no pool (T=10 at
+the current size, G §4 scope decision) applies the same rule to its deepest
+interior level with enough turnovers, L2: about 4 minutes at the old ingest
+rate, against about 40 if L3 were pooled. Levels that existing artifacts cannot
+decide (fewer than the minimum turnovers, e.g. L3 at T=10) are decided on
+Gate N2's static runs, sized provisionally as if pooled: at least
+$\lceil n_{\min}/n_{\text{turn}}\rceil$ static runs of $n_{\text{turn}}$
+turnovers each.
+
+**Gate N2 — static comparator on the new binary.** ACT-4 (native parity) first.
+Then $\Theta_s$ on `Assoc` and one Zipfian workload at T = 2, 6 and 10, in the
+same-session design, with repeat counts from C §3. Runs: $|\Theta_s| \times$
+workloads $\times$ $T$ values $\times$ repeats.
+
+**Gate N3 — learner-free test of Conjecture B.3′.** Hand-written state rules —
+$K_0$ tracking Proposition D.11 at measured prices; releasing on neighbour fill;
+holding for garbage; L0 compacting early while the slot is idle and reads are
+heavy (Pathway A §4 (e)); interior levels holding releases while L0 is due or
+within one flush of due (Pathway A §4 (f)) — against $\theta^\star_\beta$ in each
+mode, with the stall rule applied (Global acceptance). This decides whether the
+stationary-workload claim stays before any learner run. If neither slot rule
+beats $\theta^\star_\beta$ in read priority, read priority's claim narrows to
+changing workloads and suite robustness (claims 2 and 3) before Gate N5.
+
+**Gate N4 — learner smoke test.** One workload, read priority, one $T$:
+ARCH-1 to ARCH-6, OBJ-1, OBJ-3, OBJ-4.
+
+**Gate N5 — mode matrices.** Read priority across the suite; then write and
+space priority (only $\beta$ changes), with the same instruments. The claim is
+recorded before N5 (Global acceptance).
+
+**Gate N6 — ablations.** Propagation on and off (PROP-4); counterfactual charge
+on and off; neighbour charge from the full value versus the attributed-cost head
+(§0.6 item 11); prior on and off; plugin versus socket inference (the plugin's
+remote-inference mode, same policy with Q evaluated in the trainer).
+
+Programme 2 (Pathways E and F) starts after Programme 1's claim is recorded.
+
+---
+
+## Global acceptance
+
+**Claims**, one or more of which is recorded in `PREREGISTRATION.md` before
+Gate N5:
+
+1. **Per-workload gain.** In mode $\beta$, $J_\beta(\pi) < J_\beta(\theta^\star_\beta)$
+   with the paired interval below zero on named workloads (CMP-3), and against
+   the cross-$T$ comparator (C-6).
+2. **Suite robustness.** Definition C.5 holds in the mode (CMP-7).
+3. **Changing workloads.** $\mathcal G > 0$ (B-4) and the controller captures a
+   measured share of it (F-2 form).
+4. **Propagation contributes.** PROP-2 to PROP-4, claimed only for (workload,
+   $T$) cells whose pool holds at least two admitted levels (G §4, scope
+   decision): T=2 on `Assoc` at the current size, T=6 if the admission test
+   admits two levels, never T=10 at this size.
+
+**Stall rule** (applies to every claim). $J_\beta$ prices no time (D §1), so a
+policy could lower it by deferring work until writes stall. A claim therefore
+also requires, on the same paired runs and reported beside $J_\beta$ rather than
+priced into it (OBJ-6), measured-phase stall seconds no more than
+$\delta_{\text{stall}}$ above the comparator's and foreground throughput no more
+than $\delta_{\text{thr}}$ below it. Both use the paired interval's bound; both
+margins are fixed in advance (§0.6 item 12). Stall seconds are read as in D-11,
+from the internal-stats `Cumulative stall` line differenced over the measured
+phase, never from `rocksdb.stall.micros`.
+
+**If none holds.** If Gate N3 finds no state-dependent rule that beats
+$\theta^\star_\beta$ and Gate N5 confirms it, the paper is an analysis paper: the
+structure of the static optimum (Propositions D.11 and D.13, Theorem A.2), depth
+monotonicity (Lemma A.6), the corrected elision analysis (Propositions B.1′ and B.1″), the
+cost of exploration (Proposition H.3), and the propagation measurements
+(Proposition G.1).
+
+---
+
+## References
+
+- [Cao et al.] Z. Cao, S. Dong, S. Vemuri, D. H. C. Du. Characterizing, Modeling,
+  and Benchmarking RocksDB Key-Value Workloads at Facebook. USENIX FAST 2020.
+- [Cooper et al.] B. F. Cooper, A. Silberstein, E. Tam, R. Ramakrishnan,
+  R. Sears. Benchmarking Cloud Serving Systems with YCSB. ACM SoCC 2010.
+- [Cosine] S. Chatterjee, M. Jagadeesan, W. Qin, S. Idreos. Cosine: A
+  Cloud-Cost Optimized Self-Designing Key-Value Storage Engine. PVLDB 15(1),
+  2021.
+- [Das & Dennis] I. Das, J. E. Dennis. A Closer Look at Drawbacks of Minimizing
+  Weighted Sums of Objectives for Pareto Set Generation in Multicriteria
+  Optimization Problems. Structural Optimization 14:63–69, 1997.
+- [Dostoevsky] N. Dayan, S. Idreos. Dostoevsky: Better Space-Time Trade-Offs for
+  LSM-Tree Based Key-Value Stores via Adaptive Removal of Superfluous Merging.
+  ACM SIGMOD 2018.
+- [Endure] A. Huynh, H. A. Chaudhari, E. Terzi, M. Athanassoulis. Endure: A
+  Robust Tuning Paradigm for LSM Trees Under Workload Uncertainty. PVLDB 15(8),
+  2022.
+- [Foerster et al.] J. N. Foerster, G. Farquhar, T. Afouras, N. Nardelli,
+  S. Whiteson. Counterfactual Multi-Agent Policy Gradients. AAAI 2018.
+- [How to Grow] How to Grow an LSM-tree? Towards Bridging the Gap Between Theory
+  and Practice. ACM SIGMOD 2025. Source of the M3 convention used in P0-7.
+- [Kearns & Singh] M. Kearns, S. Singh. Near-Optimal Reinforcement Learning in
+  Polynomial Time. Machine Learning 49:209–232, 2002. Simulation lemma.
+- [Miettinen] K. Miettinen. Nonlinear Multiobjective Optimization. Kluwer, 1999.
+- [Mnih et al.] V. Mnih et al. Human-Level Control through Deep Reinforcement
+  Learning. Nature 518:529–533, 2015.
+- [Monkey] N. Dayan, M. Athanassoulis, S. Idreos. Monkey: Optimal Navigable
+  Key-Value Store. ACM SIGMOD 2017.
+- [Ng et al.] A. Y. Ng, D. Harada, S. Russell. Policy Invariance under Reward
+  Transformations: Theory and Application to Reward Shaping. ICML 1999.
+- [O'Neil et al.] P. O'Neil, E. Cheng, D. Gawlick, E. O'Neil. The
+  Log-Structured Merge-Tree (LSM-Tree). Acta Informatica 33(4):351–385, 1996.
+- [RusKey] D. Mo, F. Chen, S. Luo, C. Shan. Learning to Optimize LSM-trees:
+  Towards a Reinforcement Learning Based Key-Value Store for Dynamic Workloads.
+  ACM SIGMOD 2024; arXiv:2308.07013. Lerp and policy propagation in §5;
+  evaluation in §7.
+- [Sarkar et al.] S. Sarkar, D. Staratzis, Z. Zhu, M. Athanassoulis.
+  Constructing and Analyzing the LSM Compaction Design Space. PVLDB 14(11), 2021.
+- [van Hasselt et al.] H. van Hasselt, A. Guez, D. Silver. Deep Reinforcement
+  Learning with Double Q-Learning. AAAI 2016.
+- [Wolpert & Tumer] D. H. Wolpert, K. Tumer. Optimal Payoff Functions for Members
+  of Collectives. Advances in Complex Systems 4(2–3):265–279, 2001.
+- [Zhu et al.] Z. Zhu, J. H. Mun, A. Raman, M. Athanassoulis. Reducing Bloom
+  Filter CPU Overhead in LSM-Trees on Modern Storage Devices. DaMoN 2021.
+
+RocksDB behaviour (score computation, file picking, `SetOptions`) is cited to
+the pinned source, not to documentation.
+
+---
+
+## Appendix R — Record of the 2026-09-11 programme (historical; not re-scored)
+
+Dated verdicts are in `docs/PREREGISTRATION.md`; narratives are in the history
+document (§§10.7, 14.7–14.24).
+
+**Gate 0 (complete).** A-0 decomposition of the write excess, paired means over
+five repeats (uniform workload, 2026-09-11):
+
+| cell | arm | excess | depth part (GiB) | eagerness part (GiB) | depth share |
 | --- | --- | ---: | ---: | ---: | ---: |
 | 10M T=2 | `prior_only` | +18.2% | 0.00 | +5.24 | 0.00 |
 | | `rl` | +15.8% | +1.08 | +3.48 | 0.22 |
@@ -289,1427 +2402,32 @@ the exact tickers within 0.8%.
 | | `rl` | +10.0% | +2.00 | +4.62 | 0.35 |
 | | `unconstrained_rl` | +16.7% | +1.76 | +9.32 | 0.18 |
 
-The prior's excess is entirely eagerness in every cell. The learner's depth
-share peaks at 0.35 (20M T=2) and is below the 0.05 GB quantisation at T=10.
-Pathway A's attributable $W$ claim is bounded by that share.
-
-- **Delivers:** the ability to defer at a level without releasing a burst
-  downstream — no depth cascade, no read cost (Theorem A.1). This makes
-  deferral a usable action for the constrained objective.
-- **Delivers, conditionally:** removal of the depth component $D_{\text{depth}}$
-  of the write excess, measured per cell at A-0, expected small or negative
-  outside $T{=}6$.
-- **Does not deliver:** parity on its own. A-2 requires Pathway D to reduce the
-  prior's eagerness, and every unit of eagerness given up returns read
-  amplification. **A-2 is a joint A+D criterion.** The paper attributes a $W$
-  change to expansion only for the $D_{\text{depth}}$ share.
-- **Does not deliver:** $W$ meaningfully below parity by geometry (Theorem
-  A.2(iv), static, Hull$_s$'s). Material sub-parity requires a fall in $\eta$;
-  deferral is the mechanism (B-3) and Theorem B.1 bounds it by cumulative
-  garbage.
-
-### Implementation
-
-**A-Impl-1. State lives in `VersionStorageInfo`, and stays out of L0's byte
-branch.** `level_max_bytes_` and the compaction score live in
-`VersionStorageInfo` (`ComputeCompactionScore`, `MaxBytesForLevel`; re-locate
-against the pinned commit). A picker-local scale cannot reach the score. Hold
-the scale vector in `VersionStorageInfo`, set it from the picker, apply it
-inside `MaxBytesForLevel` for levels $\ge 1$ **only**, and never route it through
-`max_bytes_for_level_base`, or expanding L1 silently suppresses L0's
-byte-driven trigger. Add a unit test asserting L0's computed score is invariant
-to the scale vector. An L0 leak would show up as a spurious A-1b pass.
-
-**A-Impl-2. Pin `level_compaction_dynamic_level_bytes = false` and declare
-it.** Under the default-on mode, level targets are computed top-down from the
-last level, `max_bytes_for_level_multiplier_additional` is ignored, levels below
-`max_bytes_for_level_base / multiplier` are kept empty, the L0 target term is
-raised to $\max(\texttt{max\_bytes\_for\_level\_base},\;
-\texttt{level\_max\_bytes\_}[\text{base\_level}]/\text{multiplier})$ (so
-scaling leaks into L0), and `MaxBytesForLevel` is not a pure function of options
-and level. The capacity-scale mechanism presumes a static ladder. Document the
-pin in §11.2; justify it in the setup section as isolating the mechanism from
-an externally varying target schedule.
-
-**Pinned alongside it: direct I/O, off.** `use_direct_reads` and
-`use_direct_io_for_flush_and_compaction` are both **false**, with
-`compaction_readahead_size` at the pinned tree's 2 MB default. Enabling them was
-the original decision and was reversed on measurement: a 10M T=2 pilot ran
-mixgraph at 2,750 ops/s with direct I/O and 58,332 ops/s buffered, a 21×
-penalty that puts Gate 1 near 95 h. An earlier revision quoted 2.6×, comparing
-against a buffered figure from the 2026-09-03 suite on different hardware; that
-cross-machine comparison was invalid and is retracted here. Roughly 40% of that
-gap came from table-open churn, 7,509 SST files against `max_open_files` 1000
-with index and filter blocks outside the block cache; lifting the limit
-recovered that much and no more.
-
-The cost is accepted because almost nothing Gate 1 produces is cache-sensitive.
-Write, point-read and space amplification, sorted-run seeks, per-level merge
-survival and the $\Delta S(\text{scale})$ curve are byte ratios fixed by tree
-shape and volume, so Hull₀ over $(W, R)$ is cache-invariant. What buffered I/O
-does cost is that latency, runtime and stall figures are warm-cache: the ~3.7 GB
-database sits in page cache. They must be reported as bounds on foreground
-disruption, never as storage-latency claims. One coupling to watch: stage 06
-selects the comparator by lowest mean runtime among the minimum-space survivors,
-and runtime is cache-sensitive, so a change of I/O mode requires a regenerated
-manifest.
-
-The setting may be turned on for the final paper benchmark workload if the
-amplification results justify the cost. Such runs carry fingerprint field `dio1`
-and cannot be pooled with `dio0` runs. The rejected alternative remains a cgroup
-page-cache cap, which is external state the fingerprint cannot carry. Pinned,
-never swept, recorded as the `dio` fingerprint field and as `use_direct_io` in
-`metadata.env`.
-
-**A-Impl-3. Snapshot epoch — decompose, do not invalidate.** The epoch mixes
-`MaxBytesForLevel(level)` (`compaction_picker_rl.cc:300`), so routing capacity
-through `level_max_bytes_` naively makes every in-flight frame structurally
-stale on each action-2. Split the quantity: hash the **static base ladder** into
-the epoch; carry the **controller-set scale** as an explicit echoed field. This
-is sound only under A5; if A5 is lifted, the base ladder returns to the epoch as
-a hashed input.
-
-**A-Impl-4. Debt estimator.** The debt safeguard (`:1177–1185`,
-`pending_debt_ratio_limit`) and `NeedsCompaction` (`:2177`) read
-`estimated_compaction_needed_bytes()`, computed by
-`EstimateCompactionBytesNeeded` from `CalculateBaseBytes` targets. If the scale
-does not feed that estimator, debt accrues against an unchanged limit and §6.4
-forces the gate open precisely when expansion is meant to hold it closed, so
-A-1b fails for a reason unrelated to Theorem A.1. The estimator must be in
-scope. The ratio is then self-consistent; the **absolute** pending-byte limits
-do not scale and must be re-checked. Defaults: `soft_pending_compaction_bytes_limit`
-= 64 GB, `hard_pending_compaction_bytes_limit` = 256 GB, decimal. Re-derive the
-§11.2 headroom with 256 GB.
-
-**A-Impl-5. Ruled out: `max_bytes_for_level_multiplier_additional`.** It is
-`kMutable`, but (a) it is `vector<int>`, so $\alpha = 1.25$ and the decay are
-inexpressible; (b) its effect is cumulative down the tree, so it cannot express
-independent per-level $s_i$; (c) it is ignored outright when
-`level_compaction_dynamic_level_bytes` is on.
-
-**A-Impl-6. Protocol.** Extend the protocol-v2 response from a binary action
-array to a ternary one. Bump to `credit_assignment_version: 3`; preserve the
-`decision_id` echo and effective-action reporting from the 2026-08-31 repair.
-
-**A-Impl-7. Bounds.** Enforce $s_i \in [1, s_{\max}]$ with $s_{\max}$ read from
-Gate 1's measured $\Delta S(\text{scale})$ curve at the budget rung the run is
-executing. Record the rung and its $s_{\max}$ in the run manifest and the
-experiment fingerprint. Reject expansions violating the projected space bound
-before applying them.
-
-**A-Impl-8. Decay.** $s_i \leftarrow \max(1, s_i \cdot e^{-\Delta t/\tau})$ each
-control interval where action 2 was not selected; start $\tau$ at 4× the
-decision horizon. Decay can drive $s_i$ below $\phi_i$ while the level is still
-over-full; either the controller re-expands to hold the condition, or depth
-invariance degrades to depth deferral. A-4 tests the conjunction.
-
-**A-Impl-9. Attribution.** Expansion appears in the effective-action stream,
-the replay transition, and per-level diagnostics. A forced contraction (safety,
-drain, maintenance) is an override and is relabelled as such, exactly as forced
-opens are.
-
-**A-Impl-10. Pressure audit.** `CheckPressureDivergence` (`:1188`) asserts the
-held score equals the score published through the `ComputeCompactionScore`
-observer; locating the scale in `VersionStorageInfo` satisfies this. Extend the
-audit to assert L0 score invariance under the scale vector.
-
-### Acceptance criteria
-
-| # | Criterion | Threshold | Instrument |
-| --- | --- | --- | --- |
-| A-0 | **Write-excess decomposition** (Gate 0, existing §10.7 artifacts) | $D_{\text{depth}}$ and $D_{\text{eager}}$ per cell for `prior_only` and `rl`, summing to the total excess; attribution of any $W$ change to expansion is limited to $D_{\text{depth}}$ | per-level `compaction_bytes_written`, paired by seed |
-| A-1a | **Mechanism:** with $s_i \ge \phi_i$ enforced, $\delta L = 0$ | every paired repeat, T=2, relaxed space bound (Gate 3a-0) | `levelstats`, $\phi_j$ at release |
-| A-1b | **Acceptance:** $\delta L = 0$ under the space bound of the budget rung being run | every paired repeat, at the (cell, rung) pairs selected by the rule below; 2% rung is the research-track headline unless another is preregistered before 3b | `levelstats` |
-| A-2 | Write amplification non-inferior to baseline (**joint A+D**) | upper 95% bound on $W_{rl} - W_{base}$ $\le \delta_W$ (2%, P0-3) | paired evaluator |
-| A-3 | Space amplification inside the space bound | upper 95% bound $\le$ the bound of the rung being run | paired evaluator |
-| A-4 | **Sustained** expansion — Theorem A.1's hypothesis held | $s_i \ge \phi_i$ in $\ge$ 99% of frames where $\phi_i > 1$; $\max_i s_i \le s_{\max}$ in 100% of frames | policy log |
-| A-5 | Accounting integrity preserved | zero hard-invalid frames, balanced acceptance, C++/Python decision agreement | `learning_health.json` schema 3 |
-
-A-2 uses non-inferiority, not "CI contains 0": with $\pm 20$–$30\%$ CIs at five
-repeats, a CI containing 0 passes by lack of power. A-4's $s_{\max}$ clause is a
-construction invariant; the sustained-condition clause is the measured
-criterion.
-
-**Preregistered cell rule (replaces any cell list):**
-
-> A-1b runs at every (cell, budget rung) pair, rungs from the P0-6 ladder
-> $\{0, 2, 5, 10\}\%$, where Gate 1's measured $\Delta S(\text{scale})$ curve
-> gives $s_{\max}(\text{rung}) \ge 1.10\,\kappa$. Pairs with $s_{\max} < \kappa$
-> are reported as closed at that rung, with the measured curve, and not run.
-> Pairs in $[\kappa,\,1.10\kappa)$ are reported as undecidable at the available
-> margin and not run. A cell closed at every rung is closed. The research-track
-> verdict is read at the 2% rung.
-
-**A-1a's relaxed bound — one rule.** Set it to whatever $S$ the measured
-$\Delta S(s)$ curve says is required to reach $s = 1.10\,\kappa_{1M}$, and
-report it as a measured space cost ("depth invariance at $T{=}2$ costs $X\%$
-space"), not as a threshold. A-1a is diagnostic and carries no acceptance
-weight.
-
-**A-1b is the gate.** If depth does not flatten at the surviving pairs, A3/A4
-are wrong for this system and the analytical spine needs revision.
-
----
-## Pathway B — Workload Realism
-
-### Purpose
-
-Theorem A.2 shows the only *material* route to $W$ below parity is a fall in
-merge survival $\eta$. Deferral is the mechanism that lowers $\eta$: holding a
-merge back lets more overwrites accumulate above it, so each merge drops more
-(B-3). The fall is bounded by **cumulative** garbage (Theorem B.1), which is
-large on the current workload — the same workload settles to $S = 2.271$ at
-$T{=}2$ and $1.166$ at $T{=}10$, so $g_{\text{flow}} \ge 0.56$ and the $T{=}10$
-baseline has simply already elided most of it. What Pathway B adds is (B1) skew,
-which concentrates overwrites on hot keys so that deferral at a level has garbage
-to act on before the baseline reaches it; (B3) tombstones, a garbage class the
-uniform workload never produces, which activate the compensated-size term of the
-file-selection control; and (B2) phases, which create the non-stationarity that
-lets phase-adaptivity be measured.
-
-### Description
-
-**B1 — Update skew (creates concentrated $g$). (Done)** `mixgraph` uses prefix-based
-hotspot key generation only when at least one of `keyrange_dist_{a,b,c,d}` is
-nonzero; all-zero (the current configuration) yields uniform random. Adopt the
-published fit:
-
-```
--keyrange_dist_a=14.18  -keyrange_dist_b=-2.917
--keyrange_dist_c=0.0164 -keyrange_dist_d=-0.08082
--keyrange_num=30
--key_dist_a=0.002312    -key_dist_b=0.3467
--value_k=0.2615         -value_sigma=25.45
--iter_k=2.517           -iter_sigma=14.236
-```
-
-These encode the **UDB `Assoc`** column family, modelled mix Get/Put/Iterator
-$= 0.806 / 0.159 / 0.035$, **no modelled deletes**. Cite the column family; note
-that the paper's appendix, the RocksDB wiki and §7.4 disagree at the second
-decimal rather than picking one silently. Sweep `keyrange_num` $\in \{5, 30,
-100\}$ as the skew-intensity axis.
-
-**B2 — Workload shift (creates non-stationarity).** `sine_*` flags vary QPS
-intensity, not the operation mix. Chaining `db_bench` invocations restarts the
-process and resets the learner (violates §3.2); routing through the Tectonic
-runner creates a second experiment surface (rejected, see Gate 2). **Use an
-in-process `db_bench` phase patch.** Schedule: 2 phases (read-heavy ↔
-write-heavy) until a nonzero $\mathcal{G}$ is demonstrated; extend to 4 only
-afterwards. Shift magnitude and frequency are separate swept axes. Shift points
-are identical across arms so pairing stays valid.
-
-**B3 — Explicit deletes (creates tombstones). A patch, not a flag.** `mixgraph`
-models exactly three operation types (Get, Put, Seek) from
-`FLAGS_mix_{get,put,seek}_ratio`, read once at benchmark start; there is no
-`mix_delete_ratio`. Add a fourth operation type to `QueryDecider` and a
-`mix_delete_ratio` flag, in the same patch as B2's phase schedule. Rejected
-alternatives: `DeleteRange` injection (range tombstones, different compaction
-semantics, not comparable to the published mix); a side thread (breaks the
-single-decider op accounting the paired evaluator relies on). Delete rate is a
-swept axis $\in \{0\%, 3\%, 6\%\}$ on the `Assoc` key distribution, labelled
-synthetic (P0-10); the 78/13/6/3 mix is ZippyDB, not `Assoc`. Tombstones are
-dropped only at the bottommost level, so the $\eta$ response to deletes will be
-concentrated there — predict this before measuring it.
-
-### Theory
-
-**Theorem B.1 (Elision bound).**
-*Run-cumulative merge survival satisfies $\eta \ge 1/S_{\text{flow}}$. Under
-the write model of Theorem A.2(ii) with uniform fanout and constant survival,
-the maximum achievable relative reduction in $W - 1$ is*
-
-$$\frac{|\Delta (W-1)|}{W-1} \;\le\;
-1 - \frac{1 - \eta_{\min}^{\,L}}{L\,(1-\eta_{\min})},
-\qquad \eta_{\min} = \frac{1}{S_{\text{flow}}},$$
-
-*which for small garbage is $\approx (L-1)\,g_{\text{flow}}/2$.*
-
-*Proof.* Every byte live at run end must survive every merge it participates
-in, so any merge's output is at least the bytes among its inputs that are live
-at run end. Pooled over the run, compaction output is at least the live bytes
-and input is at most the bytes the user wrote plus their rewrites, so the pooled
-ratio is at least $N/N_{\text{written}} = 1/S_{\text{flow}}$. With uniform $f$,
-$(W-1)(\eta)/(W-1)(1) = \frac{1}{L}\sum_{i<L}\eta^i = \frac{1-\eta^L}{L(1-\eta)}$;
-substitute $\eta_{\min}$ and expand. $\blacksquare$
-
-The floor is $1/S_{\text{flow}}$, not $1/S$: resident garbage is a snapshot,
-elision is a flow, and the two differ by exactly the garbage the baseline has
-already elided. The table below is the Gate 0 recomputation from measured
-$S_{\text{flow}}$ on the `regular` arm of `suite-20260902-193415`, with $L$
-the number of merge stages (populated levels minus one). The earlier
-resident-$S$ table, which was a lower bound on the ceiling, is withdrawn.
-
-| cell | $S_{\text{flow}}$ | $g_{\text{flow}}$ | resident $S$ | $L$ | ceiling on $W-1$ |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 10M $T{=}2$ | 2.553 | 60.8% | 2.271 | 8 | 79.5% |
-| 10M $T{=}6$ | 1.503 | 33.5% | 1.261 | 4 | 39.9% |
-| 10M $T{=}10$ | 1.422 | 29.7% | 1.166 | 4 | 36.3% |
-| 20M $T{=}2$ | 2.561 | 60.9% | 2.250 | 9 | 81.8% |
-
-This is a strict upper bound, not an expectation. **The quantity to trust is
-measured per-level $\eta$ from the Gate 0 instrument.** B.1 is a sanity check
-and the ceiling for B-2 and D-4, not a design input. Do not draw feasibility
-conclusions from the current `rl` gaps: they are pre-A/D deficits (A-0), and the
-comparison that matters is the ceiling against $d'$, the residual deficit
-measured after Gate 3b.
-
----
-
-**Theorem B.2 (Expansion budget) — marginal bound, sanity check only.**
-
-$\sum_{i<L}C_i = C_0\frac{T^L-1}{T-1}$ and $C_L = C_0T^L$, so
-$C_L/\sum_{i<L}C_i \to T-1$; the structural form is $S \le 1 + s/(T-1)$. As an
-*absolute* bound it is falsified by the $s{=}1$ baselines (predicts
-2.000/1.200/1.111 against measured 2.271/1.261/1.166), so it cannot set
-$s_{\max}$. Let $\Delta S(s) = S(s) - S(1)$. Two models bracket it:
-
-- **Worst case** (all deferred volume is pure garbage): $\Delta S \le
-  \frac{s-1}{T-1}$, $s_{\max} = 1 + (T-1)\,\Delta S_{\text{budget}}$.
-- **Survival-weighted** (only the elidable fraction of deferred volume is
-  additional): $\Delta S \lesssim \frac{(1-\eta_i)(s-1)}{T-1}$ with the
-  **local** $\eta_i$ at the expanded level — a model, not a theorem, since a
-  merge also touches overlapping bytes below.
-
-| $T$ | $S_{\text{base}}$ | 2% budget $\Delta S$ | $s_{\max}$, worst case | required $\kappa$ |
-| ---: | ---: | ---: | ---: | ---: |
-| 2 | 2.2710 | 0.0454 | 1.045 | 3.00 |
-| 6 | 1.2614 | 0.0252 | 1.126 | 1.60 |
-| 10 | 1.1655 | 0.0233 | 1.210 | 1.71 |
-
-Under the worst case every cell is closed at a 2% budget; under the
-survival-weighted model $T{=}10$ is the most plausibly open cell, but the model
-carries no predictive weight for cell selection. The one expectation surviving
-both brackets is that $T{=}2$ is closed at any reasonable budget ($\kappa =
-3.00$ against $S_{\text{base}} = 2.27$). Therefore **$s_{\max}$ is measured at
-Gate 1, not derived**: the grid's `max_bytes_for_level_base` axis (0.5×/1×/2×)
-is a static uniform capacity-scale axis; extracting $\Delta S(\text{scale})$ and
-$\eta_i$ from those runs costs no additional node-hours. Uniform scaling also
-changes $L$ whereas per-level $s_i$ does not, so the measured curve is an upper
-bound on the per-level mechanism's space cost — the conservative direction.
-
-**The space bound is a swept axis** (P0-6). Report the $W$–$R$–$S$ surface at
-budgets $\{0, 2, 5, 10\}\%$ rather than fixing 2% and discovering the mechanism
-cannot be tested inside it.
-
----
-
-**Proposition B.3 (Exploration cost is strictly positive).**
-*Let $\theta^\star = \arg\min_{\theta\in\Theta} J(\theta)$ be constant over the
-run, and suppose the optimal policy for the underlying control problem is
-realisable as a constant action. Then for any online controller $\pi$ that does
-not know $\theta^\star$ and performs non-degenerate exploration, over a finite
-horizon $J(\pi) = J(\theta^\star) + \mathcal{R}$ with $\mathcal{R} > 0$.*
-
-*Proof.* Under the hypothesis, $\pi$'s cost decomposes into $\theta^\star$'s
-cost plus regret on every interval where the action differs; any exploration
-schedule with nonzero probability of a suboptimal action on a positive-measure
-set contributes strictly positive regret. $\blacksquare$
-
-**The added hypothesis is generally false here, and that is a positive result.**
-A stationary *workload* does not imply a stationary *system state*: level
-occupancies, pending-compaction debt, L0 file count and stall state evolve under
-stationary arrivals, and compaction control is a genuine decision problem over
-that internal state. $\Theta$ is exactly the subclass of constant-action
-policies, so a state-dependent policy can strictly beat every member of
-$\Theta$ on a perfectly stationary workload. The learner's primary route to
-value is therefore **state-dependent control**; phase-adaptivity is secondary.
-The data (§10.6: `prior_only` and `rl` on identical policies differing by
-$+0.8$pp $W$ and $+4.8$pp stalls) supports only "exploration is not free".
-Do not use "no-regret" for this; no-regret means sublinear regret.
-
-**Definition (phase-adaptivity gap).**
-$$\mathcal{G} \;=\; \min_{\theta \in \Theta} J(\theta) \;-\; \sum_{p} \frac{t_p}{T_{\text{tot}}}\min_{\theta\in\Theta} J_p(\theta),$$
-the excess cost of the best single static configuration over a hindsight oracle
-that switches per phase. Both terms range over $\Theta$.
-
-**Corollary B.4.** $\mathcal{G} > 0$ is sufficient evidence that adaptivity has
-value on that workload. $\mathcal{G} = 0$ is **not** evidence that it does not:
-$\mathcal{G}$ measures only the workload-phase component of adaptivity, and the
-learner's per-level, per-interval action space lies outside $\Theta$ in a way
-$\mathcal{G}$ does not see. $\mathcal{G}$ is a lower bound on one component, not
-an upper bound on the whole. B-4 is therefore not a research-track requirement.
-
-### Implementation
-
-1. **(Done, 2026-09-20)** Parameterise the `db_bench` pipeline over a
-   workload-family flag: `uniform`, `skew` (B1), `skew+delete` (B1+B3).
-   `WORKLOAD_SKEW` in `config.sh` selects the first two; `skew+delete` awaits
-   B3. Adopted as the programme-wide workload, not a Gate 4 axis: a hull
-   measured on one family is not a valid comparator for a policy measured on
-   another, which is the workload form of the knob-parity rule stated under
-   "Two hulls". Deviations from the published fit: `value_theta` is 925.5, not
-   the paper's 0, holding the mean value size at the project's 960 bytes so the
-   level ladder and the T sweep stay comparable — report as "Assoc key
-   distribution and operation mix at the project's record size", never as the
-   published value distribution. `mix_max_value_size` is raised to 65536
-   because db_bench applies it as `val_size % value_max`, and the 1024 default
-   wraps 6.85% of draws down to as little as one byte and pulls the measured
-   mean to 890.2.
-2. Implement `shift` (B2) as a `db_bench` phase patch (see Gate 2 for the
-   `QueryDecider::Initiate` trap). Record phase boundaries in the run manifest
-   and the experiment fingerprint.
-3. Implement deletes (B3) as a fourth operation type in the same `QueryDecider`
-   patch, with `mix_delete_ratio`.
-4. **Instrument $\eta$ (Gate 0):** `compaction_bytes_written /
-   compaction_bytes_read`, per level and per run, **excluding trivial moves**
-   (output = input, would bias toward 1). Per level because tombstone dropping
-   happens only at the bottommost level.
-5. Hindsight-oracle runner: per phase, run the static sweep and record
-   $\min_\theta J_p(\theta)$; compose to obtain $\mathcal{G}$.
-
-### Acceptance criteria
-
-| # | Criterion | Threshold | Instrument |
-| --- | --- | --- | --- |
-| B-1 | Skew raises resident garbage | $g$ under `skew` exceeds $g$ under `uniform` by $\ge$ 10pp at the surviving cells | space amp, `regular` arm |
-| B-2 | Elision ceiling exceeds the residual deficit | Theorem B.1 ceiling at measured $S_{\text{flow}}$ and $L$ $>$ measured $d'$ for that cell | derived |
-| B-3 | Merge survival is measurable and responds | $\eta$ per level, trivial moves excluded; $\eta_{\text{defer}} < \eta_{\text{eager}}$; response concentrated at the bottommost level | Gate 0 instrument |
-| B-4 | Shift produces a positive phase-adaptivity gap | $\mathcal{G} > 0$ with 95% CI excluding 0 | hindsight-oracle runner |
-| B-5 | Deletes activate compensated size | nonzero tombstone-driven file selections in RocksDB LOG | `LOG` parse |
-
-B-2 is evaluated against the post-Gate-3b deficit $d'$, not the current gaps,
-and against the ceiling at measured $S_{\text{flow}}$; prefer measured
-per-level $\eta$ over the bound wherever both are available. B-4 gates the
-*phase*-adaptivity claim only; state adaptivity is D-5's business.
-
----
-
-## Pathway C — Frontier Comparator
-
-### Purpose
-
-Replace a single tuned baseline point with the Pareto hull of the static
-configuration class, so the claim is about a class rather than a point. Under
-Theorem A.2(iii) the survival-weighted optimal fanout profile is static, so any
-geometric gain from non-uniform capacity must appear in Hull$_s$ or the
-comparison is unfair to the baseline. Gate 1's grid also supplies Theorem B.2's
-calibration.
-
-### Description
-
-The §3.1 baseline is selected as minimum-space, then lowest-runtime, a procedure
-that never explores trading write bandwidth for reads; the comparator sits at
-one arbitrary point on a curve that was never traced.
-
-**Two hulls.**
-
-- **Hull₀** — static configurations at $s = 1$. Comparator for `prior_only` and
-  any arm without a capacity action (C-3). Runs at Gate 1.
-- **Hull$_s$** — Hull₀ plus statically capacity-expanded configurations,
-  including the profile $f_i \propto \eta^{-i}$ at measured $\eta$. Comparator
-  for post-Pathway-A `rl` (C-4). Runs after Gate 2, only at cells surviving
-  Gate 3b.
-
-Comparing a policy against a static class that lacks a knob the policy has, or
-has one the policy lacks, is invalid in either direction.
-
-**Grid, sized to a lease.** The full $4\times3\times2 = 24$ configurations per
-$T$ at ~110 s/Mop is ≈ 120 h at five repeats. Pin `compaction_pri` to
-`kMinOverlappingRatio` (the experimental control in §2.2/§4.3) for a
-$4\times3 = 12$ subset; L0 trigger and level scale move along the $W$–$R$ trade,
-`compaction_pri` changes *which* files rather than *how much*. Test the
-alternative priority only at retained hull points.
-
-| Knob | Values | In the 12-point subset |
-| --- | --- | --- |
-| `level0_file_num_compaction_trigger` | 2, 4, 8, 16 | yes |
-| level target scale (`max_bytes_for_level_base`) | 0.5×, 1×, 2× | yes — the B.2 calibration axis |
-| `compaction_pri` | `kMinOverlappingRatio`, `kOldestSmallestSeqFirst` | pinned to the former; alternative only at retained points |
-| size ratio $T$ (cross-$T$ hull) | 2, 6, 10 (full grid) plus 14, 20 (`regular` at trigger 4, scale 1× only) | 14 and 20 are two extra `regular` cells per repeat |
-| static $s$ (Hull$_s$ only) | 1.0, 1.5, 2.0 | surviving cells only |
-
-**Why $T$ is on the grid.** A per-$T$ hull is the right comparison for the
-paired evaluator but not the static class a reviewer means by "a tuned
-baseline": a different size ratio is a legitimate static competitor. Cross-$T$
-dominance is already present in §10.7 means — `regular` $T{=}6$ (8.33, 5.30,
-1.26) dominates `prior_only` $T{=}2$ (8.78, 6.53, 2.28) and `rl` $T{=}2$ (8.60,
-7.59, 1.62) on $(W, R, S)$; `regular` $T{=}10$ (9.36, 4.52, 1.17) dominates `rl`
-$T{=}6$ (10.24, 4.71, 1.23). Every non-dominated policy point is at $T{=}10$,
-past the last measured `regular` point. Two extra `regular` cells at three to
-five repeats cost ≈ 3–4 h and bound the hull on the side where those points sit.
-
-**Adaptive repeat schedule.** Three repeats to locate the hull ($12 \times 3T
-\times 3 \approx 36$ h), retained points topped up to five or until C-2's width
-condition is met ($\approx 8$ h), plus the cross-$T$ cells ($\approx 3$–4 h).
-Total $\approx 48$ h.
-
-### Theory
-
-**Proposition C.1 (Comparator validity).** *Let $\mathcal{H}$ be the Pareto
-hull of $\{(W(\theta), R(\theta)) : \theta \in \Theta\}$. If $\pi$'s operating
-point is dominated by any point of $\mathcal{H}$, a static configuration exists
-that is at least as good on every axis, and $\pi$'s contribution is nil
-regardless of its performance against any single $\theta_0$.* Immediate from
-the definition of dominance.
-
-**Corollary C.2.** "$\pi$ beats $\theta_0$" is strictly weaker than "$\pi$ is
-non-dominated by $\mathcal{H}$". Finding 2 (`prior_only` at $-19.3\%$ reads for
-$+13.9\%$ writes) is currently in exactly this unresolved state.
-
-**Corollary C.3 (The geometric gain belongs to the hull).** By Theorem A.2(iii)
-the survival-weighted optimal fanout profile is fixed, hence realisable
-statically. Any $W$ reduction attributable to fanout shaping alone is a point of
-Hull$_s$, not a contribution of $\pi$. The learner's case rests on
-state-dependent action (D-5, C-4).
-
-### Implementation
-
-1. Baseline-only sweep script: no socket, no learner, no guard.
-2. Hull extraction with paired-seed CIs on each retained point, per $T$ and
-   pooled over $T$.
-3. Plotting routine overlaying `prior_only`, `rl` and the hindsight oracle on
-   the hull, per $T$ and per workload family.
-4. Extraction step producing $\Delta S(\text{scale})$, per-level $\eta$ and $L$
-   from the Gate 1 runs, which sets $s_{\max}$ per (cell, rung) for A-Impl-7.
-
-### Acceptance criteria
-
-| # | Criterion | Threshold | Instrument |
-| --- | --- | --- | --- |
-| C-1 | Hull₀ adequately sampled | 12 static configurations per $T$; $\ge$ 4 on the hull | sweep output |
-| C-2 | Retained hull points decidable | 3 repeats to locate, topped up to $\ge$ 5 until CI width $<$ half the inter-point spacing | paired evaluator |
-| C-3 | `prior_only` position resolved against Hull₀ | classified dominated or non-dominated, with CI | hull comparison |
-| C-4 | `rl` non-dominated against Hull$_s$ | no hull point dominates $\pi$ on $(W, R)$ simultaneously | hull comparison |
-| C-5 | $s_{\max}$ calibrated | $\Delta S(\text{scale})$ and per-level $\eta$ measured at every $T$; $s_{\max}$ set per (cell, rung) before Gate 3b | Gate 1 re-analysis |
-| C-6 | **Cross-$T$ non-domination** | C-3 and C-4 also pass against the hull pooled over $T \in \{2, 6, 10, 14, 20\}$ on $(W, R)$ with $S$ inside the cell's bound; a policy dominated by a `regular` point at another $T$ is reported as dominated | hull comparison, cross-$T$ |
-
-C-3 decides whether Finding 2 survives: if `prior_only` lies on or inside the
-hull, it reduces to "compacting more improves reads" and is withdrawn.
-
-**C-3 and C-6 executed 2026-09-19: both FAIL. Finding 2 is withdrawn.**
-Measured on `unconstrained_prior_only` at 10M, ten repeats per cell — the
-analytic prior with the guard classifying but not enforcing, which the E-5
-measurement below shows is the same policy as `prior_only` on this workload
-(the guard changes at most 0.09% of frames). All thirty arms passed the
-learning-health gate with `eval_mode`, `zero_train_steps` and `zero_residual`.
-
-| cell | $W$ | $R$ | $S$ | C-3 | dominator CI, hull minus policy |
-| --- | ---: | ---: | ---: | --- | --- |
-| T=2 | 9.5621 | 7.4761 | 2.1798 | **dominated** | $W$ [-7.02%, -6.38%], $R$ [-4.34%, -3.66%] |
-| T=6 | 9.8464 | 5.2476 | 1.3370 | **dominated** | $W$ [-9.05%, -8.57%], $R$ [-3.72%, -0.92%] |
-| T=10 | 10.4058 | 4.8861 | 1.2125 | **dominated** | $W$ [-6.49%, -5.58%], $R$ [-5.74%, -3.81%] |
-
-One static configuration per cell is better on $W$ **and** $R$ at once, both
-paired intervals strictly below zero. **C-6 fails identically**: the cross-$T$
-pooled hull over $T \in \{2,6,10,14,20\}$ holds 18 of 38 points — reproducing
-the Gate 1 figure exactly — and the policy is dominated within it.
-
-**Consequence for C-4.** Hull$_s$ is the static class plus capacity-expanded
-configurations, so its configuration set contains Hull$_0$'s. If a Hull$_0$
-point dominates a policy, then either that point is in Hull$_s$ or something in
-Hull$_s$ dominates it; domination is transitive, so **anything dominated by
-Hull$_0$ is dominated by Hull$_s$**. That applies to the prior directly. It
-does not transfer to `rl`, which is a different policy once it carries a
-capacity action — but it fixes the bar Gate 3b must clear: 6-9% on $W$ and
-4-6% on $R$, simultaneously, against a comparator at least as strong as the one
-the prior lost to.
-
-**Scope, and why Gate 4 is now upstream of Gate 3b.** This workload has almost
-no resident garbage, and Gate 0 measured the ceiling that follows: Theorem B.1
-caps $W-1$ at 79.5%, 39.9% and 36.3% at $T$ = 2, 6 and 10. Compaction's
-write-side benefit is elision of stale versions, so where there are none,
-compacting more can only add write bytes — the class wins because the policy's
-mechanism has nothing here to work on. This negative result is specific to a
-near-garbage-free workload and must be reported with that scope. Pathway B
-tests whether it generalises, and that question is upstream of whether a
-capacity knob helps. C-5
-gates Gate 3b. C-6 is what a "tuned baseline" objection actually tests; report
-both verdicts and lead with the cross-$T$ one.
-
----
-
-## Pathway D — Constrained Objective and Reward Alignment
-
-### Purpose
-
-Make the reward the learner optimises identical to the criterion it is judged
-against. §10.7 Finding 3: $\Phi$ treats space as a quantity to minimise while
-the criteria treat it as a bound, and the learner correctly spent reads on space
-it received no credit for.
-
-### Description
-
-The objective is
-
-$$\min_\pi\; R(\pi) \quad\text{s.t.}\quad W(\pi)\le W_{\text{base}} + \delta_W,\;\;
-S(\pi)\le S_{\text{bound}},\;\; \text{lat}(\pi)\le \text{lat}_{\text{bound}},\;\;
-\text{stall}(\pi)\le \text{stall}_{\text{base}} .$$
-
-The write constraint is non-inferiority at margin $\delta_W = 2\%$ (P0-3),
-matching A-2; exact parity is not testable at the available power.
-Parity-plus-margin is the *acceptance* target because it is the claim the
-current evidence supports, not because the theory forecloses improvement:
-geometry offers $O((1-\eta)^2)$ (Theorem A.2), but elision is bounded at
-cumulative garbage (Theorem B.1), which is large, and deferral reaches it (B-3).
-Improvement on $W$ is a bonus. Sweep $\beta$ only to exhibit the frontier's
-shape. $S_{\text{bound}}$ is a swept axis (P0-6).
-
-**The reward trains against a point; the paper is judged against a hull.** The
-write hinge needs a scalar the learner can observe online, so it uses
-$W_{\text{base}} + \delta_W$ from the tuned point at the arm's own $T$. C-4 and
-C-6 compare the resulting policy with Hull$_s$ and the cross-$T$ hull. A policy
-can satisfy the hinge and still be dominated; that outcome is reported as
-dominated and the hinge target is not moved to rescue it.
-
-### Theory
-
-**Proposition D.1 (Shaping invariance, with the variable-duration correction).**
-For a standard MDP with $F(s,a,s') = \gamma\Phi(s') - \Phi(s)$, the optimal
-policy under $r + F$ equals that under $r$ (Ng, Harada & Russell, ICML 1999).
-The controller operates over variable-duration decisions, for which the
-invariance-preserving form is $F = \gamma^{\tau}\Phi(s') - \Phi(s)$ with $\tau$
-the realised duration. The single-step form is not policy-invariant when $\tau$
-varies and mis-credits long compactions in a state-correlated way. **Audit the
-existing $\Phi$ term for which form it implements before retaining it.**
-
-**Proposition D.2 (Hinge terms are not shaping).** Terms $-\lambda\max(0, x -
-x_{\text{bound}})$ are not potential differences and do change the optimal
-policy. This is intended; the paper must state which terms are shaping and
-which are objective.
-
-**Proposition D.3 (Two-timescale convergence — design motivation only).** With
-multipliers updated on a slower timescale than the Q-function ($\eta_\lambda /
-\eta_Q \to 0$, $\sum\eta = \infty$, $\sum\eta^2 < \infty$), the primal–dual
-iteration converges to a saddle point of the Lagrangian under standard
-stochastic-approximation conditions (Borkar, *Systems & Control Letters* 29(5),
-1997; 54(3):207–213, 2005). Those results assume step-size separation, iterate
-boundedness and compatible/linear approximation, none of which hold for a deep
-nonlinear off-policy controller. Cite for the *design* of the separation; do not
-claim convergence. Practically: update $\lambda$ 10–100× more slowly than Q.
-
-**Diagnostic corollary.** An unbounded $\lambda_W$ trajectory is evidence that
-the write constraint is infeasible at that cell — which is exactly what should
-happen wherever the Theorem B.1 ceiling is below the residual deficit. A
-training pathology becomes a confirmation of the analysis (D-4). Evaluate
-against the ceiling at measured $S_{\text{flow}}$ and $L$.
-
-### Implementation
-
-1. Reward: $r_t = -\Delta R_t - \lambda_W[W_t - W_{\text{base}} - \delta_W]^+ -
-   \lambda_S[S_t - S_{\text{bound}}]^+ - \lambda_L[\text{lat}_t -
-   \text{lat}_{\text{bound}}]^+$.
-2. Dual ascent: $\lambda \leftarrow [\lambda + \eta_\lambda(\text{violation})]^+$
-   on the slow timescale.
-3. Remove space from $\Phi$ as a minimand; it enters only through its hinge.
-4. Audit and, if necessary, correct $\Phi$'s discounting to the $\gamma^\tau$
-   form (Proposition D.1).
-5. Stabilisation, in this order: Huber loss on TD error, gradient-norm clipping
-   at 10, target-network period sweep, reward normalisation by running standard
-   deviation. §14.5 reports `max_abs_residual_advantage` 1012–1102 against
-   `residual_scale` 1.5–3.4 and TD loss near 6,136, several times the return
-   scale; that is not converged.
-6. Log $\lambda$ trajectories as first-class output.
-
-**Status on `Assoc` (2026-09-22): first learned arms run; the objective was
-mis-specified and is repaired.** Eighteen arms at 10M × $T$ = 2/6/10. The
-learner trains (argmax flip 0.24–0.43, health green on every arm) and is worse
-than `regular` on both axes at $T$ = 2 and 10, trading +13.2% $W$ for −10.4%
-$R$ at $T{=}6$. Two reward defects were found and fixed, both unit errors of
-the same family: the space hinge compared a live estimate against a measured
-reference (D-6, confirmed clean — $\lambda_S$ never moved from its initial
-value), and the latency hinge compared a 50 ms window's p99 against a
-whole-run p99 limit on a distribution whose average exceeds its P99, railing
-$\lambda_{\text{lat}}$ at `LAMBDA_MAX` in every arm (D-8). D-1 through D-5 are
-therefore **not yet scored**: the run is diagnostic. Verdicts in
-`docs/PREREGISTRATION.md` D-7 and D-8; narrative in history 14.19.
-
-**Status on `Assoc` (2026-09-23): the architecture audited against this
-objective and realigned by D-9; unrun.** The audit (history 14.20) found the
-write hinge measuring a 10 s time-weighted window against a byte-weighted
-whole-run bound (13–61% high on 94–100% of the D-7 frames), every multiplier a
-ratchet (the hinge fed the update, so no $\lambda$ could fall), the action
-space offering the two write-costly moves the theory rules out — early deep
-compaction at score $\ge 0.10$, one-file L0 compaction — while withholding the
-write-saving one (L0 deferral, `RL_L0_ALLOW_DEFER=0`), a state with no write,
-multiplier or garbage feature, and a 20 s effective horizon. D-9 gives the
-reward the flow/level form (signed marginal terms for $W$, $R$, seeks and
-stall; hinges for space and the latency averages), signed dual ascent with
-replay re-priced at sample time, the D-4 rule as an action mask, eight
-constraint features in the state, $\gamma$ = 0.98 per second with an 8 s
-credit window and Huber loss (item 5 above, in part), and lifts the L0 posture
-for `rl` and `unconstrained_rl`. D-1 through D-5 stay unscored until the
-re-run; predictions in `docs/PREREGISTRATION.md` D-9.
-
-**Status on `Assoc` (2026-09-23, later): D-9's smoke gate stopped its matrix;
-D-10 repairs the multiplier instrument; unrun.** The one smoke arm reached
-write parity ($W$ +0.45% against its same-seed twin at $T{=}2$, $R$ +3.2%,
-depth 9 against 9, zero early deep releases) but every flow multiplier railed or climbed to
-tens. Three instrument defects (history 14.21): the latency hinge compared
-the C++ telemetry's window value against db_bench's histogram limit, 19–25×
-apart on scans — which also corrects D-8, whose p99 hinges were zero on every
-frame; the write denominators differed by a 30-byte-per-Put framing; and the
-run-to-date ratios are dominated by the load's compaction backlog early in
-the run. D-10 adds telemetry-unit latency references to the manifest, treats
-the latency averages as flows in that unit, adds the framing, and gives the
-multipliers a 30 s warm-up and a slack clip. `docs/PREREGISTRATION.md` D-10.
-
-**Status on `Assoc` (2026-09-23, latest): the evaluator had been scoring the
-bulk load; D-11 corrects it and re-scores the record; unrun.** db_bench's
-`resetstats` clears internal stats only, so the tickers behind $W$, stall
-seconds and write latency covered the whole run in every `Assoc` arm
-(history 14.22). Re-scored on the measured phase: the prior at the
-trigger-2 comparators is +2.75% / +0.45% write (recorded +0.09 / +0.10), the
-L0 band +14.4% / +6.6% (recorded +2.9 / +2.1), the D-7 learner +24 / +43 /
-+13% (recorded +6 / +13 / +5), and both smoke arms +5% against their twins
-(recorded at parity). The comparator references moved to $W$ = 7.92 / 8.48 /
-13.45 and the stall references to about 0.01% of time. C-1 still passes;
-C-2 at $T{=}6$ flips to fail because the honest write axis has three to nine
-times the run-to-run scatter, which also voids the 14.7 ten-repeat
-justification as stated. D-1 through D-5 remain unscored; predictions in
-`docs/PREREGISTRATION.md` D-11.
-
-**Status on `Assoc` (2026-09-23, latest): D-11's smoke gate stopped on the
-latency multiplier; D-12 measures its slack from the warm-up against the
-baseline's own trajectory; unrun.** `lambda_latency` ended at 27.75 on an
-arm whose window write latency sat 16-19% under its limit from 10 s on
-(history 14.23): the run-to-date average carried the first two seconds after
-`rlresume`, when the L0 backlog inherited from the suspended load stalls
-writes at 15-32× the limit -- and the calibration arms carry the same
-transient, so under that form the *baseline* reads a positive slack until
-120-150 s of a 160 s run. D-12 makes the latency multiplier's slack the
-since-warm-up cumulative against the baseline's since-warm-up cumulative at
-the same elapsed time, from a trajectory the calibrator writes into the
-manifest; the priced term is unchanged. $W$'s multiplier is transient-driven
-the same way and is left for its own entry. D-1 through D-5 remain unscored;
-predictions in `docs/PREREGISTRATION.md` D-12.
-The first D-12 smoke attempt was invalid (the C++ parser rejected the
-manifest on a nested key, and the reward's first frame carried load writes);
-both are corrected and the smoke is re-run into its own root.
-
-**Status on `Assoc` (2026-09-23, scored): D-12 is the first evidential
-learner run, and the learned trigger does not beat native RocksDB.** Every
-instrument held (write identity within 0.095%, no early deep release, depth
-flat, manifest accepted on all nineteen arms). Against the same-seed static
-twin at three repeats, `rl` is +6.6% $W$ / +3.0% $R$ at $T{=}2$ (dominated,
-and beaten across ratios by two static $T{=}6$ points), +9.7% / −7.1% at
-$T{=}6$ (non-dominated per $T$, a worse exchange rate than the prior on
-means), and −0.6% / +1.1% at $T{=}10$ (native; the write constraint passes
-at 2%, reads do not move). The $T{=}2$ write cost is deep-level deferral with
-no elision — L4 and L5 released at 2–2.6× target, merge survival rising to
-0.97–0.995 — which is D-9's falsification clause, measured. D-1 fails at
-$T{=}10$, D-2 passes, D-3 and D-4 fail at $T{=}2$ and $T{=}6$ ($\lambda_W$
-monotone, driven partly by the post-load transient that also inflates
-$\lambda_{\text{scan}}$), D-5 fails. Verdict and tables in
-`docs/PREREGISTRATION.md`, "D-12 scored"; narrative history 14.24.
-*Corrected the same day:* the $T{=}2$ write excess is start-up exploration
-plus session drift, not a learned lever; see
-`docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`, which also audits this document.
-
-### Acceptance criteria
-
-| # | Criterion | Threshold | Instrument |
-| --- | --- | --- | --- |
-| D-1 | Residual tail controlled | $\max_i \|\text{residual}\| / \text{residual\_scale} < 20$ | `11_analyze_learning.py` |
-| D-2 | TD loss converges to return scale | final TD loss $<$ 2× observed return scale | learning log |
-| D-3 | Multipliers bounded on feasible cells | $\lambda$ plateaus within run; no monotone divergence | $\lambda$ log |
-| D-4 | Multipliers diverge on infeasible cells | $\lambda_W$ grows monotonically exactly where the Theorem B.1 ceiling $< d'$ | $\lambda$ log + Theorem B.1 |
-| D-5 | **Learned policy is state-dependent and beats the prior** | argmax flip rate $>$ 0.1 per level; action distribution varies with level occupancy and debt, not just time; reward improves over `prior_only` | learning health |
-
-D-5 is a primary criterion (Proposition B.3, Corollary C.3): the learner's case
-rests on behaviour no fixed member of $\Theta$ and no static fanout profile can
-reproduce. A high flip rate uncorrelated with state is churn, not adaptivity.
-D-4 is a positive result, not a failure.
-
----
-
-## Pathway E — Shield Symmetry and Guard Calibration
-
-### Purpose
-
-§10.6 Finding 2: the SLO mask collapses a $+19\%/-12\%$ policy excursion to
-within $\sim1\%$ of baseline on every amplification metric. The shield
-determines the outcome more than the policy does.
-
-### Description
-
-**Structural.** §6.4's action set is asymmetric: space breach and read breach
-force due gates open; write breach revokes only *optional* below-threshold work.
-None can hold due work closed. Under a write-parity objective this opposes the
-only direction the policy needs to move. Add a deferral-side action: on
-write-pressure breach, the shield may hold due work closed and contract $s_i$.
-
-**Calibration.** The holdout sits at 3.8–6.0% predicted override against a 1%
-preregistered threshold. Either derive the limits from measured baseline
-dispersion — as §14.2 does for stall seconds — or amend the threshold with
-justification.
-
-### Theory
-
-**Proposition E.1 (Shield projection).** *Let the shield override with
-probability $p$ and project the action onto $A_{\text{shield}} \subseteq
-A_{\text{policy}}$. The realised policy is $\pi_{\text{real}} = (1-p)\pi +
-p\,\Pi_{A_{\text{shield}}}\pi$; as $p \to 1$ it tends to
-$\Pi_{A_{\text{shield}}}\pi$, independent of $\pi$ on $A_{\text{policy}}
-\setminus A_{\text{shield}}$.* Immediate from the mixture.
-
-**Corollary E.2.** $\|\pi_{\text{real}} - \pi\| \le p\,\|\Pi_{A_{\text{shield}}}\pi -
-\pi\|$. Small $p$ alone bounds the shield's influence. What symmetry buys is
-that the residual influence is unbiased in direction: with $A_{\text{shield}}
-\subsetneq A_{\text{policy}}$ every override pushes toward compaction, a
-systematic drift against the direction the policy needs. And the marginal rate
-is the wrong statistic: a shield that fires 1% of the time but only when
-deferral would have paid can still determine the outcome. Report the override
-rate *conditioned on the policy having selected defer or expand*.
-
-### Implementation
-
-1. Add the deferral-side shield action and its attribution reason code,
-   extending the six-reason table in §5.7, including contraction of $s_i$.
-2. Recalibrate limits from preregistered baseline dispersion rather than
-   hard-coded bootstrap caps (§10.6: most manifests returned
-   `calibrated: false`, forcing the caps).
-3. Report shield intervention rate per cell, marginal and conditioned on the
-   policy's selected action.
-
-### Acceptance criteria
-
-| # | Criterion | Threshold | Instrument |
-| --- | --- | --- | --- |
-| E-1 | Holdout meets its preregistered limit | $\le$ 1% predicted override, or an amended and justified limit | guard holdout |
-| E-2 | Manifests calibrate | `calibrated: true` for $\ge$ 90% of **populated** level-cells, where populated means `episode_count > 0`; the count of populated and declared levels is reported alongside | manifest generator |
-| E-3 | Shield action set spans policy action set | every policy action has a shield counterpart, including expansion/contraction | source review |
-| E-4 | Shield no longer dominates | $\|J(\texttt{rl}) - J(\texttt{unconstrained\_rl})\|$ smaller than $\|J(\texttt{unconstrained\_rl}) - J(\texttt{regular})\|$ | paired evaluator |
-| E-5 | Conditional override rate reported | override rate given policy selected defer/expand, per cell | guard log |
-
-E-1 must pass or the guard is cut from the paper. **E-1 is recorded failed as of
-2026-09-14** (verdict and evidence below). **Decided 2026-09-20, PREREGISTRATION
-D-2:** the failure was traced by offline replay to a budget-force latch the
-calibration never modelled (about half the rate) plus two unmodelled global
-terms; the latch is removed, the shadow log gains the global terms, and the
-guard is kept with **E-5 as the deciding criterion** for the re-run. E-1's
-marginal rate is reported per cell without a pass/fail.
-
-**E-2 denominator amended 2026-09-14, recorded before the holdout re-run.** The
-denominator becomes populated level-cells rather than declared ones. `num_levels`
-is a fixed configuration constant of 12, while a 10M run populates 8 levels at
-$T=2$ and 4 at $T=6$ and $T=10$. An unpopulated level never became due, emits no
-pressure episode, and therefore carries nothing to calibrate; counting it as a
-calibration failure makes E-2 unsatisfiable at any size ratio above 2 regardless
-of the estimator's behaviour. The amendment is a denominator definition and does
-not relax the threshold, which stays at 90%.
-
-It is taken now because the confound it was masking has been removed and
-measured. `censored_tolerance_bound` returned no bound whenever a single
-truncated episode appeared in a sample, which forced the hard-coded bootstrap
-caps that Pathway E's implementation item 2 exists to eliminate. It now charges
-each censored episode to the tail when choosing its order-statistic rank, which
-is valid distribution-free without a preregistered censoring model. Re-running
-stage 06 on the Gate 1 sweep gives `calibrated == populated` in all three cells —
-8/8, 4/4, 4/4 — so every remaining E-2 shortfall against the declared count is
-attributable to unpopulated levels alone and to nothing about the estimator.
-
-Two consequences are recorded with it. The whole-tree
-`allowed_pending_debt_ratio` moves from the hard-coded 0.50 floor to a measured
-4.141, 2.689 and 2.718 at $T=2$, 6 and 10, which removes the mechanism diagnosed
-behind the 36.2% override. And the bound walks the existing
-`TOLERANCE_COVERAGES` ladder under censoring: $T=6$ L1 needed rank 600 from 599
-completed episodes and fell to 0.90 coverage, which yields a *tighter* limit, not
-a missing one. Read `achieved_coverage` before comparing two limits.
-
-**E-1 re-run with the censoring fix, 2026-09-14: fail, unchanged.** Holdout at
-10M/T=2, seeds 10001–10003: `would_override_fraction` 0.368 / 0.366 / 0.357
-against 0.362 / 0.372 / 0.362 before, `actual_interventions` 0, manifest
-verified live by `baseline_slo_sha256`. The debt limit moving 0.50 → 4.141
-changed nothing, which retires the debt hypothesis alongside the bridge-latency
-and bootstrap-cap hypotheses.
-
-**Measured cause: the limits are calibrated in the wrong unit.** Reconstructing
-the force condition offline from `pressure_episodes.jsonl` (due age is exact at
-frame time from the episode start) attributes **99.4%** of scored override
-frames to `due_age >= due_age_limit_micros`. The limits are 99% tolerance
-bounds on *completed episode durations* — 61.6 ms at L7, 84.9 at L6, 161.5 at
-L2 — and are correct as such. But the picker tests a level's *current* due age
-on every 50 ms frame, so frames sample due time, not episodes: a rare long
-episode covers hundreds of consecutive frames while a short one covers one or
-none (the inspection paradox). A limit at the episode p99 therefore fires on
-far more than 1% of frames, and the frame fraction is what E-1 scores. This
-explains the fraction being stable across two manifests, the sticky multi-hundred-
-frame runs, and the separately observed ~100% override in the 1,181-frame window
-before `guard_ready` (33% of the run; not scored by the validator).
-
-**Instrument amended, recorded before the next re-run.** All three per-level
-terms of the force condition — `due_age_limit_micros`,
-`pressure_limit_score_micros` and `score_limit` — are now calibrated together by
-`frame_simulated_limits`: every baseline run is replayed at the observation
-cadence, each level's limits are the frame quantiles at a common per-level
-exceedance $k/N$, and $k$ is the largest count for which the fraction of frames
-where *any* level trips *any* term is $\le$ 1% — the same statistic, in the same
-unit, as E-1. The three are calibrated jointly because a frame overrides on a
-disjunction: fixing a subset only moves the firing onto the terms left out, and
-an earlier revision of this fix that calibrated due age and pressure alone would
-have handed the entire override rate to the untouched `score_limit`, which had
-already co-fired on 98.7% of frames. The manifest records the prediction under
-`guard_frame_simulation`, so E-1 is readable before node time is spent. The 1%
-threshold is unchanged.
-
-**The score trajectory is not logged, so it is modelled — and the model is
-measured, not assumed.** For a linear ramp within an episode the peak excess is
-twice the mean, so `(max_score - 1) / (integrated_excess / duration)` should be
-2. Across 429,115 baseline episodes, weighted by the frames each covers, that
-ratio is **1.93 to 2.50 on every level of the tree**; the median reads 1.0 only
-on episodes short enough that peak and mean fall inside one observation. Score
-is therefore modelled as a linear ramp from 1 to the episode's observed
-`max_score`, and pressure as the integral of that ramp,
-`total * (age / duration)²`, which reaches the measured
-`integrated_excess_score_micros` exactly at the episode's end.
-
-Two alternatives are reported but never used to select limits:
-`predicted_override_fraction_score_flat` holds each episode at its mean excess
-(lower bound) and `..._score_upper` holds it at `max_score` throughout (upper
-bound). Their spread is the residual modelling risk. An earlier revision of this
-fix used the flat model to *choose* limits, which the ramp measurement shows
-understates the score term.
-
-Three terms of the condition are not modelled at all, having no per-frame
-record: `global_debt_breach`, `slo_force_due` and `l0_slowdown`. Each is global
-rather than per-level, so no per-level limit can offset one. **That omission
-turned out to decide the gate**; see the verdict below.
-
-**Execution record.** E-1 is **recorded failed** (2026-09-14, all three cells
-scored 2026-09-17); E-2 passes under an amended denominator; E-5 is satisfied
-on the *uniform* measurement (2026-09-19). The measurements, the retraction of
-the offline replay's per-level attribution, and the two corrections to the T=2
-reading are in `docs/PREREGISTRATION.md`; the narrative is history Sections 14.8
-and 14.9.
-
-**Status on `Assoc` (2026-09-22): E-5 measured on `rl` and FAILED.** The
-first arm capable of disagreeing with the guard — `rl` defers 41–43% of due
-frames — puts the conditional override rate at **0.1497 / 0.0693 / 0.0973** at
-$T$ = 2/6/10, **15× / 7× / 10× the 1% limit D-2 made the decider**. Neither
-the `oracle` holdout nor `prior_only` could score it: force requires `due` and
-neither arm disagrees with that predicate. The measurement carries one caveat
-— the policy was driven by a latency multiplier railed at its cap (D-8) — so
-it diagnoses the reward-and-guard pair, not the guard alone, and is re-measured
-under D-8 prediction 5. `docs/PREREGISTRATION.md` D-7; history 14.19.
-
-**Status on `Assoc` (2026-09-22): guard protocol run; E-5 measured on
-`prior_only` and vacuous there.** The D-4/D-5 arms carry enforcement live
-(1351 / 520 / 744 interventions) and score E-5 at 0.0006 / 0.0000 / 0.0007
-against the 1% limit — but under D-4 a deep level compacts iff it is due,
-which is the guard's own force predicate, so force cannot change the prior's
-action by construction. That is the same structural bar the `oracle` holdout
-hit, reproduced on a second arm. **E-5 is decided on `rl`.** Details in
-`docs/PREREGISTRATION.md` D-5; narrative in history 14.18.
-
-**Status on `Assoc` (2026-09-22): guard protocol run, E-5 not yet measurable.**
-Nine calibration and nine holdout `oracle` arms at 10M × T=2/6/10. D-2's first
-prediction is confirmed (marginal rate below 0.20 in every cell, roughly halved
-against uniform); its second is **falsified** (leave-one-out misses by 7–12×, so
-the calibration's transfer claim is wrong). **E-5 remains unmeasured**: the
-holdout arm is `oracle`, force requires `due`, and the oracle compacts whenever
-due, so its conditional rate is zero by construction — a property of the holdout
-design, not a result about the guard. An arm that queries the server supplies
-both the conditional rate and the per-frame guard state the calibration lacks,
-with no rebuild.
-
-Audit, same date: the force condition has six terms and the calibration bounds
-three; discounting the three global terms still leaves the calibrated ones at
-3.5–10.7× their 1% budget; `due_age` and `pressure` latch by construction, so
-D-2's removal of the explicit latch was structurally partial; and the episode
-replay that would choose new limits spans 20× and matches none of its own score
-models. Limits were **not** re-fitted (measure-only). The remaining repairs —
-logging the per-frame score and pressure trajectory, `prohibit_optional`, a
-release-frame flag, and a ruling on the global terms — are C++ and are batched
-into Gate 2 with a hull re-measurement. Dated verdicts and the audit are in
-`docs/PREREGISTRATION.md`; the narrative is history Section 14.17.
-
-## Pathway F — Dynamic SLO: phase-aware objective switching (Programme 2)
-
-**Status: second programme, second paper.** Pathway F changes the objective per
-phase, so it cannot run inside Programme 1 without a versioned amendment to the
-frozen contract. It is specified here so that Programme 1's instruments (Gate 0
-$\eta$/$\phi_j$ logging, the B2 phase patch, the hindsight-oracle runner, the
-stress-suite manifests) are built in a form Programme 2 can reuse. Nothing in
-Programme 1's acceptance depends on it.
-
-### Purpose
-
-On a workload whose composition changes over time — a write-heavy start, a
-mixed middle, a read-heavy end — a single objective is the wrong target: the
-write phase wants compaction bandwidth kept off the foreground, the read phase
-wants a shallow tree. Pathway F lets the controller change *which* trade-off it
-is pursuing as the workload changes, and tests whether anticipating a change is
-worth more than reacting to it.
-
-### Objective — what is per-phase and what is whole-run
-
-Write amplification is bytes written over the whole run divided by bytes the
-user wrote; deferring compaction in one phase does not remove those rewrites, it
-moves them into the next phase. **W and S are therefore whole-run bounds, never
-per-phase targets.** What a phase can legitimately target is what it experiences
-while it runs.
-
-| Phase class | Per-phase objective (measured inside the phase) | Whole-run constraints |
-| --- | --- | --- |
-| write-heavy | minimise write avg / p99 latency and `stall_seconds`; hold write throughput | $W \le W_{\text{base}} + \delta_W$, $S \le S_{\text{bound}}$ |
-| mixed | the Programme 1 rule: minimise $R$ subject to the same bounds, plus per-phase latency bounds on get, scan and write | same |
-| read-heavy | minimise $R$ and get avg / p99 latency; `sorted_run_seeks_per_scan` if scans are present | same |
-
-"The most optimal point on the frontier" is not a rule; a frontier is a set of
-points none of which is best. The mixed-phase rule is the frozen Programme 1
-objective, not a new one. Phase classes are defined by the operation mix in a
-window: write-heavy if Put $\ge 60\%$ of operations, read-heavy if Get + Seek
-$\ge 80\%$, mixed otherwise; thresholds are preregistered before any F run.
-
-### Description
-
-**Architecture: a layer above the existing controller, not a new controller.**
-The per-level trigger (protocol v2, or v3 with Pathway A's capacity action) is
-unchanged. An upper layer chooses, per episode, *which SLO manifest* the lower
-layer's constraint weights come from. The stress suites already define
-read-heavy, write-heavy and balanced manifests; F switches between them. This
-keeps every Programme 1 instrument valid and makes the ablation clean: same
-lower controller, manifest fixed versus switched.
-
-**Episodes.** The run is divided into fixed-length episodes. The episode
-length is a preregistered parameter tied to the tree's reshaping time: the
-time a full catch-up compaction takes at the run's scale (measured at Gate 3a-0
-/ Gate 1 as the `waitforcompaction` drain duration). Shorter episodes give
-noisy mix estimates and setting churn; longer ones miss transitions. Start at
-one drain-time, sweep $\{0.5, 1, 2\}\times$.
-
-**Two versions of "predict episode $n+1$ from episode $n$", and they are
-different papers.** Every run starts cold (§3.2). On a workload with three
-phases, the controller sees each transition once and there is nothing to learn
-a forecast from.
-
-- **F-forecast** — the workload has *repeating* structure (many episodes with a
-  period, as in diurnal production traces). Predicting episode $n+1$ means
-  learning the period and phase within it. Requires a workload family with real
-  repetition; mixgraph phase schedules with more than ~6 periods, or replayed
-  Tectonic traces.
-- **F-detect** — the workload has no repetition. "Prediction" is early
-  detection: notice the operation mix drifting from leading signals (Put share,
-  L0 arrival rate, memtable fill rate, iterator count) and act before the tree
-  has fully adapted the wrong way. This is what is achievable under cold start
-  on the three-phase 500M example, and it is the default.
-
-State which version a run is under. Do not describe F-detect as prediction in
-the paper.
-
-**Leak guard.** Paired arms must share identical shift points across repeats
-(B2), so a fixed schedule is trivially learnable across runs. Under cold start
-this is harmless; if cold start is ever relaxed (offline pretraining), the
-schedule itself becomes the thing learned. Any relaxation of §3.2 for F must
-randomise phase lengths and order per seed and must be recorded as an amendment.
-
-**The value is in the transition, not the phase.** The tree's state carries
-across phases. Knowing a read phase is coming is worth something only if the
-lead time is used to compact *before* it starts — spending write bandwidth at
-the tail of the write phase so the tree is shallow when reads arrive. A
-reactive controller cannot do this; it is the only thing a predictor can do
-that a reactor cannot. F's headline measurement is therefore how much of the
-oracle's advantage a reactor already captures, and how much lead time buys.
-
-**Switchable knobs only.** A "parameter set" may contain only settings that
-change cheaply at runtime: the manifest (constraint weights and bounds),
-`level0_file_num_compaction_trigger` and its slowdown/stop thresholds,
-`max_bytes_for_level_base` (via `SetOptions`), `compaction_pri`, and Pathway
-A's $s_i$. **The size ratio $T$ is not switchable** — changing it mid-run
-reorganises the whole tree — and is fixed per run as in Programme 1.
-
-### Theory
-
-**Definition (three controllers over one schedule).** For a phase schedule
-$p = 1..P$ with boundaries known to the evaluator:
-
-- $J_{\text{oracle}}$: the hindsight oracle of Pathway B — best static setting
-  per phase, switched exactly at the boundaries. This is the ceiling; its
-  advantage over the best single static setting is $\mathcal{G}$.
-- $J_{\text{react}}$: the manifest is chosen from the *current* window's
-  measured mix, no lookahead, switched when the window's class changes.
-- $J_{\text{pred}}$: the manifest is chosen from a predicted class for the
-  *next* episode, with lead time $\ell$ used to pre-compact before a read phase.
-
-**Proposition F.1 (Decomposition of the adaptivity value).**
-*$\mathcal{G} = \big(J_{\text{static}} - J_{\text{react}}\big) +
-\big(J_{\text{react}} - J_{\text{pred}}\big) + \big(J_{\text{pred}} -
-J_{\text{oracle}}\big)$, where the first term is the value of reacting, the
-second the value of anticipating, and the third the remaining loss to
-imperfect prediction and finite lead time. Each term is measurable with the
-paired evaluator.* Immediate by telescoping. The second term is the paper's
-claim; if it is within noise of zero, prediction has no room on that workload
-and F-detect is the complete result.
-
-**Proposition F.2 (Lead time bounds the value of anticipation).**
-*Let $\Delta_{\text{shape}}$ be the time a catch-up compaction takes to bring
-the tree from its write-phase shape to its read-phase shape, and $\ell$ the
-lead time a predictor provides. The anticipation term is bounded by the
-read-phase cost incurred during the first $\max(0, \Delta_{\text{shape}} -
-\ell)$ of the read phase under the reactive controller.* A predictor with $\ell
-\ge \Delta_{\text{shape}}$ can remove that cost entirely; one with $\ell = 0$
-is the reactive controller. On a *gradual* transition $\Delta_{\text{shape}}$
-is spread across the transition and the reactive controller pays little, so the
-anticipation term is expected to be small. On an abrupt transition it is
-expected to be the whole of $\mathcal{G} - (J_{\text{static}} -
-J_{\text{react}})$. **Sweep transition abruptness** as an axis; it is the
-variable the result depends on.
-
-### Implementation
-
-1. **Manifest switching** in the Python controller: load all three stress-suite
-   manifests at start; expose `active_manifest` as a per-episode field in the
-   protocol response echo and in the effective-action stream, so a switch is
-   attributed like any other action.
-2. **Phase classifier** (F-detect): windowed operation-mix estimate from the
-   existing foreground telemetry accumulator; class thresholds preregistered;
-   hysteresis of one episode to prevent churn.
-3. **Forecaster** (F-forecast only): a per-episode class predictor trained
-   online within the run on the episode sequence; it may use only episodes
-   already completed. Log its accuracy per episode as a first-class output.
-4. **Pre-compaction action**: on a predicted read phase with lead $\ell$, the
-   upper layer sets the lower layer's manifest to read-heavy $\ell$ before the
-   predicted boundary. Attribute the resulting compactions to the upper layer.
-5. **Reactive arm**: the same code path with the forecaster replaced by the
-   current-window class. This is the ablation and must share every other
-   setting with the predictive arm.
-6. **Reuse, not rebuild**: the B2 phase patch supplies the schedule; the
-   hindsight-oracle runner supplies $J_{\text{oracle}}$; the paired evaluator
-   is extended with per-phase windows (latency, stall, throughput, $R$ inside
-   each phase) alongside the whole-run $W$ and $S$.
-7. **Scale**: develop at 50M with phases scaled proportionally (≈ 1.5 h per
-   run). Run 500M (≈ 15 h per run) once per arm as confirmation, not as the
-   evidence base; at 500M, five paired repeats of four arms is ≈ 300 h per
-   cell.
-
-### Acceptance criteria
-
-| # | Criterion | Threshold | Instrument |
-| --- | --- | --- | --- |
-| F-1 | Phase-adaptivity gap exists | $\mathcal{G} > 0$ with 95% CI excluding 0 (this is B-4; F does not proceed without it) | hindsight-oracle runner |
-| F-2 | Reacting captures a measured share | $J_{\text{static}} - J_{\text{react}}$ reported with CI as a fraction of $\mathcal{G}$ | paired evaluator, per-phase windows |
-| F-3 | Anticipation adds value | $J_{\text{react}} - J_{\text{pred}} > 0$ with 95% CI excluding 0 on at least the abrupt-transition schedule | paired evaluator |
-| F-4 | Whole-run bounds hold under switching | $W$ and $S$ non-inferior at $\delta_W$ / $S_{\text{bound}}$ against the best single static setting | paired evaluator |
-| F-5 | No churn | manifest switches per run $\le$ number of phase boundaries + 1; per-phase latency not worse than the reactive arm by more than 2% in any phase | policy log |
-| F-6 | Forecaster is honest (F-forecast only) | per-episode class accuracy reported; accuracy on a seed-randomised schedule within 5pp of accuracy on the fixed schedule | forecaster log |
-| F-7 | Lead-time dependence shown | anticipation term reported against $\ell / \Delta_{\text{shape}} \in \{0, 0.5, 1, 2\}$ | paired evaluator |
-
-F-3 is the claim. F-1 and F-2 are prerequisites that can each end the
-programme honestly: no gap, or a gap the reactor already closes, is a complete
-negative result about forecasting on that workload class.
-
----
-## Execution order
-
-Ordered to maximise information per node-hour and to fail cheaply.
-
-### Gate 0 — Instrumentation and re-analysis (0 node-hours) — **complete 2026-09-11**
-
-Items 1–2 are instrumentation in the RocksDB working tree (`merge_schema_version`
-1 fields on `compaction_finished`; a `compaction_release` event under the DB
-mutex with per-level occupancy, nominal/effective targets and capacity
-generation), parsed by `compaction_measurements.py`, which `03_run_experiments.sh`
-now runs on every arm. They need the rebuilt binary; no historical arm carries
-them. Items 3–4 were executed by `14_gate0_reanalysis.py` on
-`suite-20260902-193415`; results are in Pathway A (A-0 table) and Theorem B.1.
-Record: `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` §14.6.
-
-1. **$\eta$ instrument**, log-parse only: `compaction_bytes_written /
-   compaction_bytes_read` per level, excluding trivial moves.
-2. **$\phi_j$ logging at release time** (Theorem A.1's headroom form cannot be
-   evaluated without it).
-3. **A-0 decomposition** on the existing §10.7 artifacts (suite
-   `suite-20260902-193415`). For each paired (`regular`, arm) at each cell, arm
-   $\in$ {`prior_only`, `rl`, `unconstrained_rl`}: with $\mathcal{L}_{\text{reg}}$
-   the levels the `regular` run populated,
-   $D_{\text{depth}} = \sum_{i \notin \mathcal{L}_{\text{reg}}} \text{bytes}_i(\text{arm})$
-   and
-   $D_{\text{eager}} = \sum_{i \in \mathcal{L}_{\text{reg}}} (\text{bytes}_i(\text{arm}) - \text{bytes}_i(\text{regular}))$,
-   flush bytes included at L0. Report both as fractions of the total excess
-   with paired intervals; include the partial 20M cells as supporting evidence.
-4. **$S_{\text{flow}}$ and $g_{\text{flow}}$ per cell** from the recorded
-   `user_logical_bytes_written` and `live_logical_bytes`; recompute the Theorem
-   B.1 ceiling table at measured $S_{\text{flow}}$ and $L$ and replace the
-   resident-$S$ table.
-
-- **Cost:** 0 node-hours. Items 1–2 required a C++ change (contrary to the
-  original "log-parse only" wording); items 3–4 were parse-only.
-- **Blocks:** Gate 1's re-analysis, Gate 3b, and the scoping of Pathway A in
-  Gate 2. All three are now unblocked.
-
-### Gate 1 — Hull₀ and space calibration (Pathway C, no learner)
-
-12-point subset (`compaction_pri` pinned), 10M × T=2/6/10, 3 repeats to locate
-the hull, retained points topped up to $\ge 5$; no static $s$ axis. Plus two
-cross-$T$ `regular` cells, $T = 14$ and $T = 20$ at trigger 4, scale 1×, 3
-repeats topped up to 5 if either lands on the pooled hull (seeds derive from
-repeat index, so they pair with the existing repeats). From the same runs,
-extract $\Delta S(\text{scale})$ per cell, per-level $\eta$, and populated $L$.
-
-- **Pass:** C-1, C-2, C-3, C-5, C-6 for `prior_only`.
-- **Decides:** whether Finding 2 is in the paper (per-$T$ and cross-$T$); which
-  (cell, rung) pairs Gate 3b runs.
-- **Cost:** ≈ 48 h. Baseline-only. Sequence it to run *during* Gate 2's
-  implementation — it is the one block that parallelises.
-
-**Status: re-measured on `Assoc` (2026-09-21); C-1 and E-2 pass, C-2 partial,
-C-3/C-4/C-6 not yet evaluable, C-5 open.** 182 `regular` arms at 10M on binary
-`9b9321b1…`: C-1 passes at 11/7/8 hull points of 12, C-2 reaches 18 of 26 points
-and **passes completely at $T{=}6$**, E-2 calibrates 100% of populated
-level-cells, and the cross-$T$ pooled hull holds 14 of 38 with $T{=}14$ and
-$T{=}20$ contributing none — the ratio axis is bounded above (P1-14). Two grid
-cells were found to be the *same* configuration: L0's byte branch (A3′) caps the
-effective trigger at roughly `max_bytes_for_level_base` / L0 file size, so
-triggers 8 and 16 at base 8 MiB are indistinguishable by construction. This
-should shape the Hull$_s$ grid at Gate 3c. C-3, C-4 and C-6 stay unevaluable
-until `prior_only` runs at ten repeats against the hull.
-
-**C-5 closed 2026-09-22**: stage 16 over 27 capacity arms gives
-$s_{\max} = 2.0$ at the 2% rung at every ratio, every applied vector verified
-against its request. Applying the A-1b (cell, rung) rule still needs $\kappa$
-measured on `Assoc` — the $\kappa$ = 3.00/1.60/1.71 in Theorem B.2's table is
-from the uniform workload — which Gate 3a-0 owes.
-
-**`prior_only` measured on `Assoc` 2026-09-22 at three repeats** (D-4, D-5;
-history 14.18), which is a mechanism result, not C-3. After the D-4 prior
-repair the policy is native at deep levels — zero releases below due in ~44,000
-merges — and its only lever is the below-threshold L0 band, which exists only
-at L0 trigger $\ge$ 3. Against the same-configuration static twin the band
-costs $\Delta W$ = +2.9/+2.1/+2.1% and buys $\Delta R$ = −4.5/−5.7/−7.1% at
-$T$ = 2/6/10, with paired upper bounds on $\Delta W$ of +3.92/+3.43/+2.96%
-against $\delta_W$ = 2%: **the prior misses the write constraint at every
-ratio where it has a lever, and has no lever where it meets it.** The band's
-trade is monotone in populated depth, buying 3.35 / 2.75 / 1.54 units of read
-per unit of write at $T$ = 10 / 6 / 2, which bears on Gate 3b cell selection.
-
-**The superseded uniform measurement (2026-09-19)** recorded C-1 passing, C-5
-closed at $s_{\max} = 2.0$, and C-2, C-3 and C-6 failed, on binary `deb6753c`
-under contract `87eaddbc`. It is not re-scored. Dated verdicts and the
-per-criterion reasoning for both are in `docs/PREREGISTRATION.md`; the narratives
-are history Sections 14.7, 14.9 and 14.16.
-
-### Gate 2 — Implementation (0 node-hours, longest calendar item)
-
-Pathway A (A-Impl-1 through A-Impl-10, schema v3), Pathway D (Lagrangian
-reward, $\Phi$ discounting audit, stabilisation), Pathway E (shield symmetry
-including $s_i$ contraction, recalibration), B1 (mixgraph skew — a flag change),
-and **B2 + B3 as a single `db_bench` patch**.
-
-**Why a `db_bench` patch, not Tectonic.** Every gate instrument — manifest
-generation, guard calibration, oracle parity, the paired evaluator (§11) — is
-built on `db_bench`; a second experiment surface would need that chain ported
-and revalidated at 10M. `mixgraph` reads `FLAGS_mix_{get,put,seek}_ratio` once
-into a `QueryDecider` at benchmark start; making that a schedule that
-re-initialises the decider at preregistered operation counts is tens of lines,
-keeps one surface, and preserves pairing and fingerprinting. B3's fourth
-operation type touches the same class.
-
-**Trap: `QueryDecider::Initiate` appends, it does not reset.** It calls
-`type_.push_back` and `ratio_.push_back` with no `clear()`; only `range_` is
-zeroed. Re-calling it mid-run leaves stale entries and the query lookup selects
-against stale boundaries. The failure is silent: the run completes with wrong
-mix ratios. Fix is two lines (clear both vectors); add an assertion on
-`type_.size()` after each re-initialisation and a per-phase op-count check in
-the summary. Verify the function body against the pinned commit.
-
-**Hindsight-oracle sweep** ($\mathcal{G}$) is Gate 1's sweep re-run at each
-phase mix; use 2 phases until a nonzero $\mathcal{G}$ is shown, and reuse Gate 1
-points wherever a phase mix coincides with one already swept.
-
-- **Cost:** 0 node-hours; price in days when planning.
-
-### Gate 3a-0 — Calibrate 3a's parameters (~2 h)
-
-$\kappa = 3.00$ and $S = 2.271$ are 10M/T=2 measurements. Run `regular` and
-`prior_only` at 1M/T=2, 3 repeats, to measure $\kappa_{1M}$, $S_{1M}$,
-$\eta_{1M}$ and $L_{1M}$; set A-1a's relaxed bound to the $S$ the measured
-$\Delta S(s)$ curve requires to reach $s = 1.10\,\kappa_{1M}$. **Verify the "six
-leveled levels at 1M" claim** from `levelstats` before committing to 1M/T=2 as
-the mechanism cell. 3a needs its own manifest at the relaxed bound: the
-per-arm gate at `03_run_experiments.sh:335` keys off arm name, so a learned arm
-demands a manifest regardless of `RL_REQUIRE_BASELINE_SLO=0` — a full
-sweep → select → guard chain at 1M.
-
-### Gate 3a — Mechanism (~1 h)
-
-1M × T=2 at the calibrated relaxed bound, 3 repeats, logging $\phi_j$ at
-release time. Diagnostic only.
-
-- **Pass:** A-1a, A-4, A-5.
-
-### Gate 3b — Acceptance (the track decision)
-
-10M, uniform workload, 5 repeats, `rl` with and without the capacity action, at
-the (cell, rung) pairs selected by the preregistered rule in Pathway A, rungs
-from the P0-6 ladder $\{0, 2, 5, 10\}\%$. Every rung run is reported; the bound
-is not widened after seeing a result. The one expectation that survives both
-Theorem B.2 brackets is that $T{=}2$ is closed at any reasonable budget. If one
-cell survives at one rung, accept a single-cell result and say so plainly.
-
-- **Pass:** A-1b, A-2, A-3, A-5, at each rung run.
-- **Decides:** research track (A-1b passes at the 2% rung, or at a rung
-  preregistered as the headline before 3b) vs. Experiments & Analysis track
-  (A-1b fails at every rung).
-- **Cost:** up to 2 cells × 4 arms × 5 repeats = 40 runs ≈ 14 h per rung; the
-  `regular` and `prior_only` arms are shared across rungs, so each extra rung
-  costs ≈ 7 h per cell. Budget 14–35 h.
-
-### Gate 3c — Hull$_s$ (Pathway C, after Gate 2 and Gate 3b)
-
-Static $s \in \{1.0, 1.5, 2.0\}$ only at cells surviving Gate 3b, plus the
-$f_i \propto \eta^{-i}$ profile at measured $\eta$ (Corollary C.3). Gate 1's
-$s{=}1.0$ points are reusable (same cells, same seeds).
-
-- **Pass:** C-4 becomes decidable.
-- **Cost:** 12 × 2 new $s$-values × 2 cells × 3 repeats = 144 runs ≈ 48 h,
-  plus ≈ 8 h for the profile points ≈ **56 h**.
-
-### Gate 4 — Garbage and phase adaptivity (Pathway B)
-
-Off the critical path (Corollary B.4). Keeps T=2 for the **baseline arms only**
-— $g$, $\eta$ and $\mathcal{G}$ are properties of the workload and the static
-class, and T=2 carries the largest garbage fraction; `rl` is excluded at T=2
-where it would inflate depth.
-
-- Baseline arms: 4 families × 3 T × {`regular`, `prior_only`} × 5 = 120 runs
-  ≈ 40 h.
-- `rl` arm: 4 families × 2 T × 5 = 40 runs ≈ 13 h.
-- Hindsight oracle: 12 configs × 2 phases × 2 T × 3 = 144 runs ≈ 48 h.
-- **Cost: ≈ 101 h.** **Pass:** B-1 through B-5. **Decides:** which cells are
-  analytically open under Theorem B.1 at measured $S_{\text{flow}}$ and $L$.
-
-### Gate 5 — Frontier at ten repeats (Pathways C + D, ~27 h)
-
-Headline cells only — those surviving Gate 3b and B-2 — at the preregistered
-ten paired repeats, constrained objective, $S_{\text{bound}}$ swept. Produces
-the paper's principal figure.
-
-- **Pass:** C-4, C-6, D-1 through D-5.
-
-### Gate 6 — Ablations (~8 h)
-
-Capacity action on/off, shield on/off, prior/residual/both, shared trunk vs
-independent heads. Three repeats each; ablations, not claims.
-
-- **Pass:** E-4.
-
-Run 20M only if a 10M result is close enough that scale could plausibly flip it.
-
-### Total budget and lease boundaries
-
-| Gate | Cost |
-| --- | ---: |
-| 0 — instrumentation and re-analysis | 0 (off-box) |
-| 1 — Hull₀ + space calibration + cross-$T$ cells | 48 h |
-| 2 — implementation | 0 node-hours (longest calendar item) |
-| 3a-0 + 3a — mechanism at 1M | 3 h |
-| 3b — acceptance, at the $S_{\text{bound}}$ ladder | 14–35 h |
-| 3c — Hull$_s$ | ~56 h |
-| 4 — garbage and phase adaptivity | 101 h |
-| 5 — frontier at ten repeats | ~27 h |
-| 6 — ablations | ~8 h |
-| **Total** | **~257–278 h ≈ 11–12 days** |
-
-A seven-day lease is 168 h, so this is two leases minimum; results must be
-copied off-box before each lease ends.
-
-- **Lease 1 — decides the track.** Gates 1, 3a-0, 3a, 3b ≈ 65–86 h, leaving
-  margin for the reruns Gate 3b failures would require.
-- **Lease 2 — produces the headline.** Gates 3c, 5, 6 ≈ 91 h.
-- **Lease 3 — extends it.** Gate 4 ≈ 101 h. Separable: the parity claim does
-  not depend on B-2 or B-4.
-
-If only two leases are available, cut Gate 4; the claim narrows from
-parity + non-domination + phase-adaptivity to parity + non-domination +
-**state**-adaptivity, which D-5 delivers without Gate 4.
-
----
-
-## Programme 2 execution order (Pathway F)
-
-Runs only after Programme 1's Gate 4, which supplies $\mathcal{G}$ and the
-phase patch, and after the Programme 1 paper's claim is recorded.
-
-### Gate F-0 — Reactive arm and per-phase evaluator (0 node-hours)
-
-Implement items 1, 2, 5 and 6 of Pathway F. Extend the paired evaluator with
-per-phase windows. No learner change below the manifest layer.
-
-### Gate F-1 — Reactor versus oracle (reuses Gate 4 runs)
-
-Add the reactive arm to Gate 4's 2-phase schedule at 50M, two abruptness
-settings (gradual, abrupt), 5 paired repeats. Report F-1 and F-2.
-
-- **Decides:** whether anticipation has room. If $J_{\text{react}}$ is within
-  noise of $J_{\text{oracle}}$ on both schedules, stop; publish F-detect as the
-  result.
-- **Cost:** 2 schedules × 2 arms × 5 repeats × ≈ 1.5 h ≈ **30 h** beyond Gate 4.
-
-### Gate F-2 — Lead-time sweep with a perfect predictor
-
-Before building a forecaster, give the predictive arm the *true* next-phase
-class at lead $\ell \in \{0, 0.5, 1, 2\} \times \Delta_{\text{shape}}$. This
-measures the ceiling of anticipation independent of prediction quality (F-7).
-
-- **Cost:** 2 schedules × 4 leads × 5 repeats × ≈ 1.5 h ≈ **60 h**.
-- **Decides:** the lead a real forecaster must deliver to matter. If no lead
-  beats $\ell = 0$ outside noise, the forecaster is not built.
-
-### Gate F-3 — Forecaster (F-forecast only)
-
-Only on a workload family with repetition (≥ 6 periods). 3-phase schedule,
-seed-randomised phase lengths and order, 5 repeats. Report F-3, F-5, F-6.
-
-- **Cost:** ≈ **45 h** at 50M.
-
-### Gate F-4 — 500M confirmation
-
-One run per arm (static, reactive, predictive, oracle) on the three-phase 500M
-schedule. Confirmation only; not the evidence base.
-
-- **Cost:** ≈ **60 h**.
-
-| Gate | Cost |
-| --- | ---: |
-| F-0 | 0 |
-| F-1 | 30 h |
-| F-2 | 60 h |
-| F-3 | 45 h |
-| F-4 | 60 h |
-| **Total** | **≈ 195 h**, one to two leases, after Programme 1 |
-
----
-
-## Global acceptance: what constitutes a paper
-
-**The research-track claim is non-inferiority on $W$, not improvement.** Geometry
-permits only $O((1-\eta)^2)$ below parity (static, Hull$_s$'s); elision can add
-more, bounded by cumulative garbage, but no arm has yet shown it. The claim the
-evidence supports: *write amplification non-inferior at margin $\delta_W$,
-point-read amplification strictly improved, non-dominated against Hull$_s$ and
-against the cross-$T$ hull, with state-dependent policy behaviour.* It requires
-neither B-2 nor B-4. Improvement on $W$ is a bonus governed by measured $\eta$.
-Record which claim is being made before Gate 4; the two select different
-acceptance sets and cannot both stand.
-
-**A-2 is not Pathway A's to claim alone.** By A-0 the write excess is mostly
-the prior's eagerness. If A-2 passes, attribute it to expansion only for the
-$D_{\text{depth}}$ share and to the constrained reward for the rest, and report
-what the read gain cost to buy it.
-
-**Research track** requires: A-0, A-1b, A-2, A-4, C-4, C-6, D-5. B-2 only if
-the claim is improvement rather than non-inferiority.
-
-**Experiments & Analysis track** requires: A-1b, or a documented refutation of
-A3 with $\phi_j$ logged at release time; B-1 through B-3 across all workload
-families; C-1 through C-3 and C-6 against Hull₀. A refutation of Theorem A.1's
-assumptions is itself publishable if the measurement is clean. A third E&A
-outcome is available: a measured $\Delta S(s)$ curve showing that depth
-invariance at the observed deferral factors is incompatible with any reasonable
-space budget, with the analytical bracket explaining why — a complete negative
-result about capacity-mediated deferral that does not depend on the learner.
-
-**Neither is reachable** if Gate 1 shows `prior_only` on or inside Hull₀
-(per-$T$ or cross-$T$) *and* Gate 3b shows depth not flattening at any surviving
-pair. Then the analysis stands but the system contributes nothing, and the
-honest output is a short paper on the conservation result, the elision bound,
-and the measured space cost of deferral.
-
----
-
-## Frozen preregistered decisions
-
-Moved to `docs/PREREGISTRATION.md` on 2026-09-20, together with the dated gate
-verdicts that had accumulated inside Pathway E and Gate 1. This document is the
-theory, the specification and the done/not-done status; that one is the dated
-record of what was decided, when, and what was predicted before each run.
+**Gate 1 (partial).** Uniform workload (2026-09-19, superseded): C-1 passed;
+C-2, C-3 and C-6 failed — the prior was dominated by one static point on both
+$W$ and $R$ at every $T$, and Finding 2 was withdrawn. C-5 closed at
+$s_{\max} = 2.0$ (27 capacity arms, 2026-09-22). `Assoc`: C-1 passed (11, 7
+and 8 hull points); C-2 partial (18 of 26 points decidable); comparators trigger
+2/4/2 at a 16 MiB base; the cross-$T$ hull holds 14 of 38 points. The repaired
+prior on `Assoc` (D-4, D-5) is native at deep levels and uses only the L0 band:
+$\Delta W$ = +2.9/+2.1/+2.1% for $\Delta R$ = −4.5/−5.7/−7.1% at $T$ = 2/6/10
+against same-configuration twins — the L0 lever of Proposition D.11 at work.
+
+**Pathway D statuses (constrained objective).** D-7: the learner wrote more with
+a multiplier railed at its cap. D-8 to D-11 repaired reward, state, action mask
+and measurement. D-12 (first valid instrument run): against same-session twins,
+T=2 +6.6% $W$ / +3.0% $R$; T=6 +9.7% / −7.1%, via L0 early-compaction lock-in;
+T=10 −0.6% / +1.1%, native behaviour. The audit (2026-09-23) attributes the T=2
+result to start-up exploration during the backlog plus session drift, not to a
+learned deferral lever.
+
+**Pathway E.** E-1 recorded failed; E-2 passed under the populated-level
+denominator; E-5 failed on `rl` (15, 7 and 10 times the limit at T = 2, 6, 10),
+with the post-load transient identified by the audit.
+
+**Retired criteria** (their records stand; they are not scored again): A-0 to A-5,
+B-2, C-3, C-4, C-5, the Pathway D criteria D-1 to D-5 of 2026-09-11, and Gates 1
+to 6 of 2026-09-11 (Gate 0 complete, Gate 1 partial, Gates 2–6 never run).
+
+**Frozen preregistered decisions.** P0, P1, P1b and P1c in
+`docs/PREREGISTRATION.md` remain the record of the 2026-09-11 programme. Items
+this fork supersedes are listed in §0.6 and need dated amendments there.

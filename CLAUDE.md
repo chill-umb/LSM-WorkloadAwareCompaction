@@ -16,7 +16,7 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
 | --- | --- |
 | Forward plan, gates, acceptance criteria, theory | `docs/PATHWAYS.md` |
 | Dated decisions, predictions made in advance, gate verdicts | `docs/PREREGISTRATION.md` |
-| Frozen research objective | `config/research_objective_contract.v3.json` (machine-readable; the prose is `docs/PREREGISTRATION.md` §4 "Frozen preregistered decisions", moved there from PATHWAYS on 2026-09-20 — the former `docs/RESEARCH_OBJECTIVE_CONTRACT.md` was removed the same day as stale) |
+| Research objective contract | `config/research_objective_contract.json` (machine-readable Programme 1 values; the prose is `docs/PREREGISTRATION.md` D-13) |
 | Every experimental control, paper setup text | `docs/EXPERIMENTAL_SETUP.md` |
 | Historical record | `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` |
 | Pipeline operation | `scripts/dbbench_pipeline/README.md` |
@@ -28,7 +28,7 @@ This is research code for a **trigger-only RL compaction controller for RocksDB*
   that file is tracked by git — its commit date is the only proof it was written
   in advance. Pathways A–F, their proofs, per-pathway acceptance criteria and the gated execution order. Its vocabulary is `A-Impl-N`, `C-N`, `Gate N`, `P0`/`P1` preregistration items. Nothing else defines what to do next.
 - **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record of what happened. §5–6 architecture and the learning/safety system (§5.7 is the six bypass reasons), §11 the pipeline, §14 the dated gate records (§14.7 is Gate 1), §15–16 what is open. It was trimmed on 2026-09-13: §12 is gone and the number is not reused, so §§13–18 keep their numbers and every external citation still resolves.
-- **The objective contract is frozen** (v3, 2026-09-12). **Never create a new version — edit `config/research_objective_contract.v3.json` in place**, with a written reason. v1 and v2 remain in the tree only as superseded records; no run was ever executed under either. Never change the contract after seeing a gate's outcome.
+- **The objective contract is `config/research_objective_contract.json`** (Programme 1, 2026-09-30). Contracts v1–v3 were deleted on the owner's instruction on 2026-09-30 and are recoverable from commit `5bea343`. Edit the file in place with a written reason, never make a versioned copy, and never change it after seeing a gate's outcome.
 - **`TRIGGER_CONTROLLER_REPAIR_PLAN.md` is historical.** Its audited deviations were closed on 2026-08-16 and the controller design it describes is built. Read it for the per-level state machine and the deferral math, not for what to do next.
 
 ### docs/ is tracked
@@ -68,25 +68,43 @@ scripts/dbbench_pipeline/02_build_db_bench.sh        # build db_bench in the sam
 
 **The root CMake build is legacy.** The root `CMakeLists.txt` builds the old `db_runner` wrapper (`src/`, `include/`) and `tectonic-cli` (Rust nightly) into `bin/`. Its build tree `build/` carries the `compile_commands.json` used for the syntax check above.
 
-RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`: registering new `.cc` files in `src.mk`, `CMakeLists.txt`, `Makefile` and BUCK; make targets; `make format-auto`. Its test-writing guidance does not apply here — see below.
+RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`: registering new `.cc` files in `src.mk`, `CMakeLists.txt`, `Makefile` and BUCK; make targets; `make format-auto`. Its test-writing guidance applies to the fork's own test files (see Tests below).
 
-### No tests
+### Tests
 
-**This repository has no test suite, and none should be written.** The Python
-`rl_agent/tests/` and `scripts/dbbench_pipeline/tests/` directories and the RL
-cases inside the submodule's `compaction_picker_test.cc` and `version_set_test.cc`
-were removed on 2026-09-13. Do not add `test_*.py` files, `TEST_F` cases, a
-`__main__` self-check, or a test dependency, and do not re-add them as part of
-some other change.
+**Every piece of Programme 1 code ships with tests, and no multi-hour node run
+starts until the preflight passes.** This replaces the 2026-09-13 "no tests"
+rule (owner, 2026-09-29). The owner wants every bug found in minutes, not after
+an 18-hour run.
 
-This is research code. The deliverable is a measurement, and correctness is
-established by the gates in `docs/PATHWAYS.md` — the oracle parity gate, the
-guard holdout, the hull criteria and the paired acceptance evaluators — not by
-unit tests. When you change the controller, the proof is the relevant gate
-re-run on the node, and a `-fsyntax-only` check locally.
+The suites come in three tiers. Their layout and full case list are in
+`docs/IMPLEMENTATION_PLAN_PROGRAMME1.md` §6, which is the specification until
+they exist.
 
-RocksDB's own upstream tests in the submodule are untouched and stay that way;
-do not delete or extend them.
+1. **Local, seconds, before every commit.**
+   - Python `unittest` suites, stdlib only, in a `tests/` folder beside the
+     code they cover (`rl_agent/tests/`, `scripts/dbbench_pipeline/tests/`).
+   - `-fsyntax-only` for every changed C++ file.
+2. **Node, build.**
+   - The fork's own gtest files and the controller plugin's tests.
+   - Built in a separate Debug tree, so RocksDB's `assert`s fire.
+3. **Node, preflight.**
+   - A short end-to-end run: build, plugin, trainer, logs and evaluator
+     (stage 13, reworked).
+   - It writes a marker bound to the `db_bench`, plugin and code hashes.
+   - Every long-run driver checks for a matching marker and refuses to start
+     without one.
+
+**Where fork tests go.** Fork tests live in new files of the fork's own, such
+as `db/level_target_multipliers_test.cc`, registered like any `.cc`. RocksDB's
+upstream test files stay exactly as upstream ships them.
+
+**When a test fails.** Fix the code. Change a test only when the specification
+in `docs/PATHWAYS.md` changed, and name that change in the commit.
+
+**Suites and gates do different jobs.** A green suite shows the code does what
+the specification says. The gates in PATHWAYS decide the research claims. Both
+are required.
 
 ## Running experiments
 
