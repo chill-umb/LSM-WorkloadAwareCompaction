@@ -124,7 +124,6 @@ are required.
 Gate-specific stages, added for the PATHWAYS programme:
 - `14_gate0_reanalysis.py` — Gate 0 against existing artifacts.
 - `15_top_up_hull.{py,sh}` — decide which hull points still need repeats, and record those unresolvable at any affordable cost.
-- `16_capacity_calibration.py` — measure ΔS(s) and derive `s_max`, verifying each arm's applied capacity vector against its request.
 
 **Starting and resuming**
 - Every runner requires `CONFIRM_*=YES` before it will start.
@@ -212,7 +211,7 @@ db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
 - **Result layout has a `repeat-NN/` level only when `REPEATS > 1`.**
 - **Stage 06 must exclude the level-base scale axis** from comparator selection (`--level-base-bytes`), or a 0.5× configuration can win minimum-space and silently redefine the baseline.
 - **The hull is bound to its binary.** The evaluator refuses to pool across `dbbench_sha256`. Any criterion comparing a policy against the hull needs the hull re-measured on whatever binary finally runs that policy.
-- **Put repeated pipeline logic in a numbered stage, not a pasted heredoc.** That is what `15` and `16` are.
+- **Put repeated pipeline logic in a numbered stage, not a pasted heredoc.** That is what `15` is.
 
 ## graphify
 
