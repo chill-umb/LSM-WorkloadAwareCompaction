@@ -5,8 +5,10 @@
 # Both arms run the same flags as 03 (dbbench_shared_flags), native leveled
 # compaction, and the same upstream benchmark sequence; the explicit flush
 # makes the fork's waitforcompaction (which flushes) and stock's (which does
-# not) end on the same tree. Arm order alternates by pair. Exits with the
-# evaluator's code: 0 passed, 1 failed, 2 undecided.
+# not) end on the same tree. The patched arm also writes the host log, as
+# every measured arm will, so its cost is inside the parity checks. Arm order
+# alternates by pair. Exits with the evaluator's code: 0 passed, 1 failed,
+# 2 undecided.
 set -Eeuo pipefail
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +63,8 @@ for (( pair = 1; pair <= PARITY_PAIRS; pair++ )); do
     dir="$WORK/pair-$(printf '%02d' "$pair")/$arm"
     mkdir -p "$dir"
     extra=()
-    [[ "$arm" == patched ]] && extra=(--level_target_multipliers="$ones")
+    [[ "$arm" == patched ]] && extra=(--level_target_multipliers="$ones"
+                                      --rl_host_log="$dir/host_log.jsonl")
     command=(
       ${launcher[@]+"${launcher[@]}"}
       "${BINARY[$arm]}"

@@ -107,31 +107,36 @@ implementation `db/rl_controller_host.{h,cc}`. It exposes:
 | Instrument | Site | Note |
 | --- | --- | --- |
 | Per-level filter probes | `Version::Get` loop, where `POINT_SST_PROBE` already ticks (`db/version_set.cc`), keyed by the FilePicker's current level | Must use the version's level. The table reader's own level is stale after a trivial move |
-| Per-level filter passes, and hits | The filter outcome is written into `GetContext` at the filter check in `BlockBasedTable::Get` and read after each `table_cache_->Get`. The hit is counted at the found level | False positives = passes − hits. The hit's read feeds the shared hit-read bucket (D §4) |
-| Per-level seeks | At the same three sites `SORTED_RUN_SEEK` ticks, keyed by the level the version passes when it builds the table iterator | The exact parameter path is to be confirmed when implementing |
-| Per-job $S$, $O$, $X$, trivial flag, source level | Host job record (WP2), from the `Compaction` object's input levels and the job statistics | Excluding trivial moves from $\rho_i$, $o_i$ is then a flag, not an inference |
-| Fix the dead trivial-move telemetry | `db/db_impl/db_impl_compaction_flush.cc`: pass `num_input_files_trivially_moved > 0` instead of `is_trivial_move()`, and fill the moved bytes in the trivial branch | Review finding, Gate N0 item 3 |
-| $H$ with the operation count at every version install | Host log | Written on every arm, native included |
+| Per-level filter passes, and hits | The filter outcome is written into `GetContext` (`rl_filter_passed`, `rl_filter_hit`) where `BLOOM_FILTER_FULL_POSITIVE` and `BLOOM_FILTER_FULL_TRUE_POSITIVE` tick in `BlockBasedTable`, and read after each `table_cache_->Get`. The hit is counted at the found level | False positives = passes − hits. The hit's read feeds the shared hit-read bucket (D §4) |
+| Per-level seeks | At the same three sites `SORTED_RUN_SEEK` ticks. `TableCache::NewIterator` gives the table iterator the version's level (`InternalIteratorBase::SetReadCounterLevel`, a no-op except in `BlockBasedTableIterator`); `LevelIterator` uses its own | An iterator built outside a version has level −1 and is not counted |
+| Per-job $S$, $O$, $X$, trivial flag, source level, due-since | `CompactionJobInfo` gains $S$, $O$ and the start level's due-since, filled from the `Compaction` in `BuildCompactionJobInfo`. The due-since is read before `PickCompaction`, whose score recompute ends the due episode. The host log is an `EventListener` on these | Excluding trivial moves from $\rho_i$, $o_i$ is then a flag, not an inference. WP2's job-record callback reuses them |
+| Fix the dead trivial-move telemetry | `db/db_impl/db_impl_compaction_flush.cc`: pass `num_input_files_trivially_moved > 0` instead of `is_trivial_move()`, and the moved bytes (`CalculateTotalInputSize()`) for a trivial move | Review finding, Gate N0 item 3. Old stack only |
+| $H$ with the operation count at every version install | Host log, after every flush and compaction install (the only installs that change $H$) | Written on every arm, native included |
 
-Counters are process-wide relaxed atomics indexed `[level][kind]`, following
-the fork's existing `RLCompactionTelemetry` singleton. The workload has one
-client thread, so contention is negligible. Their cost shows up in ACT-4
-parity.
+Counters are process-wide relaxed atomics indexed `[level][kind]`
+(`db/rl_read_counters.h`), following the fork's existing
+`RLCompactionTelemetry` singleton. The workload has one client thread, so
+contention is negligible. Their cost shows up in ACT-4 parity.
 
 ### WP4 — `db_bench` (Gate N0 items 4 and 5)
 
 - **`--rl_host_log=<path>`**, on every arm. It writes H samples, job records,
-  counter snapshots and the settle and phase stamps.
+  counter snapshots and the settle and phase stamps (`db/rl_controller_host.h`
+  documents the records). It needs `--statistics`; a lost record ends the run.
 - **Settle, then measure** (PATHWAYS H §5, PREREGISTRATION D-13).
   - A new `db_bench` step, `settle`, runs between the load and `mixgraph`.
     It calls `WaitForCompact` with flushes included, then holds for
-    $h_w$ = 10 s, checking that every level's score stays below 1 and
-    $k_0 < K_0$ throughout. It prints `RL_SETTLED` with the outcome and the
-    time waited. The fork's `waitforcompaction` step is not reused, because
-    it also enters the old stack's drain mode.
+    $h_w$ = 10 s (`--rl_settle_hold_seconds`), checking every 100 ms that
+    every level's score stays below 1 and $k_0 < K_0$. The score check is
+    RocksDB's `compaction-pending` property, which is also set by a file
+    marked for compaction. It prints `RL_SETTLED` with the outcome and the
+    time waited, and stamps the host log. The fork's `waitforcompaction` step
+    is not reused, because it also enters the old stack's drain mode.
   - `mixgraph` prints `RL_MEASURE_START_OP` at its first operation ($n_w$),
-    and snapshots the tickers and the internal-stats stall line there.
-  - An arm whose hold fails is invalid (A8).
+    and the `measure_start` stamp snapshots the tickers and the stall
+    counter there (`db.user_write_stall_micros`, the counter behind the
+    internal-stats "Cumulative stall" line).
+  - An arm whose hold fails is invalid (A8); `settle` ends the run.
   - The existing `rlsuspend`/`rlresume` steps stay only as long as the old
     evaluator needs them.
 - **Drain** under fallback settings: the plugin stops, and the host applies
@@ -294,7 +299,8 @@ next starts:
 2. Tier 1 and tier 2 suites, all green.
 3. **ACT-1 on the real binary** (`20_check_actuation.py`): L0 score
    invariance, the refusals, the scaled pending estimate, recompute without
-   writes.
+   writes. Beside it, WP4's `settle` step: it passes on a settled tree and
+   writes the host log, and it refuses a due tree.
 4. **Parity** at 1M operations, T=2, on 09's limits: patched binary at
    $m \equiv 1$ against stock (ACT-4); plugin in hold-only mode against
    native (ARCH-5).
@@ -312,6 +318,11 @@ next starts:
      - the LOG's tree-wide maximum score;
      - stall as a fraction of the writing time, at D-13's 2-point margin;
      - seeks reported only.
+   - The patched arm writes the host log, as every measured arm will, so its
+     cost is inside parity. Each patched log is checked against itself: the
+     per-level read counters sum to their tickers, every job that began
+     ended, the last H sample equals the live SST bytes at the end of the
+     drain, and operation counts never decrease.
 5. **Rules-mode smoke** at 1M operations: zero masked actions, ACT-3 fidelity,
    logs complete, fallback exercised once by an injected bad weights file.
 6. **Learner smoke** at 2M operations, T=2, read priority:
@@ -387,9 +398,10 @@ bumped (CLAUDE.md). The contract records the new fork revision and its parent.
 
 ## 9. Open items this plan does not settle
 
-- How the filter outcome reaches `Version::Get`. A field in `GetContext` is the
-  plan; its hot-path cost is judged by ACT-4.
-- The exact parameter path for per-level seek counting.
+- The hot-path cost of WP3's counters (two flags in `GetContext`, and up to
+  three relaxed atomic adds per probe and one per seek) is judged by ACT-4.
+  Settled 2026-09-30: the filter outcome reaches `Version::Get` through
+  `GetContext`, and the seek level through `SetReadCounterLevel` (WP3).
 - The transition log format (JSON lines) may prove too slow at L1's cadence.
   If it does, switch to a binary format; the fields stay the same.
 - The Gate N0 per-level counters currently serve only controller arms and

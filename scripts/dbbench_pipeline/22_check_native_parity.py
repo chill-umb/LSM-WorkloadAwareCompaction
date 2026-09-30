@@ -20,6 +20,14 @@ stall line and the LOG's event log and level summaries. The limits are the
 - Sorted-run seeks exist only in the fork, so they are reported, not judged.
 - The stall allowance is on the stall fraction, stall seconds over the
   writing benchmarks' seconds, with the margin passed in (D-13's, from 13).
+
+The patched arm runs as every measured arm will, with the host log on (plan
+WP4), so the parity checks include its cost. Its log is checked against
+itself on every patched run (host_log_consistency): header first, the
+measure_start and drain_end stamps present, the per-level read counters
+summing to their tickers at drain_end, every job that began ended, the last
+H sample equal to drain_end's live SST bytes, and operation counts that never
+decrease.
 """
 
 from __future__ import annotations
@@ -46,6 +54,44 @@ BENCH = re.compile(r"^(filluniquerandom|mixgraph)\s+:\s+[\d.]+ micros/op "
                    r"(\d+) ops/sec ([\d.]+) seconds", re.M)
 STALL = re.compile(r"^Cumulative stall: (\d+):(\d+):([\d.]+) H:M:S", re.M)
 IDENTITY_TICKERS = ("rocksdb.bytes.written", "rocksdb.number.keys.written")
+HOST_LOG = "host_log.jsonl"
+# A stamp's levels[i] row order (db/rl_read_counters.h) and each kind's ticker.
+LEVEL_TICKERS = ("rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
+                 "rocksdb.bloom.filter.full.true.positive",
+                 "rocksdb.sorted.run.seek")
+
+
+def host_log_problems(path: Path) -> list[str]:
+    """What is wrong with one run's host log; empty when it is consistent."""
+    try:
+        records = [json.loads(line) for line in path.read_text().splitlines()
+                   if line.strip()]
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"unreadable: {error}"]
+    problems = []
+    if not records or records[0].get("type") != "header":
+        problems.append("no header first")
+    stamps = {r.get("name"): r for r in records if r.get("type") == "stamp"}
+    problems += [f"no {name} stamp" for name in ("measure_start", "drain_end")
+                 if name not in stamps]
+    end = stamps.get("drain_end")
+    if end:
+        for kind, ticker in enumerate(LEVEL_TICKERS):
+            total = sum(row[kind] for row in end["levels"])
+            if total != end["tickers"].get(ticker):
+                problems.append(f"levels sum {total} != {ticker} "
+                                f"{end['tickers'].get(ticker)}")
+        samples = [r for r in records if r.get("type") == "h"]
+        if not samples or samples[-1]["h"] != end["h"]:
+            problems.append("last H sample != live SST bytes at drain_end")
+    begins = sum(r.get("type") == "job_begin" for r in records)
+    ends = sum(r.get("type") == "job_end" for r in records)
+    if begins != ends:
+        problems.append(f"{begins} jobs began, {ends} ended")
+    ops = [r["op"] for r in records if "op" in r]
+    if any(later < earlier for earlier, later in zip(ops, ops[1:])):
+        problems.append("operation count decreased")
+    return problems
 
 
 def collect(run_dir: Path) -> dict:
@@ -89,6 +135,8 @@ def collect(run_dir: Path) -> dict:
         "point_read_amplification": probes / gets if gets else math.nan,
         "filter_checks": probes,
         "fork_point_probes": tickers.get("rocksdb.point.sst.probe"),
+        "host_log_problems": (host_log_problems(run_dir / HOST_LOG)
+                              if (run_dir / HOST_LOG).exists() else None),
         "fork_sorted_run_seeks_per_scan": (
             tickers["rocksdb.sorted.run.seek"] / seeks
             if seeks and "rocksdb.sorted.run.seek" in tickers else None),
@@ -130,6 +178,11 @@ def evaluate(pairs: list[tuple[int, dict, dict]], stall_margin: float,
                for pair, _, patched in pairs
                if patched["fork_point_probes"] != patched["filter_checks"]]
     invariant("probe_identity", pairs and not unequal, unequal)
+    broken = [{"pair": pair,
+               "problems": patched["host_log_problems"] or ["no host log"]}
+              for pair, _, patched in pairs
+              if patched["host_log_problems"] != []]
+    invariant("host_log_consistency", pairs and not broken, broken)
 
     def rel(metric):
         return [parity.relative(float(patched[metric]), float(stock[metric]))

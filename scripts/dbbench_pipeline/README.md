@@ -102,7 +102,9 @@ wired into `13` fails. Wire each step in the change that builds its component.
   freezes it, and reopens it under several `level_target_multipliers`
   vectors and through the `setoptions` step. It checks the scores and the
   pending estimate against RocksDB's formulas, and that bad vectors are
-  refused. Report: `$PREFLIGHT_WORK_DIR/act1_report.json`.
+  refused. Report: `$PREFLIGHT_WORK_DIR/act1_report.json`. The same report
+  carries, under `settle`, two checks of the `settle` step (D-13 §6): it
+  passes on a settled tree and writes a host log, and it refuses a due one.
 - **Step 4, ACT-4** (about 10 minutes, plus one full build the first time):
   - `01c_build_stock_db_bench.sh` builds *stock* RocksDB, meaning upstream
     11.1.1 (`STOCK_ROCKSDB_COMMIT`), with 01 and 02's flags, into
@@ -112,6 +114,9 @@ wired into `13` fails. Wire each step in the change that builds its component.
     every multiplier set to 1.
   - Both arms run 03's flags (`dbbench_shared_flags` in `config.sh`). They
     are judged on the 2026-08-22 gate's limits, taken from 09.
+  - The patched arm also writes the host log (`--rl_host_log`), as every
+    measured arm will, so parity includes its cost. Each patched log must be
+    consistent with itself (`host_log_consistency`).
   - "Undecided" (too few pairs for the observed spread) fails the step.
     Raise `PARITY_PAIRS` and rerun.
 
@@ -215,6 +220,23 @@ supplies a diagnostic garbage-free physical-size reference without entering
 measured write amplification. Formal space amplification uses the measured
 pre-compaction SST bytes divided by RocksDB's exported
 `estimate-live-data-size`, not the post-compaction file size.
+
+**Programme 1's db_bench steps** (plan WP4; 03 adopts them with its Programme 1
+arms, plan §5):
+
+- `--rl_host_log=<path>` (needs `--statistics`) writes the host log, one JSON
+  object per line (`lib/rocksdb/db/rl_controller_host.h`):
+  - `h`: H, the live SST bytes, with the operation count after every flush and
+    compaction;
+  - `job_begin`/`job_end`: per compaction, the start and output level, S, O,
+    X, the trivial-move flag and when the start level became due;
+  - `stamp`: `settle`, `measure_start`, `drain_start` and `drain_end`, each
+    with the operation count, H, cumulative stall micros, the per-level read
+    counters and every ticker.
+- `settle` runs `WaitForCompact` with flushes, then holds for
+  `--rl_settle_hold_seconds` (10) with no compaction pending and L0 below its
+  trigger. It prints `RL_SETTLED ok=<0|1> …`, and a failed hold ends the run.
+- `mixgraph` prints `RL_MEASURE_START_OP <n_w>` before its first operation.
 
 Important limitations:
 

@@ -22,6 +22,15 @@ so it pins every over-target level's scaled target to the byte.
 
 A check whose tree cannot show the effect it tests fails as insensitive, so a
 geometry change can never make a check pass by being blind.
+
+The same binary's other new fork step, WP4's `settle` (PREREGISTRATION D-13
+§6), is checked beside ACT-1 and reported apart from it:
+
+  settle_passes       on the tree `build` left settled: RL_SETTLED ok=1 after
+                      the full hold, exit 0, and a host log whose settle stamp
+                      says ok (the Release binary writes the host log)
+  settle_refuses_due  on the frozen tree, which the score model finds due:
+                      RL_SETTLED ok=0 and a non-zero exit
 """
 
 from __future__ import annotations
@@ -84,6 +93,9 @@ STATS_ROW = re.compile(r"^\s*L(\d+)\s+\d+/\d+\s+[\d.]+\s+\S+\s+(\S+)", re.M)
 PENDING = re.compile(r"^Estimated pending compaction bytes: (\d+)$", re.M)
 SST_LEVEL = re.compile(r"^--- level (\d+) --- version# \d+")
 SST_FILE = re.compile(r"^ (\d+):(\d+)\[")
+SETTLED = re.compile(r"^RL_SETTLED ok=(\d) wait_micros=(\d+) hold_micros=(\d+)",
+                     re.M)
+SETTLE_HOLD_SECONDS = 1
 
 
 def vector_arg(vector) -> str:
@@ -260,6 +272,45 @@ def evaluate(obs: dict) -> dict:
     return checks
 
 
+def evaluate_settle(obs: dict) -> dict:
+    """The two settle checks. obs keys: settle_ok -> {"exit_code", "output",
+    "host_log"}; settle_due -> {"exit_code", "output"}; absent (the frozen
+    tree's sstables)."""
+    checks = {}
+    good = obs["settle_ok"]
+    printed = SETTLED.search(good["output"])
+    try:
+        records = [json.loads(line) for line in good["host_log"].splitlines()
+                   if line.strip()]
+    except json.JSONDecodeError:
+        records = []
+    stamps = [r for r in records
+              if r.get("type") == "stamp" and r.get("name") == "settle"]
+    checks["settle_passes"] = {
+        "passed": bool(
+            good["exit_code"] == 0 and printed is not None and
+            printed.group(1) == "1" and
+            int(printed.group(3)) >= SETTLE_HOLD_SECONDS * 1_000_000 and
+            records and records[0].get("type") == "header" and
+            len(stamps) == 1 and stamps[0].get("ok") == 1),
+        "details": {"exit_code": good["exit_code"],
+                    "printed": printed.group(0) if printed else None,
+                    "host_log_records": len(records),
+                    "settle_stamps": stamps}}
+
+    files = obs["absent"]["sstables"]
+    due = sorted(level for level, score in model_scores(files, ONES).items()
+                 if score >= 1.0)
+    bad = obs["settle_due"]
+    printed = SETTLED.search(bad["output"])
+    checks["settle_refuses_due"] = {
+        "passed": bool(due and bad["exit_code"] != 0 and
+                       printed is not None and printed.group(1) == "0"),
+        "details": {"due_levels_model": due, "exit_code": bad["exit_code"],
+                    "printed": printed.group(0) if printed else None}}
+    return checks
+
+
 def run(db_bench: Path, work: Path) -> dict:
     db = work / "db"
     for path in (db, work / "refused"):
@@ -283,8 +334,16 @@ def run(db_bench: Path, work: Path) -> dict:
     # Native compaction lays out L1..L4, then flushes land in L0 unmerged.
     bench("build", "--benchmarks=fillrandom,waitforcompaction", "--num=30000",
           "--use_existing_db=0")
-    bench("add_l0", "--benchmarks=overwrite,flush", "--num=2800", *FROZEN)
     obs = {}
+    settle_log = work / "settle_host_log.jsonl"
+    settle_log.unlink(missing_ok=True)
+    result = bench("settle_ok", "--benchmarks=settle", "--use_existing_db=1",
+                   f"--rl_settle_hold_seconds={SETTLE_HOLD_SECONDS}",
+                   "--statistics", f"--rl_host_log={settle_log}", check=False)
+    obs["settle_ok"] = {
+        "exit_code": result.returncode, "output": result.stdout,
+        "host_log": settle_log.read_text() if settle_log.exists() else ""}
+    bench("add_l0", "--benchmarks=overwrite,flush", "--num=2800", *FROZEN)
     view = "--benchmarks=stats,sstables"
     obs["absent"] = observe(bench("absent", view, *FROZEN).stdout)
     obs["ones"] = observe(bench(
@@ -316,6 +375,12 @@ def run(db_bench: Path, work: Path) -> dict:
                    check=False)
     obs["refusals"]["setoptions_shrinking"] = {
         "exit_code": result.returncode, "output": result.stdout}
+    # Frozen, so WaitForCompact returns at once and the due tree stays due.
+    result = bench("settle_due", "--benchmarks=settle", *FROZEN,
+                   f"--rl_settle_hold_seconds={SETTLE_HOLD_SECONDS}",
+                   check=False)
+    obs["settle_due"] = {"exit_code": result.returncode,
+                         "output": result.stdout}
     return obs
 
 
@@ -326,17 +391,22 @@ def main() -> int:
                         help="scratch space; its db/ and refused/ are wiped")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    checks = evaluate(run(args.db_bench, args.work_dir))
-    passed = all(check["passed"] for check in checks.values())
+    obs = run(args.db_bench, args.work_dir)
+    checks = evaluate(obs)
+    settle = evaluate_settle(obs)
+    passed = all(check["passed"]
+                 for check in (*checks.values(), *settle.values()))
     report = {"criterion": "ACT-1", "passed": passed,
-              "db_bench": str(args.db_bench), "checks": checks}
+              "db_bench": str(args.db_bench), "checks": checks,
+              "settle": settle}
     rendered_report = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered_report)
     print(rendered_report, end="")
-    for name, check in checks.items():
-        print(f"[ACT-1] {name}: {'PASS' if check['passed'] else 'FAIL'}")
+    for tag, group in (("ACT-1", checks), ("settle", settle)):
+        for name, check in group.items():
+            print(f"[{tag}] {name}: {'PASS' if check['passed'] else 'FAIL'}")
     return 0 if passed else 1
 
 

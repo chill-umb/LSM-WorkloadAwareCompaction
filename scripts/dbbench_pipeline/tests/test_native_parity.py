@@ -13,17 +13,47 @@ act4 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(act4)
 
 
+def host_log(probe, positive):
+    """A consistent patched-run host log (db/rl_controller_host.h records)."""
+    tickers = dict(zip(act4.LEVEL_TICKERS, (probe, positive, 20000, 28903)))
+    empty = {"levels": [[0, 0, 0, 0], [0, 0, 0, 0]], "tickers": {}}
+    return [
+        {"type": "header", "schema": 1, "num_levels": 2, "t_us": 1,
+         "wall_us": 1},
+        {"type": "h", "cause": "flush", "job": 2, "t_us": 2, "op": 29000,
+         "h": 4000},
+        {"type": "stamp", "name": "measure_start", "t_us": 3, "op": 29000,
+         "h": 4000, **empty},
+        {"type": "job_begin", "job": 6, "t_us": 4, "op": 50000,
+         "start_level": 0, "trivial": 0, "s": 3000, "o": 0},
+        {"type": "job_end", "job": 6, "t_us": 5, "op": 51000,
+         "start_level": 0, "trivial": 0, "s": 3000, "o": 0, "x": 2900,
+         "ok": 1},
+        {"type": "h", "cause": "compaction", "job": 6, "t_us": 5,
+         "op": 51000, "h": 5000},
+        {"type": "stamp", "name": "drain_end", "t_us": 6, "op": 100000,
+         "h": 5000, "tickers": tickers,
+         "levels": [[probe - 10, positive - 5, 19990, 28000],
+                    [10, 5, 10, 903]]},
+    ]
+
+
 def write_run(path: Path, *, fork=True, gets=57205, sst=41855600 * 2,
               useful=52968, positive=25162, probe=None, stall="00:00:0.074",
-              l0_input=7989584, pending=1000, max_score=1.5):
+              l0_input=7989584, pending=1000, max_score=1.5, log=True):
     """A run directory in 22_check_native_parity.sh's layout; the lines are
-    copied from a real db_bench 11.1.1 run."""
+    copied from a real db_bench 11.1.1 run. A fork run also gets a host log
+    unless `log` is False; a list replaces its records."""
     path.mkdir(parents=True)
     fork_tickers = ""
     if fork:
         probe = useful + positive if probe is None else probe
         fork_tickers = (f"rocksdb.point.sst.probe COUNT : {probe}\n"
                         "rocksdb.sorted.run.seek COUNT : 28903\n")
+        if log:
+            records = log if isinstance(log, list) else host_log(probe, positive)
+            (path / act4.HOST_LOG).write_text(
+                "".join(json.dumps(r) + "\n" for r in records))
     scan = " ScanEntries:299816" if fork else ""
     (path / "stdout.txt").write_text(
         "filluniquerandom :       4.948 micros/op 202056 ops/sec 0.144 "
@@ -141,11 +171,60 @@ class ParityTest(unittest.TestCase):
             stock={"l0_input": float("nan")}, patched={"l0_input": float("nan")}))
         self.assertEqual(report["failed_checks"], ["mean_l0_l1_input_size"])
 
+    def test_patched_run_without_a_host_log_fails(self):
+        report = self.verdict(self.pairs(patched={"log": False}))
+        self.assertEqual(report["failed_checks"], ["host_log_consistency"])
+
+    def test_inconsistent_host_log_fails(self):
+        records = host_log(52968 + 25162, 25162)
+        records[-1]["levels"][1][3] += 1  # a seek the ticker never saw
+        report = self.verdict(self.pairs(patched={"log": records}))
+        self.assertEqual(report["failed_checks"], ["host_log_consistency"])
+
     def test_too_few_pairs_is_undecided_not_passed(self):
         noisy = self.pairs(n=2)
         noisy[1][2]["write_amplification"] *= 1.03
         report = self.verdict(noisy)
         self.assertEqual(report["verdict"], "undecided")
+
+
+class HostLogTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / act4.HOST_LOG
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def problems(self, records):
+        self.path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return act4.host_log_problems(self.path)
+
+    def test_consistent_log_has_no_problems(self):
+        self.assertEqual(self.problems(host_log(100, 40)), [])
+
+    def test_each_defect_is_named(self):
+        cases = {
+            "no header first": lambda r: r.pop(0),
+            "no drain_end stamp": lambda r: r.pop(),
+            "no measure_start stamp": lambda r: r.pop(2),
+            "1 jobs began, 0 ended": lambda r: r.pop(4),
+            "last H sample": lambda r: r[-1].update(h=4999),
+            "operation count decreased": lambda r: r[3].update(op=60000),
+            "levels sum": lambda r: r[-1]["levels"][0].__setitem__(0, 0),
+        }
+        for expected, edit in cases.items():
+            with self.subTest(expected):
+                records = host_log(100, 40)
+                edit(records)
+                found = self.problems(records)
+                self.assertTrue(any(p.startswith(expected) for p in found),
+                                found)
+
+    def test_unparsable_log_is_a_problem(self):
+        self.path.write_text("{not json\n")
+        self.assertTrue(act4.host_log_problems(self.path)[0]
+                        .startswith("unreadable"))
 
 
 if __name__ == "__main__":

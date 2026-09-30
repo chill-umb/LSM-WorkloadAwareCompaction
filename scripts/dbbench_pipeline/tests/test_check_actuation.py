@@ -2,6 +2,7 @@
 score and pending models, and that each check fails on the defect it names."""
 import copy
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 
@@ -200,6 +201,69 @@ class EvaluateTest(unittest.TestCase):
     def test_missing_refusal_case_fails(self):
         del self.obs["refusals"]["not_leveled"]
         self.assertEqual(self.failed(self.obs), ["refusals"])
+
+
+def settle_observations(files):
+    """What the two settle runs print and log when the step works."""
+    log = [{"type": "header", "schema": 1, "num_levels": act.LEVELS,
+            "t_us": 10, "wall_us": 20},
+           {"type": "stamp", "name": "settle", "t_us": 1000150, "op": 30000,
+            "h": 1500000, "ok": 1, "wait_micros": 812,
+            "hold_micros": 1000137, "levels": [], "tickers": {}}]
+    return {
+        "absent": {"sstables": files},
+        "settle_ok": {
+            "exit_code": 0,
+            "output": "RL_SETTLED ok=1 wait_micros=812 hold_micros=1000137\n",
+            "host_log": "".join(json.dumps(r) + "\n" for r in log)},
+        "settle_due": {
+            "exit_code": 1,
+            "output": "RL_SETTLED ok=0 wait_micros=3 hold_micros=41 "
+                      "reason=compaction pending\n"},
+    }
+
+
+class SettleTest(unittest.TestCase):
+    def setUp(self):
+        self.files = tree(REAL_SIZES, l0_files=5)  # L0 due (score 1.2)
+        self.obs = settle_observations(self.files)
+
+    def failed(self, obs):
+        return sorted(name for name, check in act.evaluate_settle(obs).items()
+                      if not check["passed"])
+
+    def test_working_step_passes(self):
+        self.assertEqual(self.failed(self.obs), [])
+
+    def test_failed_hold_on_the_settled_tree_fails(self):
+        self.obs["settle_ok"].update(
+            exit_code=1, output="RL_SETTLED ok=0 wait_micros=812 "
+                                "hold_micros=400 reason=compaction pending\n")
+        self.assertEqual(self.failed(self.obs), ["settle_passes"])
+
+    def test_hold_shorter_than_asked_fails(self):
+        self.obs["settle_ok"]["output"] = \
+            "RL_SETTLED ok=1 wait_micros=812 hold_micros=999999\n"
+        self.assertEqual(self.failed(self.obs), ["settle_passes"])
+
+    def test_host_log_must_carry_one_ok_settle_stamp(self):
+        good = self.obs["settle_ok"]["host_log"]
+        for log in ("", good.splitlines()[0] + "\n",
+                    good.replace('"ok": 1', '"ok": 0'), "{broken\n"):
+            with self.subTest(log=log[:40]):
+                self.obs["settle_ok"]["host_log"] = log
+                self.assertEqual(self.failed(self.obs), ["settle_passes"])
+
+    def test_due_tree_accepted_fails(self):
+        self.obs["settle_due"].update(
+            exit_code=0,
+            output="RL_SETTLED ok=1 wait_micros=3 hold_micros=1000041\n")
+        self.assertEqual(self.failed(self.obs), ["settle_refuses_due"])
+
+    def test_tree_with_nothing_due_is_insensitive(self):
+        files = tree([act.BASE // 4, *REAL_SIZES[1:]], l0_files=7)
+        self.assertEqual(self.failed(settle_observations(files)),
+                         ["settle_refuses_due"])
 
 
 if __name__ == "__main__":
