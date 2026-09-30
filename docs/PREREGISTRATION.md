@@ -1785,6 +1785,91 @@ record if any value marked here is changed after an arm it governs has run.
 Such a change is a new dated entry that names this one and states what it
 supersedes.
 
+### D-14, 2026-09-30 — D-13 amended: the stall rule's time base, how q̄ is measured, and where and how the two measured profiles are computed
+
+**Recorded before any run of Programme 1.** No arm governed by D-13 has run:
+the Programme 1 binary has not been built (no node exists). This entry names
+D-13 and supersedes the parts stated below; everything else in D-13 stands.
+The owner decided items 1 and 2 and asked for item 3's stage on 2026-09-30:
+the time base after the evaluator's verifier flagged it as ambiguous, and
+$\bar q$'s measurement after the implementer found that ACT-4 cannot supply
+it. The implementer's choices within items 2 and 3 (the Gate N2 run length
+for $\bar q$; profiles per grid point, run after that point's native arms;
+the common $c$ reported, not used; clipping to $[0.5, 2]$; flows over
+`mixgraph` only) were confirmed by the owner on 2026-10-01, before any run.
+
+**1. The stall rule's time base (supersedes D-13 §8's "measured-phase wall
+time" and its "measured-phase operations per second").** The stall fraction
+is measured-phase stall seconds divided by
+`mixgraph`'s wall time: from the `measure_start` stamp ($n_w$) to the
+`drain_start` stamp. Stall seconds are still the internal-stats stall counter
+differenced from $n_w$ to the end of the drain (D-11); the drain has no user
+writes, so the two spans give the same stall seconds. Throughput uses the
+same span, as D-13 §1's $\bar q$ does.
+- *Why.* Read literally, D-13 §8 divided by the whole measured phase, drain
+  included. A policy that defers work until the drain lengthens the drain and
+  so lowers its own stall fraction: the literal rule rewarded the deferral
+  the stall rule exists to bar. Stalls can only occur while `mixgraph`
+  writes, so its time is the base on which they are a fraction.
+- The margins are unchanged: at most 0.02 on the stall fraction, at least
+  −2% on relative throughput.
+
+**2. How $\bar q$ is measured (supersedes D-13 §1's "averaged over that arm's
+ACT-4 parity repeats").** ACT-4 runs at T=2, 1M operations and without the
+settle step, so it cannot give the native arm's measured-phase throughput at
+T=10. Instead, per workload:
+- five `native` arms at T=10, run through `03` with the settle step and the
+  pipeline's default options, at the Gate N2 run length (Gate N1), on the
+  Programme 1 binary that passed the preflight;
+- $\bar q$ is the mean of their `throughput_ops_per_second` (operations from
+  $n_w$ to the end of `mixgraph`, over that span's wall time, as `04`
+  reports it);
+- the value is added as a dated amendment and frozen before any $\Theta_s$
+  run, as D-13 §1 already requires.
+
+**3. The two measured profiles of $\Theta_s$ (supersedes D-13 §4's "the
+native arm's runs of the same (workload, $T$)" and fixes the computation).**
+- **Where.** Both profiles come from the `native` arms of the same
+  (workload, $T$, $K_0$, base size) point of $\Theta_s$, pooled over their
+  repeats, not from one default-configuration native arm per (workload,
+  $T$): the survival-weighted $m_1 = f_0K_0F/C_1$ depends on $K_0$ and $C_1$,
+  and the depth $L$ on the base size. So each (workload, $T$) has up to nine
+  vectors of each profile. A point's profile arms run after its native arms,
+  in the same session (CMP-8's session id), not interleaved with them: for
+  these arms this supersedes D-13 §5's "interleaved", since a profile cannot
+  run before the runs it is measured from.
+- **How**, by `scripts/dbbench_pipeline/23_static_profiles.py`:
+  - *The settled tree.* $L$, the deepest populated level, and $B_L$, its
+    bytes, are read at $n_w$: from the first `compaction_release` snapshot
+    after the `measure_start` stamp, before which only flushes (into L0)
+    change the tree. $L$ must agree across the pooled runs.
+  - *Last-level-emptying*: $m_{L-1} = 2$, every other level 1.
+  - *Survival-weighted* (Theorem A.2(ii)): $f_i = \lambda/v_i$ for
+    $i = 0..L-1$, with $v_i$ the merged bytes leaving level $i$ per user
+    byte (Lemma D.7's $a_i - t_i$, from the host log's job records) and
+    $\lambda = \big(\tfrac{B_L}{K_0F}\prod_iv_i\big)^{1/L}$; then
+    $m_1 = f_0K_0F/C_1$ and $m_{i+1} = f_im_i/T$ for $1 \le i \le L-2$; the
+    levels from $L$ down keep $m = 1$.
+  - $v_i$ and $F$, the mean flush file size, are measured over `mixgraph`
+    only ($n_w$ to the `drain_start` stamp): these are steady-state flows,
+    and the drain is a transient whose last flush is partial.
+  - A common overlap constant $c$ cancels from the optimum, so "at the
+    measured $c$" (D-13 §4) means $c_i = o_i/f_i$ is measured and reported
+    per level, not used; if the $c_i$ differ, that is a limit of Theorem
+    A.2's assumption, reported with the profile.
+  - An entry outside $[0.5, 2.0]$ (A-Impl-7's bounds) is clipped to it and
+    the clipping reported. A profile that would then make a level's target
+    smaller than the level's above is refused, not repaired.
+  - A level with no merged bytes leaving it ($v_i = 0$) has no finite
+    optimum; that profile is then not computed, the reason is recorded, and
+    the other profile is still computed. Merges out of level $L$ or below
+    (the tree deepened during the phase) are reported.
+  - Theorem A.2's fixed-point step stands: the same computation on the
+    profile's own runs gives the next iterate.
+
+**Falsification.** As D-13's: this entry fails as a record if any of it is
+changed after an arm it governs has run.
+
 ---
 
 ## 2. Gate verdicts as measured

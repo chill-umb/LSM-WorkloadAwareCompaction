@@ -384,8 +384,7 @@ SETTLED = re.compile(r"^RL_SETTLED ok=(\d+)", re.M)
 PROGRAMME1_FIELDS = (
     "measured_operations", "measured_operations_host_log",
     "mixgraph_seconds", "throughput_ops_per_second",
-    "measured_stall_seconds", "stall_fraction", "measured_phase_seconds",
-    "stall_fraction_measured_phase", "controller_cpu_seconds",
+    "measured_stall_seconds", "stall_fraction", "controller_cpu_seconds",
     "flush_bytes_written", "compaction_bytes_written", "sst_bytes_written",
     "compaction_bytes_host_log", "user_bytes_written",
     "write_amplification_measured", "filter_probes", "block_reading_probes",
@@ -429,10 +428,8 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     (c_s / q-bar) times the sum, over the intervals between version
     installs, of H times the operations served in the interval (Lemma D.15).
     Throughput and the stall fraction are over mixgraph's wall time, from
-    measure_start to drain_start, the span of D-13 §1's q-bar; the drain
-    serves no operation and stalls no write. D-13 §8's literal reading, the
-    drain in the denominator, is reported beside it as
-    stall_fraction_measured_phase until the owner settles which governs."""
+    measure_start to drain_start (PREREGISTRATION D-14 §1, the span of
+    q-bar); the drain serves no operation and stalls no write."""
     contract, contract_hash = research_objective.load_contract()
     row: dict[str, object] = {name: math.nan for name in PROGRAMME1_FIELDS}
     row.update(settle_ok=math.nan, objective_status="not programme 1",
@@ -514,7 +511,6 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
         raise InvalidArm(f"flush jobs in the measured phase: event log "
                          f"{sorted(flushed)}, host log {sorted(flushes_host_log)}")
     mixgraph_seconds = (mix_end["t_us"] - start["t_us"]) / 1e6
-    measured_seconds = (end["t_us"] - start["t_us"]) / 1e6
     stall_seconds = (end["stall_micros"] - start["stall_micros"]) / 1e6
     user_bytes = delta("rocksdb.bytes.written")
     arm = metadata.get("arm", "")
@@ -527,10 +523,6 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
                                          mixgraph_seconds),
         measured_stall_seconds=stall_seconds,
         stall_fraction=divide(stall_seconds, mixgraph_seconds),
-        # D-13 §8 read literally (the drain in the denominator); reported
-        # until the owner settles which reading governs.
-        measured_phase_seconds=measured_seconds,
-        stall_fraction_measured_phase=divide(stall_seconds, measured_seconds),
         # OBJ-6: native and static arms run no controller.
         controller_cpu_seconds=(0.0 if arm == "native" or
                                 arm.startswith("static:") else math.nan),

@@ -337,7 +337,7 @@ class EvaluatorTest(unittest.TestCase):
 
     def test_stall_is_differenced_to_the_end_of_the_drain(self):
         # 0.1 s more stall at drain_end than at drain_start: counted, over
-        # mixgraph's 10 s; the literal D-13 §8 fraction divides by 14 s.
+        # mixgraph's 10 s (D-14 §1), not the 14 s of the whole phase.
         self.run.edit("host_log.jsonl", '"wall_us":5020000000,"op":1000,'
                       '"h":15000,"stall_micros":2500500',
                       '"wall_us":5020000000,"op":1000,"h":15000,'
@@ -345,8 +345,10 @@ class EvaluatorTest(unittest.TestCase):
         row = self.row()
         self.assertAlmostEqual(row["measured_stall_seconds"], 2.6)
         self.assertAlmostEqual(row["stall_fraction"], 0.26)
-        self.assertAlmostEqual(row["measured_phase_seconds"], 14.0)
-        self.assertAlmostEqual(row["stall_fraction_measured_phase"], 2.6 / 14)
+
+    def test_legacy_measured_phase_column_is_not_overwritten(self):
+        # parse_drain's D-11 phase (rlresume 4.999e9 to drain end 5.020e9).
+        self.assertAlmostEqual(self.row()["measured_phase_seconds"], 21.0)
 
     def test_no_read_counts_in_the_drain(self):
         self.assertEqual(self.row()["drain_read_ticks"], 0)

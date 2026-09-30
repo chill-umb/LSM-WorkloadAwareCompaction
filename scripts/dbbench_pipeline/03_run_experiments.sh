@@ -158,6 +158,16 @@ for arm in $EXPERIMENT_ARMS; do
     fi
   fi
 done
+# A vector from STATIC_PROFILE_<name> was measured at one point of Theta_s
+# (D-14 §3), so it runs at that point's T and size only.
+for arm in $EXPERIMENT_ARMS; do
+  if [[ "$arm" == static:* && "$arm" != static:uniform_* ]] &&
+     (( $(wc -w <<< "$SIZE_RATIOS") > 1 || $(wc -w <<< "$WORKLOAD_SIZES_M") > 1 )); then
+    echo "Arm $arm is a measured profile, one per (T, size); run it with one" \
+         "SIZE_RATIOS and one WORKLOAD_SIZES_M value." >&2
+    exit 1
+  fi
+done
 # native and static:uniform_1 are one configuration with one fingerprint;
 # both in a matrix would be the same runs twice.
 if (( ${#m_one_arm[@]} > 1 )); then

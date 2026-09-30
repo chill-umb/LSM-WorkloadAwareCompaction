@@ -193,12 +193,10 @@ e. Gate N2, the static comparator. It cannot start in the first session.
       it needs its preregistered config file (§0.6 item 7: reference level,
       margins, ω_max, block length, k, n_min), which does not exist yet, and
       it reads host logs, which the pre-Programme-1 artifacts do not have.
-   2. **q̄ per workload** (D-13 §1), recorded in
-      `config/research_objective_contract.json` and in a dated D-13
-      amendment before any Θ_s run. D-13 defines it as the native arm's
-      measured-phase throughput at T=10 over its ACT-4 repeats, but ACT-4
-      runs at T=2; until the owner settles that, the candidate measurement
-      is `native` at T=10 through `03`, e.g. for `Assoc`:
+   2. **q̄ per workload** (PREREGISTRATION D-14 §2), recorded in
+      `config/research_objective_contract.json` and in a dated amendment
+      before any Θ_s run: the mean throughput of five `native` arms at T=10
+      through `03`, e.g. for `Assoc`:
 
       ```bash
       EXPERIMENT_ARMS=native SIZE_RATIOS=10 WORKLOAD_SIZES_M=<N2 size> \
@@ -213,11 +211,21 @@ e. Gate N2, the static comparator. It cannot start in the first session.
       For the power-law workload add `WORKLOAD_SKEW=2 MIX_GET_RATIO=0.95
       MIX_PUT_RATIO=0.05 MIX_SEEK_RATIO=0 WORKLOAD_PROFILE=powerlaw-get95-v1`
       (03 refuses the power law under the Assoc profile).
-   3. **The two measured profiles** of Θ_s: survival-weighted (Theorem A.2)
-      and last-level-emptying, as vectors, from the native runs. No stage
-      computes them yet: that is new analysis. `03` checks each vector as
-      RocksDB will (one entry per level, entry 0 = 1, entries in
-      [0.5, 2.0], no level's target below the one above it).
+   3. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
+      that point's `native` arms (run them first, in the same session):
+
+      ```bash
+      python3 scripts/dbbench_pipeline/23_static_profiles.py \
+        /mnt/nvme/n2-assoc/T<T>-b<base>-k<K0>/<N2 size>M/T<T>/repeat-*/native \
+        --output /mnt/nvme/n2-assoc/T<T>-b<base>-k<K0>/profiles.json
+      ```
+
+      It prints `STATIC_PROFILE_survival_weighted=…` and
+      `STATIC_PROFILE_last_level_emptying=…` for the next `03` call, and
+      records the inputs, the measured overlap constants and any clipping in
+      `profiles.json`. `03` checks each vector as RocksDB will (one entry per
+      level, entry 0 = 1, entries in [0.5, 2.0], no level's target below
+      the one above it).
    4. **The price-measurement method** of step d, which D-13 does not
       preregister (see `18_calibrate_prices.py`), accepted by the owner.
 

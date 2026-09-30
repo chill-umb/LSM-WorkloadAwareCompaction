@@ -2,9 +2,9 @@
   "schema_version": 1,
   "programme": "Programme 1 (research fork of 2026-09-29)",
   "contract_status": "frozen",
-  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the two reference rates from the native arm's ACT-4 runs (a dated amendment to D-13), and the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
+  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the two reference rates from five native arms at T=10 per workload (D-14 §2; a dated amendment), and the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
   "authority": {
-    "decisions": "docs/PREREGISTRATION.md D-13",
+    "decisions": "docs/PREREGISTRATION.md D-13, as amended by D-14",
     "theory": "docs/PATHWAYS.md, 2026-09-29 revision"
   },
   "replaces": {
@@ -68,7 +68,7 @@
     ]
   },
   "reference_rate": {
-    "rule": "native arm's measured-phase operations per second at T=10, mean over its ACT-4 repeats on the Programme 1 binary, frozen before any static-class run",
+    "rule": "mean measured-phase throughput (n_w to the end of mixgraph) of five native arms at T=10 per workload, run through 03 with the settle step at the Gate N2 run length on the Programme 1 binary, frozen before any static-class run (D-14 §2, superseding D-13 §1's ACT-4 repeats)",
     "ops_per_second": {
       "assoc": null,
       "powerlaw_get95": null
@@ -108,9 +108,9 @@
     ],
     "profiles": {
       "uniform_1": 1.0,
-      "survival_weighted": "Theorem A.2 at measured c and v_i = a_i - t_i, from the native arm's runs of the same workload and T",
+      "survival_weighted": "Theorem A.2(ii): f_i = lambda / v_i with v_i = a_i - t_i measured over mixgraph (n_w to drain_start) on the native arms of the same (workload, T, K0, base size) point, L and B_L from the settled tree at n_w; c_i measured and reported; entries clipped to [0.5, 2.0]; computed by 23_static_profiles.py (D-14 §3)",
       "last_level_emptying": {
-        "level": "the level just above the native arm's deepest populated level, same workload and T, on its settled tree at n_w",
+        "level": "the level just above the deepest populated level of the native arms of the same (workload, T, K0, base size) point, on their settled tree at n_w (D-14 §3)",
         "multiplier": 2.0,
         "other_levels": 1.0,
         "applied_from": "the load"
@@ -146,7 +146,7 @@
   },
   "stall_rule": {
     "confidence_level": 0.95,
-    "stall_fraction": "measured-phase stall seconds / measured-phase wall time",
+    "stall_fraction": "measured-phase stall seconds / mixgraph wall time (measure_start to drain_start stamps; D-14 §1)",
     "stall_fraction_margin": 0.02,
     "stall_seconds_source": "internal-stats Cumulative stall line differenced over the measured phase (D-11); never rocksdb.stall.micros",
     "throughput_relative_margin": 0.02
@@ -219,5 +219,12 @@
     "rocksdb_fork_programme1_binary": null,
     "rocksdb_fork_programme1_parent": null
   },
-  "frozen_date": "2026-09-30"
+  "frozen_date": "2026-09-30",
+  "amendments": [
+    {
+      "date": "2026-09-30",
+      "entry": "PREREGISTRATION D-14",
+      "reason": "before any governed run: the stall fraction's time base is mixgraph's wall time (the literal measured-phase base rewarded deferral into the drain); q-bar is measured by native arms at T=10, since ACT-4 runs at T=2; the survival-weighted profile's computation is fixed"
+    }
+  ]
 }

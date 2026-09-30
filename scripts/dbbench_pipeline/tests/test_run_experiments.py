@@ -268,6 +268,8 @@ class RefusalTest(unittest.TestCase):
           "MIX_SEEK_RATIO": "0"}, "WORKLOAD_PROFILE"),
         ({"SETTLE_HOLD_SECONDS": "5"}, "preregisters"),
         ({"EXPERIMENT_ARMS": "native native"}, "twice"),
+        ({"EXPERIMENT_ARMS": "static:held", "STATIC_PROFILE_held": "1:1:2:1",
+          "SIZE_RATIOS": "2 6"}, "one per (T, size)"),
         ({"SESSION_ID": "a b"}, "SESSION_ID must be"),
     )
 
