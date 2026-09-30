@@ -160,6 +160,7 @@ dated record.
 1. The objective change (§0.3), the headline priority factor $\beta^\star$,
    the reference operation rate $\bar q$ per workload, and the two money
    prices the others are converted with: the instance price per device-second
+   (one core-second, the instance price over its cores; PREREGISTRATION D-15)
    and the storage price $c_s > 0$ per byte-second (D §1).
 2. An amendment to P0-7 (write accounting): exact identity plus measured
    overlap constant.
@@ -339,7 +340,8 @@ so the metric does not depend on the page cache.
 byte written; $c_f$ per filter probe, a CPU cost that is not negligible on fast
 storage [Zhu et al.]; $c_{blk}$ per block-reading probe; $c_{sk}$ per run seek:
 each is the device time the operation takes, measured once per machine,
-converted at a fixed instance price per device-second. $c_s$ per byte held per
+converted at a fixed instance price per device-second, a device being one core
+(D-15: every priced operation runs on one thread). $c_s$ per byte held per
 second is a storage price, and $c_s > 0$ always. At $c_s = 0$ the space term
 vanishes: space priority becomes balanced mode, and in every mode expanding
 levels and holding garbage cost nothing. The two money prices are fixed in
@@ -1492,10 +1494,10 @@ comparable to $C_1$ at small base sizes; the last level; and the level above the
 last whenever the last level is far from its target, since its fanout
 $f_{L-1} = B_L/(m_{L-1}C_{L-1})$ is set by the last level's fill (at T=10 on
 `Assoc`, $f_3 \approx 0.6$ against $f_2 = 10$), so the T=10 pool may be L2
-alone. Existing artifacts already cover levels that complete at least two
-turnovers per run — roughly L1–L6 at T=2 and L1–L2 at T=10. Levels without
-enough turnovers in existing artifacts (L3 at T=10) are decided on Gate N2's
-static runs.
+alone. Gate N1's pilot native runs (PREREGISTRATION D-16; the 2026-09-11
+programme's artifacts are out of scope) decide every level that completes at
+least $n_{\min}$ turnovers in them. Levels with fewer (likely L6 at T=2) are
+decided on Gate N2's native arms at the default point.
 
 **Scope decision (2026-09-29): propagation is claimed only where the tree is
 deep enough to pool.** A pool needs at least two admitted levels. L1 and the
@@ -2250,17 +2252,22 @@ tests and the preflight).**
    plan §6). Every later gate that needs a long node run starts only with a
    preflight marker matching the current `db_bench`, plugin and code hashes.
 
-**Gate N1 — admission test on existing artifacts (no node time).** PROP-1 for
-the levels existing runs cover. It fixes the run length: the measured phase must
-contain at least $n_{\text{turn}}$ turnovers of the deepest pooled level, with
-$n_{\text{turn}}$ fixed in advance (10 suggested). A cell with no pool (T=10 at
-the current size, G §4 scope decision) applies the same rule to its deepest
-interior level with enough turnovers, L2: about 4 minutes at the old ingest
-rate, against about 40 if L3 were pooled. Levels that existing artifacts cannot
-decide (fewer than the minimum turnovers, e.g. L3 at T=10) are decided on
-Gate N2's static runs, sized provisionally as if pooled: at least
-$\lceil n_{\min}/n_{\text{turn}}\rceil$ static runs of $n_{\text{turn}}$
-turnovers each.
+**Gate N1 — admission test on pilot native runs (node time: about 18 runs).**
+Amended 2026-10-01 (PREREGISTRATION D-16): the 2026-09-11 programme's artifacts
+are out of scope (owner, 2026-09-30) and carry no host log, so Gate N1 runs its
+own pilot `native` arms at the default point, three per (workload, $T$). PROP-1
+for the levels the pilots decide. It fixes the run length: the measured phase
+must contain at least $n_{\text{turn}}$ turnovers of the deepest pooled level,
+with $n_{\text{turn}}$ = 10 (D-16); a candidate the pilots leave undecided
+counts as pooled for this, as below. A cell with no pool (T=10 at the current
+size, G §4 scope decision) applies the same rule to its deepest interior level
+with enough turnovers, L2: about 4 minutes at the old ingest rate, against
+about 40 if L3 were pooled. The load stays fixed and only `mixgraph` grows, so
+the tree the pools were decided on is the tree every later run settles. Levels
+the pilots cannot decide (fewer than the minimum turnovers, e.g. L6 at T=2)
+are decided on Gate N2's native arms at the default point, sized provisionally
+as if pooled: at least $\lceil n_{\min}/n_{\text{turn}}\rceil$ static runs
+of $n_{\text{turn}}$ turnovers each.
 
 **Gate N2 — static comparator on the new binary.** ACT-4 (native parity) first.
 Then $\Theta_s$ on `Assoc` and one Zipfian workload at T = 2, 6 and 10, in the

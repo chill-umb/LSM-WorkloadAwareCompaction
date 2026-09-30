@@ -175,10 +175,18 @@ SETTLE_HOLD_SECONDS="${SETTLE_HOLD_SECONDS:-10}"
 # copies the file into every arm and records its hash in the fingerprint; an
 # arm run before it exists is scored without J (04: "no prices").
 PRICES_FILE="${PRICES_FILE:-$DBBENCH_BUILD_DIR/prices.json}"
-# 18's tree: keys loaded, operations per read benchmark, and T.
-PRICE_KEYS="${PRICE_KEYS:-1000000}"
+# 18's read benchmarks (D-15 §3): operations per process.
 PRICE_READS="${PRICE_READS:-1000000}"
-PRICE_SIZE_RATIO="${PRICE_SIZE_RATIO:-10}"
+
+# PREREGISTRATION D-16 §2: every Programme 1 tree loads the same keys, and a
+# longer run lengthens mixgraph only. The count is the rungs' common load in
+# config/admission_test.json. Needs PYTHON and PROJECT_ROOT.
+programme1_load_operations() {
+  "$PYTHON" -c 'import json, sys
+r = json.load(open(sys.argv[1]))["rungs"][0]
+print(r["size_millions"] * 10**6 * r["load_percent"] // 100)' \
+    "$PROJECT_ROOT/config/admission_test.json"
+}
 
 # Output. Put DB_ROOT on the storage device being evaluated, not /tmp.
 RUN_NAME="${RUN_NAME:-$(date +%Y%m%d-%H%M%S)}"

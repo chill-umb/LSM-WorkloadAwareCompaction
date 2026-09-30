@@ -4,7 +4,7 @@
   "contract_status": "frozen",
   "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the two reference rates from five native arms at T=10 per workload (D-14 §2; a dated amendment), and the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
   "authority": {
-    "decisions": "docs/PREREGISTRATION.md D-13, as amended by D-14",
+    "decisions": "docs/PREREGISTRATION.md D-13, as amended by D-14 and D-15",
     "theory": "docs/PATHWAYS.md, 2026-09-29 revision"
   },
   "replaces": {
@@ -56,12 +56,15 @@
   },
   "prices": {
     "currency": "USD",
-    "instance_price_per_device_second": 0.00027055555555555557,
+    "instance_price_per_second": 0.00027055555555555557,
+    "instance_cores": 16,
+    "price_per_core_second": 1.6909722222222223e-05,
+    "price_per_core_second_rule": "instance_price_per_second / instance_cores: every priced operation runs on one thread and occupies one core (D-15 §3a)",
     "instance_price_source": "AWS us-east-1 on-demand, m8a.4xlarge, $0.974 per hour (16 physical Zen 5 cores, 64 GiB), retrieved 2026-09-30; closest public match to Chameleon compute_zen5_grado",
     "storage_price_per_byte_second": 3.0441400304414005e-17,
     "storage_price_source": "AWS us-east-1 EBS gp3, $0.08 per GB-month, GB = 1e9 bytes, month = 730 hours, retrieved 2026-09-30",
     "storage_price_must_be_positive": true,
-    "device_times": "c_w, c_f, c_blk and c_sk measured on the node (OBJ-2), times the instance price",
+    "device_times": "c_w, c_f, c_blk and c_sk are core-seconds per unit, times price_per_core_second, measured on the node by 18_calibrate_prices as D-15 §3 fixes: c_w from the q-bar native arms' own flush and compaction jobs, the read prices as marginal times from slopes across trees at T = 2, 6 and 10; median of five repeats (reads) or of the q-bar runs (writes)",
     "storage_price_sensitivity": [
       0.5,
       2.0
@@ -149,7 +152,8 @@
     "stall_fraction": "measured-phase stall seconds / mixgraph wall time (measure_start to drain_start stamps; D-14 §1)",
     "stall_fraction_margin": 0.02,
     "stall_seconds_source": "internal-stats Cumulative stall line differenced over the measured phase (D-11); never rocksdb.stall.micros",
-    "throughput_relative_margin": 0.02
+    "throughput_relative_margin": 0.02,
+    "bounds": "the ends of the two-sided 95% paired Student-t interval (pipeline_stats.ci95): the stall bound is its upper end and the throughput bound its lower end, each a one-sided 97.5% bound (D-15 §1)"
   },
   "retired_for_this_fork": [
     "P0-1 as a constraint",
@@ -225,6 +229,17 @@
       "date": "2026-09-30",
       "entry": "PREREGISTRATION D-14",
       "reason": "before any governed run: the stall fraction's time base is mixgraph's wall time (the literal measured-phase base rewarded deferral into the drain); q-bar is measured by native arms at T=10, since ACT-4 runs at T=2; the survival-weighted profile's computation is fixed"
+    },
+    {
+      "date": "2026-10-01",
+      "entry": "PREREGISTRATION D-15",
+      "reason": "before any governed run and before any price was measured: prices per core-second instead of per whole-machine second (a one-thread operation was charged 16 cores against c_s); the measurement method of the device prices; the stall rule's bounds read as the ends of the two-sided 95% interval; CMP-7's competitor set"
     }
-  ]
+  ],
+  "suite_robustness": {
+    "competitors": "static configurations run with the same setting on every workload (same fingerprint without the workload's own segments; 07 config_key)",
+    "excluded": "the survival-weighted and last-level-emptying profiles, computed per workload, unless a vector is identical on every workload; they stay in theta_star(w), so every regret is against the whole class",
+    "consequence": "the min-max can only rise, so CMP-7 is easier for the controller than over the whole class; stated beside every CMP-7 result, with the excluded configurations listed",
+    "decided_in": "D-15 §2"
+  }
 }

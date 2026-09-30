@@ -271,7 +271,16 @@ class RefusalTest(unittest.TestCase):
         ({"EXPERIMENT_ARMS": "static:held", "STATIC_PROFILE_held": "1:1:2:1",
           "SIZE_RATIOS": "2 6"}, "one per (T, size)"),
         ({"SESSION_ID": "a b"}, "SESSION_ID must be"),
+        # D-16 §2: a long Programme 1 run loads 2.9M keys; 20M at 29% is 5.8M.
+        ({"WORKLOAD_SIZES_M": "20"}, "Programme 1 arms must load 2900000"),
     )
+
+    def test_a_rung_passes_the_load_check(self):
+        # 29M at 10% loads 2.9M keys, so 03 goes on to the preflight check.
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = run03(Path(tmp), WORKLOAD_SIZES_M="29", LOAD_PERCENT="10",
+                        PREFLIGHT_MARKER=str(Path(tmp) / "none"))
+            self.assertEqual(ran.returncode, 7, ran.stderr)
 
     def test_refusals(self):
         for overrides, message in self.CASES:

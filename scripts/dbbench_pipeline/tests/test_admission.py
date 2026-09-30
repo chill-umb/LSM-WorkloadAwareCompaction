@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 PIPELINE = Path(__file__).resolve().parents[1]
+PREREGISTERED = PIPELINE.parents[1] / "config" / "admission_test.json"
 spec = importlib.util.spec_from_file_location(
     "admission_test", PIPELINE / "19_admission_test.py")
 adm = importlib.util.module_from_spec(spec)
@@ -177,6 +178,166 @@ class ConfigTest(unittest.TestCase):
             adm.validate_config({k: v for k, v in self.GOOD.items() if k != "seed"})
 
 
+class PreregisteredConfigTest(unittest.TestCase):
+    """config/admission_test.json, PREREGISTRATION D-16."""
+
+    def setUp(self):
+        self.raw = json.loads(PREREGISTERED.read_text())
+
+    def test_it_validates_at_every_t(self):
+        for ratio in (2.0, 6.0, 10.0):
+            config = adm.for_size_ratio(self.raw, ratio)
+            adm.validate_config(config)
+            # The fill margins clear the file granularity of L2 (G §4).
+            floor = 512 * 2**10 / (16 * 2**20 * ratio)
+            for stat in adm.FILL_STATISTICS:
+                self.assertGreater(config["margins"][stat], floor)
+        self.assertAlmostEqual(
+            adm.for_size_ratio(self.raw, 10.0)["margins"]["passthrough_overlap"], 1.1)
+
+    def test_every_rung_loads_2_9_million_keys(self):
+        loads = {adm.load_operations(r) for r in self.raw["rungs"]}
+        self.assertEqual(loads, {2_900_000})
+        self.assertEqual(adm.mixgraph_operations(self.raw["pilot"]["rung"]),
+                         26_100_000)
+
+    def test_a_t_without_margins_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "T=14"):
+            adm.for_size_ratio(self.raw, 14.0)
+
+    def test_run_length_and_n_min_refusals(self):
+        good = adm.for_size_ratio(self.raw, 2.0)
+        rungs = good["rungs"]
+        for bad, message in (
+                ({"n_min": 30}, "exactly one of n_min"),
+                ({"n_min_rule": {"grid": [40, 20], "trials": 10}}, "increasing"),
+                ({"n_min_rule": {"grid": [20], "trials": 0}}, "trials"),
+                ({"rungs": [rungs[0], {"size_millions": 10, "load_percent": 5}]},
+                 "same number of keys"),
+                ({"rungs": [rungs[1], rungs[0]]}, "lengthen"),
+                ({"rungs": [{"size_millions": 10, "load_percent": 0}]}, "1-99")):
+            with self.assertRaisesRegex(ValueError, message, msg=bad):
+                adm.validate_config({**good, **bad})
+        without = {k: v for k, v in good.items() if k != "rungs"}
+        with self.assertRaisesRegex(ValueError, "together"):
+            adm.validate_config(without)
+
+
+class NMinRuleTest(unittest.TestCase):
+    def test_the_smallest_sufficient_grid_value(self):
+        seen = []
+
+        def rates(reference, n, config, trials, rng):
+            seen.append((n, trials))
+            return {"n": n, "sufficient": n >= 40}
+        with mock.patch.object(adm, "pseudo_level_rates", rates):
+            n_min, tried = adm.choose_n_min(
+                REFERENCE, {"n_min_rule": {"grid": [20, 30, 40, 60], "trials": 7}},
+                random.Random(1))
+        self.assertEqual(n_min, 40)
+        self.assertEqual(seen, [(20, 7), (30, 7), (40, 7)])
+        self.assertEqual(len(tried), 3)
+
+    def test_no_sufficient_value_leaves_every_candidate_undecided(self):
+        with mock.patch.object(adm, "pseudo_level_rates",
+                               lambda *a: {"sufficient": False}):
+            n_min, _ = adm.choose_n_min(
+                REFERENCE, {"n_min_rule": {"grid": [20], "trials": 1}},
+                random.Random(1))
+        self.assertIsNone(n_min)
+        settings = {**config(1.5), "reference_level": 2, "omega_max": 10.0,
+                    "n_min": None, "seed": 1}
+        result = adm.membership({2: WITH_OMEGA, 3: WITH_OMEGA}, settings, GEOMETRY)
+        self.assertEqual(result["levels"][3]["decision"], "undecided")
+        self.assertIn("no n_min", result["levels"][3]["reason"])
+
+
+    def test_values_above_half_the_reference_are_not_tried(self):
+        # 50 reference turnovers: 20 and 25 fit, 30 would overlap too much.
+        seen = []
+
+        def rates(reference, n, config, trials, rng):
+            seen.append(n)
+            return {"n": n, "sufficient": False}
+        with mock.patch.object(adm, "pseudo_level_rates", rates):
+            n_min, _ = adm.choose_n_min(
+                [REFERENCE[0][:30], REFERENCE[0][30:50]],
+                {"n_min_rule": {"grid": [20, 25, 30, 60], "trials": 1}},
+                random.Random(1))
+        self.assertEqual((n_min, seen), (None, [20, 25]))
+
+    def test_a_reference_without_turnovers_has_no_n_min(self):
+        self.assertEqual(adm.choose_n_min(
+            [[], []], {"n_min_rule": {"grid": [20], "trials": 1}},
+            random.Random(1)), (None, []))
+
+
+class RunLengthTest(unittest.TestCase):
+    RUNGS = [{"size_millions": 10, "load_percent": 29},
+             {"size_millions": 29, "load_percent": 10},
+             {"size_millions": 58, "load_percent": 5}]
+    CONFIG = {"reference_level": 2, "n_turn": 10, "rungs": RUNGS}
+
+    def per_level(self, **counts):
+        return {int(level[1:]): [[{}] * n for n in runs]
+                for level, runs in counts.items()}
+
+    def test_the_deepest_level_not_refused_at_the_slowest_run(self):
+        levels = {2: {"decision": "reference"}, 3: {"decision": "undecided"},
+                  4: {"decision": "refused"}}
+        # L3: 4 and 5 turnovers in 1M mixgraph operations each; the slower
+        # run needs 2.5M for 10. L4 is refused, so it does not count.
+        out = adm.run_length(levels, self.per_level(L2=(40, 40), L3=(4, 5),
+                                                    L4=(1, 1)),
+                             [1_000_000, 1_000_000], self.CONFIG)
+        self.assertEqual(out["level"], 3)
+        self.assertAlmostEqual(out["required_mixgraph_operations"], 2_500_000)
+        self.assertEqual(out["rung"], self.RUNGS[0])  # 7.1M mixgraph ops
+
+    def test_a_longer_rung_when_the_level_is_slow(self):
+        levels = {2: {"decision": "reference"}, 3: {"decision": "admitted"}}
+        out = adm.run_length(levels, self.per_level(L2=(9, 9), L3=(1, 2)),
+                             [1_000_000, 1_000_000], self.CONFIG)
+        self.assertEqual(out["rung"], self.RUNGS[1])  # 10M needed, 26.1M given
+
+    def test_the_reference_sets_the_length_when_nothing_else_is_left(self):
+        levels = {2: {"decision": "refused"}, 3: {"decision": "refused"}}
+        out = adm.run_length(levels, self.per_level(L2=(20, 20), L3=(1, 1)),
+                             [1_000_000, 1_000_000], self.CONFIG)
+        self.assertEqual(out["level"], 2)
+
+    def test_no_rung_long_enough(self):
+        levels = {2: {"decision": "reference"}, 3: {"decision": "undecided"}}
+        out = adm.run_length(levels, self.per_level(L2=(9, 9), L3=(0, 3)),
+                             [1_000_000, 1_000_000], self.CONFIG)
+        self.assertIsNone(out["rung"])
+        self.assertIn("no rung", out["note"])
+
+
+class SettledTreeTest(unittest.TestCase):
+    TARGETS = [0, 10, 100, 1000, 10000]
+
+    def test_first_release_at_or_after_n_w(self):
+        events = [{"time_micros": t, "occupancy_bytes": o,
+                   "nominal_target_bytes": self.TARGETS}
+                  for t, o in ((5, [1, 1, 1, 1, 1]), (10, [0, 3, 2, 600, 0]),
+                               (20, [0, 3, 2, 9, 4]))]
+        self.assertEqual(adm.settled_tree(events, 10), (3, 0.6))
+        self.assertIsNone(adm.settled_tree(events, 30))
+
+    def test_candidates_follow_the_scope_decision(self):
+        # L = 8 at T=2: L2..L6, and L7 only when L8 is near its target.
+        self.assertEqual(adm.candidate_levels(8, 0.3, 2, 0.5), [2, 3, 4, 5, 6])
+        self.assertEqual(adm.candidate_levels(8, 0.5, 2, 0.5),
+                         [2, 3, 4, 5, 6, 7])
+        # L = 4 at T=10 with L4 far below target: L2 alone.
+        self.assertEqual(adm.candidate_levels(4, 0.06, 2, 0.5), [2])
+
+    def test_a_tree_too_shallow_for_the_reference_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "too shallow"):
+            adm.candidate_levels(3, 0.1, 2, 0.5)
+
+
 def job(job_id, start, op, s, o, x, trivial=0, due=0, t_us=None):
     base = {"job": job_id, "start_level": start, "output_level": start + 1,
             "trivial": trivial, "s": s, "o": o, "due_since_us": due}
@@ -310,22 +471,26 @@ class MainTest(unittest.TestCase):
         self.config.write_text(json.dumps({**ConfigTest.GOOD,
                                            "reference_level": 1}))
 
-    def run_dir(self, name, fingerprint=None, drop=None):
+    def run_dir(self, name, fingerprint="assoc-v1:1M:T2:k64:v960:sst10:fixture",
+                drop=None):
+        """A copy of the fixture. Its fingerprint gains an sst field (10 B
+        files, 1% of C_1), which 19 needs for the granularity floor."""
         path = self.root / name
         shutil.copytree(self.FIXTURE, path)
-        if fingerprint:
-            meta = path / "metadata.env"
-            meta.write_text(meta.read_text().replace(
-                "assoc-v1:1M:T2:k64:v960:fixture", fingerprint))
+        meta = path / "metadata.env"
+        meta.write_text(meta.read_text().replace(
+            "assoc-v1:1M:T2:k64:v960:fixture", fingerprint))
         if drop:
             log = path / "host_log.jsonl"
             log.write_text("".join(l for l in log.read_text().splitlines(True)
                                    if drop not in l))
         return path
 
-    def main(self, *runs):
+    def main(self, *runs, levels=("1",)):
         argv = ["19", *map(str, runs), "--config", str(self.config),
-                "--levels", "1", "--output", str(self.root / "out.json")]
+                "--output", str(self.root / "out.json")]
+        if levels:
+            argv += ["--levels", *levels]
         with mock.patch("sys.argv", argv), \
                 mock.patch("sys.stdout", io.StringIO()):
             return adm.main()
@@ -336,12 +501,107 @@ class MainTest(unittest.TestCase):
         self.assertEqual(report["empty_turnovers"], {"1": 0})
         self.assertEqual(report["levels"]["1"]["turnovers"], 2)
 
+    def test_d16_config_end_to_end(self):
+        """Margins per T, n_min by its rule and the run-length rung. The
+        fixture's L1 completes one turnover per run in 710 mixgraph
+        operations, so 20,000 turnovers need 14.2M: the second rung."""
+        raw = json.loads(PREREGISTERED.read_text())
+        raw.update(reference_level=1, replicates=20, n_turn=20_000,
+                   n_min_rule={"grid": [1], "trials": 2})
+        self.config.write_text(json.dumps(raw))
+        runs = [self.run_dir(name) for name in "ab"]
+        for run in runs:
+            meta = run / "metadata.env"
+            meta.write_text(meta.read_text().replace(
+                "load_operations=290", "load_operations=2900000"))
+        self.assertEqual(self.main(*runs), 0)
+        report = json.loads((self.root / "out.json").read_text())
+        self.assertEqual(report["config"]["margins"]["passthrough_overlap"], 0.3)
+        # The reference alone: nothing to decide, so no n_min simulation.
+        self.assertIsNone(report["config"]["n_min"])
+        self.assertNotIn("n_min_rule_simulation", report)
+        length = report["run_length"]
+        self.assertEqual(length["mixgraph_operations_per_run"], [710, 710])
+        self.assertEqual(length["turnovers_per_run"], [1, 1])
+        self.assertEqual(length["rung"], {"size_millions": 29, "load_percent": 10})
+        # With L2 as a candidate the rule runs. L2 completes no turnover, so
+        # it stays undecided, governs the length, and no rung reaches it.
+        self.assertEqual(self.main(*runs, levels=("1", "2")), 0)
+        report = json.loads((self.root / "out.json").read_text())
+        self.assertEqual(len(report["n_min_rule_simulation"]), 1)
+        self.assertEqual(report["levels"]["2"]["decision"], "undecided")
+        length = report["run_length"]
+        self.assertEqual((length["level"], length["required_mixgraph_operations"],
+                          length["rung"]), (2, None, None))
+
+    def released(self, name, occupancy, targets=(0, 1000, 2000, 4000)):
+        """A fixture copy with one compaction_release after n_w (wall
+        5.0e9), which fixes its settled tree."""
+        path = self.run_dir(name)
+        event = {"time_micros": 5000500000, "job": 99,
+                 "event": "compaction_release", "occupancy_bytes": occupancy,
+                 "nominal_target_bytes": list(targets)}
+        with (path / "rocksdb_LOG.txt").open("a") as handle:
+            handle.write("2026/09/30-10:00:02.500000 3 EVENT_LOG_v1 "
+                         + json.dumps(event) + "\n")
+        return path
+
+    def derive(self, *runs):
+        self.config.write_text(json.dumps({
+            **ConfigTest.GOOD, "reference_level": 1,
+            "last_level_near_target": 0.5}))
+        self.main(*runs, levels=())
+        return json.loads((self.root / "out.json").read_text())
+
+    def test_candidates_derived_from_the_settled_tree(self):
+        # L = 3; L3 at 300/4000 of its target: L2 is not a candidate.
+        far = self.derive(self.released("a", [0, 500, 800, 300]))
+        self.assertEqual(list(far["levels"]), ["1"])
+        self.assertEqual(far["settled_depth"], 3)
+        self.assertEqual(far["settled_tree_per_run"], [[3, 0.075]])
+        # L3 at 2400/4000: L2 (= L-1) joins, and is undecided (no turnovers).
+        near = self.derive(self.released("b", [0, 500, 800, 2400]))
+        self.assertEqual(list(near["levels"]), ["1", "2"])
+        self.assertEqual(near["levels"]["2"]["decision"], "undecided")
+
+    def test_derivation_refusals(self):
+        cases = (([self.released("d1", [0, 5, 8, 300]),
+                   self.released("d2", [0, 5, 8, 300, 7], (0, 1, 2, 4, 8))],
+                  "differ in depth"),
+                 ([self.run_dir("n")], "no compaction_release after n_w"),
+                 # One depth (L = 3), but only one run's L3 is near target.
+                 ([self.released("c1", [0, 5, 8, 300]),
+                   self.released("c2", [0, 5, 8, 2400])], "candidate levels differ"),
+                 ([self.released("s", [0, 500], (0, 1000))], "too shallow"))
+        for runs, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(SystemExit, message):
+                    self.derive(*runs)
+
+    def test_runs_03_did_not_complete_are_refused(self):
+        unfinished = self.run_dir("u")
+        (unfinished / "COMPLETED").unlink()
+        unsettled = self.run_dir("v")
+        (unsettled / "UNSETTLED").write_text("")
+        for run in (unfinished, unsettled):
+            with self.assertRaisesRegex(SystemExit, "not a completed"):
+                self.main(run)
+
+    def test_runs_loaded_otherwise_than_the_rungs_are_refused(self):
+        raw = json.loads(PREREGISTERED.read_text())
+        raw.update(reference_level=1)
+        self.config.write_text(json.dumps(raw))
+        with self.assertRaisesRegex(SystemExit, "load \\[290\\] keys"):
+            self.main(self.run_dir("a"))
+
     def test_refusals(self):
         cases = (([self.run_dir("h", drop='"type":"header"')], "host log"),
-                 ([self.run_dir("m", fingerprint="assoc-v1:1M:T2:dio0:ltm1x2")],
+                 ([self.run_dir("m", fingerprint="assoc-v1:1M:T2:sst10:dio0:ltm1x2")],
                   "m = 1"),
-                 ([self.run_dir("x"), self.run_dir("y", fingerprint="other")],
-                  "several configurations"))
+                 ([self.run_dir("x"), self.run_dir("y", fingerprint="other:sst10:")],
+                  "several configurations"),
+                 ([self.run_dir("s", fingerprint="assoc-v1:1M:T2:fixture")],
+                  "no sst field"))
         for runs, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(SystemExit, message):

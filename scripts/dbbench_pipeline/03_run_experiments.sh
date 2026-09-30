@@ -503,6 +503,26 @@ if abs(total - 1.0) > 1e-6:
     raise SystemExit(f"mix ratios must sum to one; got {total}")
 PY
 
+# PREREGISTRATION D-16 §2: a long Programme 1 run loads D-16's keys, so
+# every such arm settles the tree the admission test and the prices measured;
+# only mixgraph grows. Short runs are exempt, as above.
+programme1_load=""
+for arm in $EXPERIMENT_ARMS; do
+  is_programme1_arm "$arm" || continue
+  for size_m in $WORKLOAD_SIZES_M; do
+    (( size_m > PREFLIGHT_SHORT_RUN_MAX_M )) || continue
+    programme1_load="${programme1_load:-$(programme1_load_operations)}"
+    if (( size_m * 1000000 * LOAD_PERCENT / 100 != programme1_load )); then
+      echo "A ${size_m}M run at LOAD_PERCENT=$LOAD_PERCENT loads" \
+           "$(( size_m * 1000000 * LOAD_PERCENT / 100 )) keys; long Programme 1" \
+           "arms must load $programme1_load (D-16 §2: pass a rung's size and" \
+           "load percent from config/admission_test.json)." >&2
+      exit 1
+    fi
+  done
+  break
+done
+
 # No long run without a passed preflight matching this db_bench and this code
 # (CLAUDE.md "Tests", plan §6.4). Every long-run driver comes through here.
 # Runs no larger than PREFLIGHT_SHORT_RUN_MAX_M million operations are the

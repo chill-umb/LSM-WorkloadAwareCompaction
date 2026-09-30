@@ -18,7 +18,8 @@ DEFAULT_CONTRACT = (Path(__file__).resolve().parents[2] / "config" /
                     "research_objective_contract.json")
 MODES = ("balanced", "read", "write", "space")
 # Device prices 18_calibrate_prices.py measures, USD per unit: per byte
-# written, per filter probe, per block-reading probe, per run seek.
+# written, per filter probe, per block-reading probe, per run seek
+# (core-seconds per unit times the price per core-second, D-15 §3).
 DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk")
 
 
@@ -88,10 +89,10 @@ def objective_columns(contract: dict,
 
 def validate_prices(prices: dict, contract: dict) -> dict:
     """Prices must be money (OBJ-2): positive, finite device prices, and the
-    contract's c_s > 0 and instance price > 0. Returns prices with c_s."""
-    instance = contract["prices"].get("instance_price_per_device_second")
+    contract's c_s > 0 and core price > 0. Returns prices with c_s."""
+    core = contract["prices"].get("price_per_core_second")
     storage = contract["prices"].get("storage_price_per_byte_second")
-    for name, value in (("instance price", instance), ("c_s", storage),
+    for name, value in (("core price", core), ("c_s", storage),
                         *((key, prices.get(key)) for key in DEVICE_PRICES)):
         if (not isinstance(value, (int, float)) or isinstance(value, bool) or
                 not math.isfinite(value) or value <= 0):

@@ -386,6 +386,7 @@ PROGRAMME1_FIELDS = (
     "mixgraph_seconds", "throughput_ops_per_second",
     "measured_stall_seconds", "stall_fraction", "controller_cpu_seconds",
     "flush_bytes_written", "compaction_bytes_written", "sst_bytes_written",
+    "sst_write_seconds",
     "compaction_bytes_host_log", "user_bytes_written",
     "write_amplification_measured", "filter_probes", "block_reading_probes",
     "run_seeks", "drain_read_ticks", "held_byte_operations",
@@ -416,12 +417,39 @@ def sst_bytes_in_window(events: list[dict], start_us: int,
     return flush, compaction, flushed
 
 
+def sst_write_seconds(events: list[dict], start_us: int, end_us: int,
+                      flushed: set[int]) -> float:
+    """Wall seconds of the jobs whose bytes sst_bytes_in_window counts, for
+    c_w (PREREGISTRATION D-15 §3b): each compaction's compaction_time_micros,
+    and each flush's flush_started to flush_finished. NaN when a counted job
+    has no time, so a missing time is never read as zero."""
+    times: dict[tuple[str, int], int] = {}
+    seconds = 0.0
+    for event in events:
+        kind = event.get("event")
+        if kind in ("flush_started", "flush_finished") and "job" in event:
+            times[kind, int(event["job"])] = int(event["time_micros"])
+        elif (kind == "compaction_finished" and
+              start_us <= int(event.get("time_micros", -1)) <= end_us):
+            if "compaction_time_micros" not in event:
+                return math.nan
+            seconds += float(event["compaction_time_micros"]) / 1e6
+    for job in flushed:
+        begin = times.get(("flush_started", job))
+        finish = times.get(("flush_finished", job))
+        if begin is None or finish is None or finish < begin:
+            return math.nan
+        seconds += (finish - begin) / 1e6
+    return seconds
+
+
 def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
                        events: list[dict], mixgraph_ops: float) -> dict:
     """The measured phase from the host log: from the measure_start stamp
     (n_w, the first mixgraph operation) to the drain_end stamp.
 
-    C_W prices the SST bytes written in the window (event log, D-11). C_R
+    C_W prices the SST bytes written in the window (event log, D-11);
+    sst_write_seconds is those jobs' wall time, for c_w (D-15 §3b). C_R
     prices the tickers differenced between the two stamps: filter probes
     (point.sst.probe), block-reading probes (bloom.filter.full.positive,
     true and false positives) and run seeks (sorted.run.seek). C_S is
@@ -528,6 +556,8 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
                                 arm.startswith("static:") else math.nan),
         flush_bytes_written=flush, compaction_bytes_written=compaction,
         sst_bytes_written=flush + compaction,
+        sst_write_seconds=sst_write_seconds(
+            events, start["wall_us"], end["wall_us"], flushed),
         compaction_bytes_host_log=compaction_host_log,
         user_bytes_written=user_bytes,
         write_amplification_measured=divide(flush + compaction, user_bytes),
@@ -558,9 +588,15 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if metadata.get("prices_sha256") != prices_sha256:
         raise InvalidArm("prices.json is not the file the run recorded")
     try:
-        prices = research_objective.validate_prices(
-            json.loads(prices_path.read_text()), contract)
-    except (ValueError, KeyError, json.JSONDecodeError) as error:
+        record = json.loads(prices_path.read_text())
+        # D-15 §3a: prices per core-second; a draft (schema 1) file priced
+        # per whole machine is 16 times too high.
+        if (record.get("schema") != 2 or record.get("price_per_core_second")
+                != contract["prices"]["price_per_core_second"]):
+            raise ValueError("not priced per core-second under this contract "
+                             "(schema 2, D-15 §3a)")
+        prices = research_objective.validate_prices(record, contract)
+    except (ValueError, KeyError, AttributeError, json.JSONDecodeError) as error:
         raise InvalidArm(f"prices.json: {error}") from error
     costs = (prices["c_w"] * (flush + compaction),
              prices["c_f"] * row["filter_probes"] +

@@ -1870,6 +1870,324 @@ native arm's runs of the same (workload, $T$)" and fixes the computation).**
 **Falsification.** As D-13's: this entry fails as a record if any of it is
 changed after an arm it governs has run.
 
+### D-15, 2026-10-01 — the stall rule's bounds, suite robustness without the two measured profiles, and how the device prices are measured
+
+**Recorded before any run of Programme 1 and before any price was
+measured.** No arm governed by D-13 or D-14 has run (no node exists). The
+owner decided all three items on 2026-10-01, on the implementer's
+recommendations. This entry names D-13 and D-14 and supersedes only what is
+stated below.
+
+**1. The stall rule's bounds (D-13 §8).** D-13's "upper 95% paired bound" on
+the stall-fraction difference and its "lower 95% paired bound" on the
+relative throughput difference are the two ends of the two-sided 95% paired
+Student-t interval (`pipeline_stats.ci95`), so each is a one-sided 97.5%
+bound.
+- *Why.* It is the stricter reading, and it is the interval every other
+  criterion uses (CMP-3, C-2, D-13 §5's top-up rule), so a claim passes the
+  stall rule and CMP-3 on one interval.
+- One-sided 95% bounds ($t_{0.95}$) were considered and not chosen.
+- The margins are unchanged: $\delta_{\text{stall}}$ = 0.02 and
+  $\delta_{\text{thr}}$ = 2%.
+
+**2. Suite robustness (CMP-7, Definition C.5) and the two measured
+profiles.** The survival-weighted and last-level-emptying profiles are
+computed per workload (D-14 §3), so on two workloads the same profile name is
+in general two different multiplier vectors: not one static setting across
+the suite.
+- In CMP-7's min–max, $\min_{\theta}\max_w\text{Reg}_\beta(\theta, w)$,
+  $\theta$ ranges only over configurations run with the same setting on
+  every workload: the same fingerprint once the workload's own segments are
+  removed (`07_evaluate_paired.config_key`). A measured profile competes
+  there only if its vector is the same on every workload.
+- Both profiles stay in $\theta^\star_\beta(w)$ on each workload, so every
+  regret, CMP-3 and C-6 are measured against the whole of $\Theta_s$.
+- *Consequence, stated beside every CMP-7 result.* Removing competitors can
+  only raise the min–max, so this CMP-7 is easier for the controller to pass
+  than one over the whole class. The configurations left out are listed with
+  each result (07's `excluded_configurations`).
+- Not chosen: running each workload's vectors on the other workload (more
+  node time), or one vector pooled across workloads (a setting measured for
+  no workload).
+- If the claim entry (§0.6 item 10) makes suite robustness a headline, it
+  revisits this item before Gate N5.
+
+**3. How the device prices are measured (D-13 §1; PATHWAYS D §1, OBJ-2).**
+D-13 fixed the two money prices but not how $c_w$, $c_f$, $c_{blk}$ and
+$c_{sk}$ are measured. The draft stage `18` charged every operation the whole
+machine's price and divided each benchmark's whole time by the unit it
+prices, so a probe's price carried the Get's fixed overhead. Replaced by:
+
+*(a) The unit of device time is one core-second.* Every priced operation
+runs on one thread: the reads on `db_bench`'s one client thread
+(`THREADS=1`), each flush and compaction on one background thread
+(`max_subcompactions` is left at RocksDB's default, 1). It occupies one of
+the instance's 16 cores, so one second of it is priced at \$0.974 per hour
+÷ 16 = **\$1.6910 × 10⁻⁵ per core-second** (contract
+`price_per_core_second`). D-13's "instance price per device-second" charged
+a one-thread operation for all 16 cores, which overstated the write and read
+terms 16-fold against $c_s$. Holding 1 GB for one hour now costs as much as
+6.48 core-seconds (D-13's 0.41 s was whole-machine seconds). $c_s$ is
+unchanged.
+
+*(b) $c_w$ from the experiments' own jobs.* Per run, $t_w$ is the wall time
+of the flush and compaction jobs whose bytes $C_W$ counts, divided by those
+bytes:
+- a compaction's time is its `compaction_finished` event's
+  `compaction_time_micros`; a flush's runs from its `flush_started` to its
+  `flush_finished` event;
+- the jobs, bytes and window are exactly `04`'s $C_W$: D-11's SST bytes,
+  between the `measure_start` and `drain_end` stamps. `04` reports the time
+  per arm as `sst_write_seconds`;
+- the runs are the $\bar q$ arms of D-14 §2 (five `native` arms at $T=10$
+  per workload, both workloads). $c_w$'s device time is the median of their
+  per-run $t_w$; the minimum and maximum are reported;
+- wall time, not CPU time: a job's I/O waits hold its thread too. A
+  compaction's `compaction_time_micros` ends before its MANIFEST install,
+  while a flush's span includes its install; the difference is one
+  MANIFEST write and one directory sync per job, and is left in;
+- *why:* the draft timed one full manual `compact` of a 1M-key tree, one
+  large job unlike the experiments' compactions. The $\bar q$ arms' jobs are
+  the experiments' own, at their geometry, load and run length.
+
+*(c) The read prices are marginal times, from trees of different depth.*
+- *Trees.* Three trees are loaded as the experiments load them:
+  `filluniquerandom` of the Programme 1 load (2.9M keys, D-16 §2), the
+  pipeline's default options ($K_0$ = 4, base 16 MiB), then the `settle`
+  step; one each at
+  $T$ = 2, 6 and 10, the $T$ values of $\Theta_s$. Their depths differ, so
+  their probes per Get and runs per seek differ.
+- *Runs.* On each tree, one unscored `readrandom` warms the page cache
+  (the experiments are warm-cache, `dio0`). Then `readmissing`, `readrandom`
+  and `seekrandom` (`seek_nexts` 0), 1,000,000 operations each, each in its
+  own process so its tickers are its own, in turn, five times: five repeats.
+- *$t_f$ and $t_{blk}$*, per repeat: one least-squares fit over the six
+  (tree, benchmark) points of `readmissing` and `readrandom`,
+  $$\text{seconds per Get} = a + t_f \cdot \text{filter probes per Get} +
+  t_{blk} \cdot \text{block-reading probes per Get},$$
+  with probes from `point.sst.probe` and block reads from
+  `bloom.filter.full.positive`. `readmissing`'s Gets end filter-rejected
+  (bar false positives), so across the trees they move the probes;
+  `readrandom`'s read the block their key is found in, so on each tree the
+  pair moves the block reads. The intercept $a$ is the overhead every Get
+  pays whatever the tree holds (key generation, memtable and version
+  lookup), which is not the price of a probe. Fitting both prices together
+  keeps `readmissing`'s false-positive block reads out of $t_f$.
+- *$t_{sk}$*, per repeat: the least-squares slope, across the three trees,
+  of seconds per seek on run seeks per seek (`sorted.run.seek`) in
+  `seekrandom`.
+- Each price's device time is the median of its five per-repeat values; the
+  minimum and maximum are reported.
+- *Assumptions, stated:* the per-operation overhead does not change with the
+  tree's depth, and it is the same for a present and a missing key (copying
+  the found value out is taken as nil); a filter probe, a block read and a
+  run seek cost the same at every level. The last is approximate: with
+  `open_files` = 1000 and about 5,700 SST files of 512 KiB, deep probes often
+  reopen their table, and a reopen's cost lands partly in the slope and
+  partly in the intercept. The experiments run with the same table cache, so
+  the prices carry the same mix. To audit it, `prices.json` keeps every read
+  process's seconds and tickers per operation (`rocksdb.no.file.opens`
+  among them) and each tree's load command.
+
+*(d) Refusals.* Stage `18` writes no prices when:
+- any per-repeat or per-run time is not positive;
+- the trees' filter probes per Get in `readmissing`, or run seeks per seek,
+  span less than 1, so the slope is not identified;
+- on any tree `readrandom` reads fewer than 0.5 more blocks per Get than
+  `readmissing`;
+- fewer than five write runs of each workload are given, one is given
+  twice, or any is not a settled `native` arm at $T=10$ of a contract
+  workload, lacks a positive `sst_write_seconds` or SST byte count, or ran a
+  different `db_bench` binary from the one being priced;
+- `THREADS` is not 1.
+
+`04` refuses to score an arm whose `prices.json` is not schema 2 at the
+contract's `price_per_core_second`, so a draft file priced per whole machine
+cannot enter $J_\beta$.
+
+*(e) Node order.* ACT-4; Gate N1 (the run length); the $\bar q$ arms, run
+without prices, which $\bar q$ does not need (`04` scores them "no prices");
+then `18`, which reads the $\bar q$ arms; then $\Theta_s$. Prices are
+re-measured on any hardware or binary change.
+
+**Contract.** `config/research_objective_contract.json` is amended in place:
+`price_per_core_second` (with `instance_price_per_second` and
+`instance_cores`) replaces `instance_price_per_device_second`; the stall
+rule records its bounds; a `suite_robustness` block records item 2.
+
+**Falsification.** As D-13's: this entry fails as a record if any of it is
+changed after an arm or a price measurement it governs has run.
+
+### D-16, 2026-10-01 — Gate N1: pilot runs, the admission test's fixed values, and the run-length rule
+
+**Recorded before any run of Programme 1.** This is PATHWAYS §0.6 item 7,
+which D-13 left for an entry before Gate N1. The owner decided on 2026-09-30
+that the earlier programme's runs are out of scope for Programme 1, so Gate N1
+cannot run "on existing artifacts" as PATHWAYS said. On 2026-10-01 the owner
+asked the implementer to draft this entry. **Status: the values below are the
+implementer's proposals. The owner may change any of them in place, with a
+written reason, until the first Gate N1 pilot run starts, and never after
+it.** Their machine-readable form is `config/admission_test.json`.
+PATHWAYS Gate N1 and G §4 are amended in the same commit.
+
+**1. Gate N1 runs pilot native arms (supersedes PATHWAYS Gate N1's "on
+existing artifacts, no node time").**
+- Per workload (`Assoc`, the power-law workload) and $T \in \{2, 6, 10\}$:
+  three `native` arms through `03` with the settle step and the host log, on
+  the Programme 1 binary that passed the preflight. They run at the
+  pipeline's default point: $K_0$ = 4, base 16 MiB, $m \equiv 1$, the
+  configuration a controller arm starts from and drains to (A-Impl-8).
+- Pilot length: the second rung of item 2, 29M operations at 10% load, so
+  2.9M keys are loaded and `mixgraph` serves 26.1M operations (about 7.5
+  minutes at `Assoc`'s buffered rate). That is 18 runs, roughly 3 to 4
+  hours.
+- Pool membership is decided per (workload, $T$) at this point (PROP-1).
+
+**2. The load is fixed; a longer run lengthens `mixgraph` only.**
+- Every Programme 1 tree loads **2.9M keys**: the 10M × 29% load of every
+  earlier record, about 3 GiB of `Assoc`. PATHWAYS G §4's scope decision
+  (a pool at T=2 in L2–L6, none at T=10) is stated for this tree, and
+  loading more would deepen the tree and change the pools.
+- `03` sets the load as size × `LOAD_PERCENT` / 100, so the run lengths are
+  rungs with the same load: (size, load %) = (10, 29), (29, 10), (58, 5),
+  (145, 2), (290, 1), i.e. 7.1M, 26.1M, 55.1M, 142.1M and 287.1M `mixgraph`
+  operations.
+- `03` refuses a Programme 1 arm above 2M operations that loads any other
+  count. Stage `18` loads the same count (D-15 §3c). The count comes from
+  the config file.
+
+**3. The candidates and the reference level.**
+- The reference level is **L2** in every cell: the shallowest candidate.
+- The candidates follow G §4's scope decision. They run from L2 to $L-2$,
+  where $L$ is the deepest populated level of the settled tree at $n_w$.
+  $L-1$ joins them only when the last level is **near its target**, which
+  is fixed here as holding at least **half** its target, $B_L/C_L \ge 0.5$,
+  at $n_w$. Otherwise $L-1$'s fanout $f_{L-1} = B_L/C_{L-1}$ is set by the
+  last level's fill, not by $T$: at T=10 on `Assoc`, $f_3 \approx 0.6$.
+  - Expected: at T=2, L8 is last and the candidates are L2–L6, plus L7 if
+    L8 is at half its target. At T=10, L4 is far below its target, so the
+    only candidate is L2, and there is no pool.
+- `19` reads $L$ and $B_L/C_L$ from the first `compaction_release` after
+  the `measure_start` stamp. It refuses runs whose depths or candidate sets
+  differ, and a tree too shallow to hold L2 as a candidate.
+- L1 and the last level are never candidates (G §4: L1 is fed in L0-sized
+  batches; the last level has no level below it). L1 keeps its own model.
+
+**4. The compared statistics and their margins**, in each statistic's own
+units, per (workload, $T$), the same for both workloads:
+
+| Statistic | Margin | Reason |
+| --- | --- | --- |
+| fill sampled every $1/k$ turnover | 0.05 of a level | a twentieth of a level; the file granularity $F_{\text{sst}}/C_2$ is 1/64 at T=2 (512 KiB files, base 16 MiB), smaller at larger $T$ |
+| fill at release | 0.05 | as above |
+| bytes released per turnover, in units of $C_i$ | 0.10 | a tenth of a level per turnover |
+| $(1-\xi_i)(\rho_i + o_i)$, bytes written per byte released | $0.1(1+T)$: 0.3, 0.7, 1.1 | a tenth of the nominal $\rho + o = 1 + T$ |
+| $\tilde\rho_i$, the share that lands below | 0.05 | five points of pass-through |
+| inflow ratio $\ell_i$ | 0.20 | a fifth of the mean rate |
+
+The mean, 10th and 90th percentile differences must each have a 90%
+interval inside $\pm$ the margin (G §4).
+
+**5. The fixed values of the test.**
+- $\omega_{\max}$ = **0.25** decision intervals: the upper 95% bound on a
+  level's mean slot wait per release must be below a quarter of its decision
+  interval. By G.4's heuristic, a release then crosses a decision boundary
+  with probability under about a quarter.
+- $k$ = **10**: fills are sampled ten times per turnover, and $\omega$ is in
+  units of $N_i/10$. This also fixes the controller's cadence (G-iv): level
+  $j$ decides every $N_j/10$ operations. A controller with another $k$
+  needs this test re-run.
+- Block length $b$ = **3** turnovers.
+- Bootstrap replicates: **1,000**. Seed: **20261001**.
+- **$n_{\min}$ by rule**, per cell, from the pilot's own reference
+  turnovers: the smallest $n$ in {20, 30, 40, 60, 80, 120, 160} for which
+  G §4's simulation, with 200 trials, finds that two pseudo-levels pass with
+  probability ≥ 0.8, and that the pair with any one statistic shifted to
+  its margin passes with probability ≤ 0.05. `19` tries the grid in order
+  and stops at the first sufficient $n$.
+  - A grid value above half the reference's pooled turnovers is not tried,
+    since its two pseudo-levels would mostly share turnovers. This removes
+    the gross overlap, not the pool's own sampling error. On synthetic data,
+    the simulated pass rate at $n$ = 40 ranged over 0.11–0.47 across
+    reference pools of 80 turnovers and 0.38–0.45 across pools of 1,000.
+    $n_{\min}$ is therefore itself an estimate from the pilot, with an
+    uncertainty well above the Monte Carlo error below. The simulation also
+    draws each pseudo-level as one run, while the real test resamples
+    within each of three runs.
+  - The rule runs only in a cell with a candidate besides the reference.
+  - With 200 trials, the Monte Carlo standard error is about 1.5 points at
+    5% and 2.8 points at 80%, so a value near either threshold can fall on
+    either side.
+  - *Cost, measured on synthetic turnovers:* about 12 CPU-minutes per grid
+    point at $n$ = 40 when a turnover has 64 releases (L2 at T=2, about
+    $C_2/F_{\text{sst}}$), and about 47 at 320 (T=10). The cells run as
+    separate processes.
+  - If no value tried is sufficient, that cell's candidates are undecided
+    at Gate N1. They then wait for a new dated entry.
+- A candidate is **undecided** when it, or the reference, has fewer than
+  $n_{\min}$ turnovers across the pilot. It is decided on Gate N2's
+  `native` arms at the default point. Those arms then run at least
+  $\max(5, \lceil n_{\min}/n_{\text{turn}}\rceil)$ repeats: PATHWAYS
+  Gate N1's $\lceil n_{\min}/n_{\text{turn}}\rceil$ runs of
+  $n_{\text{turn}}$ turnovers, and at least D-13 §5's five.
+
+**6. The run-length rule (PATHWAYS Gate N1).** $n_{\text{turn}}$ = **10**.
+- Per cell, the governing level is the deepest candidate that is admitted
+  or undecided. An undecided candidate is sized as if pooled (PATHWAYS
+  Gate N1), so that Gate N2's native arms can decide it. When every other
+  candidate is refused, the governing level is L2, whatever L2's own
+  decision (PATHWAYS: "its deepest interior level with enough turnovers,
+  L2").
+- Each pilot run's rate is that level's complete turnovers per `mixgraph`
+  operation, from the `measure_start` to the `drain_start` stamp. The cell
+  needs $n_{\text{turn}}$ divided by the slowest run's rate, and so the
+  shortest rung whose `mixgraph` reaches it.
+- **The Gate N2 run length of a workload is the longest of its three
+  cells' rungs**, so C-6 compares $J_\beta$ across $T$ over the same
+  operations. $\bar q$ (D-14 §2) and the prices (D-15 §3) are measured at
+  it.
+- If no rung is long enough for some cell, stop and report; the owner
+  decides. This includes a pilot run in which the governing level completes
+  no turnover.
+- *Expected, a rough estimate by the implementer's verifier and not a
+  criterion:*
+  - For `Assoc`, the governing levels are L6 at T=2, L3 at T=6 and L2 at
+    T=10. The workload's rung is then likely (58, 5): 55.1M `mixgraph`
+    operations, about 16 minutes per run. It would be (145, 2) if L7
+    joins at T=2, or if deep-level inflow is below about 71% of the put
+    bytes.
+  - For the power law, with its 5% puts, the rung is likely (145, 2), or
+    (290, 1) if a pilot run completes only one turnover of its governing
+    level.
+  - The last level's fill at T=2 is estimated at 0.44–0.47, near the 0.5
+    threshold of item 3. `19` reports each run's $(L, B_L/C_L)$.
+
+**7. Known risks, which only the pilot data can settle.**
+- `inflow_ratio`'s 10th and 90th percentiles may narrow with depth, since
+  a variable averaged over a level's own interval tightens with depth
+  (G.4). If so, a margin of 0.20 on them could refuse deeper levels whose
+  dynamics match.
+- $\omega_{\max}$ applies to the reference too. With one compaction slot,
+  L2 at T=2 could exceed it, and then that cell has no pool.
+- These values are not changed after the pilots have run. A new dated
+  entry would record any change, and name it as made after seeing data.
+
+**8. Deferred.** PROP-1b's one-step model and $\delta_{\text{kern}}$ judge
+learner transitions, so nothing before Gate N4 uses them. They are a later
+entry, before Gate N4.
+
+**Implementation.** `19_admission_test.py` reads the config file. It takes
+the margins of the runs' $T$, applies the $n_{\min}$ rule, derives the
+candidates, and reports each cell's rung. It refuses runs whose load
+differs from the rungs', runs that `03` did not complete or marked
+unsettled, and fingerprints without the SST size that the fill margins'
+floor needs. `03` enforces item 2's load. Tests: `test_admission.py`
+and `test_run_experiments.py`.
+
+**Falsification.** This entry fails as a record if any value in it, or in
+`config/admission_test.json`, is changed after the first Gate N1 pilot run
+has started.
+
 ---
 
 ## 2. Gate verdicts as measured

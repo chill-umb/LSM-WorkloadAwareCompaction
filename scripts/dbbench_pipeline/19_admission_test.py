@@ -24,8 +24,19 @@ mean, 10th and 90th percentile lie inside +-margin, and the upper 95% bound
 on its mean omega is below omega_max. Blocks are whole turnovers, resampled
 within each run. Every value the test uses (reference level, margins,
 omega_max, block length, k, n_min, replicates, seed) comes from a config file
-fixed in advance (PATHWAYS §0.6 item 7); none has a default here.
+fixed in advance (PATHWAYS §0.6 item 7; config/admission_test.json,
+PREREGISTRATION D-16); none has a default here. Margins may be given per T
+(margins_by_size_ratio), and n_min by its rule (n_min_rule: the smallest
+grid value the simulation finds sufficient on the reference's own
+turnovers). Without --levels the candidates run from the reference level to
+L-2, plus L-1 when the last level holds last_level_near_target of its
+target, L the deepest populated level of the settled tree at n_w.
 A Kolmogorov-Smirnov distance is reported, not judged.
+
+The run-length rule (Gate N1, when the config has n_turn and rungs): the
+deepest level that is the reference, admitted or undecided must complete
+n_turn turnovers in every run, extrapolated from each run's turnovers per
+mixgraph operation; the cell's rung is the shortest that does.
 """
 
 from __future__ import annotations
@@ -50,9 +61,9 @@ EVENT = re.compile(r"EVENT_LOG_v1 (\{.*\})")
 
 # --- statistics of resampled turnovers --------------------------------------
 
-def percentile(values: list[float], q: float) -> float:
+def percentile(values: list[float], q: float, presorted: bool = False) -> float:
     """Linear interpolation between order statistics (numpy's default)."""
-    ordered = sorted(values)
+    ordered = values if presorted else sorted(values)
     position = q * (len(ordered) - 1)
     low = math.floor(position)
     high = min(low + 1, len(ordered) - 1)
@@ -60,11 +71,14 @@ def percentile(values: list[float], q: float) -> float:
 
 
 def summarize(turnovers: list[dict], stat: str) -> dict[str, float] | None:
-    values = [v for t in turnovers for v in t.get(stat, ())]
+    # One sort per call; main keeps each turnover's lists sorted, so this
+    # merges presorted runs (the n_min simulation calls it millions of times).
+    values = sorted(v for t in turnovers for v in t.get(stat, ()))
     if not values:
         return None
-    return {"mean": statistics.fmean(values), "p10": percentile(values, 0.1),
-            "p90": percentile(values, 0.9)}
+    return {"mean": statistics.fmean(values),
+            "p10": percentile(values, 0.1, presorted=True),
+            "p90": percentile(values, 0.9, presorted=True)}
 
 
 def block_resample(runs: list[list[dict]], block: int,
@@ -299,16 +313,55 @@ def run_geometry(run: Path) -> dict:
     values = dict(line.split("=", 1) for line in
                   (run / "metadata.env").read_text().splitlines() if "=" in line)
     sst = re.search(r":sst(\d+):", values["experiment_fingerprint"])
+    if not sst:
+        raise ValueError("the fingerprint has no sst field, so the fill "
+                         "margins' file-granularity floor cannot be checked")
     return {"base": float(values["max_bytes_for_level_base"]),
             "ratio": float(values["size_ratio"]),
-            "sst": float(sst.group(1)) if sst else math.nan,
+            "sst": float(sst.group(1)),
+            "load": int(values["load_operations"]),
             "fingerprint": values["experiment_fingerprint"]}
 
 
-def read_run(run: Path, levels: list[int], k: int):
-    """One run's geometry and, per level, (turnovers, empty turnovers)."""
+def settled_tree(events: list[dict], start_us: int) -> tuple[int, float] | None:
+    """(L, B_L/C_L): the deepest populated level at n_w and its fill, from
+    the first release at or after the measure_start stamp, before which
+    only flushes change the tree (as 23_static_profiles reads it)."""
+    for e in events:
+        if e.get("time_micros", -1) >= start_us:
+            occupancy = e["occupancy_bytes"]
+            depth = max((i for i, b in enumerate(occupancy) if b > 0), default=0)
+            target = e["nominal_target_bytes"][depth]
+            return depth, occupancy[depth] / target if target else math.nan
+    return None
+
+
+def candidate_levels(depth: int, last_fill: float, reference: int,
+                     near_target: float) -> list[int]:
+    """G §4's scope decision: the reference to L-2, and L-1 only when the
+    last level holds at least `near_target` of its target (otherwise L-1's
+    fanout is set by the last level's fill, not by T)."""
+    top = depth if last_fill >= near_target else depth - 1
+    levels = list(range(reference, top))
+    if reference not in levels:
+        raise ValueError(f"settled tree too shallow: L={depth}, last level at "
+                         f"{last_fill:.2f} of its target; no candidate from "
+                         f"L{reference}")
+    return levels
+
+
+def read_run(run: Path, levels: list[int] | None, config: dict):
+    """One run's geometry (with its mixgraph operations and settled tree)
+    and, per level, (turnovers, empty turnovers). levels None: the
+    candidates of candidate_levels. A run 03 did not complete, or marked
+    unsettled, is refused, as 04 refuses it."""
+    if not (run / "COMPLETED").exists() or (run / "UNSETTLED").exists():
+        raise ValueError(f"{run}: not a completed, settled run")
     records = host_log.load(run / host_log.FILE_NAME)
     problems = host_log.check(records)
+    at = host_log.stamp_index(records) if not problems else {}
+    if not problems and "drain_start" not in at:
+        problems = ["no drain_start stamp"]
     if problems:
         raise ValueError(f"{run}: host log: {'; '.join(problems)}")
     events = []
@@ -316,36 +369,140 @@ def read_run(run: Path, levels: list[int], k: int):
         for line in handle:
             if "compaction_release" in line and (m := EVENT.search(line)):
                 events.append(json.loads(m.group(1)))
-    geometry = run_geometry(run)
+    start, mix_end = records[at["measure_start"]], records[at["drain_start"]]
+    geometry = {**run_geometry(run),
+                "mixgraph_operations": mix_end["op"] - start["op"],
+                "tree": settled_tree(events, start["wall_us"])}
+    if geometry["mixgraph_operations"] <= 0:
+        raise ValueError(f"{run}: no mixgraph operations")
+    if levels is None:
+        if geometry["tree"] is None:
+            raise ValueError(f"{run}: no compaction_release after n_w, so no "
+                             "settled tree; pass --levels")
+        levels = candidate_levels(*geometry["tree"], config["reference_level"],
+                                  config["last_level_near_target"])
     fills = release_fills(events)
     return geometry, {level: level_turnovers(
         records, fills, level,
-        geometry["base"] * geometry["ratio"] ** (level - 1), k)
+        geometry["base"] * geometry["ratio"] ** (level - 1), config["k"])
         for level in levels}
 
 
 REQUIRED = ("reference_level", "margins", "omega_max", "block_length", "k",
-            "n_min", "replicates", "seed")
+            "replicates", "seed")
+
+
+def positive_int(name: str, value) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
+
+def for_size_ratio(config: dict, ratio: float) -> dict:
+    """The config with the margins of the runs' T, when given per T."""
+    by_ratio = config.get("margins_by_size_ratio")
+    if by_ratio is None:
+        return config
+    if f"{ratio:g}" not in by_ratio:
+        raise ValueError(f"no margins for T={ratio:g}")
+    return {**config, "margins": by_ratio[f"{ratio:g}"]}
 
 
 def validate_config(config: dict) -> None:
     """The preregistered values: every compared statistic has a positive
     margin (the test requires every one to pass), and the counts are
-    positive integers (a zero block length would never end a resample)."""
+    positive integers (a zero block length would never end a resample).
+    n_min is a number or a rule; the run-length values come together."""
     missing = [key for key in REQUIRED if key not in config]
+    if ("n_min" in config) == ("n_min_rule" in config):
+        missing.append("exactly one of n_min and n_min_rule")
     if missing:
         raise ValueError(f"admission config lacks {missing}")
     if set(config["margins"]) != set(STATISTICS):
         raise ValueError(f"margins must name exactly {list(STATISTICS)}")
-    for key in ("k", "block_length", "replicates", "n_min", "reference_level"):
-        value = config[key]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise ValueError(f"{key} must be a positive integer, got {value!r}")
+    for key in ("k", "block_length", "replicates", "reference_level"):
+        positive_int(key, config[key])
+    if "n_min" in config:
+        positive_int("n_min", config["n_min"])
+    else:
+        rule = config["n_min_rule"]
+        positive_int("n_min_rule trials", rule.get("trials"))
+        grid = rule.get("grid")
+        if not grid or grid != sorted(set(grid)):
+            raise ValueError("n_min_rule grid must be increasing")
+        for n in grid:
+            positive_int("n_min_rule grid entry", n)
+    near = config.get("last_level_near_target", 1.0)
+    if isinstance(near, bool) or not isinstance(near, (int, float)) or \
+            not 0 < near <= 1:
+        raise ValueError(f"last_level_near_target must be in (0, 1], got {near!r}")
+    if ("n_turn" in config) != ("rungs" in config):
+        raise ValueError("n_turn and rungs come together")
+    if "n_turn" in config:
+        positive_int("n_turn", config["n_turn"])
+        rungs = config["rungs"]
+        if not rungs:
+            raise ValueError("rungs must not be empty")
+        for rung in rungs:
+            positive_int("rung size_millions", rung.get("size_millions"))
+            if not isinstance(rung.get("load_percent"), int) or \
+                    not 0 < rung["load_percent"] < 100:
+                raise ValueError(f"rung load_percent must be 1-99: {rung}")
+        if len({load_operations(r) for r in rungs}) != 1:
+            raise ValueError("every rung must load the same number of keys")
+        if [mixgraph_operations(r) for r in rungs] != sorted(
+                {mixgraph_operations(r) for r in rungs}):
+            raise ValueError("rungs must lengthen mixgraph strictly")
     for name, value in (("omega_max", config["omega_max"]),
                         *config["margins"].items()):
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or
                 not math.isfinite(value) or value <= 0):
             raise ValueError(f"{name} must be positive, got {value!r}")
+
+
+def load_operations(rung: dict) -> int:
+    """03's integer arithmetic: the load is size x load percent / 100."""
+    return rung["size_millions"] * 1_000_000 * rung["load_percent"] // 100
+
+
+def mixgraph_operations(rung: dict) -> int:
+    return rung["size_millions"] * 1_000_000 - load_operations(rung)
+
+
+def choose_n_min(reference: list[list[dict]], config: dict,
+                 rng: random.Random) -> tuple[int | None, list[dict]]:
+    """n_min by its rule (G §4, D-16 §5): the smallest grid value whose
+    simulation on the reference's own turnovers is sufficient, trying the
+    grid in order. A value above half the reference's turnovers is not
+    tried: its two pseudo-levels would mostly share turnovers. None when no
+    value tried is sufficient."""
+    rule, tried = config["n_min_rule"], []
+    pool = sum(len(run) for run in reference)
+    for n in (n for n in rule["grid"] if 2 * n <= pool):
+        tried.append(pseudo_level_rates(reference, n, config, rule["trials"], rng))
+        if tried[-1]["sufficient"]:
+            return n, tried
+    return None, tried
+
+
+def run_length(levels: dict, per_level: dict[int, list[list[dict]]],
+               mixgraph_ops: list[int], config: dict) -> dict:
+    """Gate N1's rule for one cell (D-16 §6): the deepest level that is
+    admitted or undecided (an undecided one sized as if pooled), or the
+    reference when there is none, must complete n_turn turnovers in every
+    run; each run's turnovers per mixgraph operation are extrapolated, and
+    the cell needs the shortest rung that reaches n_turn at the slowest
+    run's rate. required None: some run completed no turnover."""
+    level = max([config["reference_level"]] + [
+        l for l, e in levels.items()
+        if e["decision"] in ("reference", "admitted", "undecided")])
+    rates = [len(t) / ops for t, ops in zip(per_level[level], mixgraph_ops)]
+    required = config["n_turn"] / min(rates) if min(rates) > 0 else None
+    rung = None if required is None else next(
+        (r for r in config["rungs"] if mixgraph_operations(r) >= required), None)
+    return {"level": level, "turnovers_per_run": [len(t) for t in per_level[level]],
+            "mixgraph_operations_per_run": mixgraph_ops,
+            "required_mixgraph_operations": required, "rung": rung,
+            "note": None if rung else "no rung is long enough; stop and report"}
 
 
 # --- membership ----------------------------------------------------------------
@@ -374,9 +531,15 @@ def membership(per_level: dict[int, list[list[dict]]], config: dict,
         entry["omega_upper_95"] = omega
         entry["omega_passed"] = omega is not None and omega < config["omega_max"]
         if level != reference:
-            if count < config["n_min"] or sum(map(len, ref_runs)) < config["n_min"]:
+            n_min = config["n_min"]
+            if n_min is None:
                 entry.update(decision="undecided",
-                             reason=f"fewer than n_min={config['n_min']} turnovers")
+                             reason="no n_min: the rule's grid had no sufficient n")
+                levels[level] = entry
+                continue
+            if count < n_min or sum(map(len, ref_runs)) < n_min:
+                entry.update(decision="undecided",
+                             reason=f"fewer than n_min={n_min} turnovers")
                 levels[level] = entry
                 continue
             entry["comparison"] = compare(runs, ref_runs, config, rng)
@@ -405,32 +568,43 @@ def main() -> int:
                         help="static arm result directories of one (workload, T)")
     parser.add_argument("--config", type=Path, required=True,
                         help="the preregistered admission values")
-    parser.add_argument("--levels", type=int, nargs="+", required=True,
-                        help="candidate interior levels, reference included")
+    parser.add_argument("--levels", type=int, nargs="+",
+                        help="candidate interior levels, reference included "
+                             "(default: candidate_levels on the settled tree)")
     parser.add_argument("--simulate-n-min", type=int, nargs="*",
                         help="run the n_min simulation at these turnover counts")
     parser.add_argument("--trials", type=int, default=200)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    config = json.loads(args.config.read_text())
-    try:
-        validate_config(config)
-    except ValueError as error:
-        raise SystemExit(str(error)) from error
-    if config["reference_level"] not in args.levels:
+    try:  # every T's margins, before any run is read
+        raw = json.loads(args.config.read_text())
+        for ratio in raw.get("margins_by_size_ratio") or [None]:
+            validate_config(raw if ratio is None else
+                            for_size_ratio(raw, float(ratio)))
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        raise SystemExit(f"admission config: {error}") from error
+    if args.levels is None and "last_level_near_target" not in raw:
+        raise SystemExit("admission config: deriving the candidates needs "
+                         "last_level_near_target; or pass --levels")
+    reference = raw["reference_level"]
+    if args.levels is not None and reference not in args.levels:
         raise SystemExit("--levels must include the reference level")
-    per_level = {level: [] for level in args.levels}
-    empty = {level: 0 for level in args.levels}
-    fingerprints, geometry = set(), None
+    per_level: dict[int, list[list[dict]]] = {}
+    empty: dict[int, int] = {}
+    fingerprints, depths, loads, mixgraph_ops, trees = set(), set(), set(), [], []
     for run in args.runs:
         try:
-            geometry, turnovers = read_run(run, args.levels, config["k"])
-        except ValueError as error:
-            raise SystemExit(str(error)) from error
+            geometry, turnovers = read_run(run, args.levels, raw)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise SystemExit(f"{run}: {error}") from error
         fingerprints.add(geometry["fingerprint"])
+        depths.add(geometry["tree"] and geometry["tree"][0])
+        loads.add(geometry["load"])
+        mixgraph_ops.append(geometry["mixgraph_operations"])
+        trees.append(geometry["tree"])
         for level, (t, dropped) in turnovers.items():
-            per_level[level].append(t)
-            empty[level] += dropped
+            per_level.setdefault(level, []).append(t)
+            empty[level] = empty.get(level, 0) + dropped
     # G §4: one static configuration, m = 1, per (workload, T, K0); seeds
     # are not in the fingerprint, so its runs share one.
     if len(fingerprints) != 1:
@@ -438,9 +612,45 @@ def main() -> int:
     fingerprint = fingerprints.pop()
     if ":ltm" in fingerprint:
         raise SystemExit("the admission test reads m = 1 runs only")
-    report = {"schema_version": 1, "experiment_fingerprint": fingerprint,
-              "config": config, "empty_turnovers": empty,
+    if args.levels is None and len(depths) != 1:
+        raise SystemExit(f"the runs' settled trees differ in depth: {sorted(depths)}")
+    if any(len(runs) != len(args.runs) for runs in per_level.values()):
+        raise SystemExit("the runs' candidate levels differ")
+    # Every statistic is order-free, so each turnover's lists are sorted once
+    # here and summarize merges presorted runs.
+    for runs in per_level.values():
+        for run_turnovers in runs:
+            for turnover in run_turnovers:
+                for values in turnover.values():
+                    values.sort()
+    try:
+        config = for_size_ratio(raw, geometry["ratio"])
+        if "n_turn" in config and loads != {load_operations(config["rungs"][0])}:
+            raise ValueError(f"the runs load {sorted(loads)} keys, the rungs "
+                             f"{load_operations(config['rungs'][0])}")
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    simulation = None
+    # The rule is run only when a candidate besides the reference needs it
+    # (at T=10, L2 is often the only one, and the simulation is costly).
+    if "n_min_rule" in config and len(per_level) > 1:
+        n_min, simulation = choose_n_min(per_level[reference], config,
+                                         random.Random(config["seed"]))
+        config = {**config, "n_min": n_min}
+    elif "n_min_rule" in config:
+        config = {**config, "n_min": None}
+    report = {"schema_version": 2, "experiment_fingerprint": fingerprint,
+              "config": config, "settled_depth": depths.pop() if len(depths) == 1
+              else None,
+              # Per run, [L, B_L/C_L]: the fill decides whether L-1 is a
+              # candidate (D-16 §3).
+              "settled_tree_per_run": trees, "empty_turnovers": empty,
               **membership(per_level, config, geometry)}
+    if simulation is not None:
+        report["n_min_rule_simulation"] = simulation
+    if "n_turn" in config:
+        report["run_length"] = run_length(report["levels"], per_level,
+                                          mixgraph_ops, config)
     if args.simulate_n_min:
         rng = random.Random(config["seed"])
         report["n_min_simulation"] = [

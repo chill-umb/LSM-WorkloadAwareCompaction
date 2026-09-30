@@ -129,9 +129,9 @@ wired into `13` fails. Wire each step in the change that builds its component.
 
 ### Node runbook: the first node session
 
-Everything below runs on the node from the repository root. Steps a–d need
-no new code: if one fails, stop and report the output. Step e also needs
-decisions and one piece of analysis that do not exist yet; it says which.
+Everything below runs on the node from the repository root. Steps a–c need
+no new code: if one fails, stop and report the output. Step d cannot start
+in the first session; it says what must exist first.
 
 a. Publish and fetch the code. On the machine that holds the commits, push
    the fork first, since the root records a fork commit:
@@ -175,24 +175,39 @@ c. The preflight, steps 1–4 (Release build, tiers 1–2, ACT-1, ACT-4, the
    `build-dbbench/preflight/act4/act4_report.json`,
    `build-dbbench/preflight/evaluator/graphs/summary.csv`.
 
-d. Price calibration (OBJ-2, Gate N0 item 7), about 10 minutes:
+d. Gate N2, the static comparator. Four things must exist first, in this
+   order:
+   1. **Gate N1: pool membership and the run length** (PATHWAYS Gate N1,
+      PREREGISTRATION D-16, `config/admission_test.json`). Three pilot
+      `native` arms per workload and T at the default point, 29M operations
+      at 10% load (2.9M keys loaded, 26.1M `mixgraph` operations), e.g. for
+      `Assoc` (for the power law, add the flags of step 2 and use its own
+      `SESSION_ID`, `RESULTS_ROOT` and `DB_ROOT`, e.g. `n1-powerlaw`):
 
-   ```bash
-   CONFIRM_PRICE_CALIBRATION=YES DB_ROOT=/mnt/nvme/prices-db \
-     scripts/dbbench_pipeline/18_calibrate_prices.sh
-   ```
+      ```bash
+      EXPERIMENT_ARMS=native SIZE_RATIOS="2 6 10" WORKLOAD_SIZES_M=29 \
+        LOAD_PERCENT=10 REPEATS=3 SESSION_ID=gate-n1-assoc \
+        RESULTS_ROOT=/mnt/nvme/n1-assoc DB_ROOT=/mnt/nvme/n1-dbs/assoc \
+        CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh
+      pids=()
+      for T in 2 6 10; do
+        python3 scripts/dbbench_pipeline/19_admission_test.py \
+          /mnt/nvme/n1-assoc/29M/T$T/repeat-*/native \
+          --config config/admission_test.json \
+          --output /mnt/nvme/n1-assoc/admission_T$T.json &
+        pids+=($!)
+      done
+      for pid in "${pids[@]}"; do wait "$pid" || echo "an admission run FAILED"; done
+      ```
 
-   It writes `build-dbbench/prices.json`, which `03` copies into every later
-   arm and records in the fingerprint. The measurement method is in the
-   docstring of `18_calibrate_prices.py`.
-
-e. Gate N2, the static comparator. It cannot start in the first session.
-   Four things must exist first, in this order:
-   1. **Gate N1's run length**, `<N2 size>` in millions of operations
-      (PATHWAYS Gate N1). `19_admission_test.py` runs the collapse test, but
-      it needs its preregistered config file (§0.6 item 7: reference level,
-      margins, ω_max, block length, k, n_min), which does not exist yet, and
-      it reads host logs, which the pre-Programme-1 artifacts do not have.
+      Each report records the pool (`pool`), each level's decision, n_min
+      from its rule (`n_min_rule_simulation`; roughly 12 CPU-minutes per
+      grid value tried at T=2 and 47 at T=10, D-16 §5) and
+      `run_length.rung`. **`<N2 size>` and its `LOAD_PERCENT` are the
+      longest of the three rungs**: pass both to every later `03` call of
+      that workload (03 refuses a long Programme 1 run with any other load).
+      A level reported `undecided` is decided later on Gate N2's native arms
+      at the default point (D-16 §5).
    2. **q̄ per workload** (PREREGISTRATION D-14 §2), recorded in
       `config/research_objective_contract.json` and in a dated amendment
       before any Θ_s run: the mean throughput of five `native` arms at T=10
@@ -200,6 +215,7 @@ e. Gate N2, the static comparator. It cannot start in the first session.
 
       ```bash
       EXPERIMENT_ARMS=native SIZE_RATIOS=10 WORKLOAD_SIZES_M=<N2 size> \
+        LOAD_PERCENT=<N2 load %> \
         REPEATS=5 SESSION_ID=qbar-assoc RESULTS_ROOT=/mnt/nvme/qbar-assoc \
         DB_ROOT=/mnt/nvme/qbar-dbs/assoc CONFIRM_EXPERIMENTS=YES \
         scripts/dbbench_pipeline/03_run_experiments.sh
@@ -211,7 +227,24 @@ e. Gate N2, the static comparator. It cannot start in the first session.
       For the power-law workload add `WORKLOAD_SKEW=2 MIX_GET_RATIO=0.95
       MIX_PUT_RATIO=0.05 MIX_SEEK_RATIO=0 WORKLOAD_PROFILE=powerlaw-get95-v1`
       (03 refuses the power law under the Assoc profile).
-   3. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
+   3. **The device prices** (OBJ-2, Gate N0 item 7; PREREGISTRATION D-15
+      §3), about an hour: three settled trees at T = 2, 6 and 10 for the
+      read prices, and the q̄ arms' own flushes and compactions for c_w, so
+      it runs after step 2 and reads both workloads' `summary.csv`:
+
+      ```bash
+      CONFIRM_PRICE_CALIBRATION=YES DB_ROOT=/mnt/nvme/prices-db \
+        scripts/dbbench_pipeline/18_calibrate_prices.sh \
+        /mnt/nvme/qbar-assoc/graphs/summary.csv \
+        /mnt/nvme/qbar-powerlaw/graphs/summary.csv
+      ```
+
+      It stops in seconds, before any node time, unless `THREADS` is 1 and
+      the q̄ rows are settled `native` arms at T=10 on this binary, each
+      given once, at least five of each workload. It writes
+      `build-dbbench/prices.json`, which `03` copies into every later arm
+      and records in the fingerprint; the medians and spreads are in it.
+   4. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
       that point's `native` arms (run them first, in the same session):
 
       ```bash
@@ -226,8 +259,6 @@ e. Gate N2, the static comparator. It cannot start in the first session.
       `profiles.json`. `03` checks each vector as RocksDB will (one entry per
       level, entry 0 = 1, entries in [0.5, 2.0], no level's target below
       the one above it).
-   4. **The price-measurement method** of step d, which D-13 does not
-      preregister (see `18_calibrate_prices.py`), accepted by the owner.
 
    Then, per workload and per point of the grid (T ∈ {2, 6, 10}; base
    ∈ {8, 16, 32} MiB; K0 ∈ {2, 4, 8}, skipping K0 above base / write buffer,
@@ -239,7 +270,7 @@ e. Gate N2, the static comparator. It cannot start in the first session.
      STATIC_PROFILE_survival_weighted=<vector> \
      STATIC_PROFILE_last_level_emptying=<vector> \
      SIZE_RATIOS=<T> MAX_BYTES_FOR_LEVEL_BASE=<bytes> L0_COMPACTION_TRIGGER=<K0> \
-     WORKLOAD_SIZES_M=<N2 size> REPEATS=5 SESSION_ID=n2-assoc \
+     WORKLOAD_SIZES_M=<N2 size> LOAD_PERCENT=<N2 load %> REPEATS=5 SESSION_ID=n2-assoc \
      RESULTS_ROOT=/mnt/nvme/n2-assoc/T<T>-b<base>-k<K0> \
      DB_ROOT=/mnt/nvme/n2-dbs/assoc/T<T>-b<base>-k<K0> \
      CONFIRM_EXPERIMENTS=YES scripts/dbbench_pipeline/03_run_experiments.sh

@@ -87,6 +87,7 @@ gate1
 *.txt
 *.json
 !config/research_objective_contract.json
+!config/admission_test.json
 !workload_specs/**/*.json
 !workload_specs/**/*.md
 

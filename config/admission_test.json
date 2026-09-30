@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "entry": "docs/PREREGISTRATION.md D-16 (PATHWAYS §0.6 item 7, G §4, Gate N1)",
+  "status": "drafted 2026-10-01 at the owner's request, before any Gate N1 run; may be changed in place, with a written reason, until the first Gate N1 pilot run, and never after it",
+  "reference_level": 2,
+  "candidate_levels": "the reference level to L-2, and L-1 only when the last level holds at least last_level_near_target of its target, L the deepest populated level of the pilot's settled tree at n_w (G §4 scope decision; 19 derives them when --levels is omitted)",
+  "last_level_near_target": 0.5,
+  "margins_by_size_ratio": {
+    "2": {
+      "fill_sampled": 0.05,
+      "fill_at_release": 0.05,
+      "released": 0.1,
+      "rho_tilde": 0.05,
+      "inflow_ratio": 0.2,
+      "passthrough_overlap": 0.3
+    },
+    "6": {
+      "fill_sampled": 0.05,
+      "fill_at_release": 0.05,
+      "released": 0.1,
+      "rho_tilde": 0.05,
+      "inflow_ratio": 0.2,
+      "passthrough_overlap": 0.7
+    },
+    "10": {
+      "fill_sampled": 0.05,
+      "fill_at_release": 0.05,
+      "released": 0.1,
+      "rho_tilde": 0.05,
+      "inflow_ratio": 0.2,
+      "passthrough_overlap": 1.1
+    }
+  },
+  "margin_units": {
+    "fill_sampled": "fill B_i/C_i; at least the file granularity F_sst/C_2 = 1/64 at T=2, base 16 MiB",
+    "fill_at_release": "fill B_i/C_i",
+    "released": "bytes released per turnover, in units of C_i",
+    "passthrough_overlap": "bytes written per byte released; 0.1 x (1 + T), a tenth of the nominal rho + o = 1 + T",
+    "rho_tilde": "share of released bytes that land below",
+    "inflow_ratio": "a turnover's inflow rate over the run's mean"
+  },
+  "omega_max": 0.25,
+  "k": 10,
+  "block_length": 3,
+  "replicates": 1000,
+  "seed": 20261001,
+  "n_min_rule": {
+    "grid": [
+      20,
+      30,
+      40,
+      60,
+      80,
+      120,
+      160
+    ],
+    "trials": 200,
+    "note": "grid values above half the reference's pooled turnovers are not tried"
+  },
+  "n_turn": 10,
+  "rungs": [
+    {
+      "size_millions": 10,
+      "load_percent": 29
+    },
+    {
+      "size_millions": 29,
+      "load_percent": 10
+    },
+    {
+      "size_millions": 58,
+      "load_percent": 5
+    },
+    {
+      "size_millions": 145,
+      "load_percent": 2
+    },
+    {
+      "size_millions": 290,
+      "load_percent": 1
+    }
+  ],
+  "pilot": {
+    "arm": "native at the pipeline default point: K0 4, base 16 MiB, m = 1",
+    "size_ratios": [
+      2,
+      6,
+      10
+    ],
+    "workloads": [
+      "assoc",
+      "powerlaw_get95"
+    ],
+    "repeats": 3,
+    "rung": {
+      "size_millions": 29,
+      "load_percent": 10
+    }
+  }
+}

@@ -105,6 +105,19 @@ class EvaluatorTest(unittest.TestCase):
         self.assertEqual(row["user_bytes_written"], 150_000)
         self.assertAlmostEqual(row["write_amplification_measured"], 0.07)
 
+    def test_write_seconds_are_the_windowed_jobs(self):
+        # D-15 §3b: compactions 11 and 14 at 0.9 s each; flushes 10, 12 and
+        # 13 at 200, 300 and 500 us. The load's jobs 2 and 3 and the
+        # post-drain flush 15 are outside the window.
+        self.assertAlmostEqual(self.row()["sst_write_seconds"], 1.801)
+
+    def test_a_counted_flush_without_its_finish_has_no_write_seconds(self):
+        self.run.edit("rocksdb_LOG.txt", '"job": 12, "event": "flush_finished"',
+                      '"job": 12, "event": "flush_other"')
+        row = self.row()
+        self.assertTrue(math.isnan(row["sst_write_seconds"]))
+        self.assertEqual(row["sst_bytes_written"], 10500)
+
     def test_read_counts_are_tickers_differenced_at_n_w(self):
         row = self.row()
         # Whole-run tickers are 2500, 900 and 170; the stamp at n_w has
@@ -179,7 +192,9 @@ class EvaluatorTest(unittest.TestCase):
         self.assertEqual(self.row()["objective_status"], "no reference rate")
 
     def test_bad_prices_are_refused(self):
-        good = {"c_w": 1e-9, "c_f": 1e-8, "c_blk": 1e-7, "c_sk": 1e-6}
+        good = {"schema": 2, "c_w": 1e-9, "c_f": 1e-8, "c_blk": 1e-7,
+                "c_sk": 1e-6, "price_per_core_second":
+                CONTRACT["prices"]["price_per_core_second"]}
         for key, value, text in (("c_f", 0, None), ("c_w", True, None),
                                  ("c_s", 1e-16, None),
                                  ("c_w", None, '"c_w": Infinity')):
@@ -192,6 +207,17 @@ class EvaluatorTest(unittest.TestCase):
                 run.set_prices(body)
                 self.run = run
                 self.assertIn(key, self.refusal())
+
+    def test_prices_not_per_core_second_are_refused(self):
+        # D-15 §3a: the draft schema-1 file, or another core price.
+        body = json.loads((self.run.dir / "prices.json").read_text())
+        for bad in ({**body, "schema": 1}, {**body, "price_per_core_second": 1e-4}):
+            with self.subTest(bad=bad):
+                run = Run()
+                self.addCleanup(run.close)
+                run.set_prices(json.dumps(bad))
+                self.run = run
+                self.assertIn("per core-second", self.refusal())
 
     def test_prices_other_than_the_recorded_file_are_refused(self):
         (self.run.dir / "prices.json").write_text(json.dumps(
