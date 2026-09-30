@@ -32,6 +32,14 @@ from pipeline_stats import ci95, envelope_verdict
 
 SCHEMA_VERSION = 3
 
+# The parity envelope of the 2026-08-22 gate. ACT-4 and ARCH-5 (PATHWAYS A §6,
+# H §9) are judged against the same limits, so 22_check_native_parity.py
+# imports them from here.
+AMPLIFICATION_LIMIT = 0.05      # relative, two-sided
+L0_L1_INPUT_LIMIT = 0.10        # relative, two-sided
+PENDING_DEBT_LIMIT = 0.05       # relative, one-sided
+SCORE_GROWTH_LIMIT = 1.0        # normalized, see maximum_score_growth
+
 EVENT = re.compile(r"EVENT_LOG_v1 (\{.*\})")
 LEVEL_SUMMARY = re.compile(
     r"max score ([0-9.eE+-]+), estimated pending compaction bytes (\d+)")
@@ -384,23 +392,21 @@ def main() -> int:
 
     # Parity envelopes. These are two-sided: the oracle drifting either way from
     # native leveled behaviour is the finding, not just drifting upward.
-    for metric, limit in (
-            ("write_amplification", 0.05),
-            ("point_read_amplification", 0.05),
-            ("sorted_run_seeks_per_scan", 0.05)):
+    for metric in ("write_amplification", "point_read_amplification",
+                   "sorted_run_seeks_per_scan"):
         envelope(metric,
                  [relative(float(oracle[metric]), float(regular[metric]))
                   for _, regular, oracle in pairs],
-                 limit, two_sided=True)
+                 AMPLIFICATION_LIMIT, two_sided=True)
 
     envelope("mean_l0_l1_input_size",
              [relative(o["mean_l0_l1_input_bytes"], r["mean_l0_l1_input_bytes"])
               for _, r, o in facts],
-             0.10, two_sided=True)
+             L0_L1_INPUT_LIMIT, two_sided=True)
     envelope("maximum_pending_debt",
              [relative(o["max_pending_bytes"], r["max_pending_bytes"])
               for _, r, o in facts],
-             0.05)
+             PENDING_DEBT_LIMIT)
 
     stall_excess = [float(oracle["stall_seconds"]) - float(regular["stall_seconds"])
                     for _, regular, oracle in pairs]
@@ -452,7 +458,7 @@ def main() -> int:
     # not incorrectly counted as independent samples.
     score_values, score_details, unexercised = maximum_score_growth(facts)
     if score_values:
-        envelope("per_level_maximum_score", score_values, 1.0)
+        envelope("per_level_maximum_score", score_values, SCORE_GROWTH_LIMIT)
     else:
         checks["per_level_maximum_score"] = {
             "kind": "paired_envelope",

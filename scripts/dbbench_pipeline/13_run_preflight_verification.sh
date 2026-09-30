@@ -60,19 +60,25 @@ echo "=== step 2: tier 1 and tier 2 suites ==="
 pass 2
 
 echo "=== step 3: ACT-1 on the real binary ==="
-if [[ -f "$PIPELINE_DIR/20_check_actuation.py" ]]; then
-  unwired 3 "20_check_actuation.py"
-else
-  skip 3 "no 20_check_actuation.py (WP1)"
-fi
+"$PYTHON" "$PIPELINE_DIR/20_check_actuation.py" --db-bench "$DB_BENCH" \
+  --work-dir "$PREFLIGHT_WORK_DIR/act1" \
+  --output "$PREFLIGHT_WORK_DIR/act1_report.json"
+pass 3
 
 echo "=== step 4: parity at 1M, T=2 ==="
-db_bench_help="$("$DB_BENCH" --help 2>&1 || true)"
-if grep -q 'level_target_multipliers' <<<"$db_bench_help"; then
-  unwired 4 "db_bench's --level_target_multipliers"
-else
-  skip 4 "db_bench has no --level_target_multipliers (WP1)"
+# ACT-4: the patched binary at m = 1 against stock RocksDB. ARCH-5 (the
+# plugin in hold-only mode against native) joins here with the plugin.
+if [[ -d controller ]]; then unwired 4 "controller/ (ARCH-5 parity)"; fi
+"$PIPELINE_DIR/01c_build_stock_db_bench.sh"
+parity=0
+"$PIPELINE_DIR/22_check_native_parity.sh" || parity=$?
+if (( parity == 2 )); then
+  echo "[step 4] FAIL: ACT-4 undecided; the paired spread needs more pairs" \
+       "than PARITY_PAIRS=$PARITY_PAIRS (see required_pairs in" \
+       "$PREFLIGHT_WORK_DIR/act4/act4_report.json)." >&2
 fi
+(( parity == 0 )) || exit 1
+pass 4
 
 echo "=== steps 5 and 6: rules-mode and learner smoke ==="
 if [[ -d controller ]]; then unwired 5 "controller/"; fi

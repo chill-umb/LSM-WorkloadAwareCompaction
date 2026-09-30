@@ -28,8 +28,10 @@ if [[ "$SKIP_SUBMODULES" != "1" ]]; then
   git submodule update --init --recursive
 fi
 
-echo "[configure] $DBBENCH_BUILD_DIR"
-cmake -S lib/rocksdb -B "$DBBENCH_BUILD_DIR" \
+# The fork unless overridden; 01c points this at the stock source for ACT-4.
+ROCKSDB_SOURCE_DIR="${ROCKSDB_SOURCE_DIR:-lib/rocksdb}"
+echo "[configure] $DBBENCH_BUILD_DIR from $ROCKSDB_SOURCE_DIR"
+cmake -S "$ROCKSDB_SOURCE_DIR" -B "$DBBENCH_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DWITH_GFLAGS=ON \
   -DWITH_BENCHMARK_TOOLS=ON \

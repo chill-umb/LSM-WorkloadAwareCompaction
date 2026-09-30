@@ -98,6 +98,23 @@ parity, rules-mode and learner smoke (steps 3–6). A step whose component does
 not exist yet is skipped and recorded; one whose component exists but is not
 wired into `13` fails. Wire each step in the change that builds its component.
 
+- **Step 3, ACT-1** (`20_check_actuation.py`, seconds): builds a small tree,
+  freezes it, and reopens it under several `level_target_multipliers`
+  vectors and through the `setoptions` step. It checks the scores and the
+  pending estimate against RocksDB's formulas, and that bad vectors are
+  refused. Report: `$PREFLIGHT_WORK_DIR/act1_report.json`.
+- **Step 4, ACT-4** (about 10 minutes, plus one full build the first time):
+  - `01c_build_stock_db_bench.sh` builds *stock* RocksDB, meaning upstream
+    11.1.1 (`STOCK_ROCKSDB_COMMIT`), with 01 and 02's flags, into
+    `build-dbbench-stock`.
+  - `22_check_native_parity.sh` then runs `PARITY_PAIRS` pairs at 1M
+    operations, T=2. One arm is stock; the other is the patched binary with
+    every multiplier set to 1.
+  - Both arms run 03's flags (`dbbench_shared_flags` in `config.sh`). They
+    are judged on the 2026-08-22 gate's limits, taken from 09.
+  - "Undecided" (too few pairs for the observed spread) fails the step.
+    Raise `PARITY_PAIRS` and rerun.
+
 Finally run the selected regular, prior-only, unconstrained-learning ablation,
 and constrained learned arms. The trigger and
 priority settings are loaded from each selected manifest and applied identically

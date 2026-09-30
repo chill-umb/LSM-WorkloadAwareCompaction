@@ -208,28 +208,17 @@ fi
   echo "WORKLOAD_SKEW must be 0 or 1; got: $WORKLOAD_SKEW" >&2
   exit 1
 }
-SKEW_FLAGS=()
+# The skew flags themselves come from dbbench_shared_flags (config.sh).
 SKEW_FINGERPRINT=""
 if [[ "$WORKLOAD_SKEW" == "1" ]]; then
   [[ "$KEYRANGE_NUM" =~ ^[1-9][0-9]*$ ]] || {
     echo "KEYRANGE_NUM must be a positive integer; got: $KEYRANGE_NUM" >&2
     exit 1
   }
-  SKEW_FLAGS=(
-    --keyrange_num="$KEYRANGE_NUM"
-    --keyrange_dist_a="$KEYRANGE_DIST_A"
-    --keyrange_dist_b="$KEYRANGE_DIST_B"
-    --keyrange_dist_c="$KEYRANGE_DIST_C"
-    --keyrange_dist_d="$KEYRANGE_DIST_D"
-    --key_dist_a="$KEY_DIST_A"
-    --key_dist_b="$KEY_DIST_B"
-  )
   # Only the swept axis and the value floor go in the identity; every other
   # constant of the fit is fixed by WORKLOAD_PROFILE. Conditional, like the cap
   # segment, so a uniform control arm keeps the shorter identity.
   SKEW_FINGERPRINT=":skew${KEYRANGE_NUM}-${VALUE_THETA}"
-else
-  SKEW_FLAGS=(--keyrange_num=1)
 fi
 [[ "$SKEW_FINGERPRINT" =~ ^(:skew[0-9]+-[0-9.]+)?$ ]] || {
   echo "KEYRANGE_NUM and VALUE_THETA must be plain numbers." >&2
@@ -442,31 +431,8 @@ fd_hard="$(ulimit -Hn 2>/dev/null || echo 1024)"
 (( fd_hard > 65536 )) && fd_hard=65536
 ulimit -n "$fd_hard" 2>/dev/null || true
 
-COMMON=(
-  --threads="$THREADS"
-  --key_size="$KEY_SIZE"
-  --value_size="$VALUE_SIZE"
-  --disable_wal="$DISABLE_WAL"
-  --use_direct_reads="$USE_DIRECT_IO"
-  --use_direct_io_for_flush_and_compaction="$USE_DIRECT_IO"
-  --compression_type=none
-  --write_buffer_size="$WRITE_BUFFER_SIZE"
-  --target_file_size_base="$TARGET_FILE_SIZE"
-  --max_bytes_for_level_base="$MAX_BYTES_FOR_LEVEL_BASE"
-  --level_compaction_dynamic_level_bytes=false
-  --num_levels="$NUM_LEVELS"
-  --max_background_jobs="$MAX_BACKGROUND_JOBS"
-  --open_files="$OPEN_FILES"
-  --cache_size="$BLOCK_CACHE_SIZE"
-  --block_size="$BLOCK_SIZE"
-  --bloom_bits="$BLOOM_BITS"
-  --soft_pending_compaction_bytes_limit="$SOFT_PENDING_BYTES"
-  --hard_pending_compaction_bytes_limit="$HARD_PENDING_BYTES"
-  --statistics
-  --histogram
-  --perf_level=1
-  --stats_dump_period_sec="$STATS_DUMP_PERIOD_SECONDS"
-)
+dbbench_shared_flags
+COMMON=("${DBBENCH_COMMON[@]}")
 [[ -z "$LEVEL_TARGET_MULTIPLIERS" ]] ||
   COMMON+=(--level_target_multipliers="$LEVEL_TARGET_MULTIPLIERS")
 
@@ -733,14 +699,7 @@ PY
     --benchmarks=rlsuspend,filluniquerandom,resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats
     --num="$load_ops"
     --reads="$mixed_ops"
-    --mix_get_ratio="$MIX_GET_RATIO"
-    --mix_put_ratio="$MIX_PUT_RATIO"
-    --mix_seek_ratio="$MIX_SEEK_RATIO"
-    --value_theta="$VALUE_THETA" --value_k="$VALUE_K" --value_sigma="$VALUE_SIGMA"
-    --mix_max_value_size="$MIX_MAX_VALUE_SIZE"
-    --iter_theta="$SCAN_LENGTH" --iter_k="$ITER_K" --iter_sigma="$ITER_SIGMA"
-    --mix_max_scan_len="$MIX_MAX_SCAN_LENGTH"
-    ${SKEW_FLAGS[@]+"${SKEW_FLAGS[@]}"}
+    "${DBBENCH_WORKLOAD[@]}"
     --max_bytes_for_level_multiplier="$ratio"
     --level0_file_num_compaction_trigger="$effective_l0_compaction"
     --level0_slowdown_writes_trigger="$effective_l0_slowdown"

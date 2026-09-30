@@ -147,6 +147,20 @@ DBBENCH_TEST_BUILD_DIR="${DBBENCH_TEST_BUILD_DIR:-build-dbbench-debug}"
 # 1M and 2M).
 PREFLIGHT_MARKER="${PREFLIGHT_MARKER:-$DBBENCH_BUILD_DIR/PREFLIGHT_PASSED}"
 PREFLIGHT_SHORT_RUN_MAX_M="${PREFLIGHT_SHORT_RUN_MAX_M:-2}"
+# Reports and run outputs of the preflight's steps 3 and 4.
+PREFLIGHT_WORK_DIR="${PREFLIGHT_WORK_DIR:-$DBBENCH_BUILD_DIR/preflight}"
+# ACT-4 (PATHWAYS Pathway A §6): "stock" is upstream RocksDB 11.1.1, the
+# fork's upstream base, with none of the fork's changes, built by 01c with 01
+# and 02's flags. The patched db_bench at m = 1 must match it.
+STOCK_ROCKSDB_COMMIT="${STOCK_ROCKSDB_COMMIT:-6cdeb9d9d0630763327f512e6255cab33f6834e7}"
+STOCK_SOURCE_DIR="${STOCK_SOURCE_DIR:-build-dbbench-stock-src}"
+STOCK_BUILD_DIR="${STOCK_BUILD_DIR:-build-dbbench-stock}"
+# Pairs of the ACT-4 runs (1M operations, T=2 each). Five is 09's floor for a
+# paired envelope; the evaluator reports "undecided" if the data need more.
+PARITY_PAIRS="${PARITY_PAIRS:-5}"
+# D-13's stall margin, reused as ACT-4's stall allowance: the patched binary's
+# stall fraction may exceed stock's by at most this, as a paired bound.
+PARITY_STALL_FRACTION_MARGIN="${PARITY_STALL_FRACTION_MARGIN:-0.02}"
 
 # Output. Put DB_ROOT on the storage device being evaluated, not /tmp.
 RUN_NAME="${RUN_NAME:-$(date +%Y%m%d-%H%M%S)}"
@@ -210,3 +224,59 @@ SPACE_RELATIVE_MARGIN="${SPACE_RELATIVE_MARGIN:-0.02}"
 POLICY_SEED_BASE="${POLICY_SEED_BASE:-10000}"
 BASELINE_SLO_DIR="${BASELINE_SLO_DIR:-baseline_slo}"
 RL_REQUIRE_BASELINE_SLO="${RL_REQUIRE_BASELINE_SLO:-1}"
+
+# db_bench flags every measured run shares: geometry and instruments
+# (DBBENCH_COMMON), and the workload's mix, sizes and skew (DBBENCH_WORKLOAD).
+# 03 and the preflight's native-parity runs (22) both build their commands
+# from these, so ACT-4 is judged at the experiments' geometry. Upstream flags
+# only: ACT-4's stock binary must accept every one. 03 validates the skew
+# settings before calling this.
+dbbench_shared_flags() {
+  DBBENCH_COMMON=(
+    --threads="$THREADS"
+    --key_size="$KEY_SIZE"
+    --value_size="$VALUE_SIZE"
+    --disable_wal="$DISABLE_WAL"
+    --use_direct_reads="$USE_DIRECT_IO"
+    --use_direct_io_for_flush_and_compaction="$USE_DIRECT_IO"
+    --compression_type=none
+    --write_buffer_size="$WRITE_BUFFER_SIZE"
+    --target_file_size_base="$TARGET_FILE_SIZE"
+    --max_bytes_for_level_base="$MAX_BYTES_FOR_LEVEL_BASE"
+    --level_compaction_dynamic_level_bytes=false
+    --num_levels="$NUM_LEVELS"
+    --max_background_jobs="$MAX_BACKGROUND_JOBS"
+    --open_files="$OPEN_FILES"
+    --cache_size="$BLOCK_CACHE_SIZE"
+    --block_size="$BLOCK_SIZE"
+    --bloom_bits="$BLOOM_BITS"
+    --soft_pending_compaction_bytes_limit="$SOFT_PENDING_BYTES"
+    --hard_pending_compaction_bytes_limit="$HARD_PENDING_BYTES"
+    --statistics
+    --histogram
+    --perf_level=1
+    --stats_dump_period_sec="$STATS_DUMP_PERIOD_SECONDS"
+  )
+  DBBENCH_WORKLOAD=(
+    --mix_get_ratio="$MIX_GET_RATIO"
+    --mix_put_ratio="$MIX_PUT_RATIO"
+    --mix_seek_ratio="$MIX_SEEK_RATIO"
+    --value_theta="$VALUE_THETA" --value_k="$VALUE_K" --value_sigma="$VALUE_SIGMA"
+    --mix_max_value_size="$MIX_MAX_VALUE_SIZE"
+    --iter_theta="$SCAN_LENGTH" --iter_k="$ITER_K" --iter_sigma="$ITER_SIGMA"
+    --mix_max_scan_len="$MIX_MAX_SCAN_LENGTH"
+  )
+  if [[ "$WORKLOAD_SKEW" == "1" ]]; then
+    DBBENCH_WORKLOAD+=(
+      --keyrange_num="$KEYRANGE_NUM"
+      --keyrange_dist_a="$KEYRANGE_DIST_A"
+      --keyrange_dist_b="$KEYRANGE_DIST_B"
+      --keyrange_dist_c="$KEYRANGE_DIST_C"
+      --keyrange_dist_d="$KEYRANGE_DIST_D"
+      --key_dist_a="$KEY_DIST_A"
+      --key_dist_b="$KEY_DIST_B"
+    )
+  else
+    DBBENCH_WORKLOAD+=(--keyrange_num=1)
+  fi
+}

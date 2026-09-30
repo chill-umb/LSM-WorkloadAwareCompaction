@@ -66,7 +66,7 @@ Three rules carry over from CLAUDE.md:
 | Validation (rejected with an error, never clamped). Rejected when: the size differs from `num_levels`; entry 0 is not 1.0; an entry lies outside $[m_{\min}, m_{\max}]$ or is not finite; dynamic level sizing is on; the style is not `kCompactionStyleLevel`; a level target shrinks going down | `db/column_family.cc` (`ValidateOptions`; `SetOptions` calls it, not `SanitizeOptions`) |
 | Apply: every new version copies the option into the existing `capacity_scales_`, which `MaxBytesForLevel` already multiplies in. The existing limits change: values below 1 are allowed, and the last level is un-pinned. L0 stays unscaled, as the code already does | `db/version_set.{h,cc}` (the capacity-state inheritance and `MaxBytesForLevel`) |
 | Delete the `RL_STATIC_CAPACITY_SCALES` environment-variable path and the unused `SetCapacityScales()` | `db/version_set.{h,cc}` |
-| `db_bench --level_target_multipliers=…` for static profiles in $\Theta_s$ | `tools/db_bench_tool.cc` |
+| `db_bench --level_target_multipliers=…` for static profiles in $\Theta_s$; a `setoptions` step (`--setoptions="k=v;…"`, one `DB::SetOptions` call) so ACT-1 can test the SetOptions path on the Release binary | `tools/db_bench_tool.cc` |
 
 This needs no score code of its own. The score, and the pending-bytes
 estimate (A-Impl-3), both read `MaxBytesForLevel`. `SetOptions` already
@@ -205,7 +205,8 @@ headers. Its SHA-256 goes in the fingerprint, separately from `db_bench`'s.
 | `compaction_measurements.py` | $\rho_i$, $o_i$, $t_i$, $\xi_i$, $\eta_i$ and dropped bytes per source level, from host job records | B §2 item 4 |
 | `18_calibrate_prices.py` (new) | Device time per byte written, per filter probe, per block read and per seek, converted at the instance price; $c_s$ from the storage price. Checks $c_s > 0$ | OBJ-2 |
 | `19_admission_test.py` (new) | The collapse test: per-turnover statistics, moving-block bootstrap, the every-statistic-must-pass test, margins, and the $n_{\min}$ simulation. Records pool membership per (workload, $T$) | G §4, Gate N1 |
-| `20_check_actuation.py` (new) | The ACT-1 checks (§6) and ACT-3 fidelity, from the host and decision logs | ACT-1, ACT-3 |
+| `20_check_actuation.py` (new) | The ACT-1 checks (§6) on the Release `db_bench`: a frozen tree reopened under several vectors, and `db_bench`'s new `setoptions` step. ACT-3 fidelity, from the host and decision logs, joins it with the plugin | ACT-1, ACT-3 |
+| `01c_build_stock_db_bench.sh`, `22_check_native_parity.{sh,py}` (new) | Stock `db_bench` build; ACT-4 runs and evaluation (§6.4 step 4) | ACT-4 |
 | `21_check_learner.py` (new) | ARCH-2 masked-target audit, ARCH-6 agreement between C++ and Python evaluation of the same weights, OBJ-1 and OBJ-4 identities | ARCH-2, ARCH-6, OBJ-1, OBJ-4 |
 | `09_evaluate_oracle_parity.py` | Kept. Its checks define the parity envelope for ACT-4 and ARCH-5 | ACT-4, ARCH-5 |
 | `01b_build_test_trees.sh` (new) | A Debug CMake tree of the fork with only the fork's own test targets, and the plugin's test target, so `assert`s fire | CLAUDE.md "Tests", tier 2 |
@@ -294,9 +295,23 @@ next starts:
 3. **ACT-1 on the real binary** (`20_check_actuation.py`): L0 score
    invariance, the refusals, the scaled pending estimate, recompute without
    writes.
-4. **Parity** at 1M operations, T=2 (`09_evaluate_oracle_parity.py`): patched
-   binary at $m \equiv 1$ against stock (ACT-4); plugin in hold-only mode
-   against native (ARCH-5).
+4. **Parity** at 1M operations, T=2, on 09's limits: patched binary at
+   $m \equiv 1$ against stock (ACT-4); plugin in hold-only mode against
+   native (ARCH-5).
+   - **Stock** means upstream RocksDB 11.1.1 (`6cdeb9d9d`) with none of the
+     fork's changes, built by `01c` with 01 and 02's flags. It is not the
+     fork's native arm, which is ARCH-5's reference. Only a stock binary can
+     show what the fork's patches cost, including WP3's instruments.
+   - Stock has no phase stamps, no `POINT_SST_PROBE` or `SORTED_RUN_SEEK`, and
+     no episode log. `22_check_native_parity.{sh,py}` therefore adapts 09's
+     checks to instruments both binaries have:
+     - whole-run figures, with the same upstream benchmark sequence on both
+       arms;
+     - point probes as filter checks, proven equal to `POINT_SST_PROBE` on
+       every patched run;
+     - the LOG's tree-wide maximum score;
+     - stall as a fraction of the writing time, at D-13's 2-point margin;
+     - seeks reported only.
 5. **Rules-mode smoke** at 1M operations: zero masked actions, ACT-3 fidelity,
    logs complete, fallback exercised once by an injected bad weights file.
 6. **Learner smoke** at 2M operations, T=2, read priority:
