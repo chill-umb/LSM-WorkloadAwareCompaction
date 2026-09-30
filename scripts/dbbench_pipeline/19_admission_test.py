@@ -30,7 +30,8 @@ PREREGISTRATION D-16); none has a default here. Margins may be given per T
 grid value the simulation finds sufficient on the reference's own
 turnovers). Without --levels the candidates run from the reference level to
 L-2, plus L-1 when the last level holds last_level_near_target of its
-target, L the deepest populated level of the settled tree at n_w.
+target on the mean of the cell's runs, L the deepest populated level of the
+settled tree at n_w (one candidate set per cell).
 A Kolmogorov-Smirnov distance is reported, not judged.
 
 The run-length rule (Gate N1, when the config has n_turn and rungs): the
@@ -336,6 +337,21 @@ def settled_tree(events: list[dict], start_us: int) -> tuple[int, float] | None:
     return None
 
 
+def cell_candidates(trees: list[tuple[int, float] | None], reference: int,
+                    near_target: float) -> tuple[list[int], float]:
+    """One candidate set per cell (D-16 §3): the runs must agree on L, and
+    L-1's candidacy uses the mean of their B_L/C_L, so runs straddling the
+    threshold cannot split a cell. Returns (candidates, mean fill)."""
+    if any(tree is None for tree in trees):
+        raise ValueError("a run has no compaction_release after n_w, so no "
+                         "settled tree; pass --levels")
+    depths = sorted({depth for depth, _ in trees})
+    if len(depths) != 1:
+        raise ValueError(f"the runs' settled trees differ in depth: {depths}")
+    mean_fill = statistics.fmean(fill for _, fill in trees)
+    return candidate_levels(depths[0], mean_fill, reference, near_target), mean_fill
+
+
 def candidate_levels(depth: int, last_fill: float, reference: int,
                      near_target: float) -> list[int]:
     """G §4's scope decision: the reference to L-2, and L-1 only when the
@@ -350,11 +366,10 @@ def candidate_levels(depth: int, last_fill: float, reference: int,
     return levels
 
 
-def read_run(run: Path, levels: list[int] | None, config: dict):
+def read_run(run: Path, levels: list[int], config: dict):
     """One run's geometry (with its mixgraph operations and settled tree)
-    and, per level, (turnovers, empty turnovers). levels None: the
-    candidates of candidate_levels. A run 03 did not complete, or marked
-    unsettled, is refused, as 04 refuses it."""
+    and, per level, (turnovers, empty turnovers). A run 03 did not
+    complete, or marked unsettled, is refused, as 04 refuses it."""
     if not (run / "COMPLETED").exists() or (run / "UNSETTLED").exists():
         raise ValueError(f"{run}: not a completed, settled run")
     records = host_log.load(run / host_log.FILE_NAME)
@@ -375,12 +390,6 @@ def read_run(run: Path, levels: list[int] | None, config: dict):
                 "tree": settled_tree(events, start["wall_us"])}
     if geometry["mixgraph_operations"] <= 0:
         raise ValueError(f"{run}: no mixgraph operations")
-    if levels is None:
-        if geometry["tree"] is None:
-            raise ValueError(f"{run}: no compaction_release after n_w, so no "
-                             "settled tree; pass --levels")
-        levels = candidate_levels(*geometry["tree"], config["reference_level"],
-                                  config["last_level_near_target"])
     fills = release_fills(events)
     return geometry, {level: level_turnovers(
         records, fills, level,
@@ -589,12 +598,20 @@ def main() -> int:
     reference = raw["reference_level"]
     if args.levels is not None and reference not in args.levels:
         raise SystemExit("--levels must include the reference level")
+    levels, mean_fill = args.levels, None
+    if levels is None:  # a first, cheap pass for the cell's settled tree
+        try:
+            levels, mean_fill = cell_candidates(
+                [read_run(run, [], raw)[0]["tree"] for run in args.runs],
+                reference, raw["last_level_near_target"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise SystemExit(str(error)) from error
     per_level: dict[int, list[list[dict]]] = {}
     empty: dict[int, int] = {}
     fingerprints, depths, loads, mixgraph_ops, trees = set(), set(), set(), [], []
     for run in args.runs:
         try:
-            geometry, turnovers = read_run(run, args.levels, raw)
+            geometry, turnovers = read_run(run, levels, raw)
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise SystemExit(f"{run}: {error}") from error
         fingerprints.add(geometry["fingerprint"])
@@ -612,10 +629,6 @@ def main() -> int:
     fingerprint = fingerprints.pop()
     if ":ltm" in fingerprint:
         raise SystemExit("the admission test reads m = 1 runs only")
-    if args.levels is None and len(depths) != 1:
-        raise SystemExit(f"the runs' settled trees differ in depth: {sorted(depths)}")
-    if any(len(runs) != len(args.runs) for runs in per_level.values()):
-        raise SystemExit("the runs' candidate levels differ")
     # Every statistic is order-free, so each turnover's lists are sorted once
     # here and summarize merges presorted runs.
     for runs in per_level.values():
@@ -644,7 +657,8 @@ def main() -> int:
               else None,
               # Per run, [L, B_L/C_L]: the fill decides whether L-1 is a
               # candidate (D-16 §3).
-              "settled_tree_per_run": trees, "empty_turnovers": empty,
+              "settled_tree_per_run": trees, "last_level_mean_fill": mean_fill,
+              "empty_turnovers": empty,
               **membership(per_level, config, geometry)}
     if simulation is not None:
         report["n_min_rule_simulation"] = simulation

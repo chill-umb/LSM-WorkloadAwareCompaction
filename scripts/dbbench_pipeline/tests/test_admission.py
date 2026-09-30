@@ -569,14 +569,24 @@ class MainTest(unittest.TestCase):
                    self.released("d2", [0, 5, 8, 300, 7], (0, 1, 2, 4, 8))],
                   "differ in depth"),
                  ([self.run_dir("n")], "no compaction_release after n_w"),
-                 # One depth (L = 3), but only one run's L3 is near target.
-                 ([self.released("c1", [0, 5, 8, 300]),
-                   self.released("c2", [0, 5, 8, 2400])], "candidate levels differ"),
+
                  ([self.released("s", [0, 500], (0, 1000))], "too shallow"))
         for runs, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(SystemExit, message):
                     self.derive(*runs)
+
+    def test_one_candidate_set_per_cell_from_the_mean_fill(self):
+        # D-16 §3: runs on either side of 0.5 do not split the cell. L3 at
+        # 0.075 and 0.6 of target: mean 0.34, so L2 is not a candidate; at
+        # 0.45 and 0.6: mean 0.525, so it is.
+        split = self.derive(self.released("m1", [0, 5, 8, 300]),
+                            self.released("m2", [0, 5, 8, 2400]))
+        self.assertEqual(list(split["levels"]), ["1"])
+        self.assertAlmostEqual(split["last_level_mean_fill"], 0.3375)
+        near = self.derive(self.released("m3", [0, 5, 8, 1800]),
+                           self.released("m4", [0, 5, 8, 2400]))
+        self.assertEqual(list(near["levels"]), ["1", "2"])
 
     def test_runs_03_did_not_complete_are_refused(self):
         unfinished = self.run_dir("u")

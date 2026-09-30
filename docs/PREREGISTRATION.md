@@ -2068,8 +2068,12 @@ existing artifacts, no node time").**
     L8 is at half its target. At T=10, L4 is far below its target, so the
     only candidate is L2, and there is no pool.
 - `19` reads $L$ and $B_L/C_L$ from the first `compaction_release` after
-  the `measure_start` stamp. It refuses runs whose depths or candidate sets
-  differ, and a tree too shallow to hold L2 as a candidate.
+  the `measure_start` stamp. The candidate set belongs to the cell: $L-1$'s
+  candidacy uses the **mean** of the cell's runs' $B_L/C_L$, so runs on
+  either side of 0.5 cannot split it (amended in place on 2026-10-01,
+  before any pilot run, after the estimate of 0.44–0.47 at T=2 put the
+  threshold within reach of run-to-run spread). It refuses runs whose
+  depths differ, and a tree too shallow to hold L2 as a candidate.
 - L1 and the last level are never candidates (G §4: L1 is fed in L0-sized
   batches; the last level has no level below it). L1 keeps its own model.
 

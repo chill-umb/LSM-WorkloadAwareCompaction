@@ -3,7 +3,7 @@
   "entry": "docs/PREREGISTRATION.md D-16 (PATHWAYS §0.6 item 7, G §4, Gate N1)",
   "status": "drafted 2026-10-01 at the owner's request, before any Gate N1 run; may be changed in place, with a written reason, until the first Gate N1 pilot run, and never after it",
   "reference_level": 2,
-  "candidate_levels": "the reference level to L-2, and L-1 only when the last level holds at least last_level_near_target of its target, L the deepest populated level of the pilot's settled tree at n_w (G §4 scope decision; 19 derives them when --levels is omitted)",
+  "candidate_levels": "the reference level to L-2, and L-1 only when the last level holds at least last_level_near_target of its target on the mean of the cell's runs, L the deepest populated level of the pilot's settled tree at n_w (G §4 scope decision; 19 derives them when --levels is omitted)",
   "last_level_near_target": 0.5,
   "margins_by_size_ratio": {
     "2": {

@@ -133,6 +133,20 @@ Everything below runs on the node from the repository root. Steps a–c need
 no new code: if one fails, stop and report the output. Step d cannot start
 in the first session; it says what must exist first.
 
+**Unattended:** after step a, `24_gate_n1_chain.sh` runs step c and steps
+d.1–d.3 for both workloads in one go (about 10–14 hours). It first checks
+the results disk (writable, not tmpfs, `MIN_FREE_GB`, default 60), the venv,
+the fork commit and leftover result folders, so a setup mistake fails in
+seconds. Each workload's chain runs as its own process, so one workload's
+failure leaves the other to finish; the prices then wait. Run it in `tmux`:
+
+```bash
+NVME=/mnt/nvme scripts/dbbench_pipeline/24_gate_n1_chain.sh 2>&1 | tee ~/gate_n1.log
+```
+
+`STOP_AFTER_N1=1` ends after the admission tests; `RESUME=1` reuses the
+finished arms of a failed night. `PARITY_PAIRS` defaults to 10 here.
+
 a. Publish and fetch the code. On the machine that holds the commits, push
    the fork first, since the root records a fork commit:
 
