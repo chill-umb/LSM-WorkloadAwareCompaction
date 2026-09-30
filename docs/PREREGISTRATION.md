@@ -1599,6 +1599,192 @@ covers it and prediction 2 may not. (b) On $W$ this near-native arm sits
 measured-phase write coefficient of variation of 1.8% at $T{=}2$ (D-11). The
 earlier smoke arms' +4.4% to +6.5% should be read against that.
 
+### D-13, 2026-09-30 — Programme 1: the priced objective, its prices, the Gate N2 workloads, the static comparator, the settle rule and the stall rule
+
+**Recorded before any run of Programme 1.** The Programme 1 binary does not
+exist yet (Gate N0 items 2–7 are unbuilt), so no arm, pilot or calibration
+run governed here has been made. The theory is `docs/PATHWAYS.md` as
+committed with this entry; this entry fixes only the values and choices that
+PATHWAYS §0.6 leaves to preregistration, for everything Gate N2 uses (§0.6
+items 1, 2, 4, 5, 6, 8, 9 and 12). Items 3, 7, 10 and 11 are later entries:
+the admission test and run length (item 7) before Gate N1, the controller's
+action bounds (item 3) before Gate N3, the echo choice (item 11) before Gate
+N4, the claim (item 10) before Gate N5.
+
+**1. The objective (§0.6 item 1).**
+
+- For this fork the constrained objective of P1c-22 is replaced by the priced
+  cost $J_\beta$ of PATHWAYS D §2, in the four modes of that section's table.
+  There are no hard limits; the guard and the latency bounds move to
+  Programme 2.
+- **Headline $\beta^\star = 10$.** $J_\beta$ is also reported at
+  $\beta^\star \in \{2, 5\}$, and $\bar\beta$ of Proposition D.4 is reported
+  per workload, so a reader can see whether 10 sits in the strict-priority
+  regime.
+- **Prices.** $c_w$, $c_f$, $c_{blk}$ and $c_{sk}$ are the device time of one
+  operation of each kind, measured on the node (Gate N0 item 7, OBJ-2), times
+  the instance price. Both money prices are AWS `us-east-1` on-demand list
+  prices in USD, retrieved 2026-09-30.
+  - **Instance price: \$0.974 per hour for `m8a.4xlarge`, i.e.
+    \$2.7056 × 10⁻⁴ per device-second.** It is the public instance closest to
+    the node, Chameleon `compute_zen5_grado` (AMD EPYC 4545P, 16 Zen 5 cores
+    with SMT off, 64 GB RAM, local NVMe). It has 16 vCPUs, each a physical
+    5th-generation EPYC core (AWS's M8a page), and 64 GiB. Sources: the AWS M8a
+    instance page and the Vantage `m8a.4xlarge` page.
+  - **Storage price: EBS `gp3` at \$0.08 per GB-month, i.e.
+    $c_s$ = \$3.0441 × 10⁻¹⁷ per byte-second**, taking a GB as 10⁹ bytes and a
+    month as 730 hours (the AWS pricing calculator's month). Reading GB as
+    2³⁰ bytes would move $c_s$ by 7%, well inside the reported range. Block
+    storage is used because it has a per-byte price; an instance with local
+    NVMe bundles its disk into the hourly rate and has none.
+  - Together: holding 1 GB for one hour costs as much as 0.41 s of the whole
+    machine's time. Only this ratio matters, since the instance price scales
+    the write and read terms together.
+  - $c_s > 0$. Every result is also reported at $c_s/2$ and $2c_s$. Prices
+    are re-measured on any hardware change and recorded in the fingerprint.
+    The node is free to the project, so these prices stand for what the
+    resources cost a typical deployment, not for this project's bill.
+- **$\bar q$, one per workload.** $\bar q$ is the native arm's measured-phase
+  throughput at $T = 10$: operations served from $n_w$ to the end of
+  `mixgraph`, divided by the wall time between those two stamps, averaged over
+  that arm's ACT-4 parity repeats on the Programme 1 binary. The native arm
+  runs $m \equiv 1$, the configured $K_0$ and the pipeline's default options.
+  - It is a measurement fixed by a rule, so its value is added here as a dated
+    amendment when measured, and frozen before any $\Theta_s$ run.
+  - Why one value per workload: C-6 compares $J_\beta$ across $T$, which needs
+    one price scale per workload. Why $T = 10$: it is RocksDB's default fanout.
+  - Resulting node order: ACT-4, then $\bar q$, then $\Theta_s$.
+
+**2. Write accounting (§0.6 item 2): P0-7 amended.** For this fork the M3
+convention is replaced by Lemma D.7's exact identity. The overlap constant
+$c_i = o_i/f_i$ is measured per level from the event log ($\rho_i$, $o_i$ and
+$t_i$ per job), and a trivial move counts as writing nothing. The
+$\approx 3.6$ optimum quoted under P0-7 is not quoted for this fork. The
+evaluator's $W$ is unchanged, since it always summed SST bytes; what changes
+is the model used to explain it. P0-7 stands as the record of the 2026-09-11
+programme.
+
+**3. The Gate N2 workloads (§0.6 item 4).**
+
+- **`Assoc`**, exactly as D-1: the fit, both deviations, `keyrange_num` = 30,
+  delete rate 0.
+- **A read-heavy power-law workload.** Label in the paper: *"YCSB-B operation
+  mix with power-law key popularity"*. It is never labelled Zipfian or
+  YCSB-B: `db_bench` at `25468bbaa` has no Zipfian generator. Adding one was
+  considered on 2026-09-29 and not chosen.
+  - `mixgraph` with `mix_get_ratio` 0.95, `mix_put_ratio` 0.05 and
+    `mix_seek_ratio` 0.
+  - `keyrange_dist_{a,b,c,d}` = 0 and `keyrange_num` = 1, so `mixgraph` skips
+    prefix modelling. It draws a seed from the power law
+    $f(x) = a\,x^b$ (`PowerCdfInversion`) and scrambles it with `Random64`
+    (`tools/db_bench_tool.cc` at `25468bbaa`, lines 7215–7243).
+  - `key_dist_a`, `key_dist_b` = 0.002312 / 0.3467, `Assoc`'s own key-hotness
+    fit, so the two workloads differ in their operation mix, not in how
+    popular their keys are.
+  - Value-size fit, record size and load count are as for `Assoc`.
+- **Fingerprint.** Each run's family and mix parameters are in its
+  fingerprint. The new segment is emitted only for the power-law family, in
+  lockstep with the parser in `06_select_baseline_slo.py`, so `Assoc` runs
+  stay poolable.
+
+**4. The static class $\Theta_s$ (§0.6 item 5).** As PATHWAYS C §1:
+
+- $K_0 \in \{2, 4, 8\}$, restricted to admissible values (A-Impl-6).
+- Base size $\in \{8, 16, 32\}$ MiB.
+- Four multiplier profiles:
+  - uniform 1;
+  - survival-weighted (Theorem A.2), at the measured $c$ and $v_i = a_i - t_i$
+    measured on the native arm's runs of the same (workload, $T$);
+  - last-level-emptying: the level just above the native arm's deepest
+    populated level (same workload and $T$, on its settled tree at $n_w$)
+    held at 2× from the load, every other level at 1. This is the 2026-09-23
+    audit's untested idea (§3). Scaling every upper level instead would repeat
+    the base-size axis, since uniform 2× is the "base 32 MiB" point measured
+    again. A-Impl-7 holds, because the last level's target, at $1 \cdot T$,
+    is at least 2 for every $T$ in the class;
+  - uniform 0.75.
+- `compaction_pri = kMinOverlappingRatio`, pinned.
+- $T \in \{2, 6, 10\}$. For the cross-$T$ check (C-6), each mode's
+  $\theta^\star_\beta$ at $T = 10$ is re-run at $T = 14$ and $20$, per
+  workload: at most four configurations each. The rule is fixed here; the
+  configurations are known only once the $T = 10$ runs are scored.
+
+The comparator is $\theta^\star_\beta(w) = \arg\min_{\Theta_s}J_\beta$ over
+measured, seed-paired runs, per workload and mode.
+
+**5. Repeats (§0.6 item 8).**
+
+- **Five** seed-paired repeats per cell first; $\sigma_d$ is estimated from
+  them.
+- Each cell is then topped up to the smallest $n$ with
+  $n \ge (t_{0.975,n-1}\,\sigma_d/h)^2$, where $h$ is a quarter of the gap in
+  $J_\beta$ between $\theta^\star_\beta$ and the next-best static point, per
+  (workload, $T$, mode).
+- Runs are same-session and interleaved, with the session id recorded
+  (CMP-8).
+
+**6. The measured phase starts on a settled tree (§0.6 item 6).** This
+amends PATHWAYS H §5's wake-up rule, under which the post-load backlog
+drained under live `mixgraph` traffic and $n_w$ was a fixed operation number
+set from pilot runs, so the operations before it went unscored. Decided so
+that every `mixgraph` operation is measured.
+
+- After the bulk load, `db_bench` issues no operation until the tree has
+  settled: a new `settle` step calls RocksDB's `WaitForCompact` with flushes
+  included, then holds for $h_w$ = **10 s**, during which every level's score
+  must stay below 1 and $k_0 < K_0$. The fork's `waitforcompaction` step
+  makes the same call (`tools/db_bench_tool.cc` at `25468bbaa`, lines
+  8931–8953), but it is not reused, because it also enters the old stack's
+  drain mode. ($h_w$ is H §5's window $h$, renamed only to keep it
+  apart from item 5's half-width.)
+- $n_w$ is the first `mixgraph` operation. Every arm, native included, is
+  scored from $n_w$ to the end of the drain, on the tree its own load left.
+- The controller is suspended through the load and the wait, so the tree
+  settles under the arm's own configured settings, and it starts at $n_w$.
+- An arm not settled at the end of the hold is invalid. It is reported, and
+  the rule is not loosened after the fact (A8).
+- No pilot runs are needed.
+
+**7. Retirements (§0.6 item 9).** For this fork:
+- P0-1 is retired as a constraint, because scans are priced through
+  $c_{sk}R_{sk}$. `sorted_run_seeks_per_scan` stays the scan metric.
+- P0-3 ($\delta_W$), P0-6 (the $S_{\text{bound}}$ ladder), P1-15, P1-16,
+  P1c-22 and P1c-23 are retired.
+- P0-4 (latency) moves to Programme 2. Latency is reported as a `dio0`
+  warm-cache diagnostic.
+
+Their records stand, and nothing scored under them is re-scored.
+
+**8. The stall rule (§0.6 item 12).** Every claim also requires, on the same
+paired runs and reported beside $J_\beta$ rather than priced into it:
+
+- **Stalls, judged as a fraction.** Stall fraction is measured-phase stall
+  seconds divided by measured-phase wall time. Stall seconds are the
+  internal-stats `Cumulative stall` line differenced over the measured phase
+  (D-11), never `rocksdb.stall.micros`. The upper 95% paired bound on
+  (controller − comparator) stall fraction must be at most
+  $\delta_{\text{stall}}$ = 0.02, i.e. 2 percentage points.
+  A fraction is used because a relative margin on stall seconds is undefined
+  when the comparator never stalls.
+- **Throughput.** The lower 95% paired bound on the relative difference in
+  measured-phase operations per second must be at least
+  $-\delta_{\text{thr}} = -2\%$.
+
+**Predictions, recorded in advance.** PATHWAYS D §5 as committed with this
+entry. In brief: little room in read priority on stationary `Assoc`; write
+priority's room is what holding a level adds to native's high drops; space
+priority on `Assoc` is capped at the 3–8% resident garbage.
+
+**Contract.** `config/research_objective_contract.json` holds this entry's
+values in machine-readable form and is frozen in the same commit. Contracts
+v1–v3 are deleted (owner, 2026-09-30); they remain recoverable from commit
+`5bea343`.
+
+**Falsification.** This entry sets values, not hypotheses. It fails as a
+record if any value marked here is changed after an arm it governs has run.
+Such a change is a new dated entry that names this one and states what it
+supersedes.
+
 ---
 
 ## 2. Gate verdicts as measured
@@ -2634,6 +2820,11 @@ on the worst status at the end.
 ---
 
 ## 4. Frozen preregistered decisions
+
+*Superseded for Programme 1 by D-13 (2026-09-30). Contracts v1–v3 were deleted
+that day on the owner's instruction and are recoverable from commit `5bea343`;
+`config/research_objective_contract.json` replaces them. This section stays as
+the record of the 2026-09-11 programme.*
 
 **Authoritative contract:** `../config/research_objective_contract.v3.json`,
 frozen 2026-09-12 with

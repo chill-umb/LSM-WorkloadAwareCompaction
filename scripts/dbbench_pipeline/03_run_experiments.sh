@@ -72,7 +72,7 @@ if [[ -f "$BUILD_PROVENANCE" ]]; then
   ROCKSDB_PORTABLE_BUILT="$(awk -F= '/^rocksdb_portable=/ {print $2}' "$BUILD_PROVENANCE")"
   BUILD_CXX_VERSION="$(awk -F= '/^build_cxx=/ {sub(/^build_cxx=/, ""); print}' "$BUILD_PROVENANCE")"
 fi
-RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.v3.json | awk '{print $1}')"
+RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.json | awk '{print $1}')"
 
 # Inherited by every db_bench launch. The C++ side aborts if it is set but
 # unusable, so a typo stops the run instead of quietly measuring an unexpanded

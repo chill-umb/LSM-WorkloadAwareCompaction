@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "programme": "Programme 1 (research fork of 2026-09-29)",
+  "contract_status": "frozen",
+  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the two reference rates from the native arm's ACT-4 runs (a dated amendment to D-13), and the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
+  "authority": {
+    "decisions": "docs/PREREGISTRATION.md D-13",
+    "theory": "docs/PATHWAYS.md, 2026-09-29 revision"
+  },
+  "replaces": {
+    "deleted_files": [
+      "research_objective_contract.v1.json",
+      "research_objective_contract.v2.json",
+      "research_objective_contract.v3.json"
+    ],
+    "deleted_on": "2026-09-30, on the owner's instruction",
+    "recover_with": "git show 5bea343:config/research_objective_contract.v3.json",
+    "reason": "Programme 1 replaces the constrained objective with a priced cost. The 2026-09-11 programme's record stays in PREREGISTRATION section 4 and in git history."
+  },
+  "objective": {
+    "form": "priced cost J_beta, PATHWAYS D section 2",
+    "weight_order": [
+      "write",
+      "read",
+      "space"
+    ],
+    "modes": {
+      "balanced": [
+        1,
+        1,
+        1
+      ],
+      "read": [
+        1,
+        "beta_star",
+        1
+      ],
+      "write": [
+        "beta_star",
+        1,
+        1
+      ],
+      "space": [
+        1,
+        1,
+        "beta_star"
+      ]
+    },
+    "headline_beta_star": 10,
+    "reported_beta_star": [
+      2,
+      5,
+      10
+    ],
+    "hard_limits": false
+  },
+  "prices": {
+    "currency": "USD",
+    "instance_price_per_device_second": 0.00027055555555555557,
+    "instance_price_source": "AWS us-east-1 on-demand, m8a.4xlarge, $0.974 per hour (16 physical Zen 5 cores, 64 GiB), retrieved 2026-09-30; closest public match to Chameleon compute_zen5_grado",
+    "storage_price_per_byte_second": 3.0441400304414005e-17,
+    "storage_price_source": "AWS us-east-1 EBS gp3, $0.08 per GB-month, GB = 1e9 bytes, month = 730 hours, retrieved 2026-09-30",
+    "storage_price_must_be_positive": true,
+    "device_times": "c_w, c_f, c_blk and c_sk measured on the node (OBJ-2), times the instance price",
+    "storage_price_sensitivity": [
+      0.5,
+      2.0
+    ]
+  },
+  "reference_rate": {
+    "rule": "native arm's measured-phase operations per second at T=10, mean over its ACT-4 repeats on the Programme 1 binary, frozen before any static-class run",
+    "ops_per_second": {
+      "assoc": null,
+      "powerlaw_get95": null
+    }
+  },
+  "write_accounting": "Lemma D.7's exact identity with the overlap constant measured per level; replaces P0-7's M3 convention",
+  "workloads": {
+    "assoc": "PREREGISTRATION D-1 unchanged: keyrange_num 30, delete rate 0",
+    "powerlaw_get95": {
+      "label": "YCSB-B operation mix with power-law key popularity; never Zipfian or YCSB-B",
+      "mix_get_ratio": 0.95,
+      "mix_put_ratio": 0.05,
+      "mix_seek_ratio": 0.0,
+      "keyrange_num": 1,
+      "keyrange_dist": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "key_dist_a": 0.002312,
+      "key_dist_b": 0.3467,
+      "value_size_record_size_and_load": "as assoc"
+    }
+  },
+  "static_class": {
+    "l0_trigger": [
+      2,
+      4,
+      8
+    ],
+    "l0_trigger_rule": "admissible values only (A-Impl-6)",
+    "base_size_mib": [
+      8,
+      16,
+      32
+    ],
+    "profiles": {
+      "uniform_1": 1.0,
+      "survival_weighted": "Theorem A.2 at measured c and v_i = a_i - t_i, from the native arm's runs of the same workload and T",
+      "last_level_emptying": {
+        "level": "the level just above the native arm's deepest populated level, same workload and T, on its settled tree at n_w",
+        "multiplier": 2.0,
+        "other_levels": 1.0,
+        "applied_from": "the load"
+      },
+      "uniform_0_75": 0.75
+    },
+    "compaction_pri": "kMinOverlappingRatio",
+    "size_ratios": [
+      2,
+      6,
+      10
+    ],
+    "cross_t_check": {
+      "size_ratios": [
+        14,
+        20
+      ],
+      "configuration": "each mode's theta_star at T=10, per workload"
+    }
+  },
+  "repeats": {
+    "initial": 5,
+    "top_up": "smallest n with n >= (t_{0.975,n-1} sigma_d / h)^2, h a quarter of the J_beta gap between theta_star and the next-best static point, per workload, T and mode",
+    "same_session_interleaved": true
+  },
+  "measured_phase": {
+    "settle": "after the bulk load, a db_bench settle step calls WaitForCompact with flushes included, then holds while every level's score stays below 1 and L0 files stay below the trigger",
+    "hold_seconds": 10,
+    "start": "first mixgraph operation (n_w)",
+    "end": "end of the drain",
+    "controller_starts_at": "n_w",
+    "unsettled_arm": "invalid and reported"
+  },
+  "stall_rule": {
+    "confidence_level": 0.95,
+    "stall_fraction": "measured-phase stall seconds / measured-phase wall time",
+    "stall_fraction_margin": 0.02,
+    "stall_seconds_source": "internal-stats Cumulative stall line differenced over the measured phase (D-11); never rocksdb.stall.micros",
+    "throughput_relative_margin": 0.02
+  },
+  "retired_for_this_fork": [
+    "P0-1 as a constraint",
+    "P0-3",
+    "P0-6",
+    "P1-15",
+    "P1-16",
+    "P1c-22",
+    "P1c-23"
+  ],
+  "moved_to_programme_2": [
+    "P0-4 latency"
+  ],
+  "build": {
+    "march_target": "znver5",
+    "mechanism": "RocksDB PORTABLE cache variable; PORTABLE=0 would emit -march=native",
+    "why_not_native": "native silently degrades to a generic microarchitecture on a compiler that does not know the host CPU",
+    "minimum_toolchain": "GCC 14.1 or Clang 19",
+    "measurement_node": "single-socket AMD EPYC 4545P, 16 cores, SMT off, one NUMA node",
+    "binary_sha256_in_experiment_fingerprint": true,
+    "level_compaction_dynamic_level_bytes": false,
+    "io": {
+      "use_direct_reads": false,
+      "use_direct_io_for_flush_and_compaction": false,
+      "compaction_readahead_size_bytes": 2097152,
+      "swept": false,
+      "amended": "2026-09-12, in place, before any Gate 1 run",
+      "reason": "pinned off on measured cost. On the measurement node at 10M T=2, mixgraph ran at 2750 ops/s with direct I/O and 58332 ops/s buffered, a 21x penalty putting the Gate 1 sweep near 95 hours.",
+      "consequence": "the host page cache holds the database, so latency, runtime and stall figures are warm-cache and are reported as such. They bound foreground disruption; they are not storage latency claims.",
+      "unaffected_metrics": [
+        "write_amplification",
+        "point_read_amplification",
+        "space_amplification",
+        "sorted_run_seeks_per_scan",
+        "per_level_merge_survival",
+        "capacity_space_curve"
+      ],
+      "revisit": "may be set true for the final paper benchmark workload if the amplification results justify the cost. Such runs carry fingerprint field dio1, cannot be pooled with dio0 runs, and need their own comparator manifest because stage 06 selects on runtime, which is cache-sensitive.",
+      "rejected_alternative": "a cgroup memory cap on the benchmark process. It is external state the fingerprint cannot carry and a new lease silently loses.",
+      "recorded_in": [
+        "experiment_fingerprint: dio field",
+        "metadata.env: use_direct_io"
+      ],
+      "measured": {
+        "node": "AMD EPYC 4545P, buffered vs direct, 10M T=2 mixgraph",
+        "buffered_ops_per_second": 58332,
+        "direct_ops_per_second_max_open_files_unlimited": 2750,
+        "direct_ops_per_second_max_open_files_1000": 1960,
+        "penalty": "21x"
+      },
+      "correction": "an earlier revision of this entry quoted a 2.6x penalty. That compared the direct-I/O pilot on this node against a buffered figure from the 2026-09-03 suite, which ran on different hardware. The cross-machine comparison was invalid; the same-node penalty is 21x. Recorded rather than silently replaced."
+    }
+  },
+  "measurement_environment": {
+    "cpu_pinning": "db_bench and the Python controller run on disjoint cores that share no last-level cache",
+    "applies_to_every_arm": true,
+    "recorded_in": [
+      "metadata.env: dbbench_cpus",
+      "metadata.env: controller_cpus"
+    ],
+    "enforced_by_experiment_fingerprint": false,
+    "note": "recorded for provenance; a differently pinned arm is not yet refused by the paired evaluator"
+  },
+  "revisions": {
+    "rocksdb_base": "7ea2d73655025332855864f0b8d6d2dbdad3f336",
+    "rocksdb_fork_start": "25468bbaa130d916863516d55109983a69389bc0",
+    "rocksdb_fork_programme1_binary": null,
+    "rocksdb_fork_programme1_parent": null
+  },
+  "frozen_date": "2026-09-30"
+}
