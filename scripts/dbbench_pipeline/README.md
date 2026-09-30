@@ -152,7 +152,8 @@ NVME=/mnt/nvme scripts/dbbench_pipeline/24_gate_n1_chain.sh 2>&1 | tee ~/gate_n1
   `rl_agent`, while it runs: the preflight marker hashes them, and every
   later `03` call refuses a changed tree (exit 7).
 - An arm that does not settle makes `04` refuse it (exit 3), which ends
-  that workload's chain, as D-13 §6 intends; the log names the arm.
+  that workload's chain (D-13 §6 makes the arm invalid; stopping there is
+  24's choice); the log names the arm.
 - **After a failure,** find the failed arm in the log, delete its result
   folder and its database folder (03 keeps both on purpose), then rerun
   with `RESUME=1`. The rerun skips every finished arm but repeats the

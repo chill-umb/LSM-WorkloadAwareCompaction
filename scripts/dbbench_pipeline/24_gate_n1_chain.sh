@@ -107,7 +107,7 @@ fi
 [[ -x "$PY" ]] || fail "no Python at $PY; run 00_install_dependencies.sh"
 mkdir -p "$NVME" && touch "$NVME/.write_test" && rm -f "$NVME/.write_test" ||
   fail "$NVME is not writable"
-[[ "$(stat -f -c %T "$NVME")" != tmpfs ]] || fail "$NVME is tmpfs; use the NVMe device"
+[[ "$(stat -L -f -c %T "$NVME")" != tmpfs ]] || fail "$NVME is tmpfs; use the NVMe device"
 free_gb="$(df --output=avail -BG "$NVME" | tail -n 1 | tr -dc 0-9)"
 (( free_gb >= ${MIN_FREE_GB:-60} )) ||
   fail "only ${free_gb} GB free on $NVME; about ${MIN_FREE_GB:-60} GB are needed"
@@ -121,7 +121,8 @@ fi
 # The measurements are of the disk NVME is on. An unmounted /mnt/nvme is a
 # plain folder on the root disk, so that is refused unless meant.
 echo "[24] results disk: $(df --output=source,fstype,target "$NVME" | tail -n 1)"
-if [[ "$(stat -c %d "$NVME")" == "$(stat -c %d /)" && "${ALLOW_ROOT_DISK:-0}" != 1 ]]; then
+# -L: a symlinked NVME is judged by the disk it points to.
+if [[ "$(stat -L -c %d "$NVME")" == "$(stat -c %d /)" && "${ALLOW_ROOT_DISK:-0}" != 1 ]]; then
   fail "$NVME is on the root filesystem: is the NVMe mounted? If the root disk" \
        "is the device to measure, rerun with ALLOW_ROOT_DISK=1"
 fi
