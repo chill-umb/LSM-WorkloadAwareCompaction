@@ -40,7 +40,8 @@ def check(records: list[dict]) -> list[str]:
     header first, the measure_start and drain_end stamps present, the
     per-level read counters summing to their tickers at drain_end, the last H
     sample equal to drain_end's live SST bytes, every job that began ended,
-    and operation counts that never decrease."""
+    no job's begin, end or H sample written twice, and operation counts that
+    never decrease."""
     problems = []
     if not records or records[0].get("type") != "header":
         problems.append("no header first")
@@ -64,6 +65,22 @@ def check(records: list[dict]) -> list[str]:
     ends = sum(r.get("type") == "job_end" for r in records)
     if begins != ends:
         problems.append(f"{begins} jobs began, {ends} ended")
+    # A listener registered twice writes every record twice and keeps the
+    # counts above equal, so each job's records are checked one by one. (A job
+    # id is unique within one DB with one column family and no atomic flush,
+    # as the pipeline runs; atomic flush over several would repeat one.)
+    seen: set[tuple] = set()
+    repeated = []
+    for r in records:
+        if r.get("type") in ("job_begin", "job_end", "h") and "job" in r:
+            key = (r["type"], r.get("cause", ""), r["job"])
+            if key in seen:
+                repeated.append(key)
+            seen.add(key)
+    if repeated:
+        kind, cause, job = repeated[0]
+        problems.append(f"job {job} recorded twice ({kind} {cause}".rstrip()
+                        + f"); {len(repeated)} repeated records in all")
     ops = [r["op"] for r in records if "op" in r]
     if any(later < earlier for earlier, later in zip(ops, ops[1:])):
         problems.append("operation count decreased")

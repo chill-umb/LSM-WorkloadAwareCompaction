@@ -214,6 +214,7 @@ class HostLogTest(unittest.TestCase):
             "last H sample": lambda r: r[-1].update(h=4999),
             "operation count decreased": lambda r: r[3].update(op=60000),
             "levels sum": lambda r: r[-1]["levels"][0].__setitem__(0, 0),
+            "job 6 recorded twice": lambda r: r.insert(4, dict(r[3])),
         }
         for expected, edit in cases.items():
             with self.subTest(expected):
@@ -222,6 +223,18 @@ class HostLogTest(unittest.TestCase):
                 found = self.problems(records)
                 self.assertTrue(any(p.startswith(expected) for p in found),
                                 found)
+
+    def test_a_listener_registered_twice_is_named(self):
+        # db_bench on 2026-10-01 wrote every job and H sample twice: the
+        # counts still matched, so only a per-job check sees it.
+        records = []
+        for record in host_log(100, 40):
+            records.append(record)
+            if record["type"] in ("h", "job_begin", "job_end"):
+                records.append(dict(record))
+        found = self.problems(records)
+        self.assertTrue(any(p.startswith("job 2 recorded twice") for p in found),
+                        found)
 
     def test_unparsable_log_is_a_problem(self):
         self.path.write_text("{not json\n")
