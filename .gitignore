@@ -88,8 +88,15 @@ gate1
 *.json
 !config/research_objective_contract.json
 !config/admission_test.json
+# The controller arms' inputs (03, plugin_config.py): D-18's bounds and the
+# Gate N3 settings, committed when preregistered.
+!config/action_bounds.json
+!config/controller_rules.json
 !workload_specs/**/*.json
 !workload_specs/**/*.md
+# The controller plugin's build file (plan §8). Its per-arm config is composed by
+# the pipeline, not committed, so it has no re-include.
+!controller/CMakeLists.txt
 
 # docs/ is deliberately NOT ignored (b253e85, 2026-09-21). PREREGISTRATION.md
 # must keep its commit date to be worth anything, and PATHWAYS.md and
@@ -119,6 +126,9 @@ graphify-out/
 # tree of 01b is build output.
 !**/tests/fixtures/**
 /build-dbbench-debug/
+# The plugin's Release tree (13) and Debug test tree (01b).
+/build-controller/
+/build-controller-debug/
 
 # Editor swap and backup files. The preflight marker hashes every file git
 # does not ignore under the pipeline and rl_agent/, so one of these appearing

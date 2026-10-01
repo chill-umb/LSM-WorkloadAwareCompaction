@@ -2,6 +2,9 @@
 also has, and each check failing on the defect it names."""
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -188,6 +191,35 @@ class ParityTest(unittest.TestCase):
         noisy[1][2]["write_amplification"] *= 1.03
         report = self.verdict(noisy)
         self.assertEqual(report["verdict"], "undecided")
+
+    def test_arch5_judges_hold_against_native_by_the_same_checks(self):
+        """22.sh's PARITY_CHECK=arch5 layout: both arms are fork runs."""
+        work = self.root / "arch5"
+        for pair in range(1, 6):
+            write_run(work / f"pair-{pair:02d}" / "native")
+            write_run(work / f"pair-{pair:02d}" / "hold")
+        output = work / "arch5_report.json"
+        ran = subprocess.run(
+            [sys.executable, str(PIPELINE / "22_check_native_parity.py"),
+             str(work), "--arms", "native", "hold", "--criterion", "ARCH-5",
+             "--stall-fraction-margin", "0.02", "--output", str(output)],
+            capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": str(PIPELINE)})
+        self.assertEqual(ran.returncode, 0, ran.stderr + ran.stdout)
+        report = json.loads(output.read_text())
+        self.assertEqual((report["criterion"], report["arms"]),
+                         ("ARCH-5", ["native", "hold"]))
+        self.assertIn("[ARCH-5] passed", ran.stdout)
+        # The tested arm's host log is checked as ACT-4's patched arm's is.
+        (work / "pair-03" / "hold" / act4.HOST_LOG).unlink()
+        ran = subprocess.run(
+            [sys.executable, str(PIPELINE / "22_check_native_parity.py"),
+             str(work), "--arms", "native", "hold", "--criterion", "ARCH-5",
+             "--stall-fraction-margin", "0.02"],
+            capture_output=True, text=True,
+            env={**os.environ, "PYTHONPATH": str(PIPELINE)})
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("host_log_consistency", ran.stdout)
 
 
 class HostLogTest(unittest.TestCase):

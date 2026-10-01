@@ -84,7 +84,23 @@ predicted-override fraction.
 `03_run_experiments.sh` checks the marker `PREFLIGHT_PASSED` and exits 7 when
 the `db_bench` binary or the code in `rl_agent/`, `controller/` or this
 directory has changed since, or when a step the run's arms need was skipped
-(static arms need steps 1–4, `rules` also 5, learned arms 1–6).
+(static arms need steps 1–4, `hold` and `rules` also 5, learned arms 1–6).
+
+**Controller arms** (`hold`, `rules`; plan §7 step 8). `03` loads the plugin
+(`--rl_plugin`) at the first mixgraph operation and destroys it after the
+drain. `plugin_config.py` composes each arm's config from the D-18 bounds
+(`ACTION_BOUNDS_FILE`), `b_max` and the Gate N3 rules
+(`CONTROLLER_RULES_FILE`), the contract (beta for
+`CONTROLLER_OBJECTIVE_MODE`, c_s, q-bar) and the prices file, and `03`
+refuses the matrix while any of them is missing or null.
+`28_check_plugin_run.py` then checks every controller run: the plugin
+started and stopped, its logs are complete, no masked action was taken, no
+fallback, hold-only made no `SetOptions` call, and ACT-3 (at least 99% of
+the requested changes in the published score within one control interval,
+the level's next decision). A run that fails is kept with
+`FAILED_PLUGIN_CHECK`, and `03` exits 8. `PLUGIN_PLACEHOLDERS=1` fills missing
+values with smoke values for the preflight's own runs (at most 2M
+operations).
 
 ```bash
 scripts/dbbench_pipeline/run_python_tests.sh     # tier 1, seconds, before every commit
@@ -199,11 +215,19 @@ c. The preflight, steps 1–4 (Release build, tiers 1–2, ACT-1, ACT-4, the
      scripts/dbbench_pipeline/13_run_preflight_verification.sh
    ```
 
-   Expected: `[step 1]` to `[step 4] PASS`, steps 5 and 6 `SKIP` (no plugin
-   yet), and `preflight marker written: build-dbbench/PREFLIGHT_PASSED`.
+   Expected: `[step 1]` to `[step 5] PASS`, step 6 `SKIP` (no learned
+   mode yet), and `preflight marker written: build-dbbench/PREFLIGHT_PASSED`.
+   Step 4 runs ACT-4 and then ARCH-5 (`PARITY_CHECK=arch5`: the plugin in
+   hold-only mode against the native arm); step 5 runs one `rules` arm at 1M
+   with smoke placeholders, which must make at least one change and pass
+   ACT-3, then one `rules` arm whose bounds the plugin refuses, which must
+   run to the drain in fallback (03 exits 8 on it, by design).
    Reports: `build-dbbench/preflight/act1_report.json`,
    `build-dbbench/preflight/act4/act4_report.json`,
-   `build-dbbench/preflight/evaluator/graphs/summary.csv`.
+   `build-dbbench/preflight/arch5/arch5_report.json`,
+   `build-dbbench/preflight/evaluator/graphs/summary.csv`,
+   `build-dbbench/preflight/rules_smoke_report.json`,
+   `build-dbbench/preflight/rules_fallback_report.json`.
 
 d. Gate N2, the static comparator. Four things must exist first, in this
    order:

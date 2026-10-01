@@ -27,6 +27,13 @@ scored from the first mixgraph operation to the end of the drain:
                      last-level-emptying profiles measured from native runs.
                      The L0 trigger and base size are L0_COMPACTION_TRIGGER
                      and MAX_BYTES_FOR_LEVEL_BASE, as for every arm.
+  hold, rules        the controller plugin (CONTROLLER_PLUGIN) from the first
+                     mixgraph operation to the drain, from m = 1, in
+                     hold-only mode (ARCH-5 at gate size) or in Gate N3's rules
+                     mode, priced for CONTROLLER_OBJECTIVE_MODE. Each arm's
+                     config is composed by plugin_config.py and refused while
+                     a value it needs is undecided; every run is checked by
+                     28_check_plugin_run.py.
 
 The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
 unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
@@ -111,7 +118,7 @@ fi
 arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
   local name variable
   case "$1" in
-    native|static:uniform_1) ;;
+    native|static:uniform_1|hold|rules) ;;
     static:uniform_0_75)
       printf '1'
       printf ':0.75%.0s' $(seq 2 "$NUM_LEVELS")
@@ -128,8 +135,12 @@ arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
     *) printf '%s' "$LEVEL_TARGET_MULTIPLIERS" ;;
   esac
 }
-is_programme1_arm() { [[ "$1" == native || "$1" == static:* ]]; }
+is_controller_arm() { [[ "$1" == hold || "$1" == rules ]]; }
+is_programme1_arm() {
+  [[ "$1" == native || "$1" == static:* ]] || is_controller_arm "$1"
+}
 PROGRAMME1_MATRIX=0
+CONTROLLER_MATRIX=0
 programme1_vectors=()
 declare -A m_one_arm=() seen_arm=()
 for arm in $EXPERIMENT_ARMS; do
@@ -138,9 +149,12 @@ for arm in $EXPERIMENT_ARMS; do
     exit 1
   }
   seen_arm["$arm"]=1
+  if is_controller_arm "$arm"; then
+    CONTROLLER_MATRIX=1
+  fi
   if is_programme1_arm "$arm"; then
     PROGRAMME1_MATRIX=1
-    [[ "$arm" =~ ^(native|static:[A-Za-z0-9_]+)$ ]] || {
+    [[ "$arm" =~ ^(native|hold|rules|static:[A-Za-z0-9_]+)$ ]] || {
       echo "Unsupported experiment arm: $arm" >&2
       exit 1
     }
@@ -150,7 +164,7 @@ for arm in $EXPERIMENT_ARMS; do
     echo "Arm $arm: multipliers must be \":\"-separated numbers: $vector" >&2
     exit 1
   }
-  if is_programme1_arm "$arm"; then
+  if is_programme1_arm "$arm" && ! is_controller_arm "$arm"; then
     if [[ -n "$vector" ]]; then
       programme1_vectors+=("$arm=$vector")
     else
@@ -392,6 +406,64 @@ if [[ -f "$PRICES_FILE" ]]; then
   PRICES_SEGMENT=":prices${PRICES_SHA256}"
 fi
 
+# Controller arms (plan §5): the plugin 13 built, and each arm's config
+# composed now, so an undecided value stops the matrix before any run.
+PLUGIN_PATH=""
+PLUGIN_SHA256=""
+if (( CONTROLLER_MATRIX )); then
+  [[ "$CONTROLLER_PLUGIN" = /* ]] && PLUGIN_PATH="$CONTROLLER_PLUGIN" \
+    || PLUGIN_PATH="$PROJECT_ROOT/$CONTROLLER_PLUGIN"
+  [[ -f "$PLUGIN_PATH" ]] || {
+    echo "Missing $PLUGIN_PATH; 13's step 1 builds the plugin." >&2
+    exit 1
+  }
+  PLUGIN_SHA256="$(sha256sum "$PLUGIN_PATH" | awk '{print $1}')"
+  [[ "$PLUGIN_PLACEHOLDERS" =~ ^[01]$ ]] || {
+    echo "PLUGIN_PLACEHOLDERS must be 0 or 1." >&2
+    exit 1
+  }
+  if (( PLUGIN_PLACEHOLDERS )); then
+    for size_m in $WORKLOAD_SIZES_M; do
+      (( size_m <= PREFLIGHT_SHORT_RUN_MAX_M )) || {
+        echo "PLUGIN_PLACEHOLDERS=1 is for the preflight's smoke runs only" \
+             "(at most ${PREFLIGHT_SHORT_RUN_MAX_M}M operations)." >&2
+        exit 1
+      }
+    done
+  fi
+fi
+# Writes $1's config to $2 with its logs beside it; prints placeholder notes.
+compose_plugin_config() {  # $1=arm, $2=output
+  local placeholder_flag=()
+  (( ! PLUGIN_PLACEHOLDERS )) || placeholder_flag=(--placeholders)
+  "$PYTHON" "$PIPELINE_DIR/plugin_config.py" --arm "$1" \
+    --objective-mode "$CONTROLLER_OBJECTIVE_MODE" --family "$WORKLOAD_FAMILY" \
+    --bounds "$ACTION_BOUNDS_FILE" --settings "$CONTROLLER_RULES_FILE" \
+    --prices "$PRICES_FILE" --admission config/admission_test.json \
+    --decision-log "$(dirname "$2")/decisions.jsonl" \
+    --transition-log "$(dirname "$2")/transitions.jsonl" \
+    --output "$2" ${placeholder_flag[@]+"${placeholder_flag[@]}"}
+}
+# The config's identity: every value except where its logs go.
+plugin_config_sha256() {  # $1=config
+  "$PYTHON" - "$1" <<'PY'
+import hashlib, json, sys
+config = json.load(open(sys.argv[1]))
+for key in ("decision_log", "transition_log"):
+    config.pop(key, None)
+print(hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest())
+PY
+}
+if (( CONTROLLER_MATRIX )); then
+  plugin_check_dir="$(mktemp -d)"
+  for arm in $EXPERIMENT_ARMS; do
+    is_controller_arm "$arm" || continue
+    compose_plugin_config "$arm" "$plugin_check_dir/$arm/plugin_config.json" \
+      || { rm -rf "$plugin_check_dir"; exit 1; }
+  done
+  rm -rf "$plugin_check_dir"
+fi
+
 for integer in $WORKLOAD_SIZES_M $SIZE_RATIOS "$REPEATS"; do
   [[ "$integer" =~ ^[0-9]+$ ]] || {
     echo "Workload sizes and T values must be positive integers: $integer" >&2
@@ -404,7 +476,7 @@ done
 }
 for arm in $EXPERIMENT_ARMS; do
   case "$arm" in
-    native|static:*) ;;  # checked above
+    native|static:*|hold|rules) ;;  # checked above
     regular|oracle|prior_only|rl|unconstrained_rl|unconstrained_prior_only) ;;
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
@@ -529,10 +601,14 @@ done
 # preflight's own and debugging runs, and are exempt.
 # ponytail: a per-run size cap, not a wall-time cap; a matrix of many short
 # runs is exempt. Count total operations if that is ever abused.
+# With controller/ present the plugin's hash is part of the marker (13 binds
+# the library it built), so a rebuilt or deleted plugin is refused too.
+plugin_args=()
+if [[ -d controller ]]; then plugin_args=(--plugin "$CONTROLLER_PLUGIN"); fi
 for size_m in $WORKLOAD_SIZES_M; do
   if (( size_m > PREFLIGHT_SHORT_RUN_MAX_M )); then
     "$PYTHON" "$PIPELINE_DIR/preflight_marker.py" check \
-      --marker "$PREFLIGHT_MARKER" --db-bench "$DB_BENCH" \
+      --marker "$PREFLIGHT_MARKER" --db-bench "$DB_BENCH" "${plugin_args[@]}" \
       --arms "$EXPERIMENT_ARMS" || {
       echo "Refusing a ${size_m}M run without a matching preflight;" \
            "run 13_run_preflight_verification.sh first." >&2
@@ -803,7 +879,8 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
   # arm writes the host log (plan WP4).
   local multipliers settle_step="" multiplier_flag=()
   local MULTIPLIER_FINGERPRINT="" SETTLE_FINGERPRINT=""
-  local QBAR_FINGERPRINT="" PRICES_FINGERPRINT=""
+  local QBAR_FINGERPRINT="" PRICES_FINGERPRINT="" PLUGIN_FINGERPRINT=""
+  local plugin_flag=() plugin_config_sha="" plugin_placeholders=""
   multipliers="$(arm_multipliers "$arm")"
   if [[ -n "$multipliers" ]]; then
     multiplier_flag=(--level_target_multipliers="$multipliers")
@@ -814,6 +891,15 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     SETTLE_FINGERPRINT=":settle${SETTLE_HOLD_SECONDS}"
     QBAR_FINGERPRINT="$QBAR_SEGMENT"
     PRICES_FINGERPRINT="$PRICES_SEGMENT"
+  fi
+  if is_controller_arm "$arm"; then
+    plugin_placeholders="$(compose_plugin_config "$arm" \
+      "$result_dir/plugin_config.json")" || exit 1
+    [[ -z "$plugin_placeholders" ]] || echo "$plugin_placeholders"
+    plugin_config_sha="$(plugin_config_sha256 "$result_dir/plugin_config.json")"
+    plugin_flag=(--rl_plugin="$PLUGIN_PATH"
+                 --rl_plugin_config="$result_dir/plugin_config.json")
+    PLUGIN_FINGERPRINT=":plugin${PLUGIN_SHA256}:pcfg${plugin_config_sha}"
   fi
   if [[ "$arm" == "oracle" ]]; then
     oracle=1
@@ -927,7 +1013,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}${PLUGIN_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -970,6 +1056,7 @@ PY
     --seed="$run_seed"
     "${COMMON[@]}"
     ${multiplier_flag[@]+"${multiplier_flag[@]}"}
+    ${plugin_flag[@]+"${plugin_flag[@]}"}
   )
   printf '%q ' "${command[@]}" > "$result_dir/command.txt"
   printf '\n' >> "$result_dir/command.txt"
@@ -997,6 +1084,13 @@ PY
     printf 'cpu_governor=%s\n' "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | paste -sd, || echo unavailable)"
     printf 'thp_enabled=%s\n' "$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo unavailable)"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
+    if is_controller_arm "$arm"; then
+      printf 'plugin_sha256=%s\n' "$PLUGIN_SHA256"
+      printf 'plugin_config_sha256=%s\n' "$plugin_config_sha"
+      printf 'controller_objective_mode=%s\n' "$CONTROLLER_OBJECTIVE_MODE"
+      # Smoke runs only: these values were not preregistered or measured.
+      printf 'plugin_placeholders=%s\n' "${plugin_placeholders#*: }"
+    fi
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'
     printf 'use_direct_io=%s\n' "$USE_DIRECT_IO"
@@ -1154,6 +1248,21 @@ PY
     return
   fi
   check_log "$status" "$result_dir/run.log" || exit 4
+  # A controller arm whose plugin fell back, took a masked action or lost a
+  # log line ran something other than its config; it is kept, not scored.
+  if is_controller_arm "$arm"; then
+    local plugin_mode=hold-only
+    [[ "$arm" != rules ]] || plugin_mode=rules
+    "$PYTHON" "$PIPELINE_DIR/28_check_plugin_run.py" \
+      --stdout "$result_dir/run.log" \
+      --decisions "$result_dir/decisions.jsonl" \
+      --transitions "$result_dir/transitions.jsonl" --mode "$plugin_mode" \
+      --output "$result_dir/plugin_check.json" || {
+        touch "$result_dir/FAILED_PLUGIN_CHECK"
+        echo "The plugin check failed; keeping the result and DB: $result_dir" >&2
+        exit 8
+      }
+  fi
   if (( uses_server )); then
     set +e
     "$PYTHON" "$PIPELINE_DIR/10_validate_learning_health.py" \

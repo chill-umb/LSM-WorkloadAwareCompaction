@@ -2,7 +2,9 @@
 # Tier 2 (plan §6.1): build the fork's own gtest files in a separate Debug
 # tree, so RocksDB's asserts fire, and run them. The measured Release tree of
 # 01 never carries test code. A listed test whose source does not exist yet is
-# skipped; one that fails to build or run stops the script.
+# skipped; one that fails to build or run stops the script. The controller
+# plugin's tests (controller/tests, plan §6.2) build first, in their own
+# Debug tree; they need only the fork's headers and bundled gtest.
 set -Eeuo pipefail
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,11 +13,19 @@ cd "$PROJECT_ROOT"
 # shellcheck source=config.sh
 source "$PIPELINE_DIR/config.sh"
 
-# The plugin's tests (controller/tests, plan §6.2) join here with the plugin.
 if [[ -d controller ]]; then
-  echo "controller/ exists but its tests are not wired into 01b yet" \
-       "(plan §3 and §6.2)." >&2
-  exit 1
+  echo "[configure] $CONTROLLER_TEST_BUILD_DIR (Debug, plugin tests)"
+  cmake -S controller -B "$CONTROLLER_TEST_BUILD_DIR" \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DRL_CONTROLLER_TESTS=ON
+  cmake --build "$CONTROLLER_TEST_BUILD_DIR" \
+    --target rl_controller rl_controller_tests --parallel "$BUILD_JOBS"
+  echo "[tier2] running rl_controller_tests"
+  "$CONTROLLER_TEST_BUILD_DIR/rl_controller_tests"
+  # rl_controller_host_test loads this Debug plugin into a real DB (plan
+  # §6.2, "a plugin is loaded and unloaded"); without it that case fails.
+  RL_TEST_PLUGIN="$(cd "$CONTROLLER_TEST_BUILD_DIR" && pwd)/librl_controller.so"
+  export RL_TEST_PLUGIN
 fi
 
 targets=()

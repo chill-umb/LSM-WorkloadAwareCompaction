@@ -139,7 +139,8 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"(?::skew(\d+)-([0-9.]+))?(?::pow([0-9.]+)-([0-9.]+))?:"
         r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
         r"dio([01])(?::cap([0-9.x]+))?(?::ltm([0-9.x]+))?"
-        r"(?::settle(\d+))?(?::qbar([0-9.]+))?(?::prices([0-9a-f]{64}))?:"
+        r"(?::settle(\d+))?(?::qbar([0-9.]+))?(?::prices([0-9a-f]{64}))?"
+        r"(?::plugin([0-9a-f]{64}):pcfg([0-9a-f]{64}))?:"
         r"dynamic([01]):soft(\d+):hard(\d+):"
         r"binary([0-9a-f]{64}):objective([0-9a-f]{64})$"
     )
@@ -160,6 +161,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "max_background_jobs", "threads", "disable_wal", "use_direct_io",
         "static_capacity_scales", "level_target_multipliers",
         "settle_hold_seconds", "reference_rate", "prices_sha256",
+        "plugin_sha256", "plugin_config_sha256",
         "level_compaction_dynamic_level_bytes",
         "soft_pending_compaction_bytes_limit",
         "hard_pending_compaction_bytes_limit",
@@ -167,13 +169,15 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
     )
     OPAQUE = ("workload_profile", "static_capacity_scales",
               "level_target_multipliers", "dbbench_sha256",
-              "research_objective_sha256", "prices_sha256")
+              "research_objective_sha256", "prices_sha256", "plugin_sha256",
+              "plugin_config_sha256")
     # Programme 1 segments (D-13); absent on runs that predate them or do
-    # not use them: the power-law family's key fit, the settle hold, q-bar
-    # and the prices file.
+    # not use them: the power-law family's key fit, the settle hold, q-bar,
+    # the prices file, and a controller arm's plugin and its config.
     OPTIONAL = {"key_dist_a": float, "key_dist_b": float,
                 "settle_hold_seconds": int, "reference_rate": float,
-                "prices_sha256": str}
+                "prices_sha256": str, "plugin_sha256": str,
+                "plugin_config_sha256": str}
     # Absent means the run predates the B1 skew knob, which is the uniform
     # family at keyrange_num 1 and a fixed value size.
     SKEW_DEFAULTS = {"keyrange_num": "1", "value_theta": None}

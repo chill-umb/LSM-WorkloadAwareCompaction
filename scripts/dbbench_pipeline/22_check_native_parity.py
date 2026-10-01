@@ -28,6 +28,11 @@ measure_start and drain_end stamps present, the per-level read counters
 summing to their tickers at drain_end, every job that began ended, the last
 H sample equal to drain_end's live SST bytes, and operation counts that never
 decrease.
+
+With --arms native hold --criterion ARCH-5 the same checks judge ARCH-5
+(PATHWAYS H §9, plan §6.4 step 4): the patched binary's native arm as the
+reference against the controller plugin in hold-only mode, both with the host
+log. "stock" and "patched" below are then the reference and the tested arm.
 """
 
 from __future__ import annotations
@@ -115,8 +120,9 @@ def collect(run_dir: Path) -> dict:
 
 
 def evaluate(pairs: list[tuple[int, dict, dict]], stall_margin: float,
-             minimum_pairs: int) -> dict:
-    """pairs: (pair number, stock facts, patched facts)."""
+             minimum_pairs: int, criterion: str = "ACT-4") -> dict:
+    """pairs: (pair number, reference facts, tested facts): stock and
+    patched for ACT-4, native and hold for ARCH-5."""
     checks: dict[str, dict] = {}
 
     def invariant(name, ok, details):
@@ -177,7 +183,7 @@ def evaluate(pairs: list[tuple[int, dict, dict]], stall_margin: float,
                        if check["passed"] is None)
     verdict = "failed" if failed else "undecided" if undecided else "passed"
     return {
-        "criterion": "ACT-4", "verdict": verdict, "pairs": len(pairs),
+        "criterion": criterion, "verdict": verdict, "pairs": len(pairs),
         "stall_fraction_margin": stall_margin,
         "failed_checks": failed, "undecided_checks": undecided,
         "checks": checks,
@@ -199,20 +205,26 @@ def main() -> int:
     parser.add_argument("--stall-fraction-margin", type=float, required=True)
     parser.add_argument("--minimum-pairs", type=int, default=5,
                         help="09's floor for a paired envelope")
+    parser.add_argument("--arms", nargs=2, default=list(ARMS),
+                        metavar=("REFERENCE", "TESTED"))
+    parser.add_argument("--criterion", default="ACT-4",
+                        choices=("ACT-4", "ARCH-5"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     pairs = []
     for pair_dir in sorted(args.work.glob("pair-*")):
-        arms = [collect(pair_dir / arm) for arm in ARMS]
+        arms = [collect(pair_dir / arm) for arm in args.arms]
         pairs.append((int(pair_dir.name.split("-")[1]), *arms))
-    report = evaluate(pairs, args.stall_fraction_margin, args.minimum_pairs)
+    report = evaluate(pairs, args.stall_fraction_margin, args.minimum_pairs,
+                      args.criterion)
+    report["arms"] = list(args.arms)
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered)
     print(rendered, end="")
-    print(f"[ACT-4] {report['verdict']}: failed {report['failed_checks']}, "
-          f"undecided {report['undecided_checks']}")
+    print(f"[{args.criterion}] {report['verdict']}: failed "
+          f"{report['failed_checks']}, undecided {report['undecided_checks']}")
     return {"passed": 0, "failed": 1, "undecided": 2}[report["verdict"]]
 
 

@@ -29,7 +29,7 @@ SAMPLE = {
     "MAX_BACKGROUND_JOBS": "2", "THREADS": "1", "DISABLE_WAL": "0",
     "USE_DIRECT_IO": "0", "MULTIPLIER_FINGERPRINT": "",
     "POWER_FINGERPRINT": "", "SETTLE_FINGERPRINT": "", "QBAR_FINGERPRINT": "",
-    "PRICES_FINGERPRINT": "",
+    "PRICES_FINGERPRINT": "", "PLUGIN_FINGERPRINT": "",
     "SOFT_PENDING_BYTES": "68719476736", "HARD_PENDING_BYTES": "274877906944",
     "DBBENCH_SHA256": "a" * 64, "RESEARCH_OBJECTIVE_SHA256": "b" * 64,
 }
@@ -67,8 +67,22 @@ class FingerprintTest(unittest.TestCase):
     def test_older_runs_parse_without_programme1_segments(self):
         options = select.parse_fingerprint_options(fingerprint_from_03())
         for name in ("key_dist_a", "key_dist_b", "settle_hold_seconds",
-                     "reference_rate", "prices_sha256"):
+                     "reference_rate", "prices_sha256", "plugin_sha256",
+                     "plugin_config_sha256"):
             self.assertIsNone(options[name], name)
+
+    def test_a_controller_arm_carries_its_plugin_and_config(self):
+        fingerprint = fingerprint_from_03(
+            SETTLE_FINGERPRINT=":settle10", PRICES_FINGERPRINT=":prices" +
+            "c" * 64, PLUGIN_FINGERPRINT=":plugin" + "d" * 64 + ":pcfg" +
+            "e" * 64)
+        options = select.parse_fingerprint_options(fingerprint)
+        self.assertEqual(options["prices_sha256"], "c" * 64)
+        self.assertEqual(options["plugin_sha256"], "d" * 64)
+        self.assertEqual(options["plugin_config_sha256"], "e" * 64)
+        with self.assertRaises(SystemExit):  # the two travel together
+            select.parse_fingerprint_options(
+                fingerprint.replace(":pcfg" + "e" * 64, ""))
 
     def test_programme1_segments_reach_the_fingerprint_and_parse(self):
         fingerprint = fingerprint_from_03(

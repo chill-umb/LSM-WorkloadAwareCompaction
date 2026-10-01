@@ -28,13 +28,14 @@ STATIC_ARMS = {"regular", "native"}
 
 
 def required_steps(arms):
-    """Steps a run needs: static arms 1-4, rules adds 5, anything else 5-6."""
+    """Steps a run needs: static arms 1-4, the plugin's hold and rules arms
+    add 5, anything else 5-6."""
     need = set(STATIC_STEPS)
     for arm in arms:
         if arm in STATIC_ARMS or arm.startswith("static:"):
             continue
         need.add(5)
-        if arm != "rules":
+        if arm not in ("rules", "hold"):
             need.add(6)
     return need
 
@@ -65,9 +66,18 @@ def tree_sha256(root, rel):
 
 
 def current_hashes(root, db_bench, plugin):
+    """`plugin` is the controller library's path when controller/ exists
+    (13 and 03 pass it then), else None: "absent". A path that names no file
+    hashes as "missing", so a deleted plugin never matches a marker."""
+    if not plugin:
+        plugin_hash = "absent"
+    elif Path(plugin).is_file():
+        plugin_hash = file_sha256(plugin)
+    else:
+        plugin_hash = "missing"
     hashes = {
         "db_bench_sha256": file_sha256(db_bench),
-        "plugin_sha256": file_sha256(plugin) if plugin else "absent",
+        "plugin_sha256": plugin_hash,
     }
     for rel in CODE_DIRS:
         hashes[f"tree_sha256:{rel}"] = tree_sha256(root, rel)

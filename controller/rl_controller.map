@@ -1,0 +1,5 @@
+/* librl_controller.so exports only its two C entry points. */
+{
+  global: rl_controller_create; rl_controller_destroy;
+  local: *;
+};

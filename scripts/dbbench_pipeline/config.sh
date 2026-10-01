@@ -147,6 +147,21 @@ BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 # listed file that does not exist yet is skipped.
 FORK_TEST_SOURCES="${FORK_TEST_SOURCES:-db/level_target_multipliers_test.cc db/per_level_read_counters_test.cc db/rl_controller_host_test.cc}"
 DBBENCH_TEST_BUILD_DIR="${DBBENCH_TEST_BUILD_DIR:-build-dbbench-debug}"
+# The controller plugin (controller/, plan §3): its Release library, built by
+# 13's step 1, and the Debug tree 01b builds its unit tests in.
+CONTROLLER_BUILD_DIR="${CONTROLLER_BUILD_DIR:-build-controller}"
+CONTROLLER_PLUGIN="${CONTROLLER_PLUGIN:-$CONTROLLER_BUILD_DIR/librl_controller.so}"
+CONTROLLER_TEST_BUILD_DIR="${CONTROLLER_TEST_BUILD_DIR:-build-controller-debug}"
+# Controller arms (03's hold and rules; plugin_config.py composes each arm's
+# config). The objective mode sets beta at the contract's headline beta*.
+# The bounds are D-18's file and b_max with the Gate N3 rules are their
+# preregistration's; while either is missing or holds a null, 03 refuses the
+# arm. PLUGIN_PLACEHOLDERS=1 fills the gaps with smoke values, and only runs
+# of at most PREFLIGHT_SHORT_RUN_MAX_M million operations accept it.
+CONTROLLER_OBJECTIVE_MODE="${CONTROLLER_OBJECTIVE_MODE:-read}"
+ACTION_BOUNDS_FILE="${ACTION_BOUNDS_FILE:-config/action_bounds.json}"
+CONTROLLER_RULES_FILE="${CONTROLLER_RULES_FILE:-config/controller_rules.json}"
+PLUGIN_PLACEHOLDERS="${PLUGIN_PLACEHOLDERS:-0}"
 # Written by 13, checked by 03 before any run larger than
 # PREFLIGHT_SHORT_RUN_MAX_M million operations (the preflight's own runs are
 # 1M and 2M).

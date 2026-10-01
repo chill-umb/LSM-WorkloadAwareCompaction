@@ -52,6 +52,33 @@ class MarkerTest(unittest.TestCase):
         self.assertEqual(hashes["plugin_sha256"], "absent")
         self.assertEqual(hashes["tree_sha256:controller"], "absent")
 
+    def test_plugin_hash_is_bound_when_given(self):
+        # Plan §6.4 step 7: with controller/, 13 and 03 pass --plugin.
+        plugin = self.root / "librl_controller.so"
+        plugin.write_bytes(b"plugin-1")
+        hashes = pm.current_hashes(self.root, self.db_bench, plugin)
+        self.assertEqual(hashes["plugin_sha256"], pm.file_sha256(plugin))
+        pm.write_marker(self.marker, hashes, {1, 2, 3, 4}, {})
+        recheck = lambda: pm.problems(
+            pm.read_marker(self.marker),
+            pm.current_hashes(self.root, self.db_bench, plugin), {1})
+        self.assertEqual(recheck(), [])
+        plugin.write_bytes(b"plugin-2")  # rebuilt
+        self.assertIn("plugin_sha256", recheck()[0])
+        plugin.unlink()  # deleted: "missing", never a match
+        self.assertEqual(pm.current_hashes(self.root, self.db_bench,
+                                           plugin)["plugin_sha256"], "missing")
+        self.assertIn("plugin_sha256", recheck()[0])
+
+    def test_a_marker_without_the_plugin_refuses_a_check_with_it(self):
+        self.write()  # written without --plugin: "absent"
+        plugin = self.root / "librl_controller.so"
+        plugin.write_bytes(b"plugin-1")
+        problems = pm.problems(
+            pm.read_marker(self.marker),
+            pm.current_hashes(self.root, self.db_bench, plugin), {1})
+        self.assertIn("plugin_sha256", problems[0])
+
     def test_edited_code_is_refused(self):
         self.write()
         (self.root / "rl_agent/agent.py").write_text("v2\n")
@@ -83,6 +110,7 @@ class MarkerTest(unittest.TestCase):
                                             "static:uniform1"]), {1, 2, 3, 4})
         self.assertEqual(pm.required_steps(["native", "rules"]),
                          {1, 2, 3, 4, 5})
+        self.assertEqual(pm.required_steps(["hold"]), {1, 2, 3, 4, 5})
         self.assertEqual(pm.required_steps(["learned"]),
                          {1, 2, 3, 4, 5, 6})
         # Old or unknown arms get the strictest set.
