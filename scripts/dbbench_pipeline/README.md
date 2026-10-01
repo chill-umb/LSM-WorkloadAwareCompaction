@@ -102,7 +102,11 @@ wired into `13` fails. Wire each step in the change that builds its component.
   freezes it, and reopens it under several `level_target_multipliers`
   vectors and through the `setoptions` step. It checks the scores and the
   pending estimate against RocksDB's formulas, and that bad vectors are
-  refused. Report: `$PREFLIGHT_WORK_DIR/act1_report.json`. The same report
+  refused. Native compaction's timing decides the tree's layout, so a tree
+  on which some check could not see its effect (an empty L1, say) is built
+  again with the next seed, up to 10; `build_attempts` in the report lists
+  each, with its settle exit and whether its native scores matched the
+  model. Report: `$PREFLIGHT_WORK_DIR/act1_report.json`. The same report
   carries, under `settle`, two checks of the `settle` step (D-13 §6): it
   passes on a settled tree and writes a host log, and it refuses a due one.
 - **Step 4, ACT-4** (about 10 minutes, plus one full build the first time):

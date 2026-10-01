@@ -21,7 +21,11 @@ EstimateCompactionBytesNeeded, static ladder); the pending estimate is exact,
 so it pins every over-target level's scaled target to the byte.
 
 A check whose tree cannot show the effect it tests fails as insensitive, so a
-geometry change can never make a check pass by being blind.
+geometry change can never make a check pass by being blind. Native
+compaction's timing decides the layout, so a tree with such a blind spot is
+first built again with the next seed (up to ten); the report lists every
+attempt. The tree is built with no multipliers, so rebuilding cannot hide a
+multiplier defect.
 
 The same binary's other new fork step, WP4's `settle` (PREREGISTRATION D-13
 §6), is checked beside ACT-1 and reported apart from it:
@@ -186,6 +190,83 @@ def rendered(scores: dict[int, float], levels) -> dict[int, str]:
     return {level: f"{scores[level]:.1f}" for level in levels}
 
 
+MOVED = [level for level in range(1, LEVELS - 1) if VECTOR[level] != 1.0]
+
+
+def scored_levels(files) -> list[int]:
+    return [level for level in range(LEVELS - 1) if files.get(level)]
+
+
+def l0_if_leaked(files) -> str:
+    """L0's printed score if VECTOR[1] leaked into max_bytes_for_level_base
+    (A-Impl-1), which would rescale L0's size term."""
+    sizes = level_bytes(files)
+    count_term = len(files.get(0, [])) / L0_TRIGGER
+    return f"{max(count_term, sizes[0] / (BASE * VECTOR[1])):.1f}"
+
+
+def insensitive_levels(files) -> list[int]:
+    """Moved levels whose printed score would not change under VECTOR."""
+    scored = scored_levels(files)
+    native = rendered(model_scores(files, ONES), scored)
+    scaled = rendered(model_scores(files, VECTOR), scored)
+    return [level for level in MOVED
+            if level not in scored or scaled[level] == native[level]]
+
+
+def matches_native_model(observed) -> bool:
+    """A frozen tree's printed native scores and pending estimate equal the
+    model's (the native_model check, also applied to every tree built)."""
+    files = observed["sstables"]
+    scored = scored_levels(files)
+    printed = {level: observed["stats"]["scores"].get(level) for level in scored}
+    return (printed == rendered(model_scores(files, ONES), scored) and
+            observed["stats"]["pending"] == model_pending(files, ONES))
+
+
+def due_levels(files) -> list[int]:
+    return sorted(level for level, score in model_scores(files, ONES).items()
+                  if score >= 1.0)
+
+
+def blind_spots(files) -> list[str]:
+    """What the checks could not see on this frozen tree; empty when each can
+    show its effect. Every check still requires its own sensitivity, so a
+    blind tree fails; run() rebuilds instead of reporting it."""
+    scored = scored_levels(files)
+    native = rendered(model_scores(files, ONES), scored)
+    spots = []
+    if 0 not in scored or l0_if_leaked(files) == native.get(0):
+        spots.append("L0: a multiplier leaking into it would not change its "
+                     "printed score")
+    spots += [f"L{level}: its printed score would not move under "
+              f"m = {VECTOR[level]:g}" for level in insensitive_levels(files)]
+    if model_pending(files, VECTOR) == model_pending(files, ONES):
+        spots.append("pending: the estimate would not move under the vector")
+    if not due_levels(files):
+        spots.append("nothing due: settle_refuses_due cannot see a refusal")
+    return spots
+
+
+# Native compaction's timing decides the frozen tree's layout: on the node on
+# 2026-10-01 one build left L1 empty and the next did not. A blind tree is
+# built again with the next seed, up to the last of these.
+BUILD_SEEDS = range(1, 11)
+
+
+def first_sensitive(build, seeds=BUILD_SEEDS) -> list[dict]:
+    """Calls build(seed), which lays out a fresh tree and returns its frozen
+    sstables listing, until one has no blind spot. Returns every attempt;
+    the checks run on the last tree built."""
+    attempts = []
+    for seed in seeds:
+        spots = blind_spots(build(seed))
+        attempts.append({"seed": seed, "blind_spots": spots})
+        if not spots:
+            break
+    return attempts
+
+
 def evaluate(obs: dict) -> dict:
     """The six ACT-1 checks from parsed observations.
 
@@ -199,7 +280,7 @@ def evaluate(obs: dict) -> dict:
         checks[name] = {"passed": bool(ok), "details": details}
 
     files = obs["absent"]["sstables"]
-    scored = [level for level in range(LEVELS - 1) if files.get(level)]
+    scored = scored_levels(files)
     frozen = all(obs[key]["sstables"] == files
                  for key in ("ones", "vector", "before", "after"))
     native = rendered(model_scores(files, ONES), scored)
@@ -211,9 +292,7 @@ def evaluate(obs: dict) -> dict:
 
     record("tree_frozen", frozen and bool(scored),
            {"levels_with_files": scored})
-    record("native_model",
-           printed("absent") == native and
-           obs["absent"]["stats"]["pending"] == model_pending(files, ONES),
+    record("native_model", matches_native_model(obs["absent"]),
            {"printed": printed("absent"), "model": native,
             "pending": obs["absent"]["stats"]["pending"],
             "model_pending": model_pending(files, ONES)})
@@ -223,21 +302,17 @@ def evaluate(obs: dict) -> dict:
 
     # A multiplier leaking into L0 (through max_bytes_for_level_base, A-Impl-1)
     # would rescale L0's size term; the tree must make that visible.
-    sizes = level_bytes(files)
-    count_term = len(files.get(0, [])) / L0_TRIGGER
-    leaked = max(count_term, sizes[0] / (BASE * VECTOR[1]))
+    leaked = l0_if_leaked(files)
     l0 = [obs[key]["stats"]["scores"].get(0)
           for key in ("absent", "ones", "vector", "before", "after")]
-    l0_sensitive = f"{leaked:.1f}" != native.get(0)
+    l0_sensitive = leaked != native.get(0)
     record("l0_score_invariance",
            0 in scored and l0_sensitive and len(set(l0)) == 1 and
            l0[0] == native[0],
            {"printed": l0, "model": native.get(0),
-            "if_m1_leaked": f"{leaked:.1f}", "sensitive": l0_sensitive})
+            "if_m1_leaked": leaked, "sensitive": l0_sensitive})
 
-    moved = [level for level in range(1, LEVELS - 1) if VECTOR[level] != 1.0]
-    insensitive = [level for level in moved
-                   if level not in scored or scaled[level] == native[level]]
+    insensitive = insensitive_levels(files)
     record("scaled_scores",
            not insensitive and printed("vector") == scaled,
            {"printed": printed("vector"), "model": scaled,
@@ -298,9 +373,7 @@ def evaluate_settle(obs: dict) -> dict:
                     "host_log_records": len(records),
                     "settle_stamps": stamps}}
 
-    files = obs["absent"]["sstables"]
-    due = sorted(level for level, score in model_scores(files, ONES).items()
-                 if score >= 1.0)
+    due = due_levels(obs["absent"]["sstables"])
     bad = obs["settle_due"]
     printed = SETTLED.search(bad["output"])
     checks["settle_refuses_due"] = {
@@ -316,6 +389,8 @@ def run(db_bench: Path, work: Path) -> dict:
     for path in (db, work / "refused"):
         shutil.rmtree(path, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
+    for stale in work.glob("*-seed*.out"):  # an earlier run's attempts
+        stale.unlink()
 
     def bench(name, *flags, db_dir=db, check=True):
         result = subprocess.run(
@@ -331,21 +406,37 @@ def run(db_bench: Path, work: Path) -> dict:
     def observe(text):
         return {"stats": parse_stats(text), "sstables": parse_sstables(text)}
 
-    # Native compaction lays out L1..L4, then flushes land in L0 unmerged.
-    bench("build", "--benchmarks=fillrandom,waitforcompaction", "--num=30000",
-          "--use_existing_db=0")
     obs = {}
     settle_log = work / "settle_host_log.jsonl"
-    settle_log.unlink(missing_ok=True)
-    result = bench("settle_ok", "--benchmarks=settle", "--use_existing_db=1",
-                   f"--rl_settle_hold_seconds={SETTLE_HOLD_SECONDS}",
-                   "--statistics", f"--rl_host_log={settle_log}", check=False)
-    obs["settle_ok"] = {
-        "exit_code": result.returncode, "output": result.stdout,
-        "host_log": settle_log.read_text() if settle_log.exists() else ""}
-    bench("add_l0", "--benchmarks=overwrite,flush", "--num=2800", *FROZEN)
     view = "--benchmarks=stats,sstables"
-    obs["absent"] = observe(bench("absent", view, *FROZEN).stdout)
+    # Every tree built is a valid trial of settle and of the native model,
+    # discarded or not, so each attempt records both.
+    trials = {}
+
+    def build(seed):
+        # Native compaction lays out L1..L4, then flushes land in L0 unmerged.
+        # This --seed comes after GEOMETRY's --seed=1 and overrides it; the
+        # later steps keep seed 1.
+        bench(f"build-seed{seed}", "--benchmarks=fillrandom,waitforcompaction",
+              "--num=30000", "--use_existing_db=0", f"--seed={seed}")
+        settle_log.unlink(missing_ok=True)
+        result = bench(f"settle_ok-seed{seed}", "--benchmarks=settle",
+                       "--use_existing_db=1",
+                       f"--rl_settle_hold_seconds={SETTLE_HOLD_SECONDS}",
+                       "--statistics", f"--rl_host_log={settle_log}",
+                       check=False)
+        obs["settle_ok"] = {
+            "exit_code": result.returncode, "output": result.stdout,
+            "host_log": settle_log.read_text() if settle_log.exists() else ""}
+        bench(f"add_l0-seed{seed}", "--benchmarks=overwrite,flush",
+              "--num=2800", *FROZEN)
+        obs["absent"] = observe(bench(f"absent-seed{seed}", view, *FROZEN).stdout)
+        trials[seed] = {"settle_ok_exit": result.returncode,
+                        "absent_matches_model": matches_native_model(obs["absent"])}
+        return obs["absent"]["sstables"]
+
+    obs["build_attempts"] = [{**attempt, **trials[attempt["seed"]]}
+                             for attempt in first_sensitive(build)]
     obs["ones"] = observe(bench(
         "ones", view, *FROZEN,
         f"--level_target_multipliers={vector_arg(ONES)}").stdout)
@@ -398,12 +489,19 @@ def main() -> int:
                  for check in (*checks.values(), *settle.values()))
     report = {"criterion": "ACT-1", "passed": passed,
               "db_bench": str(args.db_bench), "checks": checks,
-              "settle": settle}
+              "settle": settle, "build_attempts": obs["build_attempts"]}
     rendered_report = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered_report)
     print(rendered_report, end="")
+    for attempt in obs["build_attempts"]:
+        notes = list(attempt["blind_spots"]) or ["every check can see"]
+        if attempt["settle_ok_exit"] != 0:
+            notes.append(f"settle exited {attempt['settle_ok_exit']}")
+        if not attempt["absent_matches_model"]:
+            notes.append("native scores differ from the model")
+        print(f"[ACT-1] tree, seed {attempt['seed']}: " + "; ".join(notes))
     for tag, group in (("ACT-1", checks), ("settle", settle)):
         for name, check in group.items():
             print(f"[{tag}] {name}: {'PASS' if check['passed'] else 'FAIL'}")

@@ -266,5 +266,77 @@ class SettleTest(unittest.TestCase):
                          ["settle_refuses_due"])
 
 
+class BlindSpotTest(unittest.TestCase):
+    """The tree native compaction lays out decides what the checks can see;
+    a blind tree is rebuilt, never passed."""
+
+    def test_a_tree_every_check_can_see_has_none(self):
+        self.assertEqual(act.blind_spots(tree(REAL_SIZES, l0_files=5)), [])
+
+    def test_an_empty_l1_is_named(self):
+        # The node's ACT-1 of 2026-10-01 (second night): L1 came out empty,
+        # so its m = 0.5 had no score to move.
+        spots = act.blind_spots(tree([307091, 0, 433441, 868373, 987147], 5))
+        self.assertEqual(len(spots), 1)
+        self.assertTrue(spots[0].startswith("L1:"), spots)
+
+    def test_each_insensitive_check_has_its_spot(self):
+        spots = act.blind_spots(tree([act.BASE // 4, *REAL_SIZES[1:]], 7))
+        self.assertTrue(any(s.startswith("L0:") for s in spots), spots)
+        self.assertTrue(any(s.startswith("nothing due") for s in spots), spots)
+
+    def test_spots_agree_with_the_checks(self):
+        # Each check that fails as insensitive on a tree has its spot, and
+        # each spot its check.
+        guards = {"L0": "l0_score_invariance", "L1": "scaled_scores",
+                  "L3": "scaled_scores", "pending": "scaled_pending",
+                  "nothing due": "settle_refuses_due"}
+        trees = [tree(REAL_SIZES, 5), tree([307091, 0, *REAL_SIZES[2:]], 5),
+                 tree([act.BASE // 4, *REAL_SIZES[1:]], 7),
+                 tree([200000, 100000, 600000, 500000, 900000], 5),
+                 {0: [], 1: [(1, 241889)], 2: [(2, 433441)],
+                  3: [(3, 868373)], 4: [(4, 987147)]}]
+        for files in trees:
+            failed = {name for name, check in
+                      {**act.evaluate(good_observations(files)),
+                       **act.evaluate_settle(settle_observations(files))}.items()
+                      if not check["passed"]}
+            spots = {guards[s.split(":")[0]] for s in act.blind_spots(files)}
+            self.assertEqual(failed, spots, files)
+
+
+class NativeModelTest(unittest.TestCase):
+    """Applied to every tree built, kept or discarded."""
+
+    def test_printed_native_scores_and_pending_must_match(self):
+        absent = good_observations(tree(REAL_SIZES, 5))["absent"]
+        self.assertTrue(act.matches_native_model(absent))
+        wrong_score = copy.deepcopy(absent)
+        wrong_score["stats"]["scores"][2] = "0.1"
+        wrong_pending = copy.deepcopy(absent)
+        wrong_pending["stats"]["pending"] += 1
+        for observed in (wrong_score, wrong_pending):
+            self.assertFalse(act.matches_native_model(observed))
+
+
+class RebuildTest(unittest.TestCase):
+    def test_rebuilds_with_the_next_seed_until_nothing_is_blind(self):
+        blind = tree([307091, 0, *REAL_SIZES[2:]], 5)
+        layouts = {1: blind, 2: blind, 3: tree(REAL_SIZES, 5)}
+        built = []
+        attempts = act.first_sensitive(
+            lambda seed: built.append(seed) or layouts[seed], seeds=range(1, 6))
+        self.assertEqual(built, [1, 2, 3])
+        self.assertEqual([a["seed"] for a in attempts], [1, 2, 3])
+        self.assertTrue(attempts[0]["blind_spots"])
+        self.assertEqual(attempts[-1]["blind_spots"], [])
+
+    def test_gives_up_after_the_last_seed_and_keeps_the_reasons(self):
+        blind = tree([307091, 0, *REAL_SIZES[2:]], 5)
+        attempts = act.first_sensitive(lambda seed: blind, seeds=range(1, 4))
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(all(a["blind_spots"] for a in attempts))
+
+
 if __name__ == "__main__":
     unittest.main()
