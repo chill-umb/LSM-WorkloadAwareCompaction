@@ -389,6 +389,33 @@ class GateN2ChainTest(unittest.TestCase):
         self.assertIn("q-bar for assoc (assoc) is not recorded", ran.stderr)
         self.assertFalse((self.nvme / "n2-assoc").exists())
 
+    def test_the_marker_is_checked_with_the_plugin(self):
+        """With controller/ present, 13 binds the plugin's hash into the
+        marker, and 25 checks it as 03 does: a marker with that plugin gets
+        past the check (the start then stops at the prices), a marker
+        without it is refused."""
+        (self.root / "controller").mkdir()
+        (self.root / "controller" / "plugin.cc").write_text("// stand-in\n")
+        plugin = self.root / "build-controller" / "librl_controller.so"
+        plugin.parent.mkdir()
+        plugin.write_bytes(b"stand-in plugin")
+        no_prices = {"PRICES_FILE": str(Path(self.tmp.name) / "none.json")}
+        subprocess.run(
+            [sys.executable, "scripts/dbbench_pipeline/preflight_marker.py", "write",
+             "--marker", "build-dbbench/PREFLIGHT_PASSED",
+             "--db-bench", "build-dbbench/db_bench",
+             "--plugin", "build-controller/librl_controller.so",
+             "--passed", "1", "2", "3", "4", "5", "--skipped", "6=no learner"],
+            cwd=self.root, check=True, capture_output=True)
+        ran = self.run25(**no_prices)
+        self.assertEqual(ran.returncode, 1)
+        self.assertNotIn("no preflight marker", ran.stderr)
+        self.assertIn("run 18", ran.stderr)
+        self.write_marker()  # as before the plugin: no plugin hash
+        ran = self.run25(**no_prices)
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("no preflight marker for this db_bench", ran.stderr)
+
     def test_a_vector_is_used_only_at_its_own_point_and_runs(self):
         point = Path(self.tmp.name) / "nvme" / "T10-b16-k4"
         names = [f"repeat-0{r}/native" for r in range(1, 6)]

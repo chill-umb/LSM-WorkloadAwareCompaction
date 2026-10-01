@@ -171,8 +171,12 @@ if [[ -n "${N2_CONFIGS:-}" ]]; then
 else
   node_checks n2-assoc n2-powerlaw n2-dbs
 fi
+# With controller/ present, 13 binds the plugin's hash into the marker; check
+# it the way 03 does, or every start is refused.
+plugin_args=()
+[[ ! -d controller ]] || plugin_args=(--plugin "$CONTROLLER_PLUGIN")
 "$PY" "$PIPELINE_DIR/preflight_marker.py" check --marker "$PREFLIGHT_MARKER" \
-  --db-bench "$DB_BENCH" \
+  --db-bench "$DB_BENCH" ${plugin_args[@]+"${plugin_args[@]}"} \
   --arms "native static:uniform_0_75 static:survival_weighted static:last_level_emptying" ||
   fail "no preflight marker for this db_bench and this code: run 13 (README step c)"
 "$PY" "$PIPELINE_DIR/gate_n2_plan.py" check --prices "$PRICES_FILE" \
