@@ -2370,8 +2370,9 @@ level\textquotesingle s fill (at T=10 on \texttt{Assoc},
 alone. Gate N1\textquotesingle s pilot native runs (PREREGISTRATION
 D-16; the 2026-09-11 programme\textquotesingle s artifacts are out of
 scope) decide every level that completes at least \(n_{\min}\) turnovers
-in them. Levels with fewer (likely L6 at T=2) are decided on Gate
-N2\textquotesingle s native arms at the default point.
+in them. Levels with fewer stay undecided and unpooled (D-19, which
+withdrew their later decision on Gate N2\textquotesingle s native arms).
+On the 2026-10-01 pilots no cell had a pool (D-19).
 
 \textbf{Scope decision (2026-09-29): propagation is claimed only where
 the tree is deep enough to pool.} A pool needs at least two admitted
@@ -3510,19 +3511,15 @@ about 18 runs).} Amended 2026-10-01 (PREREGISTRATION D-16): the
 \texttt{native} arms at the default point, three per (workload, \(T\)).
 PROP-1 for the levels the pilots decide. It fixes the run length: the
 measured phase must contain at least \(n_{\text{turn}}\) turnovers of
-the deepest pooled level, with \(n_{\text{turn}}\) = 10 (D-16); a
-candidate the pilots leave undecided counts as pooled for this, as
-below. A cell with no pool (T=10 at the current size, G §4 scope
-decision) applies the same rule to its deepest interior level with
-enough turnovers, L2: about 4 minutes at the old ingest rate, against
-about 40 if L3 were pooled. The load stays fixed and only
-\texttt{mixgraph} grows, so the tree the pools were decided on is the
-tree every later run settles. Levels the pilots cannot decide (fewer
-than the minimum turnovers, e.g. L6 at T=2) are decided on Gate
-N2\textquotesingle s native arms at the default point, sized
-provisionally as if pooled: at least
-\(\lceil n_{\min}/n_{\text{turn}}\rceil\) static runs of
-\(n_{\text{turn}}\) turnovers each.
+the deepest pooled level, with \(n_{\text{turn}}\) = 10 (D-16). A cell
+with no pool applies the same rule to its deepest interior level with
+enough turnovers, L2. The load stays fixed and only \texttt{mixgraph}
+grows, so the tree the pools were decided on is the tree every later run
+settles. Amended 2026-10-02 (PREREGISTRATION D-19): a candidate the
+pilots leave undecided is not pooled, does not set the run length, and
+is not decided later on Gate N2. \textbf{Status (D-19):} run on
+2026-10-01. No cell has a pool, so the run length comes from L2 (D-19 §3
+estimates the rungs).
 
 \textbf{Gate N2 --- static comparator on the new binary.} ACT-4 (native
 parity) first. Then \(\Theta_s\) on \texttt{Assoc} and one Zipfian
@@ -3582,7 +3579,9 @@ Programme 2 (Pathways E and F) starts after Programme
   \textbf{Propagation contributes.} PROP-2 to PROP-4, claimed only for
   (workload, \(T\)) cells whose pool holds at least two admitted levels
   (G §4, scope decision): T=2 on \texttt{Assoc} at the current size, T=6
-  if the admission test admits two levels, never T=10 at this size.
+  if the admission test admits two levels, never T=10 at this size. Gate
+  N1 (D-19) found no pool in any cell, so this claim is not made at the
+  current size.
 \end{enumerate}
 
 \textbf{Stall rule} (applies to every claim). \(J_\beta\) prices no time

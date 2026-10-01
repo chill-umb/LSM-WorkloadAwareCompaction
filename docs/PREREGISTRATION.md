@@ -997,6 +997,103 @@ and `test_run_experiments.py`.
 `config/admission_test.json`, is changed after the first Gate N1 pilot run
 has started.
 
+### D-19, 2026-10-02 — Gate N1's outcome: no pool in any cell; the run length comes from L2, and undecided levels stay unpooled
+
+**Recorded after the Gate N1 pilot runs were scored (the night of
+2026-10-01), so it is not a prediction about those runs.** It records what
+they showed, and it changes two rules for the runs that follow: D-16 §5's
+Gate N2 decision of undecided levels, and D-16 §6's run-length rule. No value
+of D-16 and nothing in `config/admission_test.json` changes. D-17 (the Gate N2
+screen) and D-18 (the action bounds) are reserved for entries still in draft.
+
+**1. What the pilots showed.**
+- All 18 pilot `native` arms completed: three per workload and $T$, at the
+  rung (29M, 10%), so 26.1M `mixgraph` operations each. They ran on the
+  binary of root `d43f79e` (fork `4a31e8a71`), after the preflight passed.
+- The $n_{\min}$ rule (D-16 §5) found no sufficient value in any cell where
+  it ran. Two pseudo-levels drawn from L2's own turnovers passed the
+  equivalence test in 2–10% of trials on `Assoc` at T=2 ($n$ = 20 to 80),
+  and in 0% on the power-law workload. The rule needs at least 80%. At T=10,
+  L2 was the only candidate, so the rule did not run there. Where L2 pooled
+  fewer than 40 turnovers, no grid value could be tried. So every candidate
+  besides L2 is undecided, and no cell has a pool.
+- Net turnovers per pilot run, the mean of three runs, as stage 19 reported
+  them on the node (`$NVME/n1-<workload>/admission_T<T>.json`, not in the
+  repository):
+
+  | Cell | L2 | L3 | L4 | L5 | L6 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | `Assoc`, T=2 | 79 | 25 | 6 | 1 | 0 |
+  | power law, T=2 | 27 | 10 | 3.7 | 1 | 0 |
+  | `Assoc`, T=6 | 16 | 0 | | | |
+  | power law, T=6 | 6 | 0 | | | |
+  | `Assoc`, T=10 | 9 | | | | |
+  | power law, T=10 | 3 | | | | |
+
+- **Finding: deep levels barely turn over under skewed updates.** Most writes
+  overwrite keys that already sit high in the tree, so little net inflow
+  ($\lambda_i$, as PATHWAYS defines it and as stage 19 computes it) reaches
+  the deep levels. This is a property of the workload, not an instrument
+  fault.
+- Under D-16 §6, the deepest undecided candidate set the run length: L6 at
+  T=2 and L3 at T=6. Each completed no turnover in at least one run, so no
+  rung was long enough, and the chain stopped before the q̄ arms, as D-16 §6
+  requires.
+
+**2. Decision.** Decided by the owner on 2026-10-02, as D-16 §6 requires,
+on the implementer's proposal.
+- **(a) The run length comes from L2 when a cell has no pool.** D-16 §6 is
+  amended: the governing level is the deepest pooled level, or L2 when the
+  cell has no pool. An undecided candidate is no longer sized as if pooled.
+  This is PATHWAYS Gate N1's own rule for a cell with no pool. A cell still
+  stops if L2 completes no turnover in some pilot run.
+- **(b) An undecided level stays unpooled and is not decided later.** D-16
+  §5's decision of undecided levels on Gate N2's native arms is withdrawn,
+  together with its extra native repeats. Gate N2's native arms run D-13 §5's
+  five. A level can join a pool only through a new dated entry, and D-16's
+  margins are not loosened to make a pool appear.
+- **(c) Consequences.** At this tree size, Programme 1 has no pool in any
+  cell. Every interior level keeps its own model (PATHWAYS G §4 scope
+  decision). Global acceptance item 4 ("propagation contributes", PROP-2 to
+  PROP-4) is not claimed. PROP-1 is recorded as: every candidate besides L2
+  undecided, and no pool, in every cell. The verdict is *undecided*, not *refuted*: at this
+  sample size, the test could not even resolve L2 against itself.
+
+**3. Expected rungs (an estimate, not a criterion).** From the means above, 10
+L2 turnovers need, in `mixgraph` operations:
+- `Assoc`: 3.3M at T=2, 16.3M at T=6 and 29.0M at T=10, so the workload's
+  rung is (58M, 5%).
+- Power law: 9.7M, 43.5M and 87.0M, so its rung is (145M, 2%).
+
+Stage 19 uses each cell's slowest run, so the rung it reports may be longer.
+q̄ (D-14 §2) and the prices (D-15 §3) are measured at that rung, on the binary
+that runs Gate N2.
+
+**4. Reuse of the pilots, and the binary.** The q̄ arms, the prices and Gate
+N2 run on the step-8 binary (root `2cb9b7e` or later, fork `31e087505`). The
+pilots' turnover counts are reused on the ground that step 8 adds the
+controller host without changing native compaction. The next preflight's
+ACT-4 and ARCH-5 checks test that ground. `24` with `RESUME=1` skips the
+completed pilots and re-runs 19 on them.
+
+**5. Implementation.**
+- `19_admission_test.py`: `run_length` takes the cell's pool.
+- `gate_n1_reports.py`: no longer computes D-16 §5's repeats.
+- `gate_n2_plan.py`: no longer raises the native repeats, and no longer
+  refuses a cell without $n_{\min}$.
+- `25_gate_n2_chain.sh`: no longer passes `--n1`, `--default-base` or
+  `--default-k0`, so `N2_RUN_LENGTH_<workload>` works without Gate N1's
+  reports.
+- `27_screen_design.py`: the D-16 §5 caveat is removed.
+- Tests:
+  - `test_admission.py`: `RunLengthTest`, and the D-16 end-to-end case;
+  - `test_gate_n2_chain.py`: `test_undecided_levels_change_nothing`, which
+    also runs the override without Gate N1's reports;
+  - `test_screen_design.py`: the caveat check.
+
+**Falsification.** This entry fails as a record if its rules are changed
+after the first q̄ arm at its rung has started.
+
 ---
 
 ## 2. Gate verdicts as measured

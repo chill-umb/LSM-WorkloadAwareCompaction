@@ -151,11 +151,9 @@ db_bench --rl_plugin=<librl_controller.so> --rl_host_log=<path>
   - Commit inside the submodule first, then bump the submodule pointer in the root repo.
   - The research contract pins the RocksDB base at `7ea2d73`, and later commits must record their parent.
   - The `*.cc.d` files next to the sources are make dependency outputs.
-- **The fingerprint string in `03` and the regex in `06_select_baseline_slo.py` must stay in lockstep.** `parse_fingerprint_options` is anchored with `fullmatch` and rejects unknown trailing fields. Any new fingerprint field needs the parser updated; emit the segment conditionally if existing runs must stay poolable (this is why the `ltm` segment appears only when multipliers are set; `tests/test_fingerprint.py` checks the pair).
-- **The C++ manifest parser reads every key by its first textual match** (old stack). `rl_safety_manifest.cc` searches the raw text for `"key"`, not the top-level field. Never reuse a key name `RLSafetyController::Parse` reads inside a nested manifest block; `06_calibrate_live_guard.py` refuses such a manifest (`CPP_FIRST_MATCH_KEYS`, keep in lockstep with `Parse`).
+- **The fingerprint string in `03` and the regex in `scripts/dbbench_pipeline/fingerprint.py` must stay in lockstep.** `parse_fingerprint_options` is anchored with `fullmatch` and rejects unknown trailing fields. Any new fingerprint field needs the parser updated; emit the segment conditionally if existing runs must stay poolable (this is why the `ltm` segment appears only when multipliers are set; `tests/test_fingerprint.py` checks the pair).
 - **RocksDB's `JSONWriter` has no bool overload**, so `status.ok()` and `rl_drain` reach the event log as `1`/`0`. Never test `is True` against an event-log field; use the tolerant form `in (True, 1, "true", "1")` that `04_generate_graphs.py` already uses.
 - **Result layout has a `repeat-NN/` level only when `REPEATS > 1`.**
-- **Stage 06 must exclude the level-base scale axis** from comparator selection (`--level-base-bytes`), or a 0.5× configuration can win minimum-space and silently redefine the baseline.
 - **The hull is bound to its binary.** The evaluator refuses to pool across `dbbench_sha256`. Any criterion comparing a policy against the hull needs the hull re-measured on whatever binary finally runs that policy.
 - **Put repeated pipeline logic in a numbered stage, not a pasted heredoc**, as `24` and `25` do.
 

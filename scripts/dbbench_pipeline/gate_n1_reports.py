@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """What Gate N1's admission reports (19, admission_T<T>.json) fix for Gate N2
-(PREREGISTRATION D-16 §5-6). Run as a script, prints a workload's run length,
-"<size in millions> <load percent>" (24 and 25); gate_n2_plan.py imports it."""
+(PREREGISTRATION D-16 §6, D-19). Run as a script, prints a workload's run length,
+"<size in millions> <load percent>" (24 and 25); 26_record_qbar.py imports it."""
 
 from __future__ import annotations
 
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -39,23 +38,6 @@ def workload_rung(n1_dir: Path) -> tuple[int, int]:
         rungs.append(length["rung"])
     best = max(rungs, key=mixgraph_operations)
     return best["size_millions"], best["load_percent"]
-
-
-def default_point_repeats(cell: dict, initial: int) -> int:
-    """D-16 §5: a level the pilots left undecided is decided on Gate N2's
-    native arms at the default point, which then run at least
-    max(initial, ceil(n_min / n_turn)) repeats; 0 when none is undecided.
-    Without an n_min the cell waits for a new dated entry."""
-    undecided = sorted(level for level, entry in cell["levels"].items()
-                       if entry["decision"] == "undecided")
-    if not undecided:
-        return 0
-    n_min, n_turn = cell["config"]["n_min"], cell["config"]["n_turn"]
-    if n_min is None:
-        raise ValueError(f"levels {undecided} are undecided and the n_min rule "
-                         "found no sufficient n: D-16 §5 needs a new dated entry "
-                         "before Gate N2")
-    return max(initial, math.ceil(n_min / n_turn))
 
 
 if __name__ == "__main__":

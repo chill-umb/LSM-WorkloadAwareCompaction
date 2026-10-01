@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Gate N2's arms in run order, for 25_gate_n2_chain.sh (PATHWAYS C §1, §3;
-PREREGISTRATION D-13 §4-5, D-14 §3, D-15 §3, D-16 §5).
+PREREGISTRATION D-13 §4-5, D-14 §3, D-15 §3, D-19).
 
   plan <workload> ...   the steps 25 runs, one per line, then '#' lines with
-                        the excluded points, D-16 §5 and the cost:
+                        the excluded points and the cost:
                           run <point> <T> <base MiB> <K0> <k> <arm>...
                             03 at that point with REPEATS=k: repeats 1..k of
                             each arm, the finished ones skipped (RESUME=1)
@@ -42,7 +42,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import gate_n1_reports
 import preflight_marker
 import research_objective
 
@@ -158,9 +157,8 @@ def rounds(t: int, arms_at: dict) -> list[str]:
             if any(n >= k for n in arms.values())]
 
 
-def steps(configs: list[tuple], has_profiles, initial: int, floor: dict) -> list[str]:
+def steps(configs: list[tuple], has_profiles, initial: int) -> list[str]:
     """has_profiles(point id): 23 already ran there, its vectors frozen.
-    floor[(T, base, K0)]: the fewest native repeats a point needs (D-16 §5).
     A measured profile at a point without profiles runs the point's initial
     native runs first (D-13 §5), also in a screen of fewer repeats: the
     screen is then 27's design, natives in full and the rest screened."""
@@ -175,9 +173,6 @@ def steps(configs: list[tuple], has_profiles, initial: int, floor: dict) -> list
                 profile, n = "uniform_1", initial
             arms = first.setdefault((base, k0), {})
             arms[arm(profile)] = max(n, arms.get(arm(profile), 0))
-        for (base, k0), arms in first.items():
-            if "native" in arms:
-                arms["native"] = max(arms["native"], floor.get((t, base, k0), 0))
         out += rounds(t, first)
         out += [f"profiles {point_id(t, base, k0)} {t} {base} {k0}" for base, k0 in measured]
         out += rounds(t, measured)
@@ -202,28 +197,11 @@ def plan(args) -> int:
             raise ValueError(f"N2_T {wrong} is not in Theta_s's {sc['size_ratios']}; "
                              "cross-T runs go through N2_CONFIGS")
         configs, excluded = grid(sc, ts, n, args.write_buffer, args.slowdown)
-    # D-16 §5: the default point's natives decide what Gate N1 left undecided.
-    # A cell without an n_min makes only its own candidates wait, so it stops
-    # the plan only when the plan has that cell's default point.
-    floor, notes = {}, []
-    base, k0 = args.default_base // 2**20, args.default_k0
-    for t in sorted({c[0] for c in configs} & set(gate_n1_reports.N1_SIZE_RATIOS)):
-        cell = gate_n1_reports.report(args.n1, t)
-        try:
-            need = gate_n1_reports.default_point_repeats(cell, initial)
-        except ValueError as error:
-            if any(c[:3] == (t, base, k0) for c in configs):
-                raise ValueError(f"{args.workload} T={t}: {error}") from None
-            print(f"warning: {args.workload} T={t}: {error}; this plan does not "
-                  f"include {point_id(t, base, k0)}, so it goes on", file=sys.stderr)
-            continue
-        if need:
-            floor[t, base, k0] = need
-            notes.append(f"D-16 §5: {point_id(t, base, k0)}'s native arms run at "
-                         f"least {need} repeats (levels Gate N1 left undecided)")
+    # D-19: levels Gate N1 left undecided are not decided here (D-16 §5
+    # withdrawn), so every native arm runs the initial repeats.
     root = args.nvme / f"n2-{args.workload}"
     planned = steps(configs, lambda p: (root / p / "profiles.json").exists(),
-                    initial, floor)
+                    initial)
     print("\n".join(planned))
     # Counted from the steps: each arm runs up to its last round's k.
     last = {}
@@ -239,8 +217,6 @@ def plan(args) -> int:
     hours = total * SECONDS_PER_10M_OPERATIONS * args.size / 10 / 3600
     for line in excluded:
         print(f"# excluded: {line}")
-    for line in notes:
-        print(f"# {line}")
     for t, count in sorted(runs.items(), key=lambda item: int(item[0][1:])):
         print(f"# {args.workload} {t}: {count} runs")
     print(f"# {args.workload}: {total} runs of {args.size}M, about {hours:.0f} h "
@@ -343,15 +319,12 @@ def main() -> int:
     p = sub.add_parser("plan")
     p.add_argument("workload")
     p.add_argument("--nvme", type=Path, required=True)
-    p.add_argument("--n1", type=Path, required=True, help="Gate N1's reports")
     p.add_argument("--size", type=int, required=True, help="run size, millions")
     p.add_argument("--repeats", type=int, help="default: the contract's initial")
     p.add_argument("--t", help="T values of the sweep, default Theta_s's")
     p.add_argument("--configs", type=Path, help="a named set instead of the sweep")
     p.add_argument("--write-buffer", type=int, required=True)
     p.add_argument("--slowdown", type=int, required=True)
-    p.add_argument("--default-base", type=int, required=True, help="bytes")
-    p.add_argument("--default-k0", type=int, required=True)
     v = sub.add_parser("profiles")
     v.add_argument("--compute", action="store_true")
     v.add_argument("point", type=Path)

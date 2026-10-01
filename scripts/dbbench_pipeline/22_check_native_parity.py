@@ -7,13 +7,13 @@ wrote, <work>/pair-NN/{stock,patched}/.
 STOCK_ROCKSDB_COMMIT), so every quantity here comes from an instrument both
 binaries have: db_bench's own lines, upstream tickers, the internal-stats
 stall line and the LOG's event log and level summaries. The limits are the
-2026-08-22 gate's, imported from 09. Adapted to what stock can show:
+2026-08-22 gate's (formerly stage 09's). Adapted to what stock can show:
 
 - Whole run, load included: both binaries run the same benchmark sequence,
   and stock has no phase stamps.
 - Point probes are `bloom.filter.useful + bloom.filter.full.positive`, one
   tick per filter check. The fork's `point.sst.probe` is checked equal to
-  that sum on every patched run (probe_identity), so this is the quantity 09
+  that sum on every patched run (probe_identity), so this is the quantity that gate
   judged.
 - The maximum score is the LOG's tree-wide maximum. Stock writes no
   per-level episode log.
@@ -38,19 +38,108 @@ log. "stock" and "patched" below are then the reference and the tested arm.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import re
+import statistics
 from pathlib import Path
 
 import host_log
 from pipeline_stats import envelope_verdict
 
-_spec = importlib.util.spec_from_file_location(
-    "oracle_parity", Path(__file__).with_name("09_evaluate_oracle_parity.py"))
-parity = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(parity)
+# The parity envelope of the 2026-08-22 gate, moved here from the retired
+# 09_evaluate_oracle_parity.py on 2026-10-02 with its values unchanged. ACT-4
+# and ARCH-5 (PATHWAYS A §6, H §9) are judged against it.
+AMPLIFICATION_LIMIT = 0.05      # relative, two-sided
+L0_L1_INPUT_LIMIT = 0.10        # relative, two-sided
+PENDING_DEBT_LIMIT = 0.05       # relative, one-sided
+SCORE_GROWTH_LIMIT = 1.0        # normalized, see maximum_score_growth
+
+EVENT = re.compile(r"EVENT_LOG_v1 (\{.*\})")
+LEVEL_SUMMARY = re.compile(
+    r"max score ([0-9.eE+-]+), estimated pending compaction bytes (\d+)")
+
+
+def relative(candidate: float, baseline: float) -> float:
+    if baseline == 0:
+        return 0.0 if candidate == 0 else math.inf
+    return candidate / baseline - 1.0
+
+
+def maximum_score_growth(facts: list[tuple[int, dict, dict]]):
+    """Return one paired, worst-level score statistic per repeat.
+
+    The old check treated every per-repeat maximum as a deterministic
+    invariant. Maxima are deliberately noisy, however, and adding repeats made
+    that rule *more* likely to fail. Normalize each shared level's oracle-minus-
+    regular growth by the preregistered allowance, then take the worst level in
+    that repeat. A one-sided paired confidence envelope can now ask whether the
+    worst per-repeat growth is below 1 without averaging levels as though they
+    were independent observations.
+    """
+    values = []
+    details = []
+    unexercised = []
+    for repeat, regular, oracle in facts:
+        baseline_levels = set(regular["max_score_by_level"])
+        comparable = []
+        for level, oracle_max in sorted(oracle["max_score_by_level"].items()):
+            if level not in baseline_levels:
+                unexercised.append({"repeat": repeat, "level": level,
+                                    "oracle_max_score": oracle_max})
+                continue
+            baseline_max = regular["max_score_by_level"][level]
+            allowance = max(0.05 * baseline_max, 0.10)
+            normalized = (oracle_max - baseline_max) / allowance
+            comparable.append({
+                "repeat": repeat,
+                "level": level,
+                "oracle": oracle_max,
+                "regular": baseline_max,
+                "absolute_allowance": allowance,
+                "normalized_growth": normalized,
+            })
+        if comparable:
+            worst = max(comparable, key=lambda item: item["normalized_growth"])
+            values.append(worst["normalized_growth"])
+            details.append(worst)
+    return values, details, unexercised
+
+
+def log_facts(directory: Path) -> dict:
+    """From rocksdb_LOG.txt: the tree-wide maximum score and pending bytes of
+    the level summaries, and the mean input of L0->L1 compactions."""
+    path = directory / "rocksdb_LOG.txt"
+    if not path.exists():
+        raise SystemExit(f"missing {path}")
+    text = path.read_text(errors="replace")
+    summaries = [(float(score), int(debt))
+                 for score, debt in LEVEL_SUMMARY.findall(text)]
+    events = []
+    for match in EVENT.finditer(text):
+        try:
+            events.append(json.loads(match.group(1)))
+        except json.JSONDecodeError:
+            pass
+    finishes = {int(item["job"]): item for item in events
+                if item.get("event") == "compaction_finished"}
+    l0_l1_inputs = []
+    for item in events:
+        if item.get("event") != "compaction_started":
+            continue
+        levels = sorted(int(key[7:]) for key in item if key.startswith("files_L"))
+        if not levels:
+            continue
+        output = finishes.get(int(item["job"]), {}).get("output_level")
+        if levels[0] == 0 and output == 1:
+            l0_l1_inputs.append(float(item.get("input_data_size", 0)))
+    return {
+        "max_score": max((item[0] for item in summaries), default=0.0),
+        "max_pending_bytes": max((item[1] for item in summaries), default=0),
+        "mean_l0_l1_input_bytes": (
+            statistics.fmean(l0_l1_inputs) if l0_l1_inputs else math.nan),
+    }
+
 
 ARMS = ("stock", "patched")
 TICKER = re.compile(r"^(rocksdb\.[\w.\-]+) COUNT : (\d+)", re.M)
@@ -85,14 +174,14 @@ def collect(run_dir: Path) -> dict:
 
     log_text = (run_dir / "rocksdb_LOG.txt").read_text(errors="replace")
     sst_bytes = 0
-    for match in parity.EVENT.finditer(log_text):
+    for match in EVENT.finditer(log_text):
         try:
             event = json.loads(match.group(1))
         except json.JSONDecodeError:
             continue
         if event.get("event") == "table_file_creation":
             sst_bytes += int(event.get("file_size", 0))
-    facts = parity.log_facts(run_dir)
+    facts = log_facts(run_dir)
 
     probes = (tickers.get("rocksdb.bloom.filter.useful", 0) +
               tickers.get("rocksdb.bloom.filter.full.positive", 0))
@@ -156,22 +245,22 @@ def evaluate(pairs: list[tuple[int, dict, dict]], stall_margin: float,
     invariant("host_log_consistency", pairs and not broken, broken)
 
     def rel(metric):
-        return [parity.relative(float(patched[metric]), float(stock[metric]))
+        return [relative(float(patched[metric]), float(stock[metric]))
                 for _, stock, patched in pairs]
 
     envelope("write_amplification", rel("write_amplification"),
-             parity.AMPLIFICATION_LIMIT, True)
+             AMPLIFICATION_LIMIT, True)
     envelope("point_read_amplification", rel("point_read_amplification"),
-             parity.AMPLIFICATION_LIMIT, True)
+             AMPLIFICATION_LIMIT, True)
     envelope("mean_l0_l1_input_size", rel("mean_l0_l1_input_bytes"),
-             parity.L0_L1_INPUT_LIMIT, True)
+             L0_L1_INPUT_LIMIT, True)
     envelope("maximum_pending_debt", rel("max_pending_bytes"),
-             parity.PENDING_DEBT_LIMIT, False)
-    growth, worst, _ = parity.maximum_score_growth(
+             PENDING_DEBT_LIMIT, False)
+    growth, worst, _ = maximum_score_growth(
         [(pair, {"max_score_by_level": {"tree": stock["max_score"]}},
           {"max_score_by_level": {"tree": patched["max_score"]}})
          for pair, stock, patched in pairs])
-    envelope("maximum_score", growth, parity.SCORE_GROWTH_LIMIT, False)
+    envelope("maximum_score", growth, SCORE_GROWTH_LIMIT, False)
     checks["maximum_score"]["by_pair"] = worst
     envelope("stall_fraction",
              [patched["stall_fraction"] - stock["stall_fraction"]
@@ -204,7 +293,7 @@ def main() -> int:
     parser.add_argument("work", type=Path)
     parser.add_argument("--stall-fraction-margin", type=float, required=True)
     parser.add_argument("--minimum-pairs", type=int, default=5,
-                        help="09's floor for a paired envelope")
+                        help="the 2026-08-22 gate's floor for a paired envelope")
     parser.add_argument("--arms", nargs=2, default=list(ARMS),
                         metavar=("REFERENCE", "TESTED"))
     parser.add_argument("--criterion", default="ACT-4",

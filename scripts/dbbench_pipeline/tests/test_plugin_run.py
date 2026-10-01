@@ -1,7 +1,7 @@
 """28_check_plugin_run.py on synthetic plugin logs, each check failing on the
 defect it names; and 03's hold and rules arms end to end with a stub
 db_bench that writes those logs: the config composed and passed, the
-fingerprint's plugin segment parsing in 06, the arm checked and scored, and
+fingerprint's plugin segment parsing in fingerprint.py, the arm checked and scored, and
 the refusals before any run."""
 import importlib.util
 import json

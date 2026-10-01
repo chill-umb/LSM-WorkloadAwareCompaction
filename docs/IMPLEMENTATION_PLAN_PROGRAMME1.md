@@ -205,7 +205,7 @@ headers. Its SHA-256 goes in the fingerprint, separately from `db_bench`'s.
 
 | Stage | Change | PATHWAYS |
 | --- | --- | --- |
-| `03_run_experiments.sh` | Arms: `native`, `static:<profile>` ($\Theta_s$), `learned`, `prior_only`, `rules`, and the ablations. New flags: multipliers, plugin, mode $\beta$, $\bar q$, prices. Same-session interleaved order, with a session id. The fingerprint gains mode, $\bar q$, prices, multiplier profile, plugin hash and $h_w$, emitted conditionally so older runs still pool; the regex in `06_select_baseline_slo.py` must change in lockstep. The SLO manifest is no longer required for Programme 1 arms. **Built at step 5 for Gate N2:** `native` and `static:<profile>` (`uniform_1` = native, `uniform_0_75`, or a vector in `STATIC_PROFILE_<name>`), `settle` between the load and `rlresume`, `--rl_host_log` on every arm, the session id, the power-law family (`WORKLOAD_SKEW=2`, D-13 §3), and the segments `pow`, `settle`, `qbar` and `prices`. Mode, plugin and the controller arms come with step 8 | C §3, CMP-8, OBJ-5 |
+| `03_run_experiments.sh` | Arms: `native`, `static:<profile>` ($\Theta_s$), `learned`, `prior_only`, `rules`, and the ablations. New flags: multipliers, plugin, mode $\beta$, $\bar q$, prices. Same-session interleaved order, with a session id. The fingerprint gains mode, $\bar q$, prices, multiplier profile, plugin hash and $h_w$, emitted conditionally so older runs still pool; the regex in `fingerprint.py` must change in lockstep. The SLO manifest is no longer required for Programme 1 arms. **Built at step 5 for Gate N2:** `native` and `static:<profile>` (`uniform_1` = native, `uniform_0_75`, or a vector in `STATIC_PROFILE_<name>`), `settle` between the load and `rlresume`, `--rl_host_log` on every arm, the session id, the power-law family (`WORKLOAD_SKEW=2`, D-13 §3), and the segments `pow`, `settle`, `qbar` and `prices`. Mode, plugin and the controller arms come with step 8 | C §3, CMP-8, OBJ-5 |
 | `04_generate_graphs.py` (`collect_arm`) | Measured phase from $n_w$ to the end of the drain, from the op stamps. $\mathcal C_W$ from event-log SST bytes (D-11's windowing); $\mathcal C_R$ from `POINT_SST_PROBE`, `rocksdb.bloom.filter.full.positive` and `SORTED_RUN_SEEK` differenced from the $n_w$ snapshot; $\mathcal C_S = (c_s/\bar q)\sum H \times$ operations from the host log. $J_\beta$ per mode and $\beta^\star \in \{2,5,10\}$, at $c_s$, $c_s/2$ and $2c_s$. Stall seconds are the stall counter differenced from `measure_start` to `drain_end`; the stall fraction and throughput divide by mixgraph's wall time (`measure_start` to `drain_start`; PREREGISTRATION D-14 §1, the span of $\bar q$). Self-checks of Gate N0 item 5, plus: the event log's compaction bytes in the window equal the host log's. An arm whose settle failed, whose host log is inconsistent or whose self-check fails is refused and listed, never scored | D §1, OBJ-6 |
 | `07_evaluate_paired.py` | Paired intervals on $J_\beta$ differences (CMP-3), the stall rule, regret (C.5) and suite robustness (CMP-7) | Global acceptance |
 | `frontier_analysis.py` | Lower convex hull over $(\mathcal C_W, \mathcal C_R, \mathcal C_S)$; $\theta^\star_\beta$ per mode; $\bar\beta$ | C.4, D.4 |
@@ -216,10 +216,10 @@ headers. Its SHA-256 goes in the fingerprint, separately from `db_bench`'s.
 | `20_check_actuation.py` (new) | The ACT-1 checks (§6) on the Release `db_bench`: a frozen tree reopened under several vectors, and `db_bench`'s new `setoptions` step. ACT-3 fidelity, from the host and decision logs, joins it with the plugin | ACT-1, ACT-3 |
 | `01c_build_stock_db_bench.sh`, `22_check_native_parity.{sh,py}` (new) | Stock `db_bench` build; ACT-4 runs and evaluation (§6.4 step 4) | ACT-4 |
 | `21_check_learner.py` (new) | ARCH-2 masked-target audit, ARCH-6 agreement between C++ and Python evaluation of the same weights, OBJ-1 and OBJ-4 identities | ARCH-2, ARCH-6, OBJ-1, OBJ-4 |
-| `09_evaluate_oracle_parity.py` | Kept. Its checks define the parity envelope for ACT-4 and ARCH-5 | ACT-4, ARCH-5 |
+| `09_evaluate_oracle_parity.py` | Removed 2026-10-02: the parity envelope (limits, score growth, LOG facts) it defined for ACT-4 and ARCH-5 moved into `22_check_native_parity.py`, values unchanged | ACT-4, ARCH-5 |
 | `01b_build_test_trees.sh` (new) | A Debug CMake tree of the fork with only the fork's own test targets, and the plugin's test target, so `assert`s fire | CLAUDE.md "Tests", tier 2 |
 | `13_run_preflight_verification.sh` (reworked) | The preflight of §6.4. It writes `PREFLIGHT_PASSED` bound to the hashes, and `03` and every long-run driver refuse to start without a matching marker | CLAUDE.md "Tests", tier 3 |
-| Removed 2026-10-01 | `05`, `06_run_guard_protocol.sh`, `06_validate_guard_holdout.py`, `08`, `10_run_scaling_smoke.sh`, `11`, `12`, `14`, `15`, `17`, `d*_learner_run.sh` and the other old root drivers. `06_calibrate_live_guard.py`, `06_select_baseline_slo.py` and `10_validate_learning_health.py` stay until step 12, since `03` and the fingerprint test still use them | — |
+| Removed 2026-10-01 | `05`, `06_run_guard_protocol.sh`, `06_validate_guard_holdout.py`, `08`, `10_run_scaling_smoke.sh`, `11`, `12`, `14`, `15`, `17`, `d*_learner_run.sh` and the other old root drivers. Also removed 2026-10-02 (with D-19): `06_calibrate_live_guard.py`, `slo_statistics.py`, `04_generate_graphs.sh`, `06_select_baseline_slo.py` (its fingerprint parser moved to `fingerprint.py`) and `09_evaluate_oracle_parity.py` (the parts ACT-4 uses moved into `22_check_native_parity.py`). `10_validate_learning_health.py` stays until step 12, with the old learner arms in `03` | — |
 
 ## 6. Tests, checks and the preflight
 
@@ -285,10 +285,10 @@ bundled at `third-party/gtest-1.8.1`; registered in `CMakeLists.txt`, `src.mk`,
 | `test_paired.py` | Paired intervals; the stall rule passes and fails on constructed cases; regret (C.5); suite robustness |
 | `test_frontier.py` | Lower hull on toy points, including collinear ties (C.4). $\theta^\star_\beta$ per mode. $\bar\beta$ (D.4) |
 | `test_compaction_measurements.py` | $\rho_i$, $o_i$, $t_i$, $\xi_i$, $\eta_i$ and dropped bytes on synthetic job records; trivial moves excluded from $\rho$ and $o$ |
-| `test_admission.py` | Two resamples of one level pass with probability at least 0.8; a statistic shifted to its margin passes with probability at most 0.05; the combined test's size is at most 5% (§4 of Pathway G). Reproduces the KS figure (median 0.43 at 30 turnovers). D-16: the committed config validates at every $T$ with fill margins above the file granularity; $n_{\min}$ is the smallest sufficient grid value, or every candidate is undecided; the run-length rung follows the deepest level not refused at the slowest run; the settled tree and the candidate set of G §4's scope decision; runs loaded otherwise than the rungs, runs `03` did not complete, fingerprints without an SST size, and runs whose trees differ are refused; end to end on the fixture |
+| `test_admission.py` | Two resamples of one level pass with probability at least 0.8; a statistic shifted to its margin passes with probability at most 0.05; the combined test's size is at most 5% (§4 of Pathway G). Reproduces the KS figure (median 0.43 at 30 turnovers). D-16: the committed config validates at every $T$ with fill margins above the file granularity; $n_{\min}$ is the smallest sufficient grid value, or every candidate is undecided; the run-length rung follows the deepest pooled level, or the reference when the cell has no pool (D-19), at the slowest run; the settled tree and the candidate set of G §4's scope decision; runs loaded otherwise than the rungs, runs `03` did not complete, fingerprints without an SST size, and runs whose trees differ are refused; end to end on the fixture |
 | `test_prices.py` | D-15 §3 on synthetic trees with a known answer: the fit returns the marginal times, not the average with the overhead; $c_w$ per run from the write rows; medians and spreads; the per-core price; the layout `18.sh` writes, end to end. Refuses: slopes not identified, `readrandom` not reading the found block, non-positive times, write rows that are not the $\bar q$ native arms on this binary, a run given twice, fewer than five of a contract workload, $c_s \le 0$ and missing money prices. `04` refuses a `prices.json` that is not per core-second |
 | `test_fingerprint.py` | `03 --print-fingerprint` output is accepted by `parse_fingerprint_options`, both with the new segments and without them (older runs still pool). Built as: 03's own fingerprint line, expanded by bash |
-| `test_run_experiments.py` | `03` with a stub `db_bench` replaying the evaluator fixture, then `04`: settle between the load and `rlresume`, the host log on every arm, each arm's own multipliers, fingerprints that parse in `06`, prices copied, every arm scored; the power-law family; an unsettled arm marked and reported while the matrix goes on; a resumed matrix keeping its session and prices; and the refusals before any run (bad arm, missing or invalid profile vector, `native` with `static:uniform_1`, the power law's mix and profile, an $h_w$ other than D-13's) |
+| `test_run_experiments.py` | `03` with a stub `db_bench` replaying the evaluator fixture, then `04`: settle between the load and `rlresume`, the host log on every arm, each arm's own multipliers, fingerprints that parse in `fingerprint.py`, prices copied, every arm scored; the power-law family; an unsettled arm marked and reported while the matrix goes on; a resumed matrix keeping its session and prices; and the refusals before any run (bad arm, missing or invalid profile vector, `native` with `static:uniform_1`, the power law's mix and profile, an $h_w$ other than D-13's) |
 
 Fixtures live in `tests/fixtures/`. `.gitignore` hides `*.log`, `*.txt` and
 `*.json` there (confirmed with `git check-ignore`), so add a
@@ -305,7 +305,7 @@ next starts:
    invariance, the refusals, the scaled pending estimate, recompute without
    writes. Beside it, WP4's `settle` step: it passes on a settled tree and
    writes the host log, and it refuses a due tree.
-4. **Parity** at 1M operations, T=2, on 09's limits: patched binary at
+4. **Parity** at 1M operations, T=2, on the 2026-08-22 gate's limits: patched binary at
    $m \equiv 1$ against stock (ACT-4); plugin in hold-only mode against
    native (ARCH-5).
    - **Stock** means upstream RocksDB 11.1.1 (`6cdeb9d9d`) with none of the
@@ -313,7 +313,7 @@ next starts:
      fork's native arm, which is ARCH-5's reference. Only a stock binary can
      show what the fork's patches cost, including WP3's instruments.
    - Stock has no phase stamps, no `POINT_SST_PROBE` or `SORTED_RUN_SEEK`, and
-     no episode log. `22_check_native_parity.{sh,py}` therefore adapts 09's
+     no episode log. `22_check_native_parity.{sh,py}` therefore adapts the old 09's
      checks to instruments both binaries have:
      - whole-run figures, with the same upstream benchmark sequence on both
        arms;
@@ -359,7 +359,7 @@ the preflight:
 | --- | --- |
 | ACT-2 | Paired throughput, controller at hold-only against native |
 | ACT-3, ACT-5 | Decision log against host snapshots |
-| ACT-4, ARCH-5 | `09_evaluate_oracle_parity.py` at full gate size |
+| ACT-4, ARCH-5 | `22_check_native_parity.py` at full gate size |
 | ARCH-6 | Q logged by C++ against Python recomputation, for every weight version |
 | OBJ-1, OBJ-4 | Attribution log against event log and tickers |
 
@@ -399,7 +399,7 @@ bumped (CLAUDE.md). The contract records the new fork revision and its parent.
   `controller/config.json` (rule `*.json`, line 86) would be ignored, so both
   need `!` rules. New `scripts/dbbench_pipeline/*.py` stages are already
   re-included (line 70). Check `git status` after adding each file.
-- **Fingerprint regex.** The fingerprint string in `03` and the regex in `06`
+- **Fingerprint regex.** The fingerprint string in `03` and the regex in `fingerprint.py`
   must change in lockstep. New segments are emitted conditionally so existing
   runs still pool.
 - **graphify** skips `lib/rocksdb/db/`, so search it directly.

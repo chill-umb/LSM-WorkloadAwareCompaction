@@ -12,8 +12,11 @@ scripts/dbbench_pipeline/02_build_db_bench.sh
 
 The order of node work is the runbook below: preflight (13), Gate N1 (24),
 then Gate N2 (25). The retired DQN programme's stages (05, 06's guard
-protocol, 08, 10–12, 14, 15, 17) were removed on 2026-10-01; `03` still
-accepts its arms until plan step 12.
+protocol, 08, 10–12, 14, 15, 17) were removed on 2026-10-01, and
+`06_calibrate_live_guard.py`, `06_select_baseline_slo.py`, `09`,
+`slo_statistics.py` and `04_generate_graphs.sh` on 2026-10-02 (with D-19).
+`03` still accepts its arms until plan step 12, but they can no longer get a
+fresh guard manifest.
 
 **Tests and the preflight** (CLAUDE.md "Tests", plan §6 of
 `docs/IMPLEMENTATION_PLAN_PROGRAMME1.md`). No run larger than
@@ -70,7 +73,7 @@ wired into `13` fails. Wire each step in the change that builds its component.
     operations, T=2. One arm is stock; the other is the patched binary with
     every multiplier set to 1.
   - Both arms run 03's flags (`dbbench_shared_flags` in `config.sh`). They
-    are judged on the 2026-08-22 gate's limits, taken from 09.
+    are judged on the 2026-08-22 gate's limits (constants in 22).
   - The patched arm also writes the host log (`--rl_host_log`), as every
     measured arm will, so parity includes its cost. Each patched log must be
     consistent with itself (`host_log_consistency`).
@@ -197,8 +200,9 @@ d. Gate N2, the static comparator. Four things must exist first, in this
       `run_length.rung`. **`<N2 size>` and its `LOAD_PERCENT` are the
       longest of the three rungs**: pass both to every later `03` call of
       that workload (03 refuses a long Programme 1 run with any other load).
-      A level reported `undecided` is decided later on Gate N2's native arms
-      at the default point (D-16 §5).
+      A level reported `undecided` is not pooled and is not decided later
+      (D-19); the rung follows the deepest pooled level, or L2 when the cell
+      has no pool.
    2. **q̄ per workload** (PREREGISTRATION D-14 §2), recorded in
       `config/research_objective_contract.json` and in a dated amendment
       before any Θ_s run: the mean throughput of five `native` arms at T=10
@@ -319,18 +323,15 @@ d. Gate N2, the static comparator. Four things must exist first, in this
    **Unattended:** `25_gate_n2_chain.sh` runs all of the above for both
    workloads, each in its own process, at the run length in the Gate N1
    reports under `$NVME/n1-<workload>`. Give `NVME` as an absolute path (a
-   relative one is read from the repository root, as in 24). The reports are
-   required: `N2_RUN_LENGTH_<workload>="<size M> <load %>"` replaces only the
-   rung, and D-16 §5 still reads them. Per T, it runs every point's `native`
+   relative one is read from the repository root, as in 24).
+   `N2_RUN_LENGTH_<workload>="<size M> <load %>"` replaces the rung. Per T,
+   it runs every point's `native`
    and `uniform_0_75` arms, repeat by repeat across the points, then 23 at
    each point, then the two measured profiles, each with its own point's
    vector. A profile 23 refuses
    (D-14 §3) is skipped and its reason printed (`=== <workload> <point>:
    refused …`, listed again at the end of the workload); any other failure
-   of 23 stops that workload. When Gate N1 left a level undecided, the
-   default point's native arms run D-16 §5's repeats; if that cell has no
-   n_min, 25 refuses to start when the plan includes the cell's default
-   point, and only warns otherwise. It also refuses without q̄ in the
+   of 23 stops that workload. It refuses without q̄ in the
    contract, without a schema-2 `build-dbbench/prices.json` measured on this
    `db_bench`, or
    without a preflight marker for this code (rerun 13 after any change), and

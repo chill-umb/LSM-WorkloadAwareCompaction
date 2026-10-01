@@ -1348,4 +1348,4 @@ done
 echo
 echo "Experiments complete: $RESULTS_ROOT"
 echo "Generate graphs with:"
-echo "  scripts/dbbench_pipeline/04_generate_graphs.sh --results '$RESULTS_ROOT'"
+echo "  $PYTHON scripts/dbbench_pipeline/04_generate_graphs.py --results '$RESULTS_ROOT'"

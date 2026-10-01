@@ -2,7 +2,7 @@
 """Shared paired-difference statistics for the db_bench pipeline evaluators.
 
 `07_evaluate_paired.py` (the research acceptance criterion) and
-`09_evaluate_oracle_parity.py` (the engineering gate that precedes it) must
+`22_check_native_parity.py` (the ACT-4 and ARCH-5 parity gates) must
 judge paired differences with the same instrument. The gate has no business
 using a weaker statistical test than the criterion it gates, and two
 implementations of the same interval would eventually disagree.

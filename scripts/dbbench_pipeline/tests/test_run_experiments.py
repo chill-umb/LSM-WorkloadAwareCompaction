@@ -1,11 +1,10 @@
 """03 -> 04 wiring for the Programme 1 arms, with a stub db_bench that
 replays the evaluator fixture: the settle step sits between the load and
 rlresume, every arm writes the host log, each arm gets its own multiplier
-vector, the fingerprint parses in 06, 04 scores every arm, an unsettled arm
-is reported without stopping the matrix, and 03 refuses what RocksDB or the
-preregistration would refuse later."""
+vector, the fingerprint parses in fingerprint.py, 04 scores every arm, an
+unsettled arm is reported without stopping the matrix, and 03 refuses what
+RocksDB or the preregistration would refuse later."""
 import csv
-import importlib.util
 import os
 import shlex
 import subprocess
@@ -13,14 +12,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import fingerprint as select
 import research_objective
 
 PIPELINE = Path(__file__).resolve().parents[1]
 FIXTURE = PIPELINE / "tests" / "fixtures" / "evaluator" / "1M" / "T2" / "native"
-spec = importlib.util.spec_from_file_location(
-    "select_baseline_slo", PIPELINE / "06_select_baseline_slo.py")
-select = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(select)
 CONTRACT, _ = research_objective.load_contract()
 
 # STUB_UNSETTLED=1 makes the stub fail its settle hold, as db_bench does.

@@ -1,19 +1,17 @@
-"""03's fingerprint and 06's parser must stay in lockstep (CLAUDE.md gotcha).
+"""03's fingerprint and fingerprint.py's parser must stay in lockstep
+(CLAUDE.md gotcha).
 
 The fingerprint line is taken from 03's own source and expanded by bash, so a
 new segment added to one side without the other fails here.
 """
-import importlib.util
 import re
 import subprocess
 import unittest
 from pathlib import Path
 
+import fingerprint as select
+
 PIPELINE = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "select_baseline_slo", PIPELINE / "06_select_baseline_slo.py")
-select = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(select)
 
 SAMPLE = {
     "WORKLOAD_PROFILE": "assoc-v1", "size_label": "10M", "ratio": "2",

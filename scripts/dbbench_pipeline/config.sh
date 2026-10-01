@@ -175,7 +175,7 @@ PREFLIGHT_WORK_DIR="${PREFLIGHT_WORK_DIR:-$DBBENCH_BUILD_DIR/preflight}"
 STOCK_ROCKSDB_COMMIT="${STOCK_ROCKSDB_COMMIT:-6cdeb9d9d0630763327f512e6255cab33f6834e7}"
 STOCK_SOURCE_DIR="${STOCK_SOURCE_DIR:-build-dbbench-stock-src}"
 STOCK_BUILD_DIR="${STOCK_BUILD_DIR:-build-dbbench-stock}"
-# Pairs of the ACT-4 runs (1M operations, T=2 each). Five is 09's floor for a
+# Pairs of the ACT-4 runs (1M operations, T=2 each). Five is the parity gate's floor for a
 # paired envelope; the evaluator reports "undecided" if the data need more.
 PARITY_PAIRS="${PARITY_PAIRS:-5}"
 # D-13's stall margin, reused as ACT-4's stall allowance: the patched binary's

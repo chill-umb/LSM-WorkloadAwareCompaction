@@ -34,10 +34,10 @@ target on the mean of the cell's runs, L the deepest populated level of the
 settled tree at n_w (one candidate set per cell).
 A Kolmogorov-Smirnov distance is reported, not judged.
 
-The run-length rule (Gate N1, when the config has n_turn and rungs): the
-deepest level that is the reference, admitted or undecided must complete
-n_turn turnovers in every run, extrapolated from each run's turnovers per
-mixgraph operation; the cell's rung is the shortest that does.
+The run-length rule (Gate N1, when the config has n_turn and rungs; D-19):
+the deepest pooled level, or the reference when the cell has no pool, must
+complete n_turn turnovers in every run, extrapolated from each run's
+turnovers per mixgraph operation; the cell's rung is the shortest that does.
 """
 
 from __future__ import annotations
@@ -493,17 +493,16 @@ def choose_n_min(reference: list[list[dict]], config: dict,
     return None, tried
 
 
-def run_length(levels: dict, per_level: dict[int, list[list[dict]]],
+def run_length(pool: list[int], per_level: dict[int, list[list[dict]]],
                mixgraph_ops: list[int], config: dict) -> dict:
-    """Gate N1's rule for one cell (D-16 §6): the deepest level that is
-    admitted or undecided (an undecided one sized as if pooled), or the
-    reference when there is none, must complete n_turn turnovers in every
-    run; each run's turnovers per mixgraph operation are extrapolated, and
-    the cell needs the shortest rung that reaches n_turn at the slowest
-    run's rate. required None: some run completed no turnover."""
-    level = max([config["reference_level"]] + [
-        l for l, e in levels.items()
-        if e["decision"] in ("reference", "admitted", "undecided")])
+    """Gate N1's rule for one cell (D-16 §6 as amended by D-19): the deepest
+    pooled level, or the reference when the cell has no pool, must complete
+    n_turn turnovers in every run. An undecided candidate is not pooled, so
+    it no longer governs. Each run's turnovers per mixgraph operation are
+    extrapolated, and the cell needs the shortest rung that reaches n_turn
+    at the slowest run's rate. required None: some run completed no
+    turnover."""
+    level = max(pool or [config["reference_level"]])
     rates = [len(t) / ops for t, ops in zip(per_level[level], mixgraph_ops)]
     required = config["n_turn"] / min(rates) if min(rates) > 0 else None
     rung = None if required is None else next(
@@ -672,7 +671,7 @@ def main() -> int:
     if simulation is not None:
         report["n_min_rule_simulation"] = simulation
     if "n_turn" in config:
-        report["run_length"] = run_length(report["levels"], per_level,
+        report["run_length"] = run_length(report["pool"], per_level,
                                           mixgraph_ops, config)
     if args.simulate_n_min:
         rng = random.Random(config["seed"])

@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import json
 import math
 import re
@@ -52,14 +51,11 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from fingerprint import parse_fingerprint_options
 import gate_n1_reports
 import research_objective
 
 PIPELINE = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location(
-    "select_baseline_slo", PIPELINE / "06_select_baseline_slo.py")
-select_baseline_slo = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(select_baseline_slo)
 
 ARMS = 5
 SIZE_RATIO = 10
@@ -185,7 +181,7 @@ def check(key: str, rows: list[dict], refused: list, contract: dict,
     if len({row.get("dbbench_seed") for row in rows}) != ARMS:
         raise ValueError("the five arms do not have five seeds")
     try:
-        options = select_baseline_slo.parse_fingerprint_options(fingerprint)
+        options = parse_fingerprint_options(fingerprint)
     except SystemExit as error:
         raise ValueError(str(error)) from None
     wrong = {name: (options[name], defaults[var])

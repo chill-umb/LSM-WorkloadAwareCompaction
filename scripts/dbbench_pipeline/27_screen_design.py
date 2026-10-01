@@ -77,9 +77,8 @@ Assumptions, each a flag:
       vertices, cells and workloads are taken as independent, each at the
       same gap.
 Not modelled: C §3's top-ups beyond --full-runs (they follow the hull
-points, which every design keeps), D-16 §5's extra repeats of the native
-arms at the default point when a candidate is undecided, and differences in
-run time across T and configurations (the q-bar arms run at T=10;
+points, which every design keeps) and differences in run time across T and
+configurations (the q-bar arms run at T=10;
 --seconds-per-run overrides their mean).
 """
 
@@ -420,8 +419,7 @@ def print_report(report: dict, args) -> None:
             print(f"  design {name:<26} {d['runs']:7.1f} runs "
                   f"{d['node_hours']:7.1f} node-hours")
         print("  node-hours use the q-bar arms' T=10 run time (T=2 runs are "
-              "likely slower) and leave out C §3's top-ups beyond five and "
-              "D-16 §5's extra native repeats at the default point")
+              "likely slower) and leave out C §3's top-ups beyond five")
     print(f"\n== drop probability, gap in sigma_d units at a weight where the "
           f"point is best (k = {args.threshold}, sigma {args.sigma}; positive "
           "gap = true hull point; any hole per cell / per workload at V "

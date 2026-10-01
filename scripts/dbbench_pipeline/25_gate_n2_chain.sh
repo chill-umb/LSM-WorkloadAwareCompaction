@@ -5,10 +5,8 @@
 # contract, K0 restricted to admissible values (A-Impl-6, with F the
 # configured WRITE_BUFFER_SIZE and K_slow the configured L0_SLOWDOWN_TRIGGER;
 # gate_n2_plan.k_cap says why; the plan lists the points excluded):
-#   1. the native and static:uniform_0_75 arms; at the default point (config
-#      K0 and base), at least D-16 §5's repeats when Gate N1 left a level
-#      undecided (a cell without an n_min refuses the start only if its
-#      default point is planned);
+#   1. the native and static:uniform_0_75 arms (levels Gate N1 left
+#      undecided add no repeats: D-19 withdrew D-16 §5's Gate N2 decision);
 #   2. 23 on the point's settled native runs, once it has D-13 §5's initial
 #      five: the two measured profiles; a profile 23 refuses (D-14 §3) is
 #      skipped with its reason, and the rest goes on; any other failure of 23
@@ -36,8 +34,7 @@
 #                               (the profiles need them), the others fewer
 #   N2_T="2 6 10"               the sweep's T values
 #   N2_WORKLOADS="assoc powerlaw"
-#   N2_RUN_LENGTH_<workload>="<size M> <load %>"   instead of Gate N1's rung;
-#                               the Gate N1 reports are still needed (D-16 §5)
+#   N2_RUN_LENGTH_<workload>="<size M> <load %>"   instead of Gate N1's rung
 #   NVME (absolute; a relative one is read from the repo root, as in 24),
 #   RESUME, ALLOW_ROOT_DISK, MIN_FREE_GB as 24
 set -Eeuo pipefail
@@ -74,11 +71,10 @@ run_length() {  # $1=workload; prints "<size M> <load %>"
 }
 
 plan() {  # $1=workload $2=size
-  "$PY" "$PIPELINE_DIR/gate_n2_plan.py" plan "$1" --nvme "$NVME" --n1 "$NVME/n1-$1" \
+  "$PY" "$PIPELINE_DIR/gate_n2_plan.py" plan "$1" --nvme "$NVME" \
     --size "$2" ${N2_REPEATS:+--repeats "$N2_REPEATS"} ${N2_T:+--t "$N2_T"} \
     ${N2_CONFIGS:+--configs "$N2_CONFIGS"} \
-    --write-buffer "$WRITE_BUFFER_SIZE" --slowdown "$L0_SLOWDOWN_TRIGGER" \
-    --default-base "$MAX_BYTES_FOR_LEVEL_BASE" --default-k0 "$L0_COMPACTION_TRIGGER"
+    --write-buffer "$WRITE_BUFFER_SIZE" --slowdown "$L0_SLOWDOWN_TRIGGER"
 }
 
 # One workload. Its WORKLOAD_SKEW, mix and profile are in the environment
@@ -165,7 +161,7 @@ esac
 # Checks that fail in seconds: the disk (the sweep must not find its
 # folders; a named set adds to them), the preflight marker as 03 checks it,
 # q-bar and the prices on this db_bench (D-15 §3e), and the plan itself (a
-# missing rung, D-16 §5, a bad N2_CONFIGS line).
+# missing rung, a bad N2_CONFIGS line).
 if [[ -n "${N2_CONFIGS:-}" ]]; then
   node_checks
 else

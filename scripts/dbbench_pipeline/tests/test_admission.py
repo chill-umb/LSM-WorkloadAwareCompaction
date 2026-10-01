@@ -282,33 +282,31 @@ class RunLengthTest(unittest.TestCase):
         return {int(level[1:]): [[{}] * n for n in runs]
                 for level, runs in counts.items()}
 
-    def test_the_deepest_level_not_refused_at_the_slowest_run(self):
-        levels = {2: {"decision": "reference"}, 3: {"decision": "undecided"},
-                  4: {"decision": "refused"}}
+    def test_the_deepest_pooled_level_at_the_slowest_run(self):
         # L3: 4 and 5 turnovers in 1M mixgraph operations each; the slower
-        # run needs 2.5M for 10. L4 is refused, so it does not count.
-        out = adm.run_length(levels, self.per_level(L2=(40, 40), L3=(4, 5),
-                                                    L4=(1, 1)),
+        # run needs 2.5M for 10.
+        out = adm.run_length([2, 3], self.per_level(L2=(40, 40), L3=(4, 5),
+                                                     L4=(1, 1)),
                              [1_000_000, 1_000_000], self.CONFIG)
         self.assertEqual(out["level"], 3)
         self.assertAlmostEqual(out["required_mixgraph_operations"], 2_500_000)
         self.assertEqual(out["rung"], self.RUNGS[0])  # 7.1M mixgraph ops
 
     def test_a_longer_rung_when_the_level_is_slow(self):
-        levels = {2: {"decision": "reference"}, 3: {"decision": "admitted"}}
-        out = adm.run_length(levels, self.per_level(L2=(9, 9), L3=(1, 2)),
+        out = adm.run_length([2, 3], self.per_level(L2=(9, 9), L3=(1, 2)),
                              [1_000_000, 1_000_000], self.CONFIG)
         self.assertEqual(out["rung"], self.RUNGS[1])  # 10M needed, 26.1M given
 
-    def test_the_reference_sets_the_length_when_nothing_else_is_left(self):
-        levels = {2: {"decision": "refused"}, 3: {"decision": "refused"}}
-        out = adm.run_length(levels, self.per_level(L2=(20, 20), L3=(1, 1)),
+    def test_without_a_pool_the_reference_governs(self):
+        # D-19: an undecided or refused candidate is not pooled, so it no
+        # longer governs; L3's run with no turnover does not matter.
+        out = adm.run_length([], self.per_level(L2=(9, 9), L3=(0, 3)),
                              [1_000_000, 1_000_000], self.CONFIG)
         self.assertEqual(out["level"], 2)
+        self.assertEqual(out["rung"], self.RUNGS[0])  # 1.1M needed
 
     def test_no_rung_long_enough(self):
-        levels = {2: {"decision": "reference"}, 3: {"decision": "undecided"}}
-        out = adm.run_length(levels, self.per_level(L2=(9, 9), L3=(0, 3)),
+        out = adm.run_length([], self.per_level(L2=(0, 3)),
                              [1_000_000, 1_000_000], self.CONFIG)
         self.assertIsNone(out["rung"])
         self.assertIn("no rung", out["note"])
@@ -525,14 +523,15 @@ class MainTest(unittest.TestCase):
         self.assertEqual(length["turnovers_per_run"], [1, 1])
         self.assertEqual(length["rung"], {"size_millions": 29, "load_percent": 10})
         # With L2 as a candidate the rule runs. L2 completes no turnover, so
-        # it stays undecided, governs the length, and no rung reaches it.
+        # it stays undecided; under D-19 it is not pooled and does not govern,
+        # so the reference sets the same rung as before.
         self.assertEqual(self.main(*runs, levels=("1", "2")), 0)
         report = json.loads((self.root / "out.json").read_text())
         self.assertEqual(len(report["n_min_rule_simulation"]), 1)
         self.assertEqual(report["levels"]["2"]["decision"], "undecided")
         length = report["run_length"]
-        self.assertEqual((length["level"], length["required_mixgraph_operations"],
-                          length["rung"]), (2, None, None))
+        self.assertEqual((length["level"], length["rung"]),
+                         (1, {"size_millions": 29, "load_percent": 10}))
 
     def released(self, name, occupancy, targets=(0, 1000, 2000, 4000)):
         """A fixture copy with one compaction_release after n_w (wall

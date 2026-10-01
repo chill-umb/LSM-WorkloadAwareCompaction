@@ -2,7 +2,7 @@
 db_bench of test_gate_n1_chain.py. Every other stage is the real one: 03 with
 its marker, load and profile-vector checks, 23 and 04. Gate N1's admission
 reports, q-bar, the prices and the preflight marker are written as a finished
-Gate N1 night leaves them. Checks the plan against Theta_s and D-16 §5; a
+Gate N1 night leaves them. Checks the plan against Theta_s and D-19; a
 screen, then the sweep at one T (native before the measured profiles at each
 point, one session, each vector at its own point, a refused profile skipped);
 RESUME keeping a point's vectors; a top-up and the cross-T mode, started from
@@ -206,35 +206,26 @@ class GateN2ChainTest(unittest.TestCase):
                 self.assertEqual(sum(last.values()), screen_design.design_runs(
                     configs, natives, 0, 5, n, 0.0))
 
-    def test_undecided_levels_raise_the_default_point_natives(self):
-        # D-16 §5: n_min 80 at n_turn 10 needs 8 runs at the default point.
-        self.admission("assoc", 6, admission(29, 10, undecided=[3], n_min=80))
-        ran = self.run25("plan", N2_WORKLOADS="assoc")
+    def test_undecided_levels_change_nothing(self):
+        # D-19: a level Gate N1 left undecided is not pooled and is not
+        # decided on Gate N2, with or without an n_min, so every native arm
+        # runs the initial five and nothing warns.
+        for n_min in (80, None):
+            with self.subTest(n_min=n_min):
+                self.admission("assoc", 6, admission(29, 10, undecided=[3],
+                                                     n_min=n_min))
+                ran = self.run25("plan", N2_WORKLOADS="assoc")
+                self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+                _, _, last = self.plan_steps(ran.stdout, "assoc")
+                self.assertEqual({k for (p, a), k in last.items()
+                                  if a == "native"}, {5})
+                self.assertNotIn("undecided", ran.stdout + ran.stderr)
+        # The plan no longer reads Gate N1's reports, so an override of the
+        # run length needs none.
+        shutil.rmtree(self.nvme / "n1-assoc")
+        ran = self.run25("plan", N2_WORKLOADS="assoc", N2_RUN_LENGTH_assoc="58 5")
         self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
-        _, _, last = self.plan_steps(ran.stdout, "assoc")
-        self.assertEqual(last["T6-b16-k4", "native"], 8)
-        self.assertEqual({k for (p, a), k in last.items() if a == "native"
-                          and p != "T6-b16-k4"}, {5})
-        self.assertIn("# D-16 §5: T6-b16-k4's native arms run at least 8", ran.stdout)
-        # Without an n_min, the cell's candidates wait for a new dated entry:
-        # a plan with that cell's default point refuses to start ...
-        self.admission("assoc", 6, admission(29, 10, undecided=[3], n_min=None))
-        ran = self.run25(N2_WORKLOADS="assoc")
-        self.assertEqual(ran.returncode, 1)
-        self.assertIn("needs a new dated entry", ran.stderr)
-        self.assertFalse((self.nvme / "n2-assoc").exists())
-        configs = Path(self.tmp.name) / "n2_configs.txt"
-        configs.write_text("assoc 6 16 4 uniform_0_75 5\n")
-        ran = self.run25("plan", N2_CONFIGS=str(configs))
-        self.assertEqual(ran.returncode, 1)
-        self.assertIn("needs a new dated entry", ran.stderr)
-        # ... and one without it goes on, with a warning.
-        configs.write_text("assoc 6 8 2 uniform_1 5\n")
-        ran = self.run25("plan", N2_CONFIGS=str(configs))
-        self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
-        self.assertIn("warning: assoc T=6: levels ['3'] are undecided", ran.stderr)
-        self.assertIn("does not include T6-b16-k4, so it goes on", ran.stderr)
-        self.assertIn("run T6-b8-k2 6 8 2 5 native", ran.stdout)
+        self.assertIn("# workload assoc: 58M at 5% load", ran.stdout)
 
     def test_screen_sweep_resume_top_up_and_cross_t(self):
         screen = {"N2_T": "10", "N2_REPEATS": "2", "N2_WORKLOADS": "assoc",

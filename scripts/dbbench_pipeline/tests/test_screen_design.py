@@ -232,7 +232,7 @@ class EndToEndTest(unittest.TestCase):
         gap = w["gaps"]["J_read_b10_cs1"]["2"]["dropped_beyond"]
         self.assertAlmostEqual(gap["share_of_J_upper"] / gap["share_of_J"],
                                math.sqrt(4 / 0.484419), places=4)
-        for caveat in ("best case", "T=10 run time", "D-16 §5"):
+        for caveat in ("best case", "T=10 run time"):
             self.assertIn(caveat, text)
         # Deterministic under the fixed seed.
         self.assertEqual(self.run_tool("--qbar", "assoc=1000")[0], report)
