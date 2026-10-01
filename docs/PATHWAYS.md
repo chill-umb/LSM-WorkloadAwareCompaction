@@ -3,8 +3,9 @@
 **Revision:** 2026-09-29 (research fork). Supersedes the 2026-09-11 revision and
 every status block added to it up to 2026-09-23. The narrative of what happened
 is `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`; dated decisions and verdicts are
-`docs/PREREGISTRATION.md`; the audit this revision acts on is
-`docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`.
+`docs/PREREGISTRATION.md`. "The audit" below is the 2026-09-23 audit this
+revision acts on, removed from the tree on 2026-10-01; read it with
+`git show cb45743:docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`.
 
 **Target venue:** not yet chosen for this fork.
 
@@ -19,13 +20,13 @@ and phase-aware objective switching (Pathway F).
 **Status.** Specification. No arm has run under this revision. Every result
 below is either proved from its stated assumptions or explicitly labelled a
 conjecture, an approximation or a measured fact with its source. Results of the
-2026-09-11 programme are summarised in Appendix R and are not re-scored.
+2026-09-11 programme are summarised in history §18.1 and are not re-scored.
 
 **Reading order.** §0 (what changed) → §1 (notation and assumptions) → Pathway D
 (objective and cost model) → Pathway A (actuation) → Pathway G (propagation
 across levels) → Pathway H (RL architecture) → Pathway B (workloads) → Pathway C
 (comparator) → Pathways E and F (Programme 2) → execution order → global
-acceptance → references → Appendix R.
+acceptance → references.
 
 **Referencing convention.** Numbered results use a dot (Lemma D.7,
 Theorem A.1). Sections inside a pathway use a section sign (D §3, H §5).
@@ -83,7 +84,7 @@ it, not from deferral as a mechanism.
   depth equalled the static twin's in all 18 D-12 arms (audit §3).
 - **Pathway A's own measurement already said depth was a minor write cost.**
   Depth accounted for at most 35% of the learner's extra writing (A-0,
-  Appendix R).
+  history §18.1).
 
 **Consequence.** Pathway A's motivation is withdrawn. Its mechanism —
 changing a level's effective capacity through its compaction score — survives as
@@ -146,9 +147,9 @@ bounds move to Programme 2.
 | 8 | §B and §D: cumulative garbage "is large"; §C: "almost no resident garbage" | Resolved by D-3: on `Assoc`, resident $S$ is 1.03–1.09 and $g_{\text{flow}} = 0.278$ | Pathway B |
 | 9 | Commentary on Proposition B.3: a state-dependent policy "can strictly beat every member of $\Theta$" | Unproven; no learned or hand-written policy on record lies below the static frontier | Conjecture B.3′ |
 | 10 | Gate 3b runs on the uniform workload | Contradicted D-1 (every gate on `Assoc`) | Execution order |
-| 11 | D-4: $\lambda_W$ diverges where the write constraint is infeasible | Could never apply, since native RocksDB always meets its own bound; retired with the constrained objective | Appendix R |
+| 11 | D-4: $\lambda_W$ diverges where the write constraint is infeasible | Could never apply, since native RocksDB always meets its own bound; retired with the constrained objective | history §18.1 |
 | 12 | Gate costs | 5–7 times too high (audit §4); new gates are priced by run count once run length is fixed | Execution order |
-| 13 | D-12 verdict: the T=2 extra writing is a learned deferral lever | Start-up exploration during the backlog plus session drift | Appendix R |
+| 13 | D-12 verdict: the T=2 extra writing is a learned deferral lever | Start-up exploration during the backlog plus session drift | history §18.1 |
 | 14 | Proposition F.2 bounds the anticipation term by the read-phase cost over the first $\max(0, \Delta_{\text{shape}} - \ell)$ | That quantity is the loss a predictor still leaves, not the anticipation term; restated with proof | Proposition F.2 |
 
 ### §0.6 Dated decisions this revision requires before any run
@@ -1127,7 +1128,7 @@ the decision.
 | ACT-4 | Native parity | patched binary at $m \equiv 1$ inside the oracle-parity envelope of stock RocksDB (the checks of the 2026-08-22 gate) | paired evaluator |
 | ACT-5 | No ratchet | anchors return to within $\epsilon$ of 1 after $5\kappa_a\tau_i$ without re-expansion | policy log |
 
-The 2026-09-11 criteria A-0 to A-5 are retired (Appendix R).
+The 2026-09-11 criteria A-0 to A-5 are retired (history §18.1).
 
 ---
 
@@ -2110,7 +2111,7 @@ everywhere, which no one static setting may manage.
 | CMP-7 | Suite robustness | Definition C.5 reported per mode | suite evaluator |
 | CMP-8 | Same-session twins | every comparison paired within one session, session id recorded | run manifest |
 
-The 2026-09-11 criteria C-3, C-4 and C-5 are historical (Appendix R).
+The 2026-09-11 criteria C-3, C-4 and C-5 are historical (history §18.1).
 
 ---
 
@@ -2135,7 +2136,7 @@ criteria E-1 to E-5 as defined there, and three calibration lessons:
 - calibration windows must exclude the post-load transient. E-5 was 6–17 times
   its limit over whole runs and 0–1.4% after the first 30 s (audit).
 
-Verdicts to date are in Appendix R.
+Verdicts to date are in history §18.1.
 
 ---
 
@@ -2383,58 +2384,3 @@ cost of exploration (Proposition H.3), and the propagation measurements
 
 RocksDB behaviour (score computation, file picking, `SetOptions`) is cited to
 the pinned source, not to documentation.
-
----
-
-## Appendix R — Record of the 2026-09-11 programme (historical; not re-scored)
-
-Dated verdicts are in `docs/PREREGISTRATION.md`; narratives are in the history
-document (§§10.7, 14.7–14.24).
-
-**Gate 0 (complete).** A-0 decomposition of the write excess, paired means over
-five repeats (uniform workload, 2026-09-11):
-
-| cell | arm | excess | depth part (GiB) | eagerness part (GiB) | depth share |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 10M T=2 | `prior_only` | +18.2% | 0.00 | +5.24 | 0.00 |
-| | `rl` | +15.8% | +1.08 | +3.48 | 0.22 |
-| | `unconstrained_rl` | +16.0% | +0.76 | +3.84 | 0.18 |
-| 10M T=6 | `prior_only` | +15.2% | 0.00 | +4.92 | 0.00 |
-| | `rl` | +22.8% | +0.68 | +6.68 | 0.14 |
-| | `unconstrained_rl` | +50.6% | +0.28 | +16.08 | 0.02 |
-| 10M T=10 | `prior_only` | +13.7% | 0.00 | +4.98 | 0.00 |
-| | `rl` | +9.7% | 0.00 | +3.52 | 0.00 |
-| | `unconstrained_rl` | +13.4% | 0.00 | +4.86 | 0.00 |
-| 20M T=2 | `prior_only` | +15.2% | 0.00 | +10.12 | 0.00 |
-| | `rl` | +10.0% | +2.00 | +4.62 | 0.35 |
-| | `unconstrained_rl` | +16.7% | +1.76 | +9.32 | 0.18 |
-
-**Gate 1 (partial).** Uniform workload (2026-09-19, superseded): C-1 passed;
-C-2, C-3 and C-6 failed — the prior was dominated by one static point on both
-$W$ and $R$ at every $T$, and Finding 2 was withdrawn. C-5 closed at
-$s_{\max} = 2.0$ (27 capacity arms, 2026-09-22). `Assoc`: C-1 passed (11, 7
-and 8 hull points); C-2 partial (18 of 26 points decidable); comparators trigger
-2/4/2 at a 16 MiB base; the cross-$T$ hull holds 14 of 38 points. The repaired
-prior on `Assoc` (D-4, D-5) is native at deep levels and uses only the L0 band:
-$\Delta W$ = +2.9/+2.1/+2.1% for $\Delta R$ = −4.5/−5.7/−7.1% at $T$ = 2/6/10
-against same-configuration twins — the L0 lever of Proposition D.11 at work.
-
-**Pathway D statuses (constrained objective).** D-7: the learner wrote more with
-a multiplier railed at its cap. D-8 to D-11 repaired reward, state, action mask
-and measurement. D-12 (first valid instrument run): against same-session twins,
-T=2 +6.6% $W$ / +3.0% $R$; T=6 +9.7% / −7.1%, via L0 early-compaction lock-in;
-T=10 −0.6% / +1.1%, native behaviour. The audit (2026-09-23) attributes the T=2
-result to start-up exploration during the backlog plus session drift, not to a
-learned deferral lever.
-
-**Pathway E.** E-1 recorded failed; E-2 passed under the populated-level
-denominator; E-5 failed on `rl` (15, 7 and 10 times the limit at T = 2, 6, 10),
-with the post-load transient identified by the audit.
-
-**Retired criteria** (their records stand; they are not scored again): A-0 to A-5,
-B-2, C-3, C-4, C-5, the Pathway D criteria D-1 to D-5 of 2026-09-11, and Gates 1
-to 6 of 2026-09-11 (Gate 0 complete, Gate 1 partial, Gates 2–6 never run).
-
-**Frozen preregistered decisions.** P0, P1, P1b and P1c in
-`docs/PREREGISTRATION.md` remain the record of the 2026-09-11 programme. Items
-this fork supersedes are listed in §0.6 and need dated amendments there.

@@ -78,12 +78,12 @@ baseline_slo*
 baseline_selection*
 gate1
 *.tex
+# The LaTeX reading copy of PATHWAYS.md is kept; its PDF is rebuilt locally.
+!/docs/PATHWAYS.tex
+/docs/PATHWAYS.pdf
 *.tgz
 
-# workloads
-# Generated workload files are large and reproducible from their specs, so they
-# stay out of the repo. The SPECS are source and must travel with it, otherwise
-# a fresh machine cannot regenerate the workloads at all.
+# Generated text and JSON outputs; configs are re-included one by one.
 *.txt
 *.json
 !config/research_objective_contract.json
@@ -92,8 +92,6 @@ gate1
 # Gate N3 settings, committed when preregistered.
 !config/action_bounds.json
 !config/controller_rules.json
-!workload_specs/**/*.json
-!workload_specs/**/*.md
 # The controller plugin's build file (plan §8). Its per-arm config is composed by
 # the pipeline, not committed, so it has no re-include.
 !controller/CMakeLists.txt

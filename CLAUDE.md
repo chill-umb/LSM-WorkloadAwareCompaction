@@ -8,46 +8,38 @@ Before starting a conversation, always check the model being used and if the mod
 
 ## Project
 
-This is research code for a **trigger-only RL compaction controller for RocksDB**. For every observed level, a Python DQN returns `0 = defer` or `1 = compact`. RocksDB's native leveled picker still chooses every input SST and runs the compaction. The goal is point-read improvement with write non-inferiority. The other amplifications and the latencies are held as constraints.
+This is research code for **Programme 1: a per-level compaction-trigger controller for leveled RocksDB**. The controller is a separately loaded C++ plugin (`controller/`). It changes only each level's target multiplier and the L0 trigger, through RocksDB's own compaction scores, so RocksDB keeps sole authority over which files are compacted. It minimises a priced cost of write, read and space amplification under a chosen priority (reads, writes or space).
+
+The earlier design, a Python DQN answering `defer`/`compact` per level over a socket (protocol v2, `RLCompactionPicker`, `rl_agent/server.py`), was retired on 2026-09-27. Its code stays until plan step 12 (WP10); its record is the history document.
 
 ### Where authority lives
 
 | Topic | File |
 | --- | --- |
-| Forward plan, gates, acceptance criteria, theory | `docs/PATHWAYS.md` |
+| Forward plan, gates, acceptance criteria, theory | `docs/PATHWAYS.md` (`docs/PATHWAYS.tex` is a generated LaTeX reading copy; regenerate it whenever PATHWAYS changes) |
+| Build plan, work packages, test suites | `docs/IMPLEMENTATION_PLAN_PROGRAMME1.md` |
 | Dated decisions, predictions made in advance, gate verdicts | `docs/PREREGISTRATION.md` |
 | Research objective contract | `config/research_objective_contract.json` (machine-readable Programme 1 values; the prose is `docs/PREREGISTRATION.md` D-13) |
-| Every experimental control, paper setup text | `docs/EXPERIMENTAL_SETUP.md` |
+| Experimental controls, paper setup text | `docs/EXPERIMENTAL_SETUP.md` (as of 2026-09-12 and contract v3; not yet updated for Programme 1) |
 | Historical record | `PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md` |
 | Pipeline operation | `scripts/dbbench_pipeline/README.md` |
 
-- **`docs/PATHWAYS.md` is the only forward plan**, and since 2026-09-20 it holds
-  *only* theory, specification and done/not-done status. Dated verdicts and
-  preregistered decisions live in `docs/PREREGISTRATION.md`; put new ones there,
-  not in PATHWAYS. A decision recorded after the run it governs is worthless, so
-  that file is tracked by git — its commit date is the only proof it was written
-  in advance. Pathways A–F, their proofs, per-pathway acceptance criteria and the gated execution order. Its vocabulary is `A-Impl-N`, `C-N`, `Gate N`, `P0`/`P1` preregistration items. Nothing else defines what to do next.
-- **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the authoritative record of what happened. §5–6 architecture and the learning/safety system (§5.7 is the six bypass reasons), §11 the pipeline, §14 the dated gate records (§14.7 is Gate 1), §15–16 what is open. It was trimmed on 2026-09-13: §12 is gone and the number is not reused, so §§13–18 keep their numbers and every external citation still resolves.
+- **`docs/PATHWAYS.md` is the only forward plan.** It holds only theory, specification and done/not-done status. Nothing else defines what to do next. Its vocabulary: `A-Impl-N`, Gates `N0`–`N6`, and criteria prefixed OBJ, ACT, PROP, ARCH, WL and CMP.
+- **`docs/PREREGISTRATION.md` holds every dated decision and verdict.** Put new ones there, never in PATHWAYS. Its commit date is the only proof that a decision predates the runs it governs, so it must stay tracked, and an entry is never changed after a run it governs: a new decision is a new dated entry. On 2026-10-01 the owner had D-1..D-12 and the old verdict records condensed to summaries; D-13 to D-16 are unchanged, byte for byte, and the full text before condensation is `git show cb45743:docs/PREREGISTRATION.md`.
+- **`PROJECT_HISTORY_AND_SYSTEM_DESCRIPTION.md`** is the record of the retired programme, condensed on 2026-10-01 (full text at `cb45743`). Every section number cited elsewhere is kept, §12 stays unused, and §18.1 holds the programme summary moved from PATHWAYS' former Appendix R.
 - **The objective contract is `config/research_objective_contract.json`** (Programme 1, 2026-09-30). Contracts v1–v3 were deleted on the owner's instruction on 2026-09-30 and are recoverable from commit `5bea343`. Edit the file in place with a written reason, never make a versioned copy, and never change it after seeing a gate's outcome.
-- **`TRIGGER_CONTROLLER_REPAIR_PLAN.md` is historical.** Its audited deviations were closed on 2026-08-16 and the controller design it describes is built. Read it for the per-level state machine and the deferral math, not for what to do next.
-
-### docs/ is tracked
-
-**Resolved 2026-09-21 (`b253e85`).** `.gitignore` no longer has any rule covering `docs/`: the blanket `/docs/*` and the `!/docs/PREREGISTRATION.md` re-include were both removed and the directory was committed. `PATHWAYS.md`, `EXPERIMENTAL_SETUP.md`, `PREREGISTRATION.md` and the two design notes all survive a clean checkout, and a new file under `docs/` is picked up by `git add` like any other source file — no `!` rule needed.
-
-`PREREGISTRATION.md` in particular must stay tracked: a preregistration's whole value is a commit date proving it predates the runs it governs. If it ever appears as untracked again, that is a defect, not a convention.
-
-The failure mode that produced the old warning has not gone away for other paths — see "Repo gotchas" below. A blanket ignore plus `!` re-includes silently hides *new* files, which is how `PREREGISTRATION.md` went untracked through four commits while its older neighbours did not. That pattern still governs `*.json`, `*.txt` and `scripts/*`.
 
 ## Commands
 
 ### Build
 
-**Do not build RocksDB on this machine.** Builds happen on the Chameleon node (CHI@NCAR, Zen 5). The sanctioned local check is syntax-only against the legacy build tree's compile database, which also covers the RL C++ sources:
+**Do not build RocksDB on this machine.** Builds happen on the Chameleon node (CHI@NCAR, Zen 5). The sanctioned local check is syntax-only against the compile database of the root CMake tree `build/` (the root `CMakeLists.txt` only configures `lib/rocksdb`, for this purpose):
 
 ```bash
-g++ -fsyntax-only $(...flags from build/compile_commands.json...) lib/rocksdb/db/compaction/compaction_picker_rl.cc
+g++ -fsyntax-only $(...flags from build/compile_commands.json...) lib/rocksdb/db/<file>.cc
 ```
+
+Check every changed fork file with both the Debug flags and the Release flags (`-fno-rtti -DNDEBUG`, because 01 builds with `USE_RTTI=AUTO`). `controller/tests/run_local.sh` builds and runs the plugin's own tests locally (owner exception, 2026-10-01); RocksDB itself is never built here.
 
 The numbered pipeline is the supported build path when you are on the node (Ubuntu/Debian only, run from the repo root):
 
@@ -62,11 +54,9 @@ scripts/dbbench_pipeline/02_build_db_bench.sh        # build db_bench in the sam
 - Defaults are `DBBENCH_BUILD_DIR=build-dbbench` and `PYTHON_VENV=.venv-dbbench`. **This checkout has `.venv/` and `build-bench/` instead** — a CMake tree of `lib/rocksdb` containing `db_bench`.
 - `ROCKSDB_PORTABLE=znver5` pins the march; it needs GCC 14.1+ or Clang 19+ and has a toolchain preflight.
 - `DBBENCH_CPUS=0-7` and `CONTROLLER_CPUS=8` pin the engine and the controller to disjoint cores.
-- `LEVEL_TARGET_MULTIPLIERS` (":"-separated, one per level, entry 0 = 1) becomes db_bench's `--level_target_multipliers`, the fork's `level_target_multipliers` option (WP1; empty = all 1). The old `STATIC_CAPACITY_SCALES` / `RL_STATIC_CAPACITY_SCALES` path is gone and `03` refuses it if set.
+- `LEVEL_TARGET_MULTIPLIERS` (":"-separated, one per level, entry 0 = 1) becomes db_bench's `--level_target_multipliers`, the fork's `level_target_multipliers` option (WP1; empty = all 1).
 
-**Rebuilding.** The experiment runners never build anything. `scripts/run_full_experiment.sh` refuses to start if `db_bench` is older than `compaction_picker_rl.cc` or `rl_agent/agent.py`, so rebuild after editing either one.
-
-**The root CMake build is legacy.** The root `CMakeLists.txt` builds the old `db_runner` wrapper (`src/`, `include/`) and `tectonic-cli` (Rust nightly) into `bin/`. Its build tree `build/` carries the `compile_commands.json` used for the syntax check above.
+**Rebuilding.** The experiment runners never build anything. After editing fork C++ or `controller/`, rebuild on the node and rerun the preflight.
 
 RocksDB's own conventions are in `lib/rocksdb/CLAUDE.md`: registering new `.cc` files in `src.mk`, `CMakeLists.txt`, `Makefile` and BUCK; make targets; `make format-auto`. Its test-writing guidance applies to the fork's own test files (see Tests below).
 
@@ -108,110 +98,66 @@ are required.
 
 ## Running experiments
 
-`scripts/dbbench_pipeline/README.md` gives the exact command per stage. Order:
-1. Oracle parity gate: 1M operations at T=2, arms `regular oracle`, then `09_evaluate_oracle_parity.py`.
-2. Tuned baseline sweep (`05`).
-3. SLO manifest selection (`06_select_baseline_slo.py`).
-4. Guard calibration and holdout (`06_run_guard_protocol.sh`).
-5. Learner preflight (`13`).
-6. Paired matrix (`03`).
-7. Graphs (`04`), which build `graphs/summary.csv`.
-8. Paired acceptance (`07`).
-9. Stress suites (`08`).
-
-`scripts/run_full_experiment.sh` runs the whole suite. To resume, pass the same `SUITE_ROOT` again.
-
-Gate-specific stages, added for the PATHWAYS programme:
-- `14_gate0_reanalysis.py` — Gate 0 against existing artifacts.
-- `15_top_up_hull.{py,sh}` — decide which hull points still need repeats, and record those unresolvable at any affordable cost.
+`scripts/dbbench_pipeline/README.md` gives the exact commands (its node runbook). Programme 1's node order:
+1. Preflight (`13`): tiers 1–2, ACT-1, ACT-4, the evaluator smoke, ARCH-5 and the rules smoke. It writes the `PREFLIGHT_PASSED` marker.
+2. Gate N1 (`24_gate_n1_chain.sh`): pilot native arms, the admission test (`19`), the q̄ arms and the prices (`18`).
+3. Gate N2 (`25_gate_n2_chain.sh`): the static comparator Θ_s. `26` records q̄; `27` simulates the D-17 screen.
+4. Gates N3 onward, in the order PATHWAYS' execution order gives.
 
 **Starting and resuming**
 - Every runner requires `CONFIRM_*=YES` before it will start.
 - `RESUME=1` skips only arms that have a `COMPLETED` marker. Partial result directories are never deleted automatically.
-- `03` refuses to start while a stray `db_bench` or `rl_agent/server.py` process is running.
+- `03` refuses to start while a stray `db_bench` or `rl_agent/server.py` process is running, and refuses runs above 2M operations without a matching preflight marker (exit 7).
+- Never pull or edit on the node while a long run is going: the marker hashes `rl_agent/`, `controller/` and `scripts/dbbench_pipeline/`.
+
+**Arms and workloads**
+- Programme 1 arms: `native`, `static:<profile>` (Θ_s), `hold` and `rules` (the plugin). The old arms (`regular`, `oracle`, `prior_only`, `rl`, `unconstrained_rl`, `unconstrained_prior_only`) stay in `03` until plan step 12.
+- The workloads are UDB `Assoc` (D-1) and a 95/5 power-law mix (D-13; never call it Zipfian).
+- Direct I/O is pinned **off** (`dio0`): 2,750 ops/s direct against 58,332 buffered at 10M/T=2 on the node, a 21× penalty.
 
 **Disk**
-- A failed learner gate keeps its database, roughly 1 GB per million operations.
+- A failed run keeps its database, roughly 1 GB per million operations.
 - Put `DB_ROOT` on the device you are measuring, never on tmpfs `/tmp`.
-
-**Arms and manifests**
-- The arms are `regular`, `oracle`, `prior_only`, `rl`, `unconstrained_rl` and `unconstrained_prior_only`.
-- **The workload is UDB `Assoc` (Pathway B1) since 2026-09-20**, not the old uniform `balanced-v1`. `WORKLOAD_SKEW=0` restores the uniform family for the B-1 control arms. The decision and its two deliberate departures from the published fit are `docs/PREREGISTRATION.md` D-1.
-- `unconstrained_rl` turns off the live SLO mask. It is an ablation only.
-- Learned and `prior_only` arms need a schema-v2, calibrated `baseline_slo.json`. Its workload and geometry fingerprint must match the run, or the runner stops. Since D-10 the learner also requires the six `*_latency_avg_ns_telemetry_*` fields, and since D-12 the `latency_reference_trajectory` block, both written by `06_calibrate_live_guard.py`; a manifest from before 2026-09-23 must be regenerated from its calibration artifacts (the guard fields come out identical). Manifests are gitignored data, so each machine regenerates its own; the learner drivers (`d12_learner_run.sh` is current) do this as their first phase, and that phase is safe to re-run: it reads the accepted selection hash from the calibration arms' own `metadata.env`, never from the final manifest, which the calibrator rewrites.
-
-**Protocol settings**
-- Protocol v2 is pinned and can't be overridden.
-- `RL_OBSERVE_INTERVAL_MS` must equal `RL_DECISION_INTERVAL_MS`. The default for both is 50 ms.
-- Direct I/O is pinned **off** (`use_direct_reads`, `use_direct_io_for_flush_and_compaction`). Measured on the node at 10M/T=2: 2,750 ops/s direct against 58,332 buffered, a 21× penalty. Contract v3 records the reversal and retracts an earlier cross-machine 2.6× claim.
 
 ## Architecture
 
 ```
-db_bench --compaction_style=4 (kCompactionStyleRL; the regular arm uses 0)
-  └─ RLCompactionPicker            lib/rocksdb/db/compaction/compaction_picker_rl.*
-       ├─ worker thread: builds requests from an immutable structural snapshot, off the DB mutex
-       ├─ RLCompactionClient ──Unix socket, newline-delimited JSON, protocol v2──► rl_agent/server.py
-       ├─ RLControlCoordinator     async coordinator owned by the DB
-       ├─ RLSafetyController       SLO mask driven by baseline_slo.json (rl_safety_manifest.*)
-       ├─ CompactionPressureObserver, RLCompactionTelemetry   (flush/compaction/stall/latency windows)
-       └─ per-level actions → allowed-source-level mask → native LevelCompactionPicker
+db_bench --rl_plugin=<librl_controller.so> --rl_host_log=<path>
+  └─ RLControllerHost             lib/rocksdb/db/rl_controller_host.*, include/rocksdb/rl_controller_host.h
+       ├─ tree snapshot, published by the pressure observer only while a plugin is attached
+       ├─ host log: H after every flush and compaction, job begin/end records, settle/measure/drain stamps
+       └─ controller/ plugin: state, masks, actions, prior, rules, policy, attribution, decision log
+            └─ one batched SetOptions(level_target_multipliers, level0_file_num_compaction_trigger)
 ```
 
-### Rules that span both processes
-
-- **The controller only sets triggers.**
-  - A response is an ordered array of binary per-level actions. It never contains file numbers.
-  - A "due" authorization adds a level to a mask that is passed into RocksDB's native leveled builder. That builder keeps RocksDB's score ordering, `FilesByCompactionPri`, clean-cut expansion and overlap checks.
-  - A below-threshold "optional" authorization goes through the native forced-level path exactly once.
-  - Protocol v3, which let the controller pick exact SSTs, was rejected and removed. Don't bring back candidate or file-level control.
-- **Nothing slow runs under the DB mutex.** No socket I/O and no Python inference happen there. While holding the mutex, the picker only publishes a snapshot and reads a response that was computed earlier.
-- **Messages carry `interval_micros`.** Rates and the SMDP discount use the real elapsed time, not a nominal interval.
-- **Forced actions are recorded as overrides.** For safety, drain, maintenance and fallback actions, the requested action and the effective action are kept separate. The sample is relabelled to the action that actually ran and **kept** in replay (Q-learning is off-policy; decided 2026-09-20, P1c). Only the five uncontrolled cases — socket fallback, watchdog fallback, malformed protocol, rejected manifest, unknown ownership — mark the interval invalid and drop it.
-- **The controller is suspended during the bulk load.** `db_bench` runs `rlsuspend` before `filluniquerandom` and `rlresume` before `mixgraph`; in between the native leveled picker runs under `ActionReason::kSuspended`, no frame is sent and no safety rule evaluates. Event-log jobs from that window carry `rl_suspended`. **`resetstats` does not reset the tickers** (D-11, 2026-09-23): db_bench's `resetstats` calls `DB::ResetStats`, which clears RocksDB's internal stats only, so the `Statistics` tickers and histograms in the final `stats` dump are cumulative since open and include the load. The evaluator reconstructs the measured phase itself: physical write bytes from the event log inside `[RL_CONTROL_RESUMED_MICROS, RL_DRAIN_END_MICROS]`, user bytes as the ticker less the load's exact bytes (`load_operations × (key + value + 16)`), stall seconds from the internal-stats `Cumulative stall` line, and latency from db_bench's own per-benchmark histograms after the mixgraph line. Never read `rocksdb.bytes.written`, `rocksdb.stall.micros` or `rocksdb.db.*.micros` as measured-phase figures.
+- **The controller only moves scores.** It sets multipliers and the L0 trigger and never names a file. RocksDB's native leveled picker keeps its score ordering, file choice, clean-cut expansion and overlap checks. File-level control (the old protocol v3) was rejected; don't bring it back.
+- **Nothing slow runs under the DB mutex.** No inference runs while it is held; the plugin decides on its own thread.
+- **Plugin modes:** hold-only (parity, ARCH-5) and rules (Gate N3) are built; prior-only, learned and remote come with plan step 10.
 - **Level target multipliers are applied in `PrepareForVersionAppend`.** Every new version copies the `level_target_multipliers` option into `capacity_scales_`, which `MaxBytesForLevel` multiplies in; L0 is never scaled (A-Impl-1). `ColumnFamilyData::ValidateOptions` rejects bad vectors at open and in `SetOptions`, and `db/level_target_multipliers_test.cc` covers it.
+- **Tickers are cumulative since open.** db_bench's `resetstats` does not reset them (D-11). The evaluator differences them between host-log stamps; never read a raw ticker as a measured-phase figure.
 
-### The Python agent (`rl_agent/`)
+### Python
 
-- **Configuration:** the agent is set up entirely through `RL_*` environment variables, which `start_server()` in `03_run_experiments.sh` sets. db_bench gets its settings the same way, through `RL_COMPACTION_*` variables in that script.
-- **Request flow:** `server.py` passes each request to `multilevel.py`, the protocol-v2 processor.
-- **Agent:** `agent.py` holds `DQNAgent`.
-- **Model:** `model.py` has a shared trunk with a separate two-action head for each level.
-- **Q-values:** Q is an analytic prior (`analytic_advantage`) plus a learned residual. The residual starts at zero, so a cold start behaves exactly like the prior.
-- **Reward:** `multilevel.MultiLevelProcessor._global_reward` gives every level decision in a frame the same reward, as a **component vector** priced by the multipliers in `lagrange.py` (PREREGISTRATION D-9, 2026-09-23): the objective is point probes per Get, Get-weighted; write amplification, sorted-run seeks and the stall fraction enter as the frame's **signed marginal** contribution to the whole-run constraint (numerator minus bound times denominator, over the run-to-date mean rate), so their run sums equal the evaluator's statistic; the latency averages are flows too, measured against the manifest's `*_latency_avg_ns_telemetry_*` references, which are in the C++ telemetry's own unit (D-10: db_bench's histogram and the telemetry disagree 19× on scan latency, so the formal `*_latency_avg_ns_limit` must never be a hinge target); space bytes is the one hinge; potential shaping runs over the absolute sorted-run count. **The latency multiplier's slack is measured from the end of the 30 s warm-up against the baseline's own since-warm-up trajectory at the same elapsed time** (D-12): the first two seconds after `rlresume` stall writes at 15–32× the limit under the L0 backlog inherited from the load, in every arm and in the calibration arms alike, so a whole-run cumulative reads a positive slack for most of the run whatever the policy does. The priced term is still whole-run. The reward's logical write bytes add 16 B of WriteBatch framing per write op so its W matches the evaluator's measured-phase denominator (D-11; D-10's 30 B was withdrawn), and the first frame after `rlresume` is left out of every run-to-date total because its telemetry window can carry bulk-load writes (D-12 correction). Multipliers take one **signed** dual-ascent step per frame on their constraint's slack after a 30 s warm-up, with each step clipped, and replay stores the vector and re-prices it at sample time, so a multiplier can fall and every batch is priced under one objective. **Before adding any hinge, check that its value and its limit are the same quantity from the same instrument** — seven instruments have failed that test so far (history 14.21–14.24); ask also whether both sides cover the same phase and the same elapsed time. `reward.py` was deleted 2026-09-20; it was the unreachable protocol-v1 path.
-- **Action mask (D-9):** a level at or below L1 is offered `compact` only when RocksDB scores it due; L0 below its trigger only when the compaction nets at least `RL_PRIOR_MIN_RUN_REDUCTION` runs. Due levels are never masked. The learned arms run with `RL_L0_ALLOW_DEFER_LEARNED=1` (they may defer a due L0); `prior_only` keeps `RL_L0_ALLOW_DEFER=0`.
-- **Known open defects (audit 2026-09-23, `docs/AUDIT_2026-09-23_D12_AND_PATHWAY_A.md`):** Boltzmann exploration starts at temperature 1.0 exactly while the post-load backlog drains and before the first gradient step, which produced D-12's whole T=2 write excess; the temperature is not scaled to Q, so choices are near coin flips before training and frozen after it; the Double-DQN target in `agent.py` `train_step` ignores the next-state action mask; stage 11's flip rate reads stale diagnostics; the write and scan multipliers and the guard's limits still carry the post-load transient; the structural staleness check rejects 19–39% of answers because any file change anywhere invalidates a frame.
-- **State:** 37 features (`config.ML_STATE_FIELDS`), including the run-to-date and windowed W over bound, space bytes over bound and the five multipliers. Discount 0.98 per second, 8 s credit window, Huber TD loss.
-
-### Analysis code (`scripts/dbbench_pipeline/*.py`)
-
-- `pipeline_stats.py` has the paired Student-t helpers.
-- `slo_statistics.py` has the tolerance bounds used by stage 06.
-- `research_objective.py` loads the frozen contract.
-- `frontier_analysis.py` builds the empirical hulls the Gate 1 criteria are evaluated against.
-- Formal space amplification is the SST bytes measured before compaction divided by `estimate-live-data-size`. The pipeline also records `sst_bytes_after_full_compaction` as the measured alternative denominator; switching to it would be a contract amendment.
-- `collect_arm` in `04_generate_graphs.py` returns measured-phase `write_amplification`, `stall_seconds` and latencies since D-11, with `*_whole_run` and `*_source` fields beside them. The whole-run write figure is not a diluted version of the measured one: the load's own run-to-run scatter is comparable to the measured-phase effect, so paired write deltas scored before 2026-09-23 must be re-read from the corrected evaluator, not rescaled.
-- The scan objective is sorted-run seeks, because scan amplification is already at its floor.
-
-### Legacy code
-
-`src/`, `include/`, `lib/tectonic/` and `workload_specs/` belong to the older workflow that ran Tectonic workload files. The pipeline doesn't use them, because db_bench generates its own workload: a `filluniquerandom` load followed by `mixgraph`. `workload_specs/README.md` still mentions `scripts/workload_generator.sh`, which no longer exists.
+- `rl_agent/` is still the retired protocol-v2 DQN (`server.py`, `multilevel.py`, `lagrange.py`, `agent.py`). Plan step 10 replaces it with `trainer.py`, `reward.py`, `model.py` and `membership.py`, and deletes `server.py`, `multilevel.py` and `lagrange.py` (plan §4). Its reward and mask history is PREREGISTRATION D-9..D-12.
+- The evaluator is `scripts/dbbench_pipeline/`: `04_generate_graphs.py` (`collect_arm`, measured phase from the host log), `host_log.py`, `compaction_measurements.py`, `frontier_analysis.py` (hull, θ*_β), `07_evaluate_paired.py` with `pipeline_stats.py` (paired Student-t), `18` (prices), `19` (admission), and `research_objective.py`, which loads the frozen contract.
+- **Before adding any priced or constrained term, check that its value and its limit are the same quantity, from the same instrument, over the same phase.** Seven instruments failed that test in the old programme (history 14.21–14.24).
 
 ## Repo gotchas
 
-- **`.gitignore` hides new files.** It ignores whole categories (`*.json`, `*.txt`, `scripts/*`) and then re-includes specific paths with `!` rules. New JSON configs and scripts in new directories end up untracked without warning — add a `!` rule for them. Already-tracked paths are unaffected, so the hazard is invisible until a file you expect never shows up in `git status`; `docs/PREREGISTRATION.md` went missing through four commits that way. `docs/` itself is no longer ignored (2026-09-21) and needs no `!` rule.
-- **Some tools skip all the RL C++.** The root rule `**/db/**` is meant for database working directories. Git doesn't apply it inside the submodule. Tools that apply the root `.gitignore` recursively, such as graphify, skip `lib/rocksdb/db/`, which is where all the RL C++ lives. If a search comes back empty, search `lib/rocksdb/db/compaction/` explicitly.
-- **All C++ changes are in the `lib/rocksdb` submodule.** It is the fork `chill-umb/rocksdb`, and the working branch is `rl-compaction-policy-new`.
+- **`.gitignore` hides new files.** It ignores whole categories (`*.json`, `*.txt`, `*.tex`, `scripts/*`) and then re-includes specific paths with `!` rules. New JSON configs and scripts in new directories end up untracked without warning — add a `!` rule for them. Already-tracked paths are unaffected, so the hazard is invisible until a file you expect never shows up in `git status`; `docs/PREREGISTRATION.md` went missing through four commits that way. `docs/` itself is not ignored and needs no `!` rule; `.claude/` is ignored entirely.
+- **`core.fileMode=false`** (the drive shows every file as 755): a new script needs `git add --chmod=+x`.
+- **Some tools skip all the RL C++.** The root rule `**/db/**` is meant for database working directories. Git doesn't apply it inside the submodule. Tools that apply the root `.gitignore` recursively, such as graphify, skip `lib/rocksdb/db/`, which is where all the RL C++ lives. If a search comes back empty, search `lib/rocksdb/db/` explicitly.
+- **All RocksDB changes are in the `lib/rocksdb` submodule.** It is the fork `chill-umb/rocksdb`, and the working branch is `rl-compaction-policy-new`.
   - Commit inside the submodule first, then bump the submodule pointer in the root repo.
   - The research contract pins the RocksDB base at `7ea2d73`, and later commits must record their parent.
   - The `*.cc.d` files next to the sources are make dependency outputs.
-- **The fingerprint string in `03` and the regex in `06_select_baseline_slo.py` must stay in lockstep.** `parse_fingerprint_options` is anchored with `fullmatch` and rejects unknown trailing fields. Any new fingerprint field needs the parser updated; emit the segment conditionally if existing runs must stay poolable (this is why the `ltm` segment, like the old `cap` one, appears only when multipliers are set; `tests/test_fingerprint.py` checks the pair).
-- **The C++ manifest parser reads every key by its first textual match.** `rl_safety_manifest.cc` searches the raw text for `"key"`, not the top-level field, and the calibrator writes keys sorted. Never reuse a key name `RLSafetyController::Parse` reads inside a nested manifest block; a nested `schema_version` made the D-12 manifest read as schema 1 and be rejected while the Python side accepted it. `06_calibrate_live_guard.py` now refuses such a manifest (`CPP_FIRST_MATCH_KEYS`, keep in lockstep with `Parse`).
+- **The fingerprint string in `03` and the regex in `06_select_baseline_slo.py` must stay in lockstep.** `parse_fingerprint_options` is anchored with `fullmatch` and rejects unknown trailing fields. Any new fingerprint field needs the parser updated; emit the segment conditionally if existing runs must stay poolable (this is why the `ltm` segment appears only when multipliers are set; `tests/test_fingerprint.py` checks the pair).
+- **The C++ manifest parser reads every key by its first textual match** (old stack). `rl_safety_manifest.cc` searches the raw text for `"key"`, not the top-level field. Never reuse a key name `RLSafetyController::Parse` reads inside a nested manifest block; `06_calibrate_live_guard.py` refuses such a manifest (`CPP_FIRST_MATCH_KEYS`, keep in lockstep with `Parse`).
 - **RocksDB's `JSONWriter` has no bool overload**, so `status.ok()` and `rl_drain` reach the event log as `1`/`0`. Never test `is True` against an event-log field; use the tolerant form `in (True, 1, "true", "1")` that `04_generate_graphs.py` already uses.
 - **Result layout has a `repeat-NN/` level only when `REPEATS > 1`.**
 - **Stage 06 must exclude the level-base scale axis** from comparator selection (`--level-base-bytes`), or a 0.5× configuration can win minimum-space and silently redefine the baseline.
 - **The hull is bound to its binary.** The evaluator refuses to pool across `dbbench_sha256`. Any criterion comparing a policy against the hull needs the hull re-measured on whatever binary finally runs that policy.
-- **Put repeated pipeline logic in a numbered stage, not a pasted heredoc.** That is what `15` is.
+- **Put repeated pipeline logic in a numbered stage, not a pasted heredoc**, as `24` and `25` do.
 
 ## graphify
 
@@ -221,7 +167,7 @@ Rules:
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- `docs/` is gitignored, so nothing under it is in the graph. Read those files directly.
+- The graph may not cover `docs/` or `lib/rocksdb/db/` (see Repo gotchas). Read those files directly.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
 

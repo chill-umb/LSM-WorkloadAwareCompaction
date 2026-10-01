@@ -1,7 +1,9 @@
 # Implementation plan — Programme 1 (2026-09-29)
 
 This turns `docs/PATHWAYS.md` (revision 2026-09-29, with the review fixes) into
-a file-by-file build plan. PATHWAYS remains the authority on *what* the system
+a file-by-file build plan. "The review" is the 2026-09-29 theory review, removed
+from the tree on 2026-10-01; read it with
+`git show cb45743:docs/PATHWAYS_THEORY_REVIEW_2026-09-29.md`. PATHWAYS remains the authority on *what* the system
 must do; this file says *where* each piece goes and *in what order*. Where
 this plan and PATHWAYS disagree, PATHWAYS wins, and this file must be updated.
 
@@ -217,7 +219,7 @@ headers. Its SHA-256 goes in the fingerprint, separately from `db_bench`'s.
 | `09_evaluate_oracle_parity.py` | Kept. Its checks define the parity envelope for ACT-4 and ARCH-5 | ACT-4, ARCH-5 |
 | `01b_build_test_trees.sh` (new) | A Debug CMake tree of the fork with only the fork's own test targets, and the plugin's test target, so `assert`s fire | CLAUDE.md "Tests", tier 2 |
 | `13_run_preflight_verification.sh` (reworked) | The preflight of §6.4. It writes `PREFLIGHT_PASSED` bound to the hashes, and `03` and every long-run driver refuse to start without a matching marker | CLAUDE.md "Tests", tier 3 |
-| Parked or superseded | `05`, `06_*`, `08`, `10`, `11`, `14`–`17` and `d*_learner_run.sh`: Programme 2, or superseded by the stages above | — |
+| Removed 2026-10-01 | `05`, `06_run_guard_protocol.sh`, `06_validate_guard_holdout.py`, `08`, `10_run_scaling_smoke.sh`, `11`, `12`, `14`, `15`, `17`, `d*_learner_run.sh` and the other old root drivers. `06_calibrate_live_guard.py`, `06_select_baseline_slo.py` and `10_validate_learning_health.py` stay until step 12, since `03` and the fingerprint test still use them | — |
 
 ## 6. Tests, checks and the preflight
 
