@@ -68,7 +68,7 @@ class ChainTest(unittest.TestCase):
     SCRUBBED = ("RESUME", "STOP_AFTER_N1", "PARITY_PAIRS", "ALLOW_ROOT_DISK",
                 "FAKE_FAIL_WORKLOAD", "DBBENCH_BUILD_DIR", "PREFLIGHT_MARKER",
                 "PREFLIGHT_WORK_DIR", "PRICES_FILE", "DB_ROOT", "RESULTS_ROOT",
-                "SESSION_ID", "KEEP_DATABASES")
+                "SESSION_ID", "KEEP_DATABASES", "FAKE_SURVIVAL_BASES")
 
     def run24(self, cwd=None, script=None, **overrides) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items() if k not in self.SCRUBBED}

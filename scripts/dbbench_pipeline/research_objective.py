@@ -104,6 +104,29 @@ def validate_prices(prices: dict, contract: dict) -> dict:
             "c_s": float(storage)}
 
 
+def checked_prices(record: dict, contract: dict) -> dict:
+    """A prices.json record of stage 18 as money prices: schema 2, priced per
+    core-second under this contract (D-15 §3a; a draft schema-1 file priced
+    per whole machine is 16 times too high), and valid (OBJ-2)."""
+    if (record.get("schema") != 2 or record.get("price_per_core_second")
+            != contract["prices"]["price_per_core_second"]):
+        raise ValueError("not priced per core-second under this contract "
+                         "(schema 2, D-15 §3a)")
+    return validate_prices(record, contract)
+
+
+def priced_costs(prices: dict, rate: float, sst_bytes: float,
+                 filter_probes: float, block_probes: float, run_seeks: float,
+                 held_byte_operations: float) -> tuple[float, float, float]:
+    """(C_W, C_R, C_S) of one run (PATHWAYS D §1): SST bytes written at c_w;
+    filter probes, block-reading probes and run seeks at c_f, c_blk, c_sk;
+    held byte-operations at c_s / q-bar (Lemma D.15)."""
+    return (prices["c_w"] * sst_bytes,
+            prices["c_f"] * filter_probes + prices["c_blk"] * block_probes +
+            prices["c_sk"] * run_seeks,
+            prices["c_s"] / rate * held_byte_operations)
+
+
 def reference_rate(contract: dict, family: str):
     """q-bar for a workload family, or None while it is unmeasured."""
     return contract["reference_rate"]["ops_per_second"].get(family)

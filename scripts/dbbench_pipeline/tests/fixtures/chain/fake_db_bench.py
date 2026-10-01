@@ -5,7 +5,10 @@ each other, so 04 scores the arm and 19 finds turnovers of L2: 20 per 26.1M
 mixgraph operations for Assoc, 6 for the power law. For 18 it prints result
 lines and tickers of trees whose per-operation costs are known: 0.5 us a
 filter probe, 1 us a block read, 2 us a run seek. FAKE_FAIL_WORKLOAD=assoc (or
-powerlaw) makes every arm of that workload fail as an I/O error would."""
+powerlaw) makes every arm of that workload fail as an I/O error would.
+Only L1 and L2 merge, so 23 refuses the survival-weighted profile (no merges
+out of L0 and L3); at a base size in FAKE_SURVIVAL_BASES (bytes, space
+separated; test_gate_n2_chain.py) L0 and L3 merge too, and 23 computes it."""
 import json
 import os
 import sys
@@ -52,6 +55,7 @@ num, reads, nlev = int(args["num"]), int(args["reads"]), int(args["num_levels"])
 C = [0] + [int(B * T ** (i - 1)) for i in range(1, nlev)]
 turnovers = (6 if power else 20) * reads / 26_100_000
 merges = max(8, int(turnovers * 8))            # L1 -> L2 merges, 8 per turnover
+survival = str(B) in os.environ.get("FAKE_SURVIVAL_BASES", "").split()
 WS, US = 5_000_000_000, 16                     # wall-clock start; us per operation
 host, events, H, job = [], [], 3_000_000_000, 100
 
@@ -105,6 +109,10 @@ for m in range(merges):
     moves = [(1, C[2] // 16, C[2] // 16, C[2] // 16 + C[2] // 8)]
     if m % 8 == 7:
         moves.append((2, C[2] // 2, C[3] // 4, C[2] // 2 + C[3] // 4))
+    if survival:                               # the flushed file into L1; an L3 release
+        moves.insert(0, (0, 2 << 20, C[1] // 8, (2 << 20) + C[1] // 8))
+        if m % 8 == 3:
+            moves.append((3, C[3] // 8, C[4] // 32, C[3] // 8 + C[4] // 32))
     for k, (level, s, o, x) in enumerate(moves):
         job += 1
         tj, wj = t + 10 + k * 20, wall + 10 + k * 20

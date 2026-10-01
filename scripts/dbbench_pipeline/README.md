@@ -257,6 +257,25 @@ d. Gate N2, the static comparator. Four things must exist first, in this
       For the power-law workload add `WORKLOAD_SKEW=2 MIX_GET_RATIO=0.95
       MIX_PUT_RATIO=0.05 MIX_SEEK_RATIO=0 WORKLOAD_PROFILE=powerlaw-get95-v1`
       (03 refuses the power law under the Assoc profile).
+
+      Record q̄ with `26_record_qbar.py`, after the q̄ arms and before any
+      Θ_s arm. It refuses rows that are not what D-14 §2 describes (five
+      scored `native` arms at T=10 without prices, one session and binary,
+      the pipeline's default options and the workload's own fields, and the
+      rung Gate N1 chose, read from the workload's `admission_T*.json` in
+      its `--admission` folder) and a contract that already holds the value.
+      It prints q̄ and a drafted dated record for PREREGISTRATION. `--write`
+      amends the contract in place (the value, an `amendments` entry,
+      `status_note`); commit it with the record.
+
+      ```bash
+      python3 scripts/dbbench_pipeline/26_record_qbar.py \
+        --summary assoc=/mnt/nvme/qbar-assoc/graphs/summary.csv \
+        --admission assoc=/mnt/nvme/n1-assoc \
+        --summary powerlaw_get95=/mnt/nvme/qbar-powerlaw/graphs/summary.csv \
+        --admission powerlaw_get95=/mnt/nvme/n1-powerlaw \
+        --output ~/qbar_record.md --write
+      ```
    3. **The device prices** (OBJ-2, Gate N0 item 7; PREREGISTRATION D-15
       §3), about an hour: three settled trees at T = 2, 6 and 10 for the
       read prices, and the q̄ arms' own flushes and compactions for c_w, so
@@ -275,11 +294,16 @@ d. Gate N2, the static comparator. Four things must exist first, in this
       `build-dbbench/prices.json`, which `03` copies into every later arm
       and records in the fingerprint; the medians and spreads are in it.
    4. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
-      that point's `native` arms (run them first, in the same session):
+      that point's `native` arms (run them first, in the same session). 25
+      does this step. By hand, run it as 25 does, from the point's
+      `<size>M/T<T>` folder with relative run paths, or 25 will refuse the
+      `profiles.json` (it records the runs relative to that folder; list only
+      the settled runs):
 
       ```bash
-      python3 scripts/dbbench_pipeline/23_static_profiles.py \
-        /mnt/nvme/n2-assoc/T<T>-b<base>-k<K0>/<N2 size>M/T<T>/repeat-*/native \
+      cd /mnt/nvme/n2-assoc/T<T>-b<base>-k<K0>/<N2 size>M/T<T>
+      python3 <repo>/scripts/dbbench_pipeline/23_static_profiles.py \
+        repeat-*/native \
         --output /mnt/nvme/n2-assoc/T<T>-b<base>-k<K0>/profiles.json
       ```
 
@@ -289,6 +313,28 @@ d. Gate N2, the static comparator. Four things must exist first, in this
       `profiles.json`. `03` checks each vector as RocksDB will (one entry per
       level, entry 0 = 1, entries in [0.5, 2.0], no level's target below
       the one above it).
+
+   **Before the Θ_s runs, the repeat design (D-17).** `27_screen_design.py`
+   reports, from the q̄ arms' `summary.csv` files and `prices.json`, the
+   run-to-run noise of one configuration (with its 95% interval), a Monte
+   Carlo of how often a screen of 2 or 3 runs per configuration would drop a
+   true hull point or a clearly worse one, and runs and node-hours per
+   design. Every assumption is a flag; `--help` lists them.
+
+   ```bash
+   python3 scripts/dbbench_pipeline/27_screen_design.py \
+     /mnt/nvme/qbar-assoc/graphs/summary.csv /mnt/nvme/qbar-powerlaw/graphs/summary.csv \
+     --prices build-dbbench/prices.json --json ~/screen_design.json
+   ```
+
+   Pass `--qbar assoc=<q̄> --qbar powerlaw_get95=<q̄>` until 26 has
+   recorded q̄. 27 reads only those three files, so it can run off the node.
+
+   **The preflight marker.** 25, 26, 27 and the changes that came with them
+   live in `scripts/dbbench_pipeline`, which the marker hashes (untracked
+   files included). Bringing them onto the node therefore changes the code
+   hash: run a fresh preflight (13) before the first Θ_s arm, and never
+   pull or copy them while 24 is running.
 
    Then, per workload and per point of the grid (T ∈ {2, 6, 10}; base
    ∈ {8, 16, 32} MiB; K0 ∈ {2, 4, 8}, skipping K0 above base / write buffer,
@@ -308,6 +354,53 @@ d. Gate N2, the static comparator. Four things must exist first, in this
 
    An arm whose tree does not settle after the load is marked `UNSETTLED`
    and the matrix goes on (D-13 §6); `04` lists it as refused.
+
+   **Unattended:** `25_gate_n2_chain.sh` runs all of the above for both
+   workloads, each in its own process, at the run length in the Gate N1
+   reports under `$NVME/n1-<workload>`. Give `NVME` as an absolute path (a
+   relative one is read from the repository root, as in 24). The reports are
+   required: `N2_RUN_LENGTH_<workload>="<size M> <load %>"` replaces only the
+   rung, and D-16 §5 still reads them. Per T, it runs every point's `native`
+   and `uniform_0_75` arms, repeat by repeat across the points, then 23 at
+   each point, then the two measured profiles, each with its own point's
+   vector. A profile 23 refuses
+   (D-14 §3) is skipped and its reason printed (`=== <workload> <point>:
+   refused …`, listed again at the end of the workload); any other failure
+   of 23 stops that workload. When Gate N1 left a level undecided, the
+   default point's native arms run D-16 §5's repeats; if that cell has no
+   n_min, 25 refuses to start when the plan includes the cell's default
+   point, and only warns otherwise. It also refuses without q̄ in the
+   contract, without a schema-2 `build-dbbench/prices.json` measured on this
+   `db_bench`, or
+   without a preflight marker for this code (rerun 13 after any change), and
+   runs the disk checks of 24. See the cost first; the listing runs nothing:
+
+   ```bash
+   NVME=/mnt/nvme scripts/dbbench_pipeline/25_gate_n2_chain.sh plan | grep '^#'
+   NVME=/mnt/nvme scripts/dbbench_pipeline/25_gate_n2_chain.sh 2>&1 | tee ~/gate_n2.log
+   ```
+
+   - The full Θ_s is 480 runs per workload at five repeats (about 160 s per
+     10M operations each). `N2_T=10` runs one T (a later run of other T
+     values needs `RESUME=1`); `N2_WORKLOADS=assoc` one workload;
+     `N2_REPEATS=2` or `3` a screen: every other arm runs that many, but
+     the native arms still run five, since the measured profiles are
+     computed from five (D-13 §5). That is the screen 27 costs.
+   - The free-space check is 24's (`MIN_FREE_GB`, default 60), sized for
+     Gate N1, not for Θ_s's results: size it from `du` of one arm under
+     `$NVME/n1-<workload>` times the planned runs. A full disk fails the arm
+     and stops the workload.
+   - A named set instead of the sweep, for a top-up or the cross-T check
+     (after T=10 is scored): `N2_CONFIGS=<file>`, one configuration per line,
+     `<workload> <T> <base MiB> <K0> <profile> <repeats>`, repeats being the
+     total wanted, e.g. `assoc 14 16 4 survival_weighted 5`. A measured
+     profile at a point without `profiles.json` (every cross-T point) runs
+     that point's five native arms first. At most one cross-T configuration
+     per mode and workload (D-13 §4). A path is read from where 25 starts.
+   - A point's `profiles.json` is written once, from at least five native
+     runs, and records them; resumes and top-ups reuse its vectors, and 25
+     stops if those runs have changed since. After a failure, delete the
+     failed arm's result and database folders, then rerun with `RESUME=1`.
 
    Score and build the hull per (workload, T):
 

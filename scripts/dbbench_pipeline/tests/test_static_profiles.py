@@ -9,9 +9,11 @@ bytes per user byte v = (1, 0.9, 0.8, 0.7), lambda = (16 * 0.504)^(1/4).
 import importlib.util
 import json
 import math
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PIPELINE = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -169,6 +171,42 @@ class MeasureRunTest(unittest.TestCase):
         self.assertEqual((m["L"], m["B_L"], m["F"]), (3, 900.0, 100.0))
         self.assertEqual((m["s"][1], m["o"][1], m["user_bytes"]), (300.0, 600.0, 1000.0))
         self.assertEqual(m["m"], [1.0] * 4)
+
+
+class MainTest(unittest.TestCase):
+    """A refusal of D-14 §3 is a report (25 skips the arm); any other failure
+    writes none (25 stops the workload)."""
+
+    def run_main(self, measured):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "profiles.json"
+            argv = ["23", "run-1", "run-2", "--output", str(output)]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(sp, "measure_run", side_effect=measured):
+                try:
+                    code = sp.main()
+                except SystemExit as exit:
+                    code = str(exit)
+            return code, (json.loads(output.read_text()) if output.exists() else None)
+
+    def test_runs_that_disagree_on_depth_refuse_both_profiles(self):
+        code, report = self.run_main([{**pooled(), "fingerprint": "x"},
+                                      {**pooled(L=5), "fingerprint": "x"}])
+        self.assertEqual(code, 1)
+        self.assertIsNone(report["inputs"])
+        self.assertEqual(report["runs"], ["run-1", "run-2"])
+        for name in ("survival_weighted", "last_level_emptying"):
+            self.assertIn("the runs differ in L", report[name]["refused"])
+
+    def test_other_failures_write_no_report(self):
+        for measured, message in (
+                ([{**pooled(), "fingerprint": "x"}, {**pooled(), "fingerprint": "y"}],
+                 "the runs differ in fingerprint"),
+                (ValueError("run-2: host log: no drain_end stamp"), "no drain_end")):
+            with self.subTest(message=message):
+                code, report = self.run_main(measured)
+                self.assertIn(message, code)
+                self.assertIsNone(report)
 
 
 if __name__ == "__main__":

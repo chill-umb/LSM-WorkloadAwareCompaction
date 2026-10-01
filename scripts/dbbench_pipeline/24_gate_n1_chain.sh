@@ -21,37 +21,12 @@ cd "$PROJECT_ROOT"
 NIGHT_PARITY_PAIRS="${PARITY_PAIRS:-10}"
 # shellcheck source=config.sh
 source "$PIPELINE_DIR/config.sh"
-NVME="${NVME:-/mnt/nvme}"
-if [[ "$PYTHON_VENV" = /* ]]; then
-  PY="$PYTHON_VENV/bin/python"
-else
-  PY="$PROJECT_ROOT/$PYTHON_VENV/bin/python"
-fi
-POWERLAW=(WORKLOAD_SKEW=2 MIX_GET_RATIO=0.95 MIX_PUT_RATIO=0.05 MIX_SEEK_RATIO=0
-          WORKLOAD_PROFILE=powerlaw-get95-v1)
-stamp() { echo "=== $(date '+%F %T') $*"; }
-fail() { echo "[24] $*" >&2; exit 1; }
+STAGE=24
+# shellcheck source=chain_common.sh
+source "$PIPELINE_DIR/chain_common.sh"
 
 # D-16 §6: a workload's run length is the longest of its three cells' rungs.
-rung() {
-  "$PY" - "$NVME/n1-$1" <<'PY'
-import json, sys
-from pathlib import Path
-rungs = []
-for t in (2, 6, 10):
-    report = json.loads((Path(sys.argv[1]) / f"admission_T{t}.json").read_text())
-    length = report["run_length"]
-    if length["rung"] is None:
-        sys.exit(f"T={t}: no rung is long enough for L{length['level']} "
-                 "(D-16 §6): stop and report")
-    rungs.append(length["rung"])
-def mixgraph(r):
-    total = r["size_millions"] * 10**6
-    return total - total * r["load_percent"] // 100
-best = max(rungs, key=mixgraph)
-print(best["size_millions"], best["load_percent"])
-PY
-}
+rung() { "$PY" "$PIPELINE_DIR/gate_n1_reports.py" "$NVME/n1-$1"; }
 
 # One workload: Gate N1, then its q-bar arms. Run as a child process, so that
 # set -e holds inside it and its failure is reported, not fatal to the other.
@@ -103,40 +78,7 @@ if [[ "${1:-}" == workload ]]; then
   exit 0
 fi
 
-# Checks that fail in seconds.
-[[ -x "$PY" ]] || fail "no Python at $PY; run 00_install_dependencies.sh"
-mkdir -p "$NVME" && touch "$NVME/.write_test" && rm -f "$NVME/.write_test" ||
-  fail "$NVME is not writable"
-[[ "$(stat -L -f -c %T "$NVME")" != tmpfs ]] || fail "$NVME is tmpfs; use the NVMe device"
-free_gb="$(df --output=avail -BG "$NVME" | tail -n 1 | tr -dc 0-9)"
-(( free_gb >= ${MIN_FREE_GB:-60} )) ||
-  fail "only ${free_gb} GB free on $NVME; about ${MIN_FREE_GB:-60} GB are needed"
-# Every folder a night writes under NVME must not exist yet: 03 refuses an
-# existing results root, and a failed arm's database.
-if [[ "${RESUME:-0}" != 1 ]]; then
-  for d in n1-assoc n1-powerlaw qbar-assoc qbar-powerlaw n1-dbs qbar-dbs; do
-    [[ ! -e "$NVME/$d" ]] || fail "$NVME/$d exists: move it away, or rerun with RESUME=1"
-  done
-fi
-# The measurements are of the disk NVME is on. An unmounted /mnt/nvme is a
-# plain folder on the root disk, so that is refused unless meant.
-echo "[24] results disk: $(df --output=source,fstype,target "$NVME" | tail -n 1)"
-# -L: a symlinked NVME is judged by the disk it points to.
-if [[ "$(stat -L -c %d "$NVME")" == "$(stat -c %d /)" && "${ALLOW_ROOT_DISK:-0}" != 1 ]]; then
-  fail "$NVME is on the root filesystem: is the NVMe mounted? If the root disk" \
-       "is the device to measure, rerun with ALLOW_ROOT_DISK=1"
-fi
-if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
-  recorded="$(git ls-tree HEAD lib/rocksdb | awk '{print $3}')"
-  [[ -n "$recorded" ]] || fail "cannot read the recorded lib/rocksdb commit"
-  [[ "$(git -C lib/rocksdb rev-parse HEAD 2>/dev/null)" == "$recorded" ]] ||
-    fail "lib/rocksdb is not at the recorded commit $recorded; run git submodule update --init --recursive"
-else
-  echo "[24] not a git checkout with commits; the fork commit is not checked"
-fi
-if [[ -n "$DBBENCH_CPUS" ]] && ! command -v taskset >/dev/null; then
-  fail "taskset is not installed"
-fi
+node_checks n1-assoc n1-powerlaw qbar-assoc qbar-powerlaw n1-dbs qbar-dbs
 
 stamp "preflight (13): builds, tiers 1 and 2, ACT-1, ACT-4 at $NIGHT_PARITY_PAIRS pairs, evaluator smoke"
 CONFIRM_PREFLIGHT_VERIFICATION=YES PARITY_PAIRS="$NIGHT_PARITY_PAIRS" \

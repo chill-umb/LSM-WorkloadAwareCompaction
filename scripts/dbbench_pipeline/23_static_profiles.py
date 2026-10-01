@@ -18,7 +18,9 @@ flush file size) are measured over mixgraph, measure_start to drain_start:
 steady-state flows, without the drain. A common overlap constant cancels from the
 optimum; the measured c_i = o_i / f_i are reported. Entries outside
 [0.5, 2.0] are clipped and reported; a profile that would then shrink a
-level's target below the level's above is refused.
+level's target below the level's above is refused. Runs that disagree on L
+refuse both. A refusal is recorded in the report (exit 1); any other
+failure exits without writing one.
 """
 
 from __future__ import annotations
@@ -95,12 +97,18 @@ def measure_run(run: Path) -> dict:
     }
 
 
+class DepthRefused(ValueError):
+    """D-14 §3: L must agree across the pooled runs. A refusal, recorded in
+    the report; every other failure to pool is an error."""
+
+
 def pool(runs: list[dict]) -> dict:
     """Repeats of one configuration: byte totals summed, B_L and F averaged."""
     for key in ("fingerprint", "L"):
         if len({run[key] for run in runs}) != 1:
-            raise ValueError(f"the runs differ in {key}: "
-                             f"{sorted({str(run[key]) for run in runs})}")
+            raise (DepthRefused if key == "L" else ValueError)(
+                f"the runs differ in {key}: "
+                f"{sorted({str(run[key]) for run in runs})}")
     first = runs[0]
     return {**first,
             "B_L": statistics.fmean(run["B_L"] for run in runs),
@@ -175,8 +183,13 @@ def main() -> int:
                         help="native arm result directories of one point")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    # A report is written only for a computation or a refusal of D-14 §3;
+    # any other failure exits without one.
+    pooled, depth = None, None
     try:
         pooled = pool([measure_run(run) for run in args.runs])
+    except DepthRefused as error:
+        depth = error
     except ValueError as error:
         raise SystemExit(str(error)) from error
     # Each profile on its own: a refused one is recorded with its reason
@@ -185,14 +198,17 @@ def main() -> int:
     for name, compute in (("survival_weighted", survival_weighted),
                           ("last_level_emptying", last_level_emptying)):
         try:
+            if depth:
+                raise depth
             profiles[name] = compute(pooled)
         except ValueError as error:
             profiles[name] = {"refused": str(error)}
     # Merged bytes out of level L or below: the tree deepened during the
     # measured phase, and the settled L no longer describes it.
-    deeper = [i for i in range(pooled["L"], pooled["num_levels"]) if pooled["s"][i]]
+    deeper = [] if depth else [i for i in range(pooled["L"], pooled["num_levels"])
+                               if pooled["s"][i]]
     report = {"schema_version": 1, "runs": [str(run) for run in args.runs],
-              "inputs": {k: pooled[k] for k in (
+              "inputs": None if depth else {k: pooled[k] for k in (
                   "fingerprint", "L", "B_L", "F", "K0", "C1", "T",
                   "user_bytes", "s", "o")},
               "merges_below_L": deeper, **profiles}

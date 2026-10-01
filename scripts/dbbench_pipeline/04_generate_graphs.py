@@ -588,21 +588,13 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if metadata.get("prices_sha256") != prices_sha256:
         raise InvalidArm("prices.json is not the file the run recorded")
     try:
-        record = json.loads(prices_path.read_text())
-        # D-15 §3a: prices per core-second; a draft (schema 1) file priced
-        # per whole machine is 16 times too high.
-        if (record.get("schema") != 2 or record.get("price_per_core_second")
-                != contract["prices"]["price_per_core_second"]):
-            raise ValueError("not priced per core-second under this contract "
-                             "(schema 2, D-15 §3a)")
-        prices = research_objective.validate_prices(record, contract)
+        prices = research_objective.checked_prices(
+            json.loads(prices_path.read_text()), contract)
     except (ValueError, KeyError, AttributeError, json.JSONDecodeError) as error:
         raise InvalidArm(f"prices.json: {error}") from error
-    costs = (prices["c_w"] * (flush + compaction),
-             prices["c_f"] * row["filter_probes"] +
-             prices["c_blk"] * row["block_reading_probes"] +
-             prices["c_sk"] * row["run_seeks"],
-             prices["c_s"] / rate * held)
+    costs = research_objective.priced_costs(
+        prices, rate, flush + compaction, row["filter_probes"],
+        row["block_reading_probes"], row["run_seeks"], held)
     row.update(zip(("C_W", "C_R", "C_S"), costs))
     row.update(research_objective.objective_columns(contract, costs))
     row.update(objective_status="priced", reference_rate=rate,
