@@ -152,6 +152,29 @@ TEST_F(PluginTest, HoldOnlyDecidesAndLogsButNeverCallsSetOptions) {
   EXPECT_EQ(replayable, 5);
 }
 
+TEST_F(PluginTest, L0DecidesOncePerFlushInteriorLevelsEveryNOverK) {
+  // G-iv as amended 2026-10-02: L0's state changes only at flushes and L0
+  // compactions, so it decides every N_0 / K0_cfg operations (one flush),
+  // not N_0 / k. With k = 10 that is 25k operations here against 11.5k.
+  FakeHost host;
+  {
+    Controller controller(&host, Config({{"k", "10"}}));
+    Serve(&host);
+    controller.Step();  // every level decides at 100k
+    host.AddOps(15000, 0);
+    controller.Step();  // 115k: L1-L4 due (N_j / 10 = 11.5k), L0 not (28.75k)
+    host.AddOps(25000, 0);
+    controller.Step();  // 140k: L0 due (40k since 100k >= 35k), L1-L4 too
+  }
+  int l0 = 0, others = 0;
+  for (const std::string& line : Decisions()) {
+    if (line.find("\"type\":\"decision\"") == std::string::npos) continue;
+    (line.find("\"level\":0,") != std::string::npos ? l0 : others)++;
+  }
+  EXPECT_EQ(l0, 2);
+  EXPECT_EQ(others, 12);
+}
+
 TEST_F(PluginTest, RulesBatchEveryChangeOfAPollIntoOneApply) {
   FakeHost host;
   Controller controller(

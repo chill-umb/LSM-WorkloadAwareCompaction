@@ -91,6 +91,14 @@ class CheckPluginRunTest(unittest.TestCase):
                 report = verdict(body=body)
                 self.assertEqual(report["failed_checks"], ["act3"])
                 self.assertIn(1, report["checks"]["act3"]["failed_ids"])
+                self.assertEqual(report["checks"]["act3"]["failed_by_level"],
+                                 {1: 1})
+        # Calls the SetOptions cap held are counted, to tell that cause apart.
+        held = verdict(body=[CHANGE, {"type": "apply_held", "op": 150,
+                                      "first_id": 1, "last_id": 1}, NEXT])
+        self.assertEqual(held["checks"]["act3"]["held_calls"], 1)
+        self.assertIn("1 held by the SetOptions cap",
+                      held["checks"]["act3"]["problems"][0])
         # L0's change is its trigger, carried as k0.
         l0 = verdict(body=[decision(1, 100, level=0, old=4, requested=3),
                            apply(100, 1, 1, k0=3),

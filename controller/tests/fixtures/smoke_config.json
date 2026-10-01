@@ -25,6 +25,6 @@
   "rule_l0_early_read_ratio": 1.0,
   "rule_release_fill": 0.5,
   "rules": "k0_tracking,l0_early,yield_slot,garbage_hold,neighbour_release",
-  "setoptions_min_interval_ms": 100,
+  "setoptions_min_interval_ms": 10,
   "transition_log": "transitions.jsonl"
 }

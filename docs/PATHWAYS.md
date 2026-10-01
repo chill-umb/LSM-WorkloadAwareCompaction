@@ -1294,7 +1294,13 @@ parts start at zero (cold start, H §4). The law has five rules:
   in advance, so every transition serves the same number of operations and
   carries the same discount, $e^{-1/(n_Hk)}$. During a write stop no decision
   falls due; RocksDB's own triggers act. Decisions that fall due together go
-  into one `SetOptions` call (A-Impl-5).
+  into one `SetOptions` call (A-Impl-5). Amended 2026-10-02: L0, which is
+  not pooled, decides once per flush, every $N_0/K_0^{\text{cfg}}$
+  operations, since its state changes only at flushes and L0 compactions; its
+  transitions carry $e^{-1/(n_H K_0^{\text{cfg}})}$. The `SetOptions` rate
+  cap (A-Impl-5) must stay below the shortest control interval in wall time,
+  or ACT-3 cannot hold: at $k = 10$, L0 decided every 30–64 ms on the
+  2026-10-02 rules smoke, against a 100 ms cap.
 - **(G-v) Membership.** A level joins $\mathcal P$ only if it passes the
   admission test (§4). A level that fails keeps its own model.
 

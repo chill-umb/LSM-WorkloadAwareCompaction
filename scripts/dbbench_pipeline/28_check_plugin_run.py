@@ -16,7 +16,8 @@ db_bench's output and the plugin's decision and transition logs.
              first_id..last_id covers the decision carried the requested
              value for that level, the snapshot read right after it had it
              (`seen`), and its op is no later than the level's next decision,
-             one interval of N_j/k operations on. A change held by the
+             one interval of N_j/k operations on (L0: one flush, N_0/K0_cfg,
+             G-iv). A change held by the
              SetOptions cap past that, or overwritten before any call, fails.
              A level's last change with no accepted call after it at all,
              cut off by the drain, is reported as truncated and not judged;
@@ -80,7 +81,7 @@ def act3_changes(decisions: list[dict]) -> dict:
                 apply.get("last_id", -1) and
                 math.isclose(value, decision["requested"], rel_tol=1e-12))
 
-    faithful, failed, truncated = 0, [], []
+    faithful, failed, truncated, by_level = 0, [], [], {}
     for index, decision in enumerate(made):
         if math.isclose(decision.get("requested", 0), decision.get("old", 0),
                         rel_tol=1e-12):
@@ -97,10 +98,12 @@ def act3_changes(decisions: list[dict]) -> dict:
             truncated.append(decision["id"])
         else:
             failed.append(decision["id"])
+            by_level[decision["level"]] = by_level.get(decision["level"], 0) + 1
     judged = faithful + len(failed)
     return {"changes": judged, "faithful": faithful,
             "share": faithful / judged if judged else None,
-            "failed_ids": failed[:20], "truncated_ids": truncated}
+            "failed_ids": failed[:20], "failed_by_level": by_level,
+            "truncated_ids": truncated}
 
 
 def check(stdout: str, decisions: list[dict], transitions: list[dict],
@@ -152,6 +155,7 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
     applies = [line for line in decisions if line["type"] == "apply"]
     accepted = [line for line in applies if line.get("ok") == 1]
     fidelity = act3_changes(decisions)
+    held = sum(1 for line in decisions if line["type"] == "apply_held")
     act3 = []
     if fidelity["changes"] < min_changes:
         act3.append(f"{fidelity['changes']} judged changes, fewer than "
@@ -160,8 +164,12 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
         act3.append(f"only {fidelity['faithful']} of {fidelity['changes']} "
                     f"changes reached the published score within one control "
                     f"interval ({fidelity['share']:.4f} < {ACT3_SHARE}); "
+                    f"failed by level {fidelity['failed_by_level']}; {held} "
+                    f"held by the SetOptions cap (a cap longer than a level's "
+                    f"control interval makes ACT-3 fail by design); "
                     f"first ids {fidelity['failed_ids']}")
-    record("act3", act3, **fidelity, accepted_calls=len(accepted),
+    record("act3", act3, **fidelity, held_calls=held,
+           accepted_calls=len(accepted),
            refused_calls=len(applies) - len(accepted),
            calls_seen=sum(1 for line in accepted if line.get("seen") == 1))
 

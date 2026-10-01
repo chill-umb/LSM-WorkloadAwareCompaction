@@ -337,7 +337,11 @@ std::vector<DecisionRecord> Controller::Decide(
     const double N = v.N[level];
     const double since =
         static_cast<double>(Minus(op, last_decision_op_[level]));
-    if (!(N > 0) || since < N / cfg_.k) continue;
+    // G-iv: N_j / k operations per decision, except L0, whose state changes
+    // only at flushes and L0 compactions: it decides once per flush,
+    // N_0 / K0_cfg operations.
+    const double per_turnover = level == 0 ? v.k0_cfg : cfg_.k;
+    if (!(N > 0) || !(per_turnover > 0) || since < N / per_turnover) continue;
     // Hold-only does not relax either: it never changes a value.
     const double turnovers = hold_only ? 0 : since / N;
     DecisionRecord r;

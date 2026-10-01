@@ -2,7 +2,7 @@
 // A-Impl-8). One thread polls the host every 2 ms. Each poll attributes the
 // reads, operations and jobs since the last one to every level's open
 // interval; then each level whose decision is due (every N_j / k operations,
-// none during a write stop) relaxes, is observed, masked, priced by the prior
+// L0 once per flush, N_0 / K0_cfg; none during a write stop) relaxes, is observed, masked, priced by the prior
 // and decides. The decisions update the controller's target values, and the
 // targets reach the host in one Apply, at most one per
 // setoptions_min_interval_ms (A-Impl-5): changes that fall due sooner are

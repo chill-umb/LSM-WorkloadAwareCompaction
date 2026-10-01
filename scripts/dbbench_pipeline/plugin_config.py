@@ -45,11 +45,15 @@ RULE_THRESHOLDS = {
 # Smoke values only, never measured arms. Bounds are D-18's option A, k0_cap
 # its rule at the default base (16 MiB) and write buffer (2 MiB), q-bar and
 # the device prices are round numbers of the right order, and every rule is
-# on with thresholds that let each fire.
+# on with thresholds that let each fire. The SetOptions cap must stay below
+# the fastest level's control interval or ACT-3 fails by design. On the
+# 2026-10-02 rules smoke L0 decided every 30-64 ms at 2.5 decisions per flush;
+# once per flush (G-iv as amended that day) its interval is about 2.5 times
+# that, and 10 ms leaves a wide margin.
 PLACEHOLDERS = {
     "m_min": 0.5, "m_max": 2.0, "k0_min": 2, "k0_cap": 8, "epsilon": 0.1,
     "phi_min": 0.55, "alpha": 1.5, "kappa_d": 0.25, "kappa_a": 1.0,
-    "setoptions_min_interval_ms": 100, "b_max": 1.0, "q_bar": 50000.0,
+    "setoptions_min_interval_ms": 10, "b_max": 1.0, "q_bar": 50000.0,
     "c_w": 1e-14, "c_f": 1e-12, "c_blk": 1e-11, "c_sk": 1e-11,
     "rules": ",".join(RULE_THRESHOLDS), "rule_l0_early_read_ratio": 1.0,
     "rule_garbage_drop": 0.1, "rule_release_fill": 0.5,

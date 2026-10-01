@@ -164,11 +164,11 @@ TEST(Config, TheSetOptionsCapIsRequiredAndPositive) {
       Contains(Error(values), "missing \"setoptions_min_interval_ms\""));
   values["setoptions_min_interval_ms"] = "0";
   EXPECT_TRUE(Contains(Error(values), "setoptions_min_interval_ms > 0"));
-  values["setoptions_min_interval_ms"] = "100";  // D-18's draft value
+  values["setoptions_min_interval_ms"] = "10";  // D-18's draft value
   Config c;
   std::string error;
   ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
-  EXPECT_EQ(c.setoptions_min_interval_ms, 100);
+  EXPECT_EQ(c.setoptions_min_interval_ms, 10);
 }
 
 // The fork refuses multipliers outside [0.5, 2.0]; a config wider than that

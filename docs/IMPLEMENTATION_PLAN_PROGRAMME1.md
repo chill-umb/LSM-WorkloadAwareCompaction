@@ -175,7 +175,7 @@ headers. Its SHA-256 goes in the fingerprint, separately from `db_bench`'s.
 
 | File | Contents | PATHWAYS |
 | --- | --- | --- |
-| `plugin.cc` | Entry points, the decision thread, cadence per level every $N_j/k$ operations (nothing is due during a write stop), and batching changed values into one `Apply` | G-iv, A-Impl-5 |
+| `plugin.cc` | Entry points, the decision thread, cadence per level every $N_j/k$ operations, L0 once per flush ($N_0/K_0^{\text{cfg}}$, G-iv as amended 2026-10-02) (nothing is due during a write stop), and batching changed values into one `Apply` | G-iv, A-Impl-5 |
 | `actions.{h,cc}` | Per-level anchor $\bar m_i$ and timing factor $d_i$ with relaxation ($\kappa_d\tau_i$) and anchor decay ($\kappa_a\tau_i$), and the actions. **"Expand" keeps the level deferred**: $d_i \leftarrow \max\{1, \varphi_i(1+\epsilon)/\bar m_i^{\text{new}}\}$. The L0 actions work on $K_0$ | A §2, review fix 1 |
 | `masks.{h,cc}` | "Allowed when" rules, bounds, $\varphi_{\min} \ge m_{\min}(1+\epsilon)$, defer only while $\varphi_i(1+\epsilon) \le m_{\max}$, targets never shrinking going down, $K_0 \in [2, K_{\text{cap}}]$ | A §2, A-Impl-6, A-Impl-7 |
 | `state.{h,cc}` | The normalised state of G §3 and H §2, including queue position, backlog, the fill two levels down, the bottom level's room, the slot's idle flag, and the memtable's fill. **This is the only place state is computed**; it is logged | G §3, H §2 |
