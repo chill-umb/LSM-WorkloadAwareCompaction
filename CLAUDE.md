@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Before starting a conversation, always check the model being used and if the model is Fable 5.1, always confirm whether I want to use this model. 
 
+## Context length and handoffs
+
+After each response, check how much context the session has used. Once it is above 350k tokens, write a handoff for the next Claude Code session before doing anything else, and give the owner its path.
+
+- **Measuring.** No tool reports a session's own context. When the owner shares `/context`, use that. Otherwise estimate it from the session's transcript, the newest `.jsonl` in `~/.claude/projects/<project dir>/`. On 2026-10-02 a 3.57 MB transcript was 484k tokens, about 7.4 bytes per token, so 350k tokens is about 2.6 MB.
+- **Where it goes.** Outside the repository, so that a running chain's frozen tree is never touched. On the node, write `~/node_ops/handoffs/<YYYY-MM-DD-HHMM>-handoff.md`. Elsewhere, write `~/claude_handoffs/<YYYY-MM-DD-HHMM>-handoff.md`.
+- **What it holds.**
+  1. **The current situation:** what was done this session, with commits, runs, results and their verdicts; what is running now; and the state of the working tree, especially anything uncommitted or any red test.
+  2. **The next immediate task,** with its exact commands.
+  3. **The pending implementations and open decisions,** each marked owner's or operator's, with where it is recorded.
+  4. **Everything the next session cannot easily rediscover:** paths of reports, diagnostics, archives and logs; gotchas met this session; and questions the owner asked that are not yet answered, with the drafted answer.
+
 ## Project
 
 This is research code for **Programme 1: a per-level compaction-trigger controller for leveled RocksDB**. The controller is a separately loaded C++ plugin (`controller/`). It changes only each level's target multiplier and the L0 trigger, through RocksDB's own compaction scores, so RocksDB keeps sole authority over which files are compacted. It minimises a priced cost of write, read and space amplification under a chosen priority (reads, writes or space).
