@@ -125,10 +125,29 @@ class EvaluatorTest(unittest.TestCase):
         self.assertEqual((row["filter_probes"], row["block_reading_probes"],
                           row["run_seeks"]), (1500, 600, 120))
 
+    def test_reopens_are_opens_less_the_new_files(self):
+        # D-20: 705 - 100 tables opened from n_w to the drain's end; jobs 10
+        # to 14 created 5 SSTs in that window (jobs 2 and 15 fall outside),
+        # each opened once by its own job, a write cost.
+        row = self.row()
+        self.assertEqual(row["sst_files_created"], 5)
+        self.assertEqual(row["table_reopens"], 600)
+
+    def test_more_new_files_than_opens_is_refused(self):
+        self.run.edit("host_log.jsonl", '"tickers":{"rocksdb.no.file.opens":705,',
+                      '"tickers":{"rocksdb.no.file.opens":104,')
+        self.assertIn("5 SST files created", self.refusal())
+
+    def test_stamps_without_the_open_counter_are_refused(self):
+        self.run.edit("host_log.jsonl", '"tickers":{"rocksdb.no.file.opens":100,',
+                      '"tickers":{')
+        self.assertIn("rocksdb.no.file.opens", self.refusal())
+
     def test_priced_costs_and_every_mode(self):
         row = self.row()
         self.assertEqual(row["objective_status"], "priced")
-        costs = (1e-9 * 10500, 1e-8 * 1500 + 1e-7 * 600 + 1e-6 * 120,
+        costs = (1e-9 * 10500,
+                 1e-8 * 1500 + 1e-7 * 600 + 1e-6 * 120 + 1e-5 * 600,
                  C_S / 100 * 8_450_000)
         for name, value in zip(("C_W", "C_R", "C_S"), costs):
             self.assertAlmostEqual(row[name] / value, 1.0, places=12)
@@ -192,11 +211,11 @@ class EvaluatorTest(unittest.TestCase):
         self.assertEqual(self.row()["objective_status"], "no reference rate")
 
     def test_bad_prices_are_refused(self):
-        good = {"schema": 2, "c_w": 1e-9, "c_f": 1e-8, "c_blk": 1e-7,
-                "c_sk": 1e-6, "price_per_core_second":
+        good = {"schema": 3, "c_w": 1e-9, "c_f": 1e-8, "c_blk": 1e-7,
+                "c_sk": 1e-6, "c_open": 1e-5, "price_per_core_second":
                 CONTRACT["prices"]["price_per_core_second"]}
         for key, value, text in (("c_f", 0, None), ("c_w", True, None),
-                                 ("c_s", 1e-16, None),
+                                 ("c_open", None, None), ("c_s", 1e-16, None),
                                  ("c_w", None, '"c_w": Infinity')):
             with self.subTest(key=key, value=value):
                 run = Run()
@@ -209,9 +228,11 @@ class EvaluatorTest(unittest.TestCase):
                 self.assertIn(key, self.refusal())
 
     def test_prices_not_per_core_second_are_refused(self):
-        # D-15 §3a: the draft schema-1 file, or another core price.
+        # D-15 §3a: the draft schema-1 file, or another core price; D-20:
+        # a schema-2 file, whose c_f carried the price runs' reopens.
         body = json.loads((self.run.dir / "prices.json").read_text())
-        for bad in ({**body, "schema": 1}, {**body, "price_per_core_second": 1e-4}):
+        for bad in ({**body, "schema": 1}, {**body, "schema": 2},
+                    {**body, "price_per_core_second": 1e-4}):
             with self.subTest(bad=bad):
                 run = Run()
                 self.addCleanup(run.close)

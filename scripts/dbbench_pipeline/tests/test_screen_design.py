@@ -128,6 +128,7 @@ class CostTest(unittest.TestCase):
 
 
 PRICES = {"c_w": 1e-12, "c_f": 1e-9, "c_blk": 2e-9, "c_sk": 3e-9,
+          "c_open": 4e-8,
           "c_s": CONTRACT["prices"]["storage_price_per_byte_second"]}
 
 
@@ -135,7 +136,8 @@ def rows(n=5, family="assoc"):
     return [{"workload_family": family, "experiment_fingerprint": "fp",
              "elapsed_seconds": "900", "sst_bytes_written": str(1e10 + 1e8 * i),
              "filter_probes": str(5e7 - 1e5 * i), "block_reading_probes": "2e7",
-             "run_seeks": "1e6", "held_byte_operations": str(1e17 * (1 + i / 100))}
+             "run_seeks": "1e6", "table_reopens": str(3e6 + 1e4 * i),
+             "held_byte_operations": str(1e17 * (1 + i / 100))}
             for i in range(n)]
 
 
@@ -192,7 +194,7 @@ class EndToEndTest(unittest.TestCase):
         self.prices = self.tmp / "prices.json"
         record = {k: v for k, v in PRICES.items() if k != "c_s"}
         self.prices.write_text(json.dumps({
-            "schema": 2, **record,
+            "schema": 3, **record,
             "price_per_core_second": CONTRACT["prices"]["price_per_core_second"]}))
 
     def run_tool(self, *extra):

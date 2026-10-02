@@ -95,8 +95,9 @@ from pathlib import Path
 import research_objective
 
 MIB = 1 << 20
+# priced_costs' arguments, in order (table_reopens since D-20).
 COUNTS = ("sst_bytes_written", "filter_probes", "block_reading_probes",
-          "run_seeks", "held_byte_operations")
+          "run_seeks", "table_reopens", "held_byte_operations")
 COSTS = ("C_W", "C_R", "C_S")
 
 

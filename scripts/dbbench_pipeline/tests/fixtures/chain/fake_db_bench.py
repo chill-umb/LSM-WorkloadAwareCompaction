@@ -4,7 +4,10 @@ prints a run.log and writes a RocksDB LOG and a host log that agree with
 each other, so 04 scores the arm and 19 finds turnovers of L2: 20 per 26.1M
 mixgraph operations for Assoc, 6 for the power law. For 18 it prints result
 lines and tickers of trees whose per-operation costs are known: 0.5 us a
-filter probe, 1 us a block read, 2 us a run seek. FAKE_FAIL_WORKLOAD=assoc (or
+filter probe, 1 us a block read, 2 us a run seek, and 10 us a table reopen,
+which a capped run (open_files > 0) makes on half its probes and run seeks
+and an all-open run (open_files -1, D-20) never makes; both open 0.006
+tables per operation outside the timed work. FAKE_FAIL_WORKLOAD=assoc (or
 powerlaw) makes every arm of that workload fail as an I/O error would.
 Only L1 and L2 merge, so 23 refuses the survival-weighted profile (no merges
 out of L0 and L3); at a base size in FAKE_SURVIVAL_BASES (bytes, space
@@ -32,12 +35,16 @@ if bench in ("readrandom", "readmissing", "seekrandom"):
     miss, found, runs = {2.0: (9, 8, 10), 6.0: (5, 4.5, 6), 10.0: (4, 3.5, 5)}[T]
     if bench == "seekrandom":
         per_op, tick = 3e-6 + 2e-6 * runs, {"sorted.run.seek": runs}
+        touched = runs
     else:
         probes = miss if bench == "readmissing" else found
         blocks = 0.01 * miss if bench == "readmissing" else 1 + 0.01 * (found - 1)
         per_op = 2e-6 + 0.5e-6 * probes + 1e-6 * blocks
         tick = {"point.sst.probe": probes, "bloom.filter.full.positive": blocks}
-    tick["no.file.opens"] = 0.1
+        touched = probes
+    reopens = 0.0 if int(args.get("open_files", 1000)) == -1 else 0.5 * touched
+    per_op += 10e-6 * reopens
+    tick["no.file.opens"] = 0.006 + reopens
     print(f"{bench:<12} : {per_op*1e6:11.3f} micros/op 1 ops/sec "
           f"{per_op*ops:.3f} seconds {ops} operations; (1 of 1 found)")
     print("STATISTICS:")
@@ -65,19 +72,21 @@ def levels_row(scale):
             [int(400 * scale), int(100 * scale), int(50 * scale), int(20 * scale)]]
 
 
-def tickers(scale, written):
+def tickers(scale, written, created):
+    """created: SST files written so far, each opened once by its job."""
     return {"rocksdb.point.sst.probe": int(1000 * scale),
             "rocksdb.bloom.filter.full.positive": int(300 * scale),
             "rocksdb.bloom.filter.full.true.positive": int(200 * scale),
             "rocksdb.sorted.run.seek": int(50 * scale),
+            "rocksdb.no.file.opens": int(400 * scale) + created,
             "rocksdb.bytes.written": written}
 
 
-def stamp(name, t_us, wall, op, h, stall_us, scale, written, **extra):
+def stamp(name, t_us, wall, op, h, stall_us, scale, written, created=0, **extra):
     host.append({"type": "stamp", "name": name, "t_us": t_us, "wall_us": wall,
                  "op": op, "h": h, "stall_micros": stall_us,
-                 "levels": levels_row(scale), "tickers": tickers(scale, written),
-                 **extra})
+                 "levels": levels_row(scale),
+                 "tickers": tickers(scale, written, created), **extra})
 
 
 def occupancy(fill2):
@@ -132,9 +141,10 @@ for m in range(merges):
         host.append({"type": "h", "cause": "compaction", "job": job,
                      "t_us": tj + 10, "op": op, "h": H})
 end_op, end_wall = num + reads, WS + reads * US
-stamp("drain_start", 1_000_000 + reads * US, end_wall, end_op, H, 1_000_000, 3, written)
+stamp("drain_start", 1_000_000 + reads * US, end_wall, end_op, H, 1_000_000, 3,
+      written, merges)
 stamp("drain_end", 2_000_000 + reads * US, end_wall + 1_000_000, end_op, H,
-      1_000_000, 3, written)
+      1_000_000, 3, written, merges)
 
 Path(args["rl_host_log"]).write_text("".join(json.dumps(r) + "\n" for r in host))
 db = Path(args["db"])

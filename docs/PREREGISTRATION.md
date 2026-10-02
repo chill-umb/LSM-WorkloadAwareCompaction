@@ -1094,6 +1094,181 @@ completed pilots and re-runs 19 on them.
 **Falsification.** This entry fails as a record if its rules are changed
 after the first q̄ arm at its rung has started.
 
+### D-20, 2026-10-02 — the read prices are measured with every table open, and table reopens are priced apart
+
+**Recorded after the first prices were measured, and after a diagnostic run
+on them, so it is decided after seeing price data.** Stage 18 wrote the
+first `prices.json` on 2026-10-02 at 00:19 UTC, at the end of Gate N1's
+chain (run 3, `db_bench` `a8e9329d`). No arm has been priced with it and no
+$\Theta_s$ run has started, so no Gate N2 outcome has been seen. This entry
+names D-15 §3 and supersedes only what is stated below. The owner decided
+it on 2026-10-02, on the node operator's proposal.
+
+**1. What the first prices showed.**
+- D-15 §3(c)'s fit gave, per unit (medians of five repeats):
+  - 6.38 µs per filter probe;
+  - 0.59 µs per block read;
+  - 5.99 µs per run seek.
+  
+  Pooled over the five repeats, the same fit has an intercept of −5.7 µs.
+  D-15 reads that intercept as the overhead every Get pays, which cannot be
+  negative.
+- **Most of that time was table reopens.**
+  - RocksDB keeps at most `open_files` = 1,000 tables open, and the trees
+    hold about 5,800 SSTs. A probe or seek into a closed table reopens it:
+    it opens the file, then reads and parses the footer, index and filter.
+    db_bench's default `cache_index_and_filter_blocks` is false, so a reopen
+    reloads both.
+  - RocksDB's own timer of that read (`rocksdb.table.open.io.micros`) gave
+    8.2–8.4 µs per open in all 45 read runs. It accounted for 62–75% of the
+    `readmissing` and `readrandom` runs' time.
+- **The price runs and the experiments reopen at different rates.**
+  - Reopens per filter probe (`rocksdb.no.file.opens`): 0.33–0.49 in the
+    price runs, whose keys are uniform.
+  - In the $\bar q$ arms' `mixgraph` phase, 0.056 (`Assoc`) and 0.13
+    (power law), less the opens of new files (item 2d). Skewed keys keep hot
+    tables open.
+  - D-15 §3(c) assumed that "the experiments run with the same table
+    cache, so the prices carry the same mix". That assumption does not hold.
+- **A diagnostic A/B run** (2026-10-02, 13:12–13:18 UTC; the owner approved
+  it).
+  - Setup: one T=2 tree loaded and settled as stage 18 loads it. Stage 18's
+    own `readmissing` and `readrandom` commands, each run with `open_files`
+    1,000 and with −1 (every table kept open). Five repeats, with the order
+    alternated by repeat.
+  - The extra time per Get, divided by the extra reopens per Get, was:
+    - 10.62 µs per reopen for `readmissing` (95% t interval [10.58, 10.66]);
+    - 10.24 µs for `readrandom` ([10.16, 10.33]).
+  - With every table open, a Get took 1.18 and 3.42 µs, against 26.0 and
+    19.7 µs. Reopens were 95% of a missing-key Get's time.
+- **The effect on the objective.** On the $\bar q$ arms, D-15's prices put
+  read cost at 8.05 times write cost on `Assoc` (93% of it filter probes)
+  and at 33.5 times on the power law (99%). With reopens priced at the
+  measured rate and probes and blocks at their all-open times, the ratios
+  are about 1.9 and 9.
+- Evidence: the operator report
+  `~/node_ops/reports/2026-10-02-0511-stage24-complete.md` and its scripts
+  in `~/node_ops/diag/`, on the node. Run 3's `prices.json` and its 51
+  outputs are kept in `~/node_ops/archive/run3-prices-d15/`.
+
+**2. Decision.**
+- **(a) Reopens are their own priced unit**, $c_{open}$ per table reopen.
+  PATHWAYS D §1's cost rate gains $c_{open}\,\dot o$, charged to reads
+  ($\beta_R$). Each run pays for the reopens it made, $O$.
+- **(b) Stage 18 runs every read benchmark in two arms**, on each tree and
+  in each repeat:
+  - "capped", at the experiments' `open_files`;
+  - "all_open", at `open_files` −1.
+  
+  The arms' order alternates by repeat. $c_f$, $c_{blk}$ and $c_{sk}$ come
+  from the all-open arm, by D-15 §3(c)'s fits, unchanged otherwise.
+  $c_{open}$ per repeat is the capped arm's extra seconds over the all-open
+  arm's, summed over the six Get points (three trees, `readmissing` and
+  `readrandom`), divided by its extra reopens, summed the same way. Each
+  price is the median of five repeats, with the minimum and maximum
+  reported. Seeks' reopens are priced at the Gets' $c_{open}$.
+- **(c) Refusals added to D-15 §3(d).** Stage 18 writes no prices when:
+  - an all-open Get run reopens more than 10% as many tables per Get as
+    its capped pair (the arm did not keep the tables open);
+  - a capped Get run reopens fewer than 0.5 more tables per Get than its
+    all-open pair ($c_{open}$ not identified; the A/B run measured
+    1.6–2.3);
+  - a pair's filter probes or block reads per Get differ by more than 1%
+    (or 0.005 per Get, whichever is larger), so the arms did not read
+    alike;
+  - any read run's command names `open_files` other than once, or with a
+    value other than −1 in every all-open run and one positive value in
+    every capped run.
+- **(d) The evaluator's count.** $O$ = `rocksdb.no.file.opens` differenced
+  from $n_w$ to the end of the drain, less the SST files created in that
+  window (non-empty `table_file_creation` events).
+  - Every new file is opened once, through the table cache, by the job that
+    wrote it: BuildTable and `CompactionJob::VerifyOutputFiles`, "verify
+    that the table is usable". That time is already in $c_w$'s job seconds.
+  - Compaction inputs that background jobs reopen stay counted, so $O$ is
+    an upper bound on the reads' reopens.
+  - On the $\bar q$ arms, new-file opens were 1.9% (`Assoc`) and 0.17%
+    (power law) of all opens. During the load, which has no reads, opens
+    were 1.5 per new file. So the input reopens left in are about 1% and
+    under 0.1%.
+  - `04` refuses an arm whose stamps lack the counter, or that created more
+    files than it opened.
+- **(e) `prices.json` becomes schema 3.** `04`, `27`, `gate_n2_plan` and
+  `plugin_config` refuse a schema-2 file, whose $c_f$ carried the price
+  runs' reopens.
+- **(f) Attribution (PATHWAYS D §4).** Reopens are charged to no level.
+  They go to a shared reopen bucket that no agent is rewarded on, beside
+  the hit-read bucket, and Proposition D.16 holds with both buckets. A
+  per-level count needs a counter keyed by the opened table's level, a
+  fork change left for a later entry.
+- **(g) The controller is left unchanged, as an open item.**
+  - The plugin keeps $c_w$, $c_f$, $c_{blk}$ and $c_{sk}$, and $c_f$ is now
+    a probe's cost on an open table. So the controller's own cost model
+    (the prior, H §7; the Gate N3 rules) does not see reopens.
+  - Whether it should, and how, is decided by a dated entry before Gate
+    N3's runs. The options are per-level reopen counters in the fork, or
+    $c_f$ plus $c_{open}$ times a measured reopen rate.
+
+**3. Assumptions, stated.**
+- **A reopen costs the same whatever the benchmark, tree or level.** In the
+  A/B run, `readmissing` and `readrandom` differ by 0.4 µs (4%), unexplained.
+- **The skipped cache lookup is folded into $c_{open}$.** In the all-open
+  arm, every probe also skips a table-cache lookup, because each reader is
+  pinned to its file's metadata (`db/version_builder.cc`).
+  - The A/B run could not resolve this: a two-benchmark split gave a
+    negative lookup cost.
+  - So $c_{open}$ carries the lookups. Taking a lookup as at most 0.1 µs,
+    that is at most about 2% of $c_{open}$.
+- **The all-open arm's opens at DB open are counted.** That arm opens every
+  table once when the DB opens, outside the timed benchmark (0.006 per
+  operation at 1M reads). Its tickers count those opens, which shortens the
+  extra reopens by about 0.3%.
+
+**4. Unchanged.**
+- $c_w$ (D-15 §3b).
+- The trees, the reads per process, the five repeats and the medians.
+- `THREADS` = 1, and the money conversion at the price per core-second
+  (D-15 §3a).
+- $\bar q$ (D-14 §2), and everything else in D-13 to D-19.
+- Run 3's prices are superseded and price no arm.
+
+**5. Implementation.**
+- `18_calibrate_prices.sh`: the two arms, and a refusal when the open-file
+  limit is under 16,384.
+- `18_calibrate_prices.py`: `marginal_times`, `reopen_time`,
+  `arm_open_files` and schema 3.
+- `research_objective.py`: `c_open` in `DEVICE_PRICES`, `PRICES_SCHEMA` =
+  3, and `priced_costs` takes the reopens.
+- `04_generate_graphs.py`: the columns `table_reopens` and
+  `sst_files_created`, and their pricing.
+- `27_screen_design.py`: `table_reopens` in `COUNTS`.
+- `plugin_config.py`: `PLUGIN_PRICES`, which leaves out `c_open`.
+- PATHWAYS: D §1 (metric $O$, price $c_{open}$, cost rate), D §2, D §4,
+  Proposition D.16, OBJ-1, OBJ-2, H §3 and Gate N0 item 7.
+- Tests:
+  - `test_prices.py`: the two arms, and every new refusal;
+  - `test_evaluator.py`: the count, and its refusals;
+  - the chain fake `db_bench`, which models reopens at 10 µs;
+  - the price fixtures of `test_evaluator`, `test_plugin_config`,
+    `test_screen_design` and `test_gate_n2_chain`, moved to schema 3.
+
+**6. Node order.**
+1. Archive run 3's prices (done, `~/node_ops/archive/run3-prices-d15/`).
+2. Stage 18 alone on the $\bar q$ arms' summaries. That is about 25
+   minutes: the all-open runs take 1–4 s each.
+3. The preflight (13), since the marker hashes the changed scripts. Run it
+   after 18, because the preflight's evaluator smoke prices its arm with
+   `PRICES_FILE` and `04` refuses a schema-2 file.
+4. Then 25.
+
+$\bar q$ is recorded by `26` from the $\bar q$ arms' existing
+`summary.csv`. Re-running `04` on those folders after this entry's contract
+amendment would mark them "run recorded another contract", and `26` would
+refuse them. So $\bar q$ is recorded before `04` is re-run there.
+
+**Falsification.** This entry fails as a record if any of it is changed
+after the first prices it governs have been measured.
+
 ---
 
 ## 2. Gate verdicts as measured

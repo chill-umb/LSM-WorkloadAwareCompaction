@@ -379,6 +379,8 @@ class InvalidArm(ValueError):
 
 
 SETTLED = re.compile(r"^RL_SETTLED ok=(\d+)", re.M)
+# Every table open, the reads' reopens among them (D-20).
+OPENS = "rocksdb.no.file.opens"
 # Programme 1 columns (PATHWAYS D §1, OBJ-6, Gate N0 item 5). NaN on an arm
 # that did not run the Programme 1 protocol (no settle step recorded).
 PROGRAMME1_FIELDS = (
@@ -389,7 +391,8 @@ PROGRAMME1_FIELDS = (
     "sst_write_seconds",
     "compaction_bytes_host_log", "user_bytes_written",
     "write_amplification_measured", "filter_probes", "block_reading_probes",
-    "run_seeks", "drain_read_ticks", "held_byte_operations",
+    "run_seeks", "table_reopens", "sst_files_created", "drain_read_ticks",
+    "held_byte_operations",
     "C_W", "C_R", "C_S")
 
 
@@ -415,6 +418,18 @@ def sst_bytes_in_window(events: list[dict], start_us: int,
         elif event.get("event") == "compaction_finished":
             compaction += float(event.get("total_output_size", 0))
     return flush, compaction, flushed
+
+
+def sst_files_created(events: list[dict], start_us: int, end_us: int) -> int:
+    """SST files flushes and compactions created in [start_us, end_us]
+    (table_file_creation, non-empty). Each is opened once, through the table
+    cache, by the job that wrote it (BuildTable's and
+    CompactionJob::VerifyOutputFiles' "verify that the table is usable"):
+    an open whose time c_w's job seconds already hold (D-20)."""
+    return sum(1 for e in events
+               if e.get("event") == "table_file_creation" and
+               start_us <= int(e.get("time_micros", -1)) <= end_us and
+               float(e.get("file_size", 1)) > 0)
 
 
 def sst_write_seconds(events: list[dict], start_us: int, end_us: int,
@@ -538,6 +553,18 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if flushed != flushes_host_log:
         raise InvalidArm(f"flush jobs in the measured phase: event log "
                          f"{sorted(flushed)}, host log {sorted(flushes_host_log)}")
+    # D-20: the reads' table reopens. rocksdb.no.file.opens counts every
+    # table open; each new SST's verifying open by its own job is a write
+    # cost (c_w), so it is taken off. Compaction inputs reopened from the
+    # cache stay in: the count is an upper bound on the reads' reopens.
+    if not all(OPENS in r["tickers"] for r in (start, end)):
+        raise InvalidArm(f"host log stamps carry no {OPENS}; reopens (D-20) "
+                         "cannot be counted")
+    created = sst_files_created(events, start["wall_us"], end["wall_us"])
+    reopens = delta(OPENS) - created
+    if reopens < 0:
+        raise InvalidArm(f"{created} SST files created but only "
+                         f"{delta(OPENS):.0f} tables opened in the measured phase")
     mixgraph_seconds = (mix_end["t_us"] - start["t_us"]) / 1e6
     stall_seconds = (end["stall_micros"] - start["stall_micros"]) / 1e6
     user_bytes = delta("rocksdb.bytes.written")
@@ -564,6 +591,7 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
         filter_probes=delta("rocksdb.point.sst.probe"),
         block_reading_probes=delta("rocksdb.bloom.filter.full.positive"),
         run_seeks=delta("rocksdb.sorted.run.seek"),
+        table_reopens=reopens, sst_files_created=float(created),
         # Read counts the drain added: background work should add none.
         drain_read_ticks=sum(delta(t, mix_end) for t in (
             "rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
@@ -594,7 +622,7 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
         raise InvalidArm(f"prices.json: {error}") from error
     costs = research_objective.priced_costs(
         prices, rate, flush + compaction, row["filter_probes"],
-        row["block_reading_probes"], row["run_seeks"], held)
+        row["block_reading_probes"], row["run_seeks"], reopens, held)
     row.update(zip(("C_W", "C_R", "C_S"), costs))
     row.update(research_objective.objective_columns(contract, costs))
     row.update(objective_status="priced", reference_rate=rate,

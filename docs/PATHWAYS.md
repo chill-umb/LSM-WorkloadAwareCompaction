@@ -220,12 +220,13 @@ dated record.
 | $R_f$ | filter probes per Get (the 2026-09-11 "point-read amplification") | existing counter |
 | $R_{blk}$ | probes per Get that pass the filter and read a data block | Pathway D |
 | $R_{sk}$ | sorted runs seeked per scan (P1c-20) | existing counter |
+| $O$, $\dot o$ | the reads' table reopens over the measured phase, and per second (D §1, D-20) | evaluator |
 | $S$ (metric) | settled SST bytes / garbage-free bytes (D-3) | evaluator |
 | $H(t)$ | SST bytes of the current version (`rocksdb.live-sst-files-size`): a running compaction's inputs count until it installs and its outputs from then on; obsolete files still pinned by older versions or awaiting deletion do not count | telemetry |
 | $u$, $q_{pt}$, $q_{sc}$ | user bytes written, Gets and scans, per second | telemetry |
 | $q$, $\bar q$ | all operations per second; a reference operation rate, fixed in advance per workload and recorded with the prices (OBJ-2), since it sets the weight of space against the other terms | telemetry; preregistration |
 | $N_i = C_i\,q/\bar\lambda_i$ | operations served per turnover of level $i$ ($q$ and $\bar\lambda_i$ over the same window) | derived |
-| $c_w, c_f, c_{blk}, c_{sk}, c_s$ | prices: per byte written, per filter probe, per block-reading probe, per run seek, per byte held per second | measured once per machine |
+| $c_w, c_f, c_{blk}, c_{sk}, c_{open}, c_s$ | prices: per byte written, per filter probe, per block-reading probe, per run seek, per table reopen, per byte held per second | measured once per machine |
 | $\beta = (\beta_W, \beta_R, \beta_S)$ | priority weights; $\beta^\star > 1$ is the factor on the prioritised term | run configuration |
 | $J_\beta(\pi)$ | priced, priority-weighted cost of policy $\pi$ over the measured phase | Pathway D |
 | $\mathcal C_W, \mathcal C_R, \mathcal C_S$ | unweighted priced run costs of writes, reads (three terms together) and space; $J_\beta = \beta_W\mathcal C_W + \beta_R\mathcal C_R + \beta_S\mathcal C_S$ | Pathway D |
@@ -331,6 +332,7 @@ $w = r = 1$ this gives $K^\star = 4$; with $L \approx 3.33$, $\text{WA} = \text{
 | $R_f$ | filter probes per Get: tables whose key range covers the key and whose filter is consulted, including filter-rejected ones | existing counter |
 | $R_{blk}$ | probes per Get that pass the filter and read a data block (true plus false positives) | `rocksdb.bloom.filter.full.positive`; per level through counters keyed by the version's level (§4, Gate N0) |
 | $R_{sk}$ | sorted runs seeked per scan (P1c-20) | existing counter |
+| $O$ | the reads' table reopens: tables opened because a probe or a seek found them closed (RocksDB keeps at most `open_files` tables open) | `rocksdb.no.file.opens` differenced over the measured phase, less the SST files created in it, each opened once by the job that wrote it, a cost $c_w$ already holds (D-20). Compaction inputs reopened by background jobs stay in, so $O$ is an upper bound |
 | $S$ | settled SST bytes / garbage-free bytes (D-3), at run end | evaluator |
 | $\mathcal C_S$ | $(c_s/\bar q)\sum_n H(n)$ over the measured phase, computed exactly as the sum, over the intervals between version installs, of $H$ times the operations served in the interval; $H$ is sampled with the operation count at every install, on every arm, native included | telemetry, evaluator |
 
@@ -339,7 +341,8 @@ so the metric does not depend on the page cache.
 
 **Prices.** One currency throughout: money, as in Cosine [Cosine]. $c_w$ per
 byte written; $c_f$ per filter probe, a CPU cost that is not negligible on fast
-storage [Zhu et al.]; $c_{blk}$ per block-reading probe; $c_{sk}$ per run seek:
+storage [Zhu et al.]; $c_{blk}$ per block-reading probe; $c_{sk}$ per run seek;
+$c_{open}$ per table reopen:
 each is the device time the operation takes, measured once per machine,
 converted at a fixed instance price per device-second, a device being one core
 (D-15: every priced operation runs on one thread). $c_s$ per byte held per
@@ -352,9 +355,30 @@ are also reported at $c_s/2$ and $2c_s$. The operation rates $u$, $q$,
 $q_{pt}$ and $q_{sc}$ are measured online; the reference rate $\bar q$ is fixed
 in advance per workload (§0.6).
 
+**Reopens are priced apart (D-20).** RocksDB keeps at most `open_files` tables
+open (1,000 in every run, against about 5,800 SSTs in the trees), and a probe
+or a seek that finds its table closed reopens it: it opens the file and reads
+and parses the table's footer, index and filter. On the node a reopen takes
+about 10 µs, against about 0.1–0.2 µs for a filter probe on an open table.
+How often a probe reopens a table is set by the table cache and the key
+distribution, not by the probe: the price runs' uniform keys reopened 0.33–0.49
+tables per probe, the experiments' skewed keys 0.06–0.13. A price per probe
+that holds reopens would carry the price runs' rate into every run. So $c_f$,
+$c_{blk}$ and $c_{sk}$ are measured with every table open, $c_{open}$ from the
+same reads run once with the experiments' `open_files` and once with every
+table open, and each run pays for the reopens it made.
+
+**Reopens in the analysis.** §3 and Pathway G price a probe at $c_f$ and do not
+model the table cache. If a probe reopens a table with a probability $\rho$ the
+knobs do not change, its expected price is $c_f + \rho\,c_{open}$, and their
+results hold with that in place of $c_f$. In general the knobs do change $\rho$
+(more or larger levels change which tables stay open), so that is an
+approximation; $J_\beta$ always charges the counted reopens.
+
 **Cost rate.**
-$$c(t) = c_w\,\dot w(t) + q_{pt}(t)\big(c_f R_f + c_{blk}R_{blk}\big)(t) + q_{sc}(t)\,c_{sk}R_{sk}(t) + c_s H(t)\,\frac{q(t)}{\bar q},$$
-where $\dot w$ is bytes written per second. Relation to the draft: $w\cdot
+$$c(t) = c_w\,\dot w(t) + q_{pt}(t)\big(c_f R_f + c_{blk}R_{blk}\big)(t) + q_{sc}(t)\,c_{sk}R_{sk}(t) + c_{open}\,\dot o(t) + c_s H(t)\,\frac{q(t)}{\bar q},$$
+where $\dot w$ is bytes written per second and $\dot o$ the reads' table
+reopens per second ($O$ is its integral). Relation to the draft: $w\cdot
 \text{WA} = c_w u W$; $r\cdot\text{RA}$ becomes the three read terms;
 $s\cdot\text{SA} = c_s N_{\text{live}}S = c_s H$ at the reference rate.
 
@@ -407,14 +431,15 @@ over levels, those rewards do not give minus the priced cost, for four
 reasons. Each level is divided by a different constant. Space is charged per
 level as shadowed garbage $g_i$ (§4), an estimate that leaves out live bytes,
 not as held bytes $H$. The block read of the table where a Get finds its key
-goes to a shared bucket no agent is rewarded on (§4). And a neighbour charge $X_{i+1}$ is a signed estimate of
+goes to a shared bucket no agent is rewarded on (§4), and table reopens go to
+another (§4, D-20). And a neighbour charge $X_{i+1}$ is a signed estimate of
 how level $i$'s action, against holding, changes level $i+1$'s future cost;
 level $i+1$ pays the realised change again in its own attributed cost, so the
 sum carries each action's effect on its neighbours twice — once realised, once
 estimated — above the cost when actions burden neighbours and below it when
 they relieve them. The identity that can be checked on a run is Proposition
 D.16's: the attributed write and read costs, summed over levels and over every
-interval of the measured phase, plus the shared hit-read bucket, before
+interval of the measured phase, plus the shared hit-read and reopen buckets, before
 normalisation and without neighbour charges, equal the global write and read
 costs (OBJ-1, OBJ-4). The agents'
 discounted per-level returns are a training surrogate: a joint policy that every
@@ -425,10 +450,10 @@ is judged on $J_\beta$.
 
 **Definition (priced cost with priority).** For weights $\beta = (\beta_W,
 \beta_R, \beta_S) > 0$:
-$$C_\beta(t) = \beta_W\,c_w\dot w + \beta_R\big[q_{pt}(c_fR_f + c_{blk}R_{blk}) + q_{sc}c_{sk}R_{sk}\big] + \beta_S\,c_sH\,q/\bar q,$$
+$$C_\beta(t) = \beta_W\,c_w\dot w + \beta_R\big[q_{pt}(c_fR_f + c_{blk}R_{blk}) + q_{sc}c_{sk}R_{sk} + c_{open}\dot o\big] + \beta_S\,c_sH\,q/\bar q,$$
 and $J_\beta(\pi) = \mathbb{E}\int C_\beta\,dt$ over the measured phase, the
 expectation over seeds. Write $\mathcal C_W(\pi)$, $\mathcal C_R(\pi)$, $\mathcal C_S(\pi)$ for the
-three unweighted priced run costs (write, the three read terms together,
+three unweighted priced run costs (write, the four read terms together,
 space), so $J_\beta = \beta_W \mathcal C_W + \beta_R \mathcal C_R + \beta_S \mathcal C_S$.
 
 **Modes.** $\beta^\star > 1$ is the priority factor.
@@ -798,6 +823,12 @@ The agents of Pathway H each need their own share of the cost:
   is thread-local, needs `perf_level` at least `kEnableCount`, has no seek
   counter, and keys its filter counters by the level at which a table reader was
   first opened, which is stale after a trivial move.
+- **Reopens** are charged to no level. They go to a shared *reopen bucket* that
+  no agent is rewarded on (D-20). A per-level count needs a counter keyed by the
+  level of the table being opened (`TableCache::GetTableReader` is given it),
+  which the fork does not have. Until it does, no agent sees what its level's
+  reopens cost, and the controller's own model (H §7, the Gate N3 rules)
+  prices a probe at $c_f$ without them.
 - **Slot blocking.** There is one compaction slot (G.4). While L0 is due
   (score at least 1) but cannot compact because a job sourced at level
   $i \ge 1$ holds the slot, the share $(k_0 - K_0)^+/k_0$ of L0's filter probes,
@@ -822,7 +853,7 @@ The agents of Pathway H each need their own share of the cost:
   not attributed: they are the same under every policy (Lemma D.15).
 
 **Proposition D.16 (decomposition).** The per-level charges, plus the shared
-hit-read bucket, sum to the global cost rate $c(t)$ exactly for the write and
+hit-read and reopen buckets, sum to the global cost rate $c(t)$ exactly for the write and
 read terms. For space, $\sum_i g_i$ counts only adjacent shadowing and so
 undercounts total garbage; it is reported against measured garbage at run end
 (OBJ-3).
@@ -831,7 +862,7 @@ undercounts total garbage; it is reported against measured garbage at run end
 Every probe, seek and false-positive block read happens at exactly one level and
 is charged in full either there or, under slot blocking, split between L0 and
 one other level in shares that sum to 1. Every hit's block read goes to the
-bucket. $\blacksquare$
+hit-read bucket, and every reopen to the reopen bucket. $\blacksquare$
 
 ### §5 Room by mode: predictions recorded before any run
 
@@ -862,8 +893,8 @@ bucket. $\blacksquare$
 
 | # | Criterion | Threshold | Instrument |
 | --- | --- | --- | --- |
-| OBJ-1 | Flow identity (Lemma D.1, Proposition D.16) | on every arm that runs the plugin: the attribution log's per-level write bytes (flushes to L0, each compaction to its start level, by completion time), summed over levels and over every interval from $n_w$ to the end of the drain — intervals excluded from replay included — equal the evaluator's flush and compaction bytes for the same window, with the log opening a partial interval for every level at $n_w$ and closing one at the end of the drain; any residual is listed by job and must consist only of jobs whose completion the two sources place on different sides of a boundary stamp. The log's per-level read counts, taken before the slot-blocking rule moves any of them and with each level's hit block reads logged apart from its false-positive ones, equal the per-level counters' totals over the same window (their difference between the $n_w$ stamp and the end of the drain); after the rule, per-level read charges plus the hit-read bucket still sum to the global read cost. Space is not checked here: the per-level charge is a garbage estimate (OBJ-3) | attribution log, event log |
-| OBJ-2 | Prices calibrated | all prices in money: device times for $c_w, c_f, c_{blk}, c_{sk}$ measured on the node and converted at the instance price, the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; re-measured on any hardware change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
+| OBJ-1 | Flow identity (Lemma D.1, Proposition D.16) | on every arm that runs the plugin: the attribution log's per-level write bytes (flushes to L0, each compaction to its start level, by completion time), summed over levels and over every interval from $n_w$ to the end of the drain — intervals excluded from replay included — equal the evaluator's flush and compaction bytes for the same window, with the log opening a partial interval for every level at $n_w$ and closing one at the end of the drain; any residual is listed by job and must consist only of jobs whose completion the two sources place on different sides of a boundary stamp. The log's per-level read counts, taken before the slot-blocking rule moves any of them and with each level's hit block reads logged apart from its false-positive ones, equal the per-level counters' totals over the same window (their difference between the $n_w$ stamp and the end of the drain); after the rule, per-level read charges plus the hit-read and reopen buckets still sum to the global read cost. Space is not checked here: the per-level charge is a garbage estimate (OBJ-3) | attribution log, event log |
+| OBJ-2 | Prices calibrated | all prices in money: device times for $c_w, c_f, c_{blk}, c_{sk}, c_{open}$ measured on the node (D-15 §3, D-20) and converted at the instance price, the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; re-measured on any hardware change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
 | OBJ-3 | Space attribution | $\sum_ig_i$ and measured garbage at run end reported per arm. $\sum_ig_i$ targets only adjacent shadowing and undercounts (§4), so the criterion is on differences: across $\Theta_s$ at Gate N2, the ratio's spread and the slope of $\Delta\sum_ig_i$ on $\Delta$(measured garbage) are reported, and a tolerance on the ratio is fixed from them before Gate N4; at Gate N4 the learner's paired $\Delta\sum_ig_i$ against its comparator must agree in sign with $\Delta$(measured garbage) whenever that difference's paired interval excludes zero, and its ratio must lie within that tolerance | reference compaction, event log |
 | OBJ-4 | Per-level read counters | per-level counters taken at the sites of §4 (the version's level: `FilePicker` hits in `Version::Get`; seeks per L0 file and per level iterator), so that a trivially moved file's reads are charged to its new level; block reads split into the hit's read and false-positive reads (§4); their sums match the global counters within 1% (the read half of Proposition D.16) | per-level counters, tickers |
 | OBJ-5 | Mode recorded | $\beta$, mode and $\bar q$ in every arm's manifest and fingerprint | `metadata.env` |
@@ -1640,7 +1671,8 @@ $$r_i = -\frac{c^\beta_i(\Delta t) + X_{i+1} + X_{i-1}}{c_wC_i},$$
 The charges do not model read shifts. A level that expands no longer pays the
 block reads of the hits it takes over from deeper levels, since those go to the
 hit-read bucket (D §4), but it is credited nothing for the filter probes saved
-below it (G §5). The read effect of the profile is static and belongs to
+below it (G §5). Nor do the charges carry reopens, which go to the reopen bucket
+(D §4). The read effect of the profile is static and belongs to
 $\Theta_s$. The one read effect an interior level has during a run, keeping L0
 waiting for the compaction slot, is in its attributed cost $c^\beta_i$ through
 the slot-blocking charge (D §4).
@@ -2254,7 +2286,8 @@ tests and the preflight).**
    diagnostics.
 6. The C++ inference plugin, weight push, masked target and fallback (H §4,
    H §6).
-7. Device price calibration: $c_w$, $c_f$, $c_{blk}$, $c_{sk}$, $c_s$ (OBJ-2).
+7. Device price calibration: $c_w$, $c_f$, $c_{blk}$, $c_{sk}$, $c_{open}$, $c_s$
+   (OBJ-2; $c_{open}$ and the all-open read prices by D-20).
 8. The dated `PREREGISTRATION.md` entries of §0.6.
 9. Test suites for every item above, and the preflight (CLAUDE.md "Tests";
    plan §6). Every later gate that needs a long node run starts only with a

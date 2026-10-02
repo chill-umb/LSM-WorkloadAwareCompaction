@@ -100,8 +100,10 @@ class ChainTest(unittest.TestCase):
         self.assertTrue((self.nvme / "qbar-powerlaw" / "58M" / "T10").is_dir())
         self.assertEqual(ran.stdout.count("q-bar candidate"), 2)
         prices = json.loads((self.root / "build-dbbench" / "prices.json").read_text())
-        self.assertEqual(prices["schema"], 2)
-        for key, seconds in (("c_f", 0.5e-6), ("c_blk", 1e-6), ("c_sk", 2e-6)):
+        self.assertEqual(prices["schema"], 3)
+        self.assertEqual(prices["open_files"], {"capped": 1000, "all_open": -1})
+        for key, seconds in (("c_f", 0.5e-6), ("c_blk", 1e-6), ("c_sk", 2e-6),
+                             ("c_open", 10e-6)):
             self.assertAlmostEqual(prices["core_seconds_per_unit"][key] / seconds,
                                    1.0, places=6, msg=key)
 

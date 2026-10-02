@@ -64,7 +64,7 @@
     "storage_price_per_byte_second": 3.0441400304414005e-17,
     "storage_price_source": "AWS us-east-1 EBS gp3, $0.08 per GB-month, GB = 1e9 bytes, month = 730 hours, retrieved 2026-09-30",
     "storage_price_must_be_positive": true,
-    "device_times": "c_w, c_f, c_blk and c_sk are core-seconds per unit, times price_per_core_second, measured on the node by 18_calibrate_prices as D-15 §3 fixes: c_w from the q-bar native arms' own flush and compaction jobs, the read prices as marginal times from slopes across trees at T = 2, 6 and 10; median of five repeats (reads) or of the q-bar runs (writes)",
+    "device_times": "c_w, c_f, c_blk, c_sk and c_open are core-seconds per unit, times price_per_core_second, measured on the node by 18_calibrate_prices as D-15 §3 and D-20 fix: c_w from the q-bar native arms' own flush and compaction jobs; c_f, c_blk and c_sk as marginal times from slopes across trees at T = 2, 6 and 10 with every table open (open_files -1); c_open, per table reopen, from the same reads run at the experiments' open_files against every table open; median of five repeats (reads) or of the q-bar runs (writes). Each run pays its own reads' table reopens (rocksdb.no.file.opens less the SST files it created) at c_open",
     "storage_price_sensitivity": [
       0.5,
       2.0
@@ -234,6 +234,11 @@
       "date": "2026-10-01",
       "entry": "PREREGISTRATION D-15",
       "reason": "before any governed run and before any price was measured: prices per core-second instead of per whole-machine second (a one-thread operation was charged 16 cores against c_s); the measurement method of the device prices; the stall rule's bounds read as the ends of the two-sided 95% interval; CMP-7's competitor set"
+    },
+    {
+      "date": "2026-10-02",
+      "entry": "PREREGISTRATION D-20",
+      "reason": "after the first prices were measured (run 3) and a diagnostic A/B run on them, before any Theta_s run and before any arm was priced: D-15's read prices carried the price runs' table reopens (0.33-0.49 per probe against 0.06-0.13 in the experiments), so c_f, c_blk and c_sk are measured with every table open and reopens are priced apart as c_open"
     }
   ],
   "suite_robustness": {

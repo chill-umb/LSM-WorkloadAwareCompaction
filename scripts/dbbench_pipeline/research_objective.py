@@ -2,8 +2,8 @@
 run's costs with it (PATHWAYS D §2).
 
 A run's three priced costs, in USD over the measured phase, are
-C_W (bytes written), C_R (filter probes, block-reading probes and run seeks)
-and C_S (bytes held per operation served). J_beta weights them by a mode:
+C_W (bytes written), C_R (filter probes, block-reading probes, run seeks and
+table reopens; D-20) and C_S (bytes held per operation served). J_beta weights them by a mode:
 J = beta_W C_W + beta_R C_R + beta_S C_S.
 """
 
@@ -18,9 +18,13 @@ DEFAULT_CONTRACT = (Path(__file__).resolve().parents[2] / "config" /
                     "research_objective_contract.json")
 MODES = ("balanced", "read", "write", "space")
 # Device prices 18_calibrate_prices.py measures, USD per unit: per byte
-# written, per filter probe, per block-reading probe, per run seek
-# (core-seconds per unit times the price per core-second, D-15 §3).
-DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk")
+# written, per filter probe, per block-reading probe, per run seek, per
+# table reopen (core-seconds per unit times the price per core-second,
+# D-15 §3 as amended by D-20).
+DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk", "c_open")
+# The prices file's schema: 3 since D-20 added c_open, so a schema-2 file,
+# whose c_f carried the price runs' reopens, cannot price a run.
+PRICES_SCHEMA = 3
 
 
 def load_contract(path: Path = DEFAULT_CONTRACT) -> tuple[dict, str]:
@@ -105,25 +109,31 @@ def validate_prices(prices: dict, contract: dict) -> dict:
 
 
 def checked_prices(record: dict, contract: dict) -> dict:
-    """A prices.json record of stage 18 as money prices: schema 2, priced per
+    """A prices.json record of stage 18 as money prices: schema 3, priced per
     core-second under this contract (D-15 §3a; a draft schema-1 file priced
-    per whole machine is 16 times too high), and valid (OBJ-2)."""
-    if (record.get("schema") != 2 or record.get("price_per_core_second")
+    per whole machine is 16 times too high), with reopens priced apart
+    (D-20; a schema-2 file's c_f carried the price runs' reopens), and
+    valid (OBJ-2)."""
+    if (record.get("schema") != PRICES_SCHEMA or
+            record.get("price_per_core_second")
             != contract["prices"]["price_per_core_second"]):
-        raise ValueError("not priced per core-second under this contract "
-                         "(schema 2, D-15 §3a)")
+        raise ValueError("not priced per core-second with reopens apart under "
+                         f"this contract (schema {PRICES_SCHEMA}, D-15 §3a, "
+                         "D-20)")
     return validate_prices(record, contract)
 
 
 def priced_costs(prices: dict, rate: float, sst_bytes: float,
                  filter_probes: float, block_probes: float, run_seeks: float,
+                 table_reopens: float,
                  held_byte_operations: float) -> tuple[float, float, float]:
     """(C_W, C_R, C_S) of one run (PATHWAYS D §1): SST bytes written at c_w;
-    filter probes, block-reading probes and run seeks at c_f, c_blk, c_sk;
-    held byte-operations at c_s / q-bar (Lemma D.15)."""
+    filter probes, block-reading probes, run seeks and the reads' table
+    reopens at c_f, c_blk, c_sk and c_open (D-20); held byte-operations at
+    c_s / q-bar (Lemma D.15)."""
     return (prices["c_w"] * sst_bytes,
             prices["c_f"] * filter_probes + prices["c_blk"] * block_probes +
-            prices["c_sk"] * run_seeks,
+            prices["c_sk"] * run_seeks + prices["c_open"] * table_reopens,
             prices["c_s"] / rate * held_byte_operations)
 
 

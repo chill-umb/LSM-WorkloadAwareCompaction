@@ -242,9 +242,12 @@ d. Gate N2, the static comparator. Four things must exist first, in this
         --output ~/qbar_record.md --write
       ```
    3. **The device prices** (OBJ-2, Gate N0 item 7; PREREGISTRATION D-15
-      §3), about an hour: three settled trees at T = 2, 6 and 10 for the
-      read prices, and the q̄ arms' own flushes and compactions for c_w, so
-      it runs after step 2 and reads both workloads' `summary.csv`:
+      §3 as amended by D-20), about 25 minutes: three settled trees at
+      T = 2, 6 and 10 for the read prices, every read run twice, at the
+      experiments' `open_files` and with every table open (so c_f, c_blk
+      and c_sk exclude table reopens, and c_open prices them), and the q̄
+      arms' own flushes and compactions for c_w, so it runs after step 2
+      and reads both workloads' `summary.csv`:
 
       ```bash
       CONFIRM_PRICE_CALIBRATION=YES DB_ROOT=/mnt/nvme/prices-db \
@@ -255,9 +258,12 @@ d. Gate N2, the static comparator. Four things must exist first, in this
 
       It stops in seconds, before any node time, unless `THREADS` is 1 and
       the q̄ rows are settled `native` arms at T=10 on this binary, each
-      given once, at least five of each workload. It writes
-      `build-dbbench/prices.json`, which `03` copies into every later arm
-      and records in the fingerprint; the medians and spreads are in it.
+      given once, at least five of each workload, and when the open-file
+      limit is under 16,384. It writes `build-dbbench/prices.json` (schema
+      3), which `03` copies into every later arm and records in the
+      fingerprint; the medians and spreads are in it. Run it before the
+      preflight: the preflight's evaluator smoke prices its arm with this
+      file, and `04` refuses a schema-2 one.
    4. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
       that point's `native` arms (run them first, in the same session). 25
       does this step. By hand, run it as 25 does, from the point's

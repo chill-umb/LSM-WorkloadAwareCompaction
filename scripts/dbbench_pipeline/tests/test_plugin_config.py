@@ -25,10 +25,12 @@ BOUNDS = {"m_min": 0.5, "m_max": 2.0, "k0_min": 2, "k0_cap": 8,
           "units": {"m_min": "documentation keys are ignored"}}
 SETTINGS = {"b_max": 2.0, "rules": "k0_tracking,garbage_hold",
             "rule_garbage_drop": 0.2, "rule_release_fill": 0.9}
-PRICES = {"schema": 2,
+PRICES = {"schema": 3,
           "price_per_core_second": CONTRACT["prices"]["price_per_core_second"],
-          "c_w": 2e-15, "c_f": 3e-13, "c_blk": 4e-12, "c_sk": 5e-12}
+          "c_w": 2e-15, "c_f": 3e-13, "c_blk": 4e-12, "c_sk": 5e-12,
+          "c_open": 6e-11}
 # controller/config.cc's keys: every one required, rule thresholds by rule.
+# c_open is not one: the controller does not price reopens yet (D-20 §2g).
 ALWAYS = {"mode", "decision_log", "transition_log", "m_min", "m_max",
           "k0_min", "k0_cap", "epsilon", "phi_min", "alpha", "kappa_d",
           "kappa_a", "setoptions_min_interval_ms", "k", "b_max", "beta_w",
@@ -90,6 +92,9 @@ class ComposeTest(unittest.TestCase):
             ({"settings": {**SETTINGS, "rules": "k0_tracking,fast"}},
              "unknown rule"),
             ({"prices": {**PRICES, "schema": 1}}, "per core-second"),
+            ({"prices": {**PRICES, "schema": 2}}, "reopens apart"),
+            ({"prices": {k: v for k, v in PRICES.items() if k != "c_open"}},
+             "c_open"),
             ({"prices": {**PRICES, "c_f": 0}}, "positive money price"),
             ({"bounds": {**BOUNDS, "alpha": "1.5"}}, "finite number"),
             ({"bounds": {**BOUNDS, "alpha": float("nan")}}, "finite number"),

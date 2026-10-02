@@ -11,7 +11,8 @@ value, so no value is chosen when an arm starts.
                          threshold of each rule switched on
   the contract (D-13)    beta_w beta_r beta_s of the objective mode at the
                          headline beta*; c_s; q_bar of the workload family
-  prices (18, D-15)      c_w c_f c_blk c_sk
+  prices (18, D-15)      c_w c_f c_blk c_sk (not c_open: the controller
+                         does not price reopens yet, D-20 §2g)
   D-16                   config/admission_test.json: k
 
 Every value missing, or null, in its file is listed and the arm is refused:
@@ -32,6 +33,10 @@ from pathlib import Path
 import research_objective
 
 PLUGIN_MODES = {"hold": "hold-only", "rules": "rules"}
+# The device prices controller/config.cc reads. c_open is left out: the
+# controller's cost model does not see reopens until a dated entry before
+# Gate N3 decides how (PREREGISTRATION D-20 §2g).
+PLUGIN_PRICES = ("c_w", "c_f", "c_blk", "c_sk")
 BOUND_KEYS = ("m_min", "m_max", "k0_min", "k0_cap", "epsilon", "phi_min",
               "alpha", "kappa_d", "kappa_a", "setoptions_min_interval_ms")
 # controller/config.cc's rule names and the threshold each one needs.
@@ -101,17 +106,14 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     if config["q_bar"] is None:
         missing.append(f"q_bar (contract reference_rate.{family}, D-14 §2)")
     if prices is None:
-        for key in research_objective.DEVICE_PRICES:
+        for key in PLUGIN_PRICES:
             config[key] = None
             missing.append(f"{key} (prices file, stage 18)")
         config["c_s"] = contract["prices"]["storage_price_per_byte_second"]
     else:
-        # As 04 (D-15 §3a): priced per core-second under this contract.
-        if (prices.get("schema") != 2 or prices.get("price_per_core_second")
-                != contract["prices"]["price_per_core_second"]):
-            raise ValueError("the prices file is not priced per core-second "
-                             "under this contract (schema 2, D-15 §3a)")
-        config.update(research_objective.validate_prices(prices, contract))
+        # As 04 (D-15 §3a, D-20): priced per core-second, reopens apart.
+        checked = research_objective.checked_prices(prices, contract)
+        config.update({key: checked[key] for key in (*PLUGIN_PRICES, "c_s")})
     config["k"] = admission["k"]
 
     filled: list[str] = []
