@@ -13,6 +13,7 @@ import statistics
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import research_objective
 
@@ -196,6 +197,17 @@ class EndToEndTest(unittest.TestCase):
         self.prices.write_text(json.dumps({
             "schema": 3, **record,
             "price_per_core_second": CONTRACT["prices"]["price_per_core_second"]}))
+        # 27 reads the live contract, which holds q-bar since 2026-10-02 and
+        # refuses a --qbar that differs. These runs price with the stand-in
+        # --qbar assoc=1000, so 27 sees the contract with q-bar unmeasured.
+        contract, sha = research_objective.load_contract()
+        unmeasured = json.loads(json.dumps(contract))
+        unmeasured["reference_rate"]["ops_per_second"] = dict.fromkeys(
+            contract["reference_rate"]["ops_per_second"])
+        patch = mock.patch.object(screen.research_objective, "load_contract",
+                                  return_value=(unmeasured, sha))
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def run_tool(self, *extra):
         out = self.tmp / "report.json"

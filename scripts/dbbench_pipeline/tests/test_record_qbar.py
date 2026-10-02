@@ -11,13 +11,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import research_objective
-
 PIPELINE = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
     "record_qbar", PIPELINE / "26_record_qbar.py")
 record = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(record)
+# The contract as it stood before q-bar was recorded (d07e111). The live one
+# holds q-bar since 2026-10-02, and 26 rightly refuses to write it again.
+CONTRACT_BEFORE_QBAR = (PIPELINE / "tests" / "fixtures" / "record_qbar"
+                        / "contract_before_qbar.json")
 
 SHA, OBJ = "a" * 64, "b" * 64
 ENGINE = ("T10:k64:v960:wb2097152:sst524288:block4096:l116777216:levels13:"
@@ -53,7 +55,7 @@ class RecordQbarTest(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         self.tmp = Path(folder.name)
         self.contract = self.tmp / "contract.json"
-        self.original = research_objective.DEFAULT_CONTRACT.read_text(encoding="utf-8")
+        self.original = CONTRACT_BEFORE_QBAR.read_text(encoding="utf-8")
         self.contract.write_text(self.original, encoding="utf-8")
 
     def admission(self, family, size=58, load=5):

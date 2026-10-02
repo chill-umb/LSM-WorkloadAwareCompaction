@@ -374,8 +374,12 @@ class GateN2ChainTest(unittest.TestCase):
                 self.assertEqual(ran.returncode, 1)
                 self.assertIn(message, ran.stderr)
                 self.assertFalse((self.nvme / "n2-assoc").exists())
-        # Last: q-bar as the frozen contract has it, not yet measured.
-        self.contract.write_text(self.frozen)
+        # Last: q-bar not yet measured, as the frozen contract had it until
+        # it was recorded on 2026-10-02.
+        contract = json.loads(self.frozen)
+        contract["reference_rate"]["ops_per_second"] = {
+            "assoc": None, "powerlaw_get95": None}
+        self.contract.write_text(json.dumps(contract, indent=2) + "\n")
         ran = self.run25()
         self.assertEqual(ran.returncode, 1)
         self.assertIn("q-bar for assoc (assoc) is not recorded", ran.stderr)

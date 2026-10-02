@@ -1273,6 +1273,17 @@ after the first prices it governs have been measured.
 
 ## 2. Gate verdicts as measured
 
+### q̄ recorded, 2026-10-02 (D-13 §1, D-14 §2)
+
+**Dated record, 2026-10-02: $\bar q$ measured (D-14 §2).** Recorded after the $\bar q$ arms and before any $\Theta_s$ run. The values are fixed by the rule, not chosen: the mean of `throughput_ops_per_second` over five `native` arms at $T = 10$, run through `03` with the settle step and the pipeline's default options on `db_bench` `a8e9329d7cdd`, checked by `26_record_qbar.py`.
+
+- `assoc`: $\bar q$ = **69021.5 ops/s** (contract value `69021.50770676274`); session `qbar-assoc`, 58M at 5% load; runs 69256.3, 68470.2, 69396.1, 69129.4, 68855.5; SD 366.9 (0.53%).
+- `powerlaw_get95`: $\bar q$ = **120609.3 ops/s** (contract value `120609.31341295298`); session `qbar-powerlaw`, 145M at 2% load; runs 120363.1, 120871.5, 120749.1, 120768.8, 120294.1; SD 261.6 (0.22%).
+
+The contract's `reference_rate.ops_per_second` holds these values, amended in place on 2026-10-02. From here on every Programme 1 arm of these workloads carries its `qbar` fingerprint segment, and `04` prices $\mathcal C_S$ with it.
+
+The owner confirmed on 2026-10-02 that q̄ stays one fixed value per workload, measured at $T = 10$ and used at every $T$ (D-13 §1), after discussing pricing each $T$ at its own native speed: at $T = 2$ that would weigh space about 1.8 times more, within the $2c_s$ sensitivity every result reports, and it would give C-6's cross-$T$ comparison two price scales.
+
 ### D-12 scored, 2026-09-23: the first evidential learner run, and the answer is no
 
 **Verdict.** The instrument is right for the first time, and under it the

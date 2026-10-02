@@ -80,7 +80,7 @@ class ComposeTest(unittest.TestCase):
         bounds = {**BOUNDS, "epsilon": None, "k0_cap": None}
         with self.assertRaises(ValueError) as caught:
             compose(bounds=bounds, settings={"rules": "garbage_hold"},
-                    prices=None)
+                    prices=None, contract=with_qbar(None))
         message = str(caught.exception)
         for name in ("epsilon (D-18", "k0_cap (D-18", "b_max (Gate N3",
                      "rule_garbage_drop (Gate N3", "q_bar (contract",
@@ -109,7 +109,8 @@ class ComposeTest(unittest.TestCase):
 
     def test_placeholders_fill_only_what_is_missing_and_say_so(self):
         config, filled = compose(bounds={**BOUNDS, "epsilon": None},
-                                 settings={}, placeholders=True)
+                                 settings={}, contract=with_qbar(None),
+                                 placeholders=True)
         self.assertEqual(config["epsilon"], pc.PLACEHOLDERS["epsilon"])
         self.assertEqual(config["alpha"], BOUNDS["alpha"])
         self.assertEqual(config["c_w"], PRICES["c_w"])

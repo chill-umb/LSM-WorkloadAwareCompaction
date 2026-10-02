@@ -2,7 +2,7 @@
   "schema_version": 1,
   "programme": "Programme 1 (research fork of 2026-09-29)",
   "contract_status": "frozen",
-  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
+  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the two reference rates from five native arms at T=10 per workload (D-14 §2; a dated amendment), and the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
   "authority": {
     "decisions": "docs/PREREGISTRATION.md D-13, as amended by D-14 and D-15",
     "theory": "docs/PATHWAYS.md, 2026-09-29 revision"
@@ -73,8 +73,8 @@
   "reference_rate": {
     "rule": "mean measured-phase throughput (n_w to the end of mixgraph) of five native arms at T=10 per workload, run through 03 with the settle step at the Gate N2 run length on the Programme 1 binary, frozen before any static-class run (D-14 §2, superseding D-13 §1's ACT-4 repeats)",
     "ops_per_second": {
-      "assoc": 69021.50770676274,
-      "powerlaw_get95": 120609.31341295298
+      "assoc": null,
+      "powerlaw_get95": null
     }
   },
   "write_accounting": "Lemma D.7's exact identity with the overlap constant measured per level; replaces P0-7's M3 convention",
@@ -239,11 +239,6 @@
       "date": "2026-10-02",
       "entry": "PREREGISTRATION D-20",
       "reason": "after the first prices were measured (run 3) and a diagnostic A/B run on them, before any Theta_s run and before any arm was priced: D-15's read prices carried the price runs' table reopens (0.33-0.49 per probe against 0.06-0.13 in the experiments), so c_f, c_blk and c_sk are measured with every table open and reopens are priced apart as c_open"
-    },
-    {
-      "date": "2026-10-02",
-      "entry": "PREREGISTRATION D-14 §2",
-      "reason": "q-bar measured by rule, not chosen: the mean measured-phase throughput of five native arms at T=10 per workload, before any Theta_s run: assoc 69021.5 ops/s (session qbar-assoc, 58M at 5% load, db_bench a8e9329d7cdd80917988ea111655c25712ef9ce7dd4aec631c8425155e60725c); powerlaw_get95 120609.3 ops/s (session qbar-powerlaw, 145M at 2% load, db_bench a8e9329d7cdd80917988ea111655c25712ef9ce7dd4aec631c8425155e60725c)"
     }
   ],
   "suite_robustness": {
