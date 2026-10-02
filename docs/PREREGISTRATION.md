@@ -1283,6 +1283,14 @@ owner made three choices on 2026-10-02, on the node operator's proposal:
 The rules in §2 that turn those choices into code are the operator's
 proposal. The owner confirms them before the runs in §6 start.
 
+**Confirmed by the owner, 2026-10-02 19:53 UTC, before any run it governs,
+with no changes.** All five of §2's operator-proposed rules stand as written:
+- $O$ is the fork's count;
+- `min_reopens` is 1,000;
+- the timer runs from the open to the cache insert;
+- L0's reopens move with the slot-blocking share;
+- the controller's state gains $e^o_i$ and $\tilde R^o$.
+
 **1. Why.**
 - **The controller saw no reopens (D-20 §2g).** On `Assoc` it priced a probe
   at about $c_f + \varepsilon c_{blk} \approx 0.21$ µs. Counting the measured
