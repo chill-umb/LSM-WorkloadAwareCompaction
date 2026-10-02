@@ -12,10 +12,12 @@ GOLDEN = (Path(__file__).resolve().parents[2] / "controller" / "tests" /
           "fixtures" / "log_golden.jsonl")
 ACTIONS = ("hold", "compact", "defer", "expand")
 AGENTS = ("l0", "interior", "last")
+# Reopens per level since D-21 (log schema 3).
 COST_KEYS = {
-    "write_bytes", "probes", "fp_reads", "seeks", "hit_reads",
+    "write_bytes", "probes", "fp_reads", "seeks", "hit_reads", "reopens",
     "slot_out_probes", "slot_out_fp_reads", "slot_out_seeks",
-    "slot_in_probes", "slot_in_fp_reads", "slot_in_seeks", "ops", "gets",
+    "slot_out_reopens", "slot_in_probes", "slot_in_fp_reads",
+    "slot_in_seeks", "slot_in_reopens", "ops", "gets",
     "scans", "writes", "user_bytes", "busy_ops", "inflow_bytes", "wait_ops",
     "waits", "held_byte_ops"}
 # A few names each agent's state must carry (G §3, H §2).
@@ -64,7 +66,7 @@ class LogFormatTest(unittest.TestCase):
         self.assertTrue(self.lines)
         for line in self.lines:
             self.assertIn(line["type"], ("decision", "transition"))
-            self.assertEqual(line["schema"], 2)
+            self.assertEqual(line["schema"], 3)
 
     def test_decision_lines(self):
         decisions = [l for l in self.lines if l["type"] == "decision"]

@@ -3,8 +3,10 @@ run's costs with it (PATHWAYS D §2).
 
 A run's three priced costs, in USD over the measured phase, are
 C_W (bytes written), C_R (filter probes, block-reading probes, run seeks and
-table reopens; D-20) and C_S (bytes held per operation served). J_beta weights them by a mode:
-J = beta_W C_W + beta_R C_R + beta_S C_S.
+the reads' table reopens; D-20, D-21) and C_S (bytes held per operation
+served). J_beta weights them by a mode: J = beta_W C_W + beta_R C_R + beta_S C_S.
+A run's reopens are priced at c_open only when its own time per reopen is
+within the contract's tolerance of stage 18's (D-21, reopen_check).
 """
 
 from __future__ import annotations
@@ -23,8 +25,13 @@ MODES = ("balanced", "read", "write", "space")
 # D-15 §3 as amended by D-20).
 DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk", "c_open")
 # The prices file's schema: 3 since D-20 added c_open, so a schema-2 file,
-# whose c_f carried the price runs' reopens, cannot price a run.
-PRICES_SCHEMA = 3
+# whose c_f carried the price runs' reopens, cannot price a run; 4 since D-21
+# added stage 18's time per reopen by the fork's own timer (reopen_timer),
+# the reference every run's reopens are checked against.
+PRICES_SCHEMA = 4
+# The fork's tickers of the reads' reopens and their time (D-21).
+READ_REOPENS = "rocksdb.read.table.reopen"
+READ_REOPEN_NANOS = "rocksdb.read.table.reopen.nanos"
 
 
 def load_contract(path: Path = DEFAULT_CONTRACT) -> tuple[dict, str]:
@@ -109,18 +116,51 @@ def validate_prices(prices: dict, contract: dict) -> dict:
 
 
 def checked_prices(record: dict, contract: dict) -> dict:
-    """A prices.json record of stage 18 as money prices: schema 3, priced per
+    """A prices.json record of stage 18 as money prices: schema 4, priced per
     core-second under this contract (D-15 §3a; a draft schema-1 file priced
     per whole machine is 16 times too high), with reopens priced apart
-    (D-20; a schema-2 file's c_f carried the price runs' reopens), and
+    (D-20; a schema-2 file's c_f carried the price runs' reopens) and a
+    reference time per reopen (D-21; a schema-3 file has none), and
     valid (OBJ-2)."""
     if (record.get("schema") != PRICES_SCHEMA or
             record.get("price_per_core_second")
             != contract["prices"]["price_per_core_second"]):
-        raise ValueError("not priced per core-second with reopens apart under "
-                         f"this contract (schema {PRICES_SCHEMA}, D-15 §3a, "
-                         "D-20)")
+        raise ValueError("not priced per core-second with reopens apart and a "
+                         "reopen-time reference under this contract (schema "
+                         f"{PRICES_SCHEMA}, D-15 §3a, D-20, D-21)")
+    reopen_reference(record)
     return validate_prices(record, contract)
+
+
+def reopen_reference(record: dict) -> float:
+    """Stage 18's seconds per reopen by the fork's own timer (D-21): the
+    median over repeats of its capped Gets' reopen time over their reopens."""
+    value = (record.get("reopen_timer") or {}).get("seconds_per_reopen")
+    if (not isinstance(value, (int, float)) or isinstance(value, bool) or
+            not math.isfinite(value) or value <= 0):
+        raise ValueError("prices carry no positive reopen_timer."
+                         f"seconds_per_reopen (D-21); got {value!r}")
+    return float(value)
+
+
+def reopen_check(contract: dict, reference: float, reopens: float,
+                 reopen_seconds: float) -> tuple[str, float]:
+    """D-21: whether stage 18's c_open holds for a run. The run's own time
+    per reopen, by the same timer as the reference, over its reference.
+    Returns ("held", ratio), ("does not hold", ratio) when the ratio is
+    outside 1 +- the contract's tolerance (the run is not priced), or ("too
+    few reopens", ratio) under the contract's minimum count, whose reopens
+    are priced unchecked."""
+    rule = contract["prices"]["reopen_time_check"]
+    if not (math.isfinite(reopens) and math.isfinite(reopen_seconds)):
+        raise ValueError("no reopen count or time to check")
+    ratio = (reopen_seconds / reopens / reference if reopens > 0
+             else math.nan)
+    if reopens < rule["min_reopens"]:
+        return "too few reopens", ratio
+    if abs(ratio - 1) > rule["tolerance"]:
+        return "does not hold", ratio
+    return "held", ratio
 
 
 def priced_costs(prices: dict, rate: float, sst_bytes: float,
@@ -129,8 +169,8 @@ def priced_costs(prices: dict, rate: float, sst_bytes: float,
                  held_byte_operations: float) -> tuple[float, float, float]:
     """(C_W, C_R, C_S) of one run (PATHWAYS D §1): SST bytes written at c_w;
     filter probes, block-reading probes, run seeks and the reads' table
-    reopens at c_f, c_blk, c_sk and c_open (D-20); held byte-operations at
-    c_s / q-bar (Lemma D.15)."""
+    reopens at c_f, c_blk, c_sk and c_open (D-20; the reopens counted by the
+    fork since D-21); held byte-operations at c_s / q-bar (Lemma D.15)."""
     return (prices["c_w"] * sst_bytes,
             prices["c_f"] * filter_probes + prices["c_blk"] * block_probes +
             prices["c_sk"] * run_seeks + prices["c_open"] * table_reopens,

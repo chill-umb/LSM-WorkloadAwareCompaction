@@ -3,7 +3,8 @@ are documented in lib/rocksdb/db/rl_controller_host.h: header, h (H with the
 operation count after every flush and compaction install), job_begin and
 job_end (per compaction: levels, trivial flag, S, O, X, due-since) and stamp
 (a named phase point with the operation count, H, the stall counter, the
-per-level read counters and every ticker).
+per-level read counters and every ticker). Schema 2 (D-21) adds three
+counters to each level's row: Get reopens, iterator reopens and their time.
 """
 
 from __future__ import annotations
@@ -16,6 +17,11 @@ FILE_NAME = "host_log.jsonl"
 LEVEL_TICKERS = ("rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
                  "rocksdb.bloom.filter.full.true.positive",
                  "rocksdb.sorted.run.seek")
+# Schema 2 (D-21): kinds 4 and 5, Get and iterator reopens, sum to one ticker;
+# kind 6 is their nanoseconds.
+REOPENS, REOPEN_NANOS = 4, 6
+REOPEN_TICKERS = ("rocksdb.read.table.reopen", "rocksdb.read.table.reopen.nanos")
+ROW_WIDTH = {1: 4, 2: 7}
 
 
 def load(path: Path) -> list[dict]:
@@ -38,7 +44,8 @@ def stamp_index(records: list[dict]) -> dict[str, int]:
 def check(records: list[dict]) -> list[str]:
     """What is wrong with one run's host log; empty when it is consistent:
     header first, the measure_start and drain_end stamps present, the
-    per-level read counters summing to their tickers at drain_end, the last H
+    per-level read counters (schema 1 or 2, each row as wide as its schema
+    says) summing to their tickers at drain_end, the last H
     sample equal to drain_end's live SST bytes, every job that began ended,
     no job's begin, end or H sample written twice, and operation counts that
     never decrease."""
@@ -52,12 +59,23 @@ def check(records: list[dict]) -> list[str]:
     problems += [f"no {name} stamp" for name in ("measure_start", "drain_end")
                  if name not in stamps]
     end = stamps.get("drain_end")
-    if end:
-        for kind, ticker in enumerate(LEVEL_TICKERS):
-            total = sum(row[kind] for row in end["levels"])
-            if total != end["tickers"].get(ticker):
-                problems.append(f"levels sum {total} != {ticker} "
-                                f"{end['tickers'].get(ticker)}")
+    width = ROW_WIDTH.get(records[0].get("schema")) if records else None
+    if records and width is None:
+        problems.append(f"host log schema {records[0].get('schema')!r} "
+                        f"is not one of {sorted(ROW_WIDTH)}")
+    if end and width:
+        if any(len(row) != width for row in end["levels"]):
+            problems.append(f"drain_end levels rows are not {width} wide")
+        else:
+            sums = [(LEVEL_TICKERS[kind], [kind]) for kind in range(4)]
+            if width == 7:
+                sums += [(REOPEN_TICKERS[0], [REOPENS, REOPENS + 1]),
+                         (REOPEN_TICKERS[1], [REOPEN_NANOS])]
+            for ticker, kinds in sums:
+                total = sum(row[k] for row in end["levels"] for k in kinds)
+                if total != end["tickers"].get(ticker):
+                    problems.append(f"levels sum {total} != {ticker} "
+                                    f"{end['tickers'].get(ticker)}")
         samples = [r for r in records if r.get("type") == "h"]
         if not samples or samples[-1]["h"] != end["h"]:
             problems.append("last H sample != live SST bytes at drain_end")

@@ -1,6 +1,7 @@
 // Per-level cost parts (D §4, Proposition D.16): the slot-blocking split sums
-// to 1 and preserves totals, hit reads go only to the bucket, writes go to
-// the source level (plan §6.2 attribution_test).
+// to 1 and preserves totals, hit reads go only to the bucket, reopens are
+// charged where they happen (D-21), writes go to the source level (plan §6.2
+// attribution_test).
 #include "attribution.h"
 
 #include <random>
@@ -18,8 +19,9 @@ Segment L0Blocked(int slot_level, int k0, int K0) {
   s.ops.keys_read = 70;
   s.ops.keys_written = 30;
   s.reads.resize(5);
-  s.reads[0] = {90, 30, 6, 40};  // probes, passes, hits, seeks
-  s.reads[2] = {50, 10, 8, 20};
+  // probes, passes, hits, seeks, Get and iterator reopens, reopen nanos
+  s.reads[0] = {90, 30, 6, 40, 12, 6, 180000};
+  s.reads[2] = {50, 10, 8, 20, 4, 2, 60000};
   s.slot_level = slot_level;
   s.l0_due = true;
   s.k0 = k0;
@@ -28,7 +30,7 @@ Segment L0Blocked(int slot_level, int k0, int K0) {
 }
 
 struct Totals {
-  double probes = 0, fp = 0, seeks = 0;
+  double probes = 0, fp = 0, seeks = 0, reopens = 0;
 };
 
 // Charged reads: raw, less what the slot rule moved out, plus what it moved in.
@@ -38,6 +40,7 @@ Totals Charged(const std::vector<LevelParts>& parts) {
     t.probes += p.probes - p.slot_out_probes + p.slot_in_probes;
     t.fp += p.fp_reads - p.slot_out_fp_reads + p.slot_in_fp_reads;
     t.seeks += p.seeks - p.slot_out_seeks + p.slot_in_seeks;
+    t.reopens += p.reopens - p.slot_out_reopens + p.slot_in_reopens;
   }
   return t;
 }
@@ -51,6 +54,9 @@ TEST(Attribution, SlotBlockingMovesTheExcessShareAndKeepsTheTotal) {
   EXPECT_EQ(parts[2].slot_in_probes, parts[0].slot_out_probes);
   EXPECT_EQ(parts[2].slot_in_fp_reads, parts[0].slot_out_fp_reads);
   EXPECT_EQ(parts[2].slot_in_seeks, parts[0].slot_out_seeks);
+  // L0's 18 reopens move with its probes and seeks (D-21).
+  EXPECT_NEAR(parts[0].slot_out_reopens, 6, 1e-12);
+  EXPECT_EQ(parts[2].slot_in_reopens, parts[0].slot_out_reopens);
   // L0 keeps 2/3, level 2 takes 1/3: the split sums to 1.
   const double kept = parts[0].probes - parts[0].slot_out_probes;
   EXPECT_NEAR(kept + parts[2].slot_in_probes, parts[0].probes, 1e-12);
@@ -58,6 +64,18 @@ TEST(Attribution, SlotBlockingMovesTheExcessShareAndKeepsTheTotal) {
   EXPECT_NEAR(t.probes, 140, 1e-9);
   EXPECT_NEAR(t.fp, 24 + 2, 1e-9);
   EXPECT_NEAR(t.seeks, 60, 1e-9);
+  EXPECT_NEAR(t.reopens, 24, 1e-9);
+}
+
+// D-21: each level is charged the reopens its Gets and iterators made, both
+// kinds at the one price c_open; the time is not a charge.
+TEST(Attribution, ReopensAreChargedWhereTheyHappen) {
+  std::vector<LevelParts> parts(5);
+  AttributeSegment(L0Blocked(-1, 2, 4), &parts);
+  EXPECT_EQ(parts[0].reopens, 18);
+  EXPECT_EQ(parts[2].reopens, 6);
+  EXPECT_EQ(parts[1].reopens, 0);
+  EXPECT_EQ(parts[0].slot_out_reopens + parts[2].slot_in_reopens, 0);
 }
 
 TEST(Attribution, NoMoveUnlessL0IsDueAndAnotherLevelHoldsTheSlot) {
@@ -69,6 +87,7 @@ TEST(Attribution, NoMoveUnlessL0IsDueAndAnotherLevelHoldsTheSlot) {
     AttributeSegment(s, &parts);
     for (const LevelParts& p : parts) {
       EXPECT_EQ(p.slot_out_probes + p.slot_in_probes, 0);
+      EXPECT_EQ(p.slot_out_reopens + p.slot_in_reopens, 0);
     }
   }
   Segment not_due = L0Blocked(2, 6, 4);
@@ -149,9 +168,12 @@ TEST(Attribution, RandomSegmentsPreserveEveryTotal) {
       r.filter_passes = r.filter_hits + rng() % 20;
       r.probes = r.filter_passes + rng() % 100;
       r.seeks = rng() % 50;
+      r.get_reopens = rng() % 10;
+      r.iter_reopens = rng() % 5;
       raw.probes += r.probes;
       raw.fp += r.filter_passes - r.filter_hits;
       raw.seeks += r.seeks;
+      raw.reopens += r.get_reopens + r.iter_reopens;
     }
     s.slot_level = static_cast<int>(rng() % 6) - 1;
     s.l0_due = rng() % 2;
@@ -163,6 +185,7 @@ TEST(Attribution, RandomSegmentsPreserveEveryTotal) {
   EXPECT_NEAR(t.probes, raw.probes, 1e-6);
   EXPECT_NEAR(t.fp, raw.fp, 1e-6);
   EXPECT_NEAR(t.seeks, raw.seeks, 1e-6);
+  EXPECT_NEAR(t.reopens, raw.reopens, 1e-6);
 }
 
 }  // namespace

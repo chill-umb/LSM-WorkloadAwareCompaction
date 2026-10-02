@@ -391,7 +391,8 @@ PROGRAMME1_FIELDS = (
     "sst_write_seconds",
     "compaction_bytes_host_log", "user_bytes_written",
     "write_amplification_measured", "filter_probes", "block_reading_probes",
-    "run_seeks", "table_reopens", "sst_files_created", "drain_read_ticks",
+    "run_seeks", "table_reopens", "reopen_seconds", "reopen_time_ratio",
+    "table_opens_less_created", "sst_files_created", "drain_read_ticks",
     "held_byte_operations",
     "C_W", "C_R", "C_S")
 
@@ -467,7 +468,9 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     sst_write_seconds is those jobs' wall time, for c_w (D-15 §3b). C_R
     prices the tickers differenced between the two stamps: filter probes
     (point.sst.probe), block-reading probes (bloom.filter.full.positive,
-    true and false positives) and run seeks (sorted.run.seek). C_S is
+    true and false positives), run seeks (sorted.run.seek) and the reads'
+    table reopens (read.table.reopen, D-21), the reopens only when the run's
+    own time per reopen passes the contract's reopen_time_check. C_S is
     (c_s / q-bar) times the sum, over the intervals between version
     installs, of H times the operations served in the interval (Lemma D.15).
     Throughput and the stall fraction are over mixgraph's wall time, from
@@ -476,7 +479,7 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     contract, contract_hash = research_objective.load_contract()
     row: dict[str, object] = {name: math.nan for name in PROGRAMME1_FIELDS}
     row.update(settle_ok=math.nan, objective_status="not programme 1",
-               prices_sha256="", reference_rate=math.nan)
+               reopen_check="", prices_sha256="", reference_rate=math.nan)
     row.update(research_objective.objective_columns(
         contract, (math.nan, math.nan, math.nan)))
     settled = [int(v) for v in SETTLED.findall(text)]
@@ -553,18 +556,30 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if flushed != flushes_host_log:
         raise InvalidArm(f"flush jobs in the measured phase: event log "
                          f"{sorted(flushed)}, host log {sorted(flushes_host_log)}")
-    # D-20: the reads' table reopens. rocksdb.no.file.opens counts every
+    # D-20's count, kept as a cross-check: rocksdb.no.file.opens counts every
     # table open; each new SST's verifying open by its own job is a write
     # cost (c_w), so it is taken off. Compaction inputs reopened from the
-    # cache stay in: the count is an upper bound on the reads' reopens.
+    # cache stay in: an upper bound on the reads' reopens.
     if not all(OPENS in r["tickers"] for r in (start, end)):
         raise InvalidArm(f"host log stamps carry no {OPENS}; reopens (D-20) "
                          "cannot be counted")
     created = sst_files_created(events, start["wall_us"], end["wall_us"])
-    reopens = delta(OPENS) - created
-    if reopens < 0:
+    opens_less_created = delta(OPENS) - created
+    if opens_less_created < 0:
         raise InvalidArm(f"{created} SST files created but only "
                          f"{delta(OPENS):.0f} tables opened in the measured phase")
+    # D-21: the reads' reopens, counted and timed by the fork where a Get or
+    # a user iterator reopens a table (the per-level rows sum to these
+    # tickers, host_log.check). A schema-1 host log, from a binary before
+    # D-21, has neither: its reopens are not counted and the arm is not
+    # priced.
+    timed = (research_objective.READ_REOPENS,
+             research_objective.READ_REOPEN_NANOS)
+    if all(t in r["tickers"] for t in timed for r in (start, end)):
+        reopens = delta(timed[0])
+        reopen_seconds = delta(timed[1]) / 1e9
+    else:
+        reopens = reopen_seconds = math.nan
     mixgraph_seconds = (mix_end["t_us"] - start["t_us"]) / 1e6
     stall_seconds = (end["stall_micros"] - start["stall_micros"]) / 1e6
     user_bytes = delta("rocksdb.bytes.written")
@@ -591,7 +606,9 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
         filter_probes=delta("rocksdb.point.sst.probe"),
         block_reading_probes=delta("rocksdb.bloom.filter.full.positive"),
         run_seeks=delta("rocksdb.sorted.run.seek"),
-        table_reopens=reopens, sst_files_created=float(created),
+        table_reopens=reopens, reopen_seconds=reopen_seconds,
+        table_opens_less_created=opens_less_created,
+        sst_files_created=float(created),
         # Read counts the drain added: background work should add none.
         drain_read_ticks=sum(delta(t, mix_end) for t in (
             "rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
@@ -616,10 +633,22 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if metadata.get("prices_sha256") != prices_sha256:
         raise InvalidArm("prices.json is not the file the run recorded")
     try:
-        prices = research_objective.checked_prices(
-            json.loads(prices_path.read_text()), contract)
+        record = json.loads(prices_path.read_text())
+        prices = research_objective.checked_prices(record, contract)
+        reference = research_objective.reopen_reference(record)
     except (ValueError, KeyError, AttributeError, json.JSONDecodeError) as error:
         raise InvalidArm(f"prices.json: {error}") from error
+    if math.isnan(reopens):
+        row["objective_status"] = "no reopen counters"
+        return row
+    # D-21: stage 18's c_open prices this run's reopens only if its own time
+    # per reopen, by the same timer, is within the contract's tolerance.
+    check, ratio = research_objective.reopen_check(
+        contract, reference, reopens, reopen_seconds)
+    row.update(reopen_check=check, reopen_time_ratio=ratio)
+    if check == "does not hold":
+        row["objective_status"] = "c_open does not hold"
+        return row
     costs = research_objective.priced_costs(
         prices, rate, flush + compaction, row["filter_probes"],
         row["block_reading_probes"], row["run_seeks"], reopens, held)

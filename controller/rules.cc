@@ -20,12 +20,13 @@ int BestTrigger(const View& v, const LevelParts& interval, const Config& cfg) {
   const double gets = Ratio(recent ? interval.gets : v.gets, ops);
   const double scans = Ratio(recent ? interval.scans : v.scans, ops);
   const double F = v.F;
-  const double eps = FalsePositiveRate(v);
+  double per_get = 0, per_scan = 0;
+  L0ReadPrices(v, cfg, &per_get, &per_scan);
   if (v.num_levels < 2) return 0;
-  // g(K) = A / K + B K, per operation.
+  // g(K) = A / K + B K, per operation; an L0 file's reads are priced with
+  // their reopens (D-21).
   const double A = cfg.beta_w * cfg.c_w * u * v.m[1] * v.C[1] / F;
-  const double B =
-      cfg.beta_r / 2 * (gets * (cfg.c_f + eps * cfg.c_blk) + scans * cfg.c_sk);
+  const double B = cfg.beta_r / 2 * (gets * per_get + scans * per_scan);
   if (!(A > 0) || !std::isfinite(A) || !(B >= 0) || !std::isfinite(B)) return 0;
   const Bounds& b = cfg.bounds;
   if (B == 0) return b.k0_cap;

@@ -220,7 +220,7 @@ dated record.
 | $R_f$ | filter probes per Get (the 2026-09-11 "point-read amplification") | existing counter |
 | $R_{blk}$ | probes per Get that pass the filter and read a data block | Pathway D |
 | $R_{sk}$ | sorted runs seeked per scan (P1c-20) | existing counter |
-| $O$, $\dot o$ | the reads' table reopens over the measured phase, and per second (D §1, D-20) | evaluator |
+| $O$, $\dot o$ | the reads' table reopens over the measured phase, and per second (D §1, D-20, D-21) | fork counters, evaluator |
 | $S$ (metric) | settled SST bytes / garbage-free bytes (D-3) | evaluator |
 | $H(t)$ | SST bytes of the current version (`rocksdb.live-sst-files-size`): a running compaction's inputs count until it installs and its outputs from then on; obsolete files still pinned by older versions or awaiting deletion do not count | telemetry |
 | $u$, $q_{pt}$, $q_{sc}$ | user bytes written, Gets and scans, per second | telemetry |
@@ -332,7 +332,7 @@ $w = r = 1$ this gives $K^\star = 4$; with $L \approx 3.33$, $\text{WA} = \text{
 | $R_f$ | filter probes per Get: tables whose key range covers the key and whose filter is consulted, including filter-rejected ones | existing counter |
 | $R_{blk}$ | probes per Get that pass the filter and read a data block (true plus false positives) | `rocksdb.bloom.filter.full.positive`; per level through counters keyed by the version's level (§4, Gate N0) |
 | $R_{sk}$ | sorted runs seeked per scan (P1c-20) | existing counter |
-| $O$ | the reads' table reopens: tables opened because a probe or a seek found them closed (RocksDB keeps at most `open_files` tables open) | `rocksdb.no.file.opens` differenced over the measured phase, less the SST files created in it, each opened once by the job that wrote it, a cost $c_w$ already holds (D-20). Compaction inputs reopened by background jobs stay in, so $O$ is an upper bound |
+| $O$ | the reads' table reopens: tables opened because a probe or a seek found them closed (RocksDB keeps at most `open_files` tables open) | `rocksdb.read.table.reopen` differenced over the measured phase: the fork counts each table a Get or a user iterator reopens in `TableCache::FindTable`, per level, and times it (D-21). Opens by flushes and compactions are not counted; D-20's count (`rocksdb.no.file.opens` less the SSTs created, an upper bound that kept the compaction inputs' reopens) is reported beside it |
 | $S$ | settled SST bytes / garbage-free bytes (D-3), at run end | evaluator |
 | $\mathcal C_S$ | $(c_s/\bar q)\sum_n H(n)$ over the measured phase, computed exactly as the sum, over the intervals between version installs, of $H$ times the operations served in the interval; $H$ is sampled with the operation count at every install, on every arm, native included | telemetry, evaluator |
 
@@ -368,12 +368,22 @@ $c_{blk}$ and $c_{sk}$ are measured with every table open, $c_{open}$ from the
 same reads run once with the experiments' `open_files` and once with every
 table open, and each run pays for the reopens it made.
 
+**Every run checks $c_{open}$ (D-21).** $c_{open}$ is measured on stage 18's
+trees, and a workload could reopen at another cost. The fork times every
+reopen it counts, from the open to the cache insert. Stage 18 records the
+same timer's seconds per reopen on its capped Gets as a reference, and each
+run's own seconds per reopen, over the measured phase, is divided by it.
+Outside $1 \pm 0.10$, $c_{open}$ does not hold for the run: it is not
+priced, and its workload's $c_{open}$ is measured on that workload by a
+dated entry. Under 1,000 reopens the check does not apply.
+
 **Reopens in the analysis.** §3 and Pathway G price a probe at $c_f$ and do not
 model the table cache. If a probe reopens a table with a probability $\rho$ the
 knobs do not change, its expected price is $c_f + \rho\,c_{open}$, and their
 results hold with that in place of $c_f$. In general the knobs do change $\rho$
 (more or larger levels change which tables stay open), so that is an
-approximation; $J_\beta$ always charges the counted reopens.
+approximation; $J_\beta$ always charges the counted reopens. The controller
+uses it with $\rho$ measured per level (H §7, D-21).
 
 **Cost rate.**
 $$c(t) = c_w\,\dot w(t) + q_{pt}(t)\big(c_f R_f + c_{blk}R_{blk}\big)(t) + q_{sc}(t)\,c_{sk}R_{sk}(t) + c_{open}\,\dot o(t) + c_s H(t)\,\frac{q(t)}{\bar q},$$
@@ -431,8 +441,8 @@ over levels, those rewards do not give minus the priced cost, for four
 reasons. Each level is divided by a different constant. Space is charged per
 level as shadowed garbage $g_i$ (§4), an estimate that leaves out live bytes,
 not as held bytes $H$. The block read of the table where a Get finds its key
-goes to a shared bucket no agent is rewarded on (§4), and table reopens go to
-another (§4, D-20). And a neighbour charge $X_{i+1}$ is a signed estimate of
+goes to a shared bucket no agent is rewarded on (§4), and table reopens of no
+known level go to another (§4, D-20, D-21). And a neighbour charge $X_{i+1}$ is a signed estimate of
 how level $i$'s action, against holding, changes level $i+1$'s future cost;
 level $i+1$ pays the realised change again in its own attributed cost, so the
 sum carries each action's effect on its neighbours twice — once realised, once
@@ -823,18 +833,19 @@ The agents of Pathway H each need their own share of the cost:
   is thread-local, needs `perf_level` at least `kEnableCount`, has no seek
   counter, and keys its filter counters by the level at which a table reader was
   first opened, which is stale after a trivial move.
-- **Reopens** are charged to no level. They go to a shared *reopen bucket* that
-  no agent is rewarded on (D-20). A per-level count needs a counter keyed by the
-  level of the table being opened (`TableCache::GetTableReader` is given it),
-  which the fork does not have. Until it does, no agent sees what its level's
-  reopens cost, and the controller's own model (H §7, the Gate N3 rules)
-  prices a probe at $c_f$ without them.
+- **Reopens** (D-21) are charged to the level where they happen, like the
+  probes and seeks that make them: the fork counts each table a Get or a user
+  iterator reopens, keyed by the level the read passes in (`FilePicker`'s hit
+  level, the iterator's level), at $c_{open}$. A reopen of no known level
+  goes to a shared *reopen bucket* that no agent is rewarded on; on the Get
+  and iterator paths there are none. Until D-21 every reopen went there
+  (D-20), and the controller priced a probe at $c_f$ without them.
 - **Slot blocking.** There is one compaction slot (G.4). While L0 is due
   (score at least 1) but cannot compact because a job sourced at level
   $i \ge 1$ holds the slot, the share $(k_0 - K_0)^+/k_0$ of L0's filter probes,
   false-positive block reads and seeks — the files beyond its trigger — is
   charged to level $i$ instead of to L0, for every operation served in that
-  span. The rule moves cost between levels and leaves the total unchanged. It
+  span, with the same share of L0's reopens (D-21). The rule moves cost between levels and leaves the total unchanged. It
   is an attribution rule, not an exact counterfactual: had the slot been free,
   flushes arriving during L0's own merge would still have added files. It is
   the channel through which an interior level changes read cost during a run
@@ -861,8 +872,9 @@ undercounts total garbage; it is reported against measured garbage at run end
 *Proof.* Every written byte has exactly one source (a flush or one compaction).
 Every probe, seek and false-positive block read happens at exactly one level and
 is charged in full either there or, under slot blocking, split between L0 and
-one other level in shares that sum to 1. Every hit's block read goes to the
-hit-read bucket, and every reopen to the reopen bucket. $\blacksquare$
+one other level in shares that sum to 1, and so is every reopen at a known
+level. Every hit's block read goes to the hit-read bucket, and every other
+reopen to the reopen bucket. $\blacksquare$
 
 ### §5 Room by mode: predictions recorded before any run
 
@@ -894,9 +906,9 @@ hit-read bucket, and every reopen to the reopen bucket. $\blacksquare$
 | # | Criterion | Threshold | Instrument |
 | --- | --- | --- | --- |
 | OBJ-1 | Flow identity (Lemma D.1, Proposition D.16) | on every arm that runs the plugin: the attribution log's per-level write bytes (flushes to L0, each compaction to its start level, by completion time), summed over levels and over every interval from $n_w$ to the end of the drain — intervals excluded from replay included — equal the evaluator's flush and compaction bytes for the same window, with the log opening a partial interval for every level at $n_w$ and closing one at the end of the drain; any residual is listed by job and must consist only of jobs whose completion the two sources place on different sides of a boundary stamp. The log's per-level read counts, taken before the slot-blocking rule moves any of them and with each level's hit block reads logged apart from its false-positive ones, equal the per-level counters' totals over the same window (their difference between the $n_w$ stamp and the end of the drain); after the rule, per-level read charges plus the hit-read and reopen buckets still sum to the global read cost. Space is not checked here: the per-level charge is a garbage estimate (OBJ-3) | attribution log, event log |
-| OBJ-2 | Prices calibrated | all prices in money: device times for $c_w, c_f, c_{blk}, c_{sk}, c_{open}$ measured on the node (D-15 §3, D-20) and converted at the instance price, the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; re-measured on any hardware change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
+| OBJ-2 | Prices calibrated | all prices in money: device times for $c_w, c_f, c_{blk}, c_{sk}, c_{open}$ measured on the node (D-15 §3, D-20) and converted at the instance price, every run's own time per reopen within 10% of stage 18's (D-21; otherwise the run is not priced), the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; re-measured on any hardware change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
 | OBJ-3 | Space attribution | $\sum_ig_i$ and measured garbage at run end reported per arm. $\sum_ig_i$ targets only adjacent shadowing and undercounts (§4), so the criterion is on differences: across $\Theta_s$ at Gate N2, the ratio's spread and the slope of $\Delta\sum_ig_i$ on $\Delta$(measured garbage) are reported, and a tolerance on the ratio is fixed from them before Gate N4; at Gate N4 the learner's paired $\Delta\sum_ig_i$ against its comparator must agree in sign with $\Delta$(measured garbage) whenever that difference's paired interval excludes zero, and its ratio must lie within that tolerance | reference compaction, event log |
-| OBJ-4 | Per-level read counters | per-level counters taken at the sites of §4 (the version's level: `FilePicker` hits in `Version::Get`; seeks per L0 file and per level iterator), so that a trivially moved file's reads are charged to its new level; block reads split into the hit's read and false-positive reads (§4); their sums match the global counters within 1% (the read half of Proposition D.16) | per-level counters, tickers |
+| OBJ-4 | Per-level read counters | per-level counters taken at the sites of §4 (the version's level: `FilePicker` hits in `Version::Get`; seeks per L0 file and per level iterator), so that a trivially moved file's reads are charged to its new level; block reads split into the hit's read and false-positive reads (§4); the reads' reopens counted and timed in `TableCache::FindTable` at the level the read passes in, Gets and iterators apart (D-21); their sums match the global counters within 1% (the read half of Proposition D.16) | per-level counters, tickers |
 | OBJ-5 | Mode recorded | $\beta$, mode and $\bar q$ in every arm's manifest and fingerprint | `metadata.env` |
 | OBJ-6 | Unpriced time reported | measured-phase throughput, stall seconds and controller CPU per arm, paired against the comparator; not part of $J_\beta$, but the first two decide the stall rule (Global acceptance) | db_bench, event log, per-thread CPU clocks (plugin thread, trainer process) |
 
@@ -1229,7 +1241,8 @@ outflow $\mu_i$, turnover time $\tau_i$, level clock $\theta_i$, survival to
 level $i$ $\pi_i$. In addition, per level: $e^f_i$ filter probes per Get at level
 $i$, $e^b_i$ false-positive block reads per Get at level $i$ (the hit's block
 read goes to the hit-read bucket, Pathway D §4), $\nu_i$ runs seeked per
-scan at level $i$ (1 if the level has a file at or after the seek key), and the
+scan at level $i$ (1 if the level has a file at or after the seek key), $e^o_i$
+the reads' table reopens at level $i$ per operation (D-21), and the
 holding price
 $\sigma_i = c_sN_i/(c_w\bar q)$, with $N_i$ the operations served per turnover
 of level $i$ (§1.1): the cost of holding one byte while level $i$ turns over
@@ -1264,9 +1277,9 @@ part of $C_\beta$ (Pathway D §4: its write and read shares, and for space its
 shadowed-garbage charge, which is not a share of $C_\beta$'s space term)
 accumulated over one turnover, divided by $c_wC_i$ (the price of
 writing one level's worth of bytes), is
-$$\hat c_i = \beta_W(1-\xi_i)(\rho_i + o_i) + \frac{\beta_R\big(\tilde R^f e^f_i + \tilde R^b e^b_i + \tilde R_{sk}\nu_i + \tilde y_i\big)}{\pi_i} + \beta_S\,\sigma_i\,(1-\tilde\rho_i)\bar\varphi_i,$$
+$$\hat c_i = \beta_W(1-\xi_i)(\rho_i + o_i) + \frac{\beta_R\big(\tilde R^f e^f_i + \tilde R^b e^b_i + \tilde R_{sk}\nu_i + \tilde R^o e^o_i + \tilde y_i\big)}{\pi_i} + \beta_S\,\sigma_i\,(1-\tilde\rho_i)\bar\varphi_i,$$
 with the workload price ratios, the same at every level,
-$$\tilde R^f = \frac{q_{pt}c_f}{c_w\bar\lambda_1},\qquad \tilde R^b = \frac{q_{pt}c_{blk}}{c_w\bar\lambda_1},\qquad \tilde R_{sk} = \frac{q_{sc}c_{sk}}{c_w\bar\lambda_1},$$
+$$\tilde R^f = \frac{q_{pt}c_f}{c_w\bar\lambda_1},\qquad \tilde R^b = \frac{q_{pt}c_{blk}}{c_w\bar\lambda_1},\qquad \tilde R_{sk} = \frac{q_{sc}c_{sk}}{c_w\bar\lambda_1},\qquad \tilde R^o = \frac{q\,c_{open}}{c_w\bar\lambda_1},$$
 and $\tilde y_i = y_i/(c_w\bar\lambda_1)$, where $y_i$ is the mean unweighted L0
 read cost per second charged to level $i$ by the slot-blocking rule (Pathway
 D §4).
@@ -1275,7 +1288,7 @@ D §4).
 in steady state. A share $1-\xi_i$ of them is merged and writes
 $(1-\xi_i)C_i(\rho_i + o_i)$ bytes; trivially moved bytes write nothing
 (Lemma D.7). Reads charged to the level cost $\beta_R\tau_i[q_{pt}(c_fe^f_i +
-c_{blk}e^b_i) + q_{sc}c_{sk}\nu_i + y_i]$. The level's attributed garbage
+c_{blk}e^b_i) + q_{sc}c_{sk}\nu_i + q\,c_{open}e^o_i + y_i]$. The level's attributed garbage
 $(1-\tilde\rho_i)B_i$ (Pathway D §4) costs $\beta_S(c_s/\bar q)
 (1-\tilde\rho_i)\bar\varphi_iC_iN_i$ over the $N_i$ operations of the turnover.
 Divide by $c_wC_i$ and use $\tau_i/C_i = 1/\bar\lambda_i =
@@ -1370,8 +1383,8 @@ parts start at zero (cold start, H §4). The law has five rules:
   $j+1$ reaches $j+2$ next (Theorem A.1, containment), and the last level's
   room decides whether the tree deepens (Lemma A.6);
 - level terms: $\hat\rho_j$, $\hat\xi_j$, the overlap constant $c_j$, $\pi_j$,
-  $e^f_j$, $e^b_j$, $\nu_j$, $\sigma_j$;
-- workload price ratios $\tilde R^f$, $\tilde R^b$, $\tilde R_{sk}$;
+  $e^f_j$, $e^b_j$, $\nu_j$, $e^o_j$, $\sigma_j$;
+- workload price ratios $\tilde R^f$, $\tilde R^b$, $\tilde R_{sk}$, $\tilde R^o$;
 - the priority vector $\beta$, and L0's $k_0/K_0$.
 
 **Proposition G.3 (normalisation does not change a level's decisions).** Define
@@ -1633,7 +1646,8 @@ Every learned quantity starts at zero at the start of each run (cold start).
 - **Interior agents:** the normalised state of G §3.
 - **L0 agent:** $k_0/K_0$, $\bar K_0$, flush rate over its mean, L1 fill
   $\varphi_1$, the Get-to-write and scan-to-write rate ratios, the price ratios
-  $\tilde R$, $\beta$, and the compaction slot's busy share over the last
+  $\tilde R$ (with $\tilde R^o$, D-21) and L0's reopens per operation $e^o_0$,
+  $\beta$, and the compaction slot's busy share over the last
   interval (L0 is the level most exposed to the single slot, G.4); and, as
   for interior agents (G §3), queue position, backlog and L2's fill
   $\varphi_2/m_2$. For lever (e) of Pathway A §4 it also sees whether the slot
@@ -1671,8 +1685,8 @@ $$r_i = -\frac{c^\beta_i(\Delta t) + X_{i+1} + X_{i-1}}{c_wC_i},$$
 The charges do not model read shifts. A level that expands no longer pays the
 block reads of the hits it takes over from deeper levels, since those go to the
 hit-read bucket (D §4), but it is credited nothing for the filter probes saved
-below it (G §5). Nor do the charges carry reopens, which go to the reopen bucket
-(D §4). The read effect of the profile is static and belongs to
+below it (G §5). The charges do carry the level's own reopens, at $c_{open}$
+(D §4, D-21). The read effect of the profile is static and belongs to
 $\Theta_s$. The one read effect an interior level has during a run, keeping L0
 waiting for the compaction slot, is in its attributed cost $c^\beta_i$ through
 the slot-blocking charge (D §4).
@@ -1827,6 +1841,10 @@ with the current measured inputs. It prices:
 - an expansion, by its space bound (Lemma D.14);
 - for the L0 agent, an early compaction, by the extra L0 → L1 overlap it writes
   (Proposition D.11) against the probes and seeks saved while the slot is idle.
+  An L0 file's reads are priced with L0's measured reopens: $c_f +
+  \varepsilon c_{blk} + \rho_g c_{open}$ per Get and $c_{sk} + \rho_s
+  c_{open}$ per scan, $\rho_g$ and $\rho_s$ L0's reopens per probe and per seek
+  (0 until measured; D-21). The slot-blocking charge carries L0's reopens too.
 
 It is clipped to $\pm b_{\max}$ in normalised units. It is code, not trained
 weights, so cold start is preserved.
@@ -2287,7 +2305,8 @@ tests and the preflight).**
 6. The C++ inference plugin, weight push, masked target and fallback (H §4,
    H §6).
 7. Device price calibration: $c_w$, $c_f$, $c_{blk}$, $c_{sk}$, $c_{open}$, $c_s$
-   (OBJ-2; $c_{open}$ and the all-open read prices by D-20).
+   (OBJ-2; $c_{open}$ and the all-open read prices by D-20, the reopen
+   timer's reference and every run's check by D-21).
 8. The dated `PREREGISTRATION.md` entries of §0.6.
 9. Test suites for every item above, and the preflight (CLAUDE.md "Tests";
    plan §6). Every later gate that needs a long node run starts only with a

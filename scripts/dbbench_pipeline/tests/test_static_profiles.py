@@ -128,7 +128,7 @@ class MeasureRunTest(unittest.TestCase):
                        **{name: 0 for name in sp.host_log.LEVEL_TICKERS}}
             empty = [[0, 0, 0, 0]] * 4
             records = [
-                {"type": "header"},
+                {"type": "header", "schema": 1},  # every real log has one
                 {"type": "stamp", "name": "measure_start", "op": 0, "wall_us": 100,
                  "h": 0, "tickers": dict(tickers), "levels": empty},
                 {"type": "job_begin", "job": 5, "op": 1, "start_level": 1,

@@ -11,8 +11,8 @@ value, so no value is chosen when an arm starts.
                          threshold of each rule switched on
   the contract (D-13)    beta_w beta_r beta_s of the objective mode at the
                          headline beta*; c_s; q_bar of the workload family
-  prices (18, D-15)      c_w c_f c_blk c_sk (not c_open: the controller
-                         does not price reopens yet, D-20 §2g)
+  prices (18, D-15)      c_w c_f c_blk c_sk c_open (D-21: the controller
+                         prices each level's reopens at stage 18's c_open)
   D-16                   config/admission_test.json: k
 
 Every value missing, or null, in its file is listed and the arm is refused:
@@ -33,10 +33,10 @@ from pathlib import Path
 import research_objective
 
 PLUGIN_MODES = {"hold": "hold-only", "rules": "rules"}
-# The device prices controller/config.cc reads. c_open is left out: the
-# controller's cost model does not see reopens until a dated entry before
-# Gate N3 decides how (PREREGISTRATION D-20 §2g).
-PLUGIN_PRICES = ("c_w", "c_f", "c_blk", "c_sk")
+# The device prices controller/config.cc reads, c_open among them since
+# PREREGISTRATION D-21 (resolving D-20 §2g): measured by stage 18, never a
+# default; only the preflight's smoke runs fill a missing one.
+PLUGIN_PRICES = ("c_w", "c_f", "c_blk", "c_sk", "c_open")
 BOUND_KEYS = ("m_min", "m_max", "k0_min", "k0_cap", "epsilon", "phi_min",
               "alpha", "kappa_d", "kappa_a", "setoptions_min_interval_ms")
 # controller/config.cc's rule names and the threshold each one needs.
@@ -59,7 +59,7 @@ PLACEHOLDERS = {
     "m_min": 0.5, "m_max": 2.0, "k0_min": 2, "k0_cap": 8, "epsilon": 0.1,
     "phi_min": 0.55, "alpha": 1.5, "kappa_d": 0.25, "kappa_a": 1.0,
     "setoptions_min_interval_ms": 10, "b_max": 1.0, "q_bar": 50000.0,
-    "c_w": 1e-14, "c_f": 1e-12, "c_blk": 1e-11, "c_sk": 1e-11,
+    "c_w": 1e-14, "c_f": 1e-12, "c_blk": 1e-11, "c_sk": 1e-11, "c_open": 1e-10,
     "rules": ",".join(RULE_THRESHOLDS), "rule_l0_early_read_ratio": 1.0,
     "rule_garbage_drop": 0.1, "rule_release_fill": 0.5,
 }

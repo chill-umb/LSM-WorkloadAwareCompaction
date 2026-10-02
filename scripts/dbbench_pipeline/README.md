@@ -118,6 +118,20 @@ NVME=/mnt/nvme scripts/dbbench_pipeline/24_gate_n1_chain.sh 2>&1 | tee ~/gate_n1
   folder and its database folder (03 keeps both on purpose), then rerun
   with `RESUME=1`. The rerun skips every finished arm but repeats the
   preflight and the admission tests.
+- **After a binary change** (PREREGISTRATION D-21), the prices need q̄
+  arms on the new binary, since `18` takes c_w only from arms of the binary
+  it prices. `QBAR_ONLY=1 QBAR_TAG=<tag>` reuses Gate N1's reports in
+  `n1-<workload>` and runs only the preflight, the q̄ arms (into
+  `qbar-<workload>-<tag>`, `qbar-dbs-<tag>`; no earlier folder is touched)
+  and the prices, about 4.5–5 hours. q̄ stays as recorded: the new arms'
+  mean is printed beside it, and `18` prints each arm's reopen check (below).
+  Move the old `build-dbbench/prices.json` aside first, so the preflight's
+  smoke runs unpriced instead of refusing a stale file:
+
+  ```bash
+  NVME=/mnt/nvme QBAR_ONLY=1 QBAR_TAG=d21 \
+    scripts/dbbench_pipeline/24_gate_n1_chain.sh 2>&1 | tee ~/qbar_d21.log
+  ```
 
 a. Publish and fetch the code. On the machine that holds the commits, push
    the fork first, since the root records a fork commit:
@@ -260,10 +274,20 @@ d. Gate N2, the static comparator. Four things must exist first, in this
       the q̄ rows are settled `native` arms at T=10 on this binary, each
       given once, at least five of each workload, and when the open-file
       limit is under 16,384. It writes `build-dbbench/prices.json` (schema
-      3), which `03` copies into every later arm and records in the
-      fingerprint; the medians and spreads are in it. Run it before the
-      preflight: the preflight's evaluator smoke prices its arm with this
-      file, and `04` refuses a schema-2 one.
+      4), which `03` copies into every later arm and records in the
+      fingerprint; the medians and spreads are in it. Schema 4 (D-21) adds
+      `reopen_timer`: the capped Gets' time per reopen by the fork's own
+      timer (`rocksdb.read.table.reopen.nanos` over
+      `rocksdb.read.table.reopen`), the reference for every run's reopen
+      check, and `qbar_reopen_checks`, each q̄ arm's own time against it.
+      `04` prices a run's reopens (the fork's count) only when its own time
+      per reopen is within the contract's `reopen_time_check` tolerance
+      (10%) of the reference; outside it, the arm's `objective_status` is
+      "c_open does not hold" and that workload's c_open must be measured on
+      it by a dated entry. Under 1,000 reopens the check does not apply.
+      Run 18 before the preflight when one exists: the preflight's evaluator
+      smoke prices its arm with this file, and `04` refuses a schema-2 or
+      schema-3 one.
    4. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
       that point's `native` arms (run them first, in the same session). 25
       does this step. By hand, run it as 25 does, from the point's

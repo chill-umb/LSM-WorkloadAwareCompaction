@@ -46,6 +46,19 @@ TEST(Rules, BestTriggerIsD11sBestAdmissibleInteger) {
   EXPECT_EQ(BestTrigger(v, interval, cfg), 2);
 }
 
+// D-21: with L0's reopens priced (prior_test's L0ReopensRaiseTheReadPrice),
+// g(K) = 3276.8 / K + 265.5 K, K* = 3.51, and g(4) = 1881.2 < g(3) = 1888.8.
+TEST(Rules, BestTriggerPricesL0Reopens) {
+  View v = TestView();
+  v.get_reopens[0] = 3000;
+  v.iter_reopens[0] = 500;
+  EXPECT_EQ(BestTrigger(v, {}, TestConfig()), 4);
+  // Reopens below L0 do not move L0's trigger.
+  v = TestView();
+  v.get_reopens[3] = 30000;
+  EXPECT_EQ(BestTrigger(v, {}, TestConfig()), 5);
+}
+
 TEST(Rules, K0TrackingMovesTheTriggerTowardKStar) {
   const Bounds b = TestBounds();
   const Config cfg = TestConfig(Mode::kRules, {"k0_tracking"});

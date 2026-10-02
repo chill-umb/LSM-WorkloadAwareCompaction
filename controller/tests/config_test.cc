@@ -157,6 +157,23 @@ TEST(Config, StringsMustBeValidUtf8) {
   EXPECT_EQ(out["a"].text, "caf\xc3\xa9 \xe2\x82\xac \xf0\x9f\x98\x80");
 }
 
+// D-21: the controller prices reopens at stage 18's measured c_open. A
+// config without it is refused, never given a default.
+TEST(Config, TheReopenPriceIsRequiredAndPositive) {
+  auto values = BaseConfig("/tmp/x");
+  values.erase("c_open");
+  EXPECT_TRUE(Contains(Error(values), "missing \"c_open\""));
+  for (const char* bad : {"0", "-1e-12", "\"1e-11\""}) {
+    values["c_open"] = bad;
+    EXPECT_FALSE(Error(values).empty()) << bad;
+  }
+  values["c_open"] = "1.25e-11";
+  Config c;
+  std::string error;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  EXPECT_EQ(c.c_open, 1.25e-11);
+}
+
 TEST(Config, TheSetOptionsCapIsRequiredAndPositive) {
   auto values = BaseConfig("/tmp/x");
   values.erase("setoptions_min_interval_ms");

@@ -68,7 +68,8 @@ class ChainTest(unittest.TestCase):
     SCRUBBED = ("RESUME", "STOP_AFTER_N1", "PARITY_PAIRS", "ALLOW_ROOT_DISK",
                 "FAKE_FAIL_WORKLOAD", "DBBENCH_BUILD_DIR", "PREFLIGHT_MARKER",
                 "PREFLIGHT_WORK_DIR", "PRICES_FILE", "DB_ROOT", "RESULTS_ROOT",
-                "SESSION_ID", "KEEP_DATABASES", "FAKE_SURVIVAL_BASES")
+                "SESSION_ID", "KEEP_DATABASES", "FAKE_SURVIVAL_BASES",
+                "QBAR_ONLY", "QBAR_TAG")
 
     def run24(self, cwd=None, script=None, **overrides) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items() if k not in self.SCRUBBED}
@@ -100,8 +101,15 @@ class ChainTest(unittest.TestCase):
         self.assertTrue((self.nvme / "qbar-powerlaw" / "58M" / "T10").is_dir())
         self.assertEqual(ran.stdout.count("q-bar candidate"), 2)
         prices = json.loads((self.root / "build-dbbench" / "prices.json").read_text())
-        self.assertEqual(prices["schema"], 3)
+        self.assertEqual(prices["schema"], 4)
         self.assertEqual(prices["open_files"], {"capped": 1000, "all_open": -1})
+        # D-21: the fake times every reopen at 8 us, in the price runs and in
+        # the q-bar arms alike, so every q-bar arm's check holds.
+        self.assertAlmostEqual(prices["reopen_timer"]["seconds_per_reopen"]
+                               / 8e-6, 1.0, places=6)
+        for family in ("assoc", "powerlaw_get95"):
+            self.assertEqual({r["check"] for r in
+                              prices["qbar_reopen_checks"][family]}, {"held"})
         for key, seconds in (("c_f", 0.5e-6), ("c_blk", 1e-6), ("c_sk", 2e-6),
                              ("c_open", 10e-6)):
             self.assertAlmostEqual(prices["core_seconds_per_unit"][key] / seconds,
@@ -132,6 +140,46 @@ class ChainTest(unittest.TestCase):
         self.assertEqual(self.admission("powerlaw", 10)["run_length"]["rung"],
                          {"size_millions": 58, "load_percent": 5})
         self.assertFalse((self.nvme / "qbar-assoc").exists())
+
+    def test_qbar_only_reruns_the_qbar_arms_and_the_prices(self):
+        # D-21: after a binary change, Gate N1's reports are reused and only
+        # the q-bar arms and the prices run again, into new folders.
+        ran = self.run24(STOP_AFTER_N1="1")
+        self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+        pilots = self.nvme / "n1-assoc" / "graphs" / "summary.csv"
+        before = pilots.stat().st_mtime_ns
+        ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d21")
+        self.assertEqual(ran.returncode, 0, ran.stdout[-3000:] + ran.stderr[-3000:])
+        self.assertIn("stub preflight", ran.stdout)
+        self.assertNotIn("Gate N1 pilots", ran.stdout)
+        self.assertEqual(pilots.stat().st_mtime_ns, before)
+        self.assertTrue((self.nvme / "qbar-assoc-d21" / "29M" / "T10").is_dir())
+        self.assertTrue((self.nvme / "qbar-powerlaw-d21" / "58M" / "T10").is_dir())
+        self.assertFalse((self.nvme / "qbar-assoc").exists())
+        # q-bar is not offered for recording again: it stays as recorded.
+        self.assertNotIn("q-bar candidate", ran.stdout)
+        self.assertEqual(ran.stdout.count("q-bar stays as recorded"), 2)
+        prices = json.loads((self.root / "build-dbbench" / "prices.json").read_text())
+        self.assertEqual(prices["schema"], 4)
+        self.assertEqual(len(prices["write_summaries_sha256"]), 2)
+        self.assertTrue(all("-d21" in path for path in prices["write_summaries_sha256"]))
+        self.assertIn("reopen check, assoc q-bar arms", ran.stdout)
+
+    def test_qbar_only_refusals(self):
+        cases = [({"QBAR_ONLY": "1"}, "needs QBAR_TAG"),
+                 ({"QBAR_ONLY": "1", "QBAR_TAG": "a/b"}, "needs QBAR_TAG"),
+                 ({"QBAR_ONLY": "2"}, "QBAR_ONLY must be 0 or 1"),
+                 ({"QBAR_ONLY": "1", "QBAR_TAG": "d21"}, "no Gate N1 run length")]
+        for overrides, message in cases:
+            with self.subTest(message=message):
+                ran = self.run24(**overrides)
+                self.assertEqual(ran.returncode, 1)
+                self.assertIn(message, ran.stderr)
+                self.assertNotIn("stub preflight", ran.stdout)
+        (self.nvme / "qbar-assoc-d21").mkdir()
+        ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d21")
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("qbar-assoc-d21 exists", ran.stderr)
 
     def test_checks_fail_before_the_preflight(self):
         leftovers = {"n1-assoc": self.nvme / "a", "n1-dbs": self.nvme / "b"}

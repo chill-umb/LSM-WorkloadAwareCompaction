@@ -47,6 +47,9 @@ std::vector<RLLevelReadCounts> Delta(
     d[i].filter_passes = Minus(now[i].filter_passes, before[i].filter_passes);
     d[i].filter_hits = Minus(now[i].filter_hits, before[i].filter_hits);
     d[i].seeks = Minus(now[i].seeks, before[i].seeks);
+    d[i].get_reopens = Minus(now[i].get_reopens, before[i].get_reopens);
+    d[i].iter_reopens = Minus(now[i].iter_reopens, before[i].iter_reopens);
+    d[i].reopen_nanos = Minus(now[i].reopen_nanos, before[i].reopen_nanos);
   }
   return d;
 }

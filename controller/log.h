@@ -48,7 +48,7 @@
 
 namespace rlc {
 
-constexpr int kLogSchema = 2;
+constexpr int kLogSchema = 3;
 
 // The shortest decimal that reads back as the same double; null if not
 // finite.

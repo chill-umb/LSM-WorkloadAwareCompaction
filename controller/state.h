@@ -119,6 +119,8 @@ struct View {
   double flushes = 0, flush_bytes = 0;
   double F = kNaN;  // the fixed flush file size (Stats::flush_file_bytes)
   std::vector<double> probes, fp_reads, hit_reads, seeks;
+  // Tables a Get or a user iterator found closed and reopened (D-21).
+  std::vector<double> get_reopens, iter_reopens;
   std::vector<double> rho;            // (X - O) / S over merges
   std::vector<double> xi;             // trivially moved share of bytes leaving
   std::vector<double> overlap;        // O / S over merges
@@ -145,9 +147,16 @@ int QueuePosition(const View& v, int level, double score, double epsilon);
 // (Lemma D.10's epsilon): false positives / (probes - hits), all levels.
 double FalsePositiveRate(const View& v);
 
-// The workload price ratios of G.2: R^f, R^b and R_sk.
+// The workload price ratios of G.2: R^f, R^b, R_sk and R^o (D-21).
 void PriceRatios(const View& v, const Config& cfg, double* r_f, double* r_b,
-                 double* r_sk);
+                 double* r_sk, double* r_o);
+
+// The price of one L0 file's reads per Get and per scan that reach it, as
+// Proposition D.11 prices them (c_f + eps c_blk, and c_sk), each plus c_open
+// times L0's measured reopens per probe or per seek (D-21). A reopen rate
+// not measured yet contributes 0.
+void L0ReadPrices(const View& v, const Config& cfg, double* per_get,
+                  double* per_scan);
 
 enum class Agent { kL0, kInterior, kLast };
 const char* AgentName(Agent agent);

@@ -67,7 +67,9 @@ std::vector<std::string> GoldenLines() {
   t.parts.fp_reads = 9;
   t.parts.seeks = 300;
   t.parts.hit_reads = 150;
+  t.parts.reopens = 42;
   t.parts.slot_in_probes = 10.5;
+  t.parts.slot_in_reopens = 1.5;
   t.parts.ops = 23456;
   t.parts.gets = 12000;
   t.parts.writes = 9000;
@@ -88,6 +90,7 @@ std::vector<std::string> GoldenLines() {
   first.agent = Agent::kL0;
   first.parts.probes = 400;
   first.parts.slot_out_probes = 10.5;
+  first.parts.slot_out_reopens = 1.5;
   first.parts.ops = 10000;
   first.next_agent = Agent::kL0;
   first.next_state.assign(FeatureNames(Agent::kL0).size(), 1);

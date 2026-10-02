@@ -47,9 +47,10 @@ struct Config {
   double setoptions_min_interval_ms = 0;
   double b_max = 0;  // the prior's clip (H §7)
   double beta_w = 0, beta_r = 0, beta_s = 0;
-  // Prices (D §1): per byte written, filter probe, block-reading probe and
-  // run seek, per byte held per second; and the reference operation rate.
-  double c_w = 0, c_f = 0, c_blk = 0, c_sk = 0, c_s = 0;
+  // Prices (D §1): per byte written, filter probe, block-reading probe, run
+  // seek and table reopen (D-21), per byte held per second; and the
+  // reference operation rate.
+  double c_w = 0, c_f = 0, c_blk = 0, c_sk = 0, c_open = 0, c_s = 0;
   double q_bar = 0;
   std::string decision_log;
   std::string transition_log;

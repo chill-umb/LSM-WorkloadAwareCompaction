@@ -93,12 +93,13 @@ class GateN2ChainTest(unittest.TestCase):
         contract["reference_rate"]["ops_per_second"] = {
             "assoc": 62500.0, "powerlaw_get95": 62500.0}
         self.contract.write_text(json.dumps(contract, indent=2) + "\n")
+        # The fake db_bench times each reopen at 8 us (D-21).
         self.prices = {
-            "schema": 3,
+            "schema": 4,
             "price_per_core_second": contract["prices"]["price_per_core_second"],
             "db_bench_sha256": hashlib.sha256(db_bench.read_bytes()).hexdigest(),
             "c_w": 1e-14, "c_f": 1e-11, "c_blk": 2e-11, "c_sk": 4e-11,
-            "c_open": 2e-10}
+            "c_open": 2e-10, "reopen_timer": {"seconds_per_reopen": 8e-6}}
         (self.root / "build-dbbench" / "prices.json").write_text(json.dumps(self.prices))
         for workload, rung in (("assoc", (29, 10)), ("powerlaw", (58, 5))):
             for t in (2, 6, 10):
@@ -359,7 +360,7 @@ class GateN2ChainTest(unittest.TestCase):
         five = Path(self.tmp.name) / "five.txt"
         five.write_text("".join(f"assoc 14 {b} {k} uniform_1 5\n" for b, k in POINTS[:5]))
         cases = [({"PRICES_FILE": str(Path(self.tmp.name) / "none.json")}, "run 18"),
-                 ({"PRICES_FILE": str(draft)}, "schema 3"),
+                 ({"PRICES_FILE": str(draft)}, "schema 4"),
                  ({"PRICES_FILE": str(stale)}, "re-measures them after any binary change"),
                  ({"PREFLIGHT_MARKER": str(Path(self.tmp.name) / "none")},
                   "no preflight marker for this db_bench"),

@@ -19,10 +19,14 @@ struct LevelParts {
   double fp_reads = 0;  // filter passes without a hit
   double seeks = 0;
   double hit_reads = 0;
+  // Tables a Get or a user iterator reopened at this level (D-21), priced
+  // at c_open; charged like the probes and seeks that reopened them.
+  double reopens = 0;
   // Slot-blocking moves (D §4): out of L0 (level 0 only), into the level
   // whose job held the slot. Charged reads = raw - slot_out + slot_in.
   double slot_out_probes = 0, slot_out_fp_reads = 0, slot_out_seeks = 0;
   double slot_in_probes = 0, slot_in_fp_reads = 0, slot_in_seeks = 0;
+  double slot_out_reopens = 0, slot_in_reopens = 0;
   // Operations served, and their kinds.
   double ops = 0, gets = 0, scans = 0, writes = 0, user_bytes = 0;
   // State inputs measured over the interval (G §3): operations served while
@@ -52,9 +56,9 @@ struct Segment {
 
 // Adds a segment's reads and operations to every level's interval. While L0
 // is due and a job sourced at level i >= 1 holds the slot, the share
-// (k0 - K0)^+ / k0 of L0's probes, false-positive reads and seeks moves from
-// L0 to level i. The total is unchanged (D.16). Each level also adds its
-// held bytes times the operations served.
+// (k0 - K0)^+ / k0 of L0's probes, false-positive reads, seeks and reopens
+// moves from L0 to level i. The total is unchanged (D.16). Each level also
+// adds its held bytes times the operations served.
 void AttributeSegment(const Segment& segment, std::vector<LevelParts>* parts);
 
 // A finished job: its bytes to its start level (a flush's to L0), unless it

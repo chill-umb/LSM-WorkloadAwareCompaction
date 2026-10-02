@@ -1269,6 +1269,182 @@ refuse them. So $\bar q$ is recorded before `04` is re-run there.
 **Falsification.** This entry fails as a record if any of it is changed
 after the first prices it governs have been measured.
 
+### D-21, 2026-10-02 — the reads' table reopens are counted and timed per level by the fork, the controller prices them, and every run checks c_open
+
+**Recorded after D-20's prices (stage 18, 2026-10-02 17:28 UTC) and the
+$\bar q$ record (`96e5c74`), before any $\Theta_s$ run and before any arm is
+priced under it.** It resolves D-20 §2g and amends D-20 §2d and §2f. The
+owner made three choices on 2026-10-02, on the node operator's proposal:
+- option (b) of D-20 §2g, per-level reopen counters in the fork;
+- every run checks c_open against its own measured time per reopen, with a
+  10% tolerance;
+- c_w is measured again from $\bar q$ arms run on the new binary.
+
+The rules in §2 that turn those choices into code are the operator's
+proposal. The owner confirms them before the runs in §6 start.
+
+**1. Why.**
+- **The controller saw no reopens (D-20 §2g).** On `Assoc` it priced a probe
+  at about $c_f + \varepsilon c_{blk} \approx 0.21$ µs. Counting the measured
+  0.056 reopens per probe at $c_{open} = 10.44$ µs, a probe costs about
+  0.80 µs, about 3.8 times more. Proposition D.11's $K_0^\star \propto
+  \sqrt{\text{write price}/\text{read price}}$ was then about 1.9 times too
+  high. The risk is a false negative at Gates N3 and N5: a controller blind
+  to reopens loses to a static configuration chosen on the full cost.
+- **D-20 §3's first assumption was unchecked.** "A reopen costs the same
+  whatever the benchmark, tree or level." Stage 18 measures $c_{open}$ on its
+  own trees, with uniform keys and no writes. In an experiment, compactions
+  run beside the reads, and a workload with other files or another page-cache
+  state could reopen at another cost. The owner asked that this be checked,
+  not assumed.
+- **D-20's count is an upper bound.** $O$ = `rocksdb.no.file.opens` less the
+  SSTs created keeps the compaction inputs that background jobs reopen, about
+  1% of the opens on `Assoc` and under 0.1% on the power law. $c_w$'s job
+  seconds already pay for them.
+
+**2. Decision.**
+- **(a) The fork counts and times the reads' reopens per level.**
+  - Where: `TableCache::FindTable`, when it opens a table it found closed
+    for a Get (`kGetReopen`) or a user iterator (`kIterReopen`).
+  - Which level: the one the read passes in. That is `FilePicker`'s hit
+    level for a Get and the iterator's level for a seek, the same levels as
+    the other per-level counters (OBJ-4).
+  - The time (`kReopenNanos`, wall clock) runs from the open to the cache
+    insert, which closes the table the insert evicts.
+  - Tickers: `rocksdb.read.table.reopen` (both kinds) and
+    `rocksdb.read.table.reopen.nanos`. The per-level rows sum to them, and
+    the host log, now schema 2, carries both.
+  - Not counted: opens by flushes, compactions, ingestion and verification
+    (D-20 §2d: a new file's verifying open is a write cost). MultiGet is not
+    counted either; the workloads issue none.
+- **(b) $J_\beta$'s reopen count $O$ becomes the fork's count.** It is
+  `rocksdb.read.table.reopen`, differenced from $n_w$ to the end of the
+  drain. This is the reads' reopens exactly, by the same instrument as the
+  controller's per-level counts (CLAUDE.md: a priced term and the
+  controller's view of it come from one instrument over one phase). D-20
+  §2d's count stays as a reported cross-check, `table_opens_less_created`.
+  An arm whose host log is schema 1 (a binary before D-21) is not priced.
+- **(c) Every run checks $c_{open}$.**
+  - The reference: stage 18 records `reopen_timer`. Per repeat, it is the
+    capped arm's reopen nanoseconds over its reopens, both summed over the
+    six Get points; the reference is the median of the five repeats, with
+    min and max. `prices.json` becomes schema 4.
+  - The check: `04` computes each run's own seconds per reopen by the same
+    tickers, from $n_w$ to the end of the drain, and divides it by the
+    reference.
+    - Outside $1 \pm 0.10$, $c_{open}$ does not hold for that run. Its
+      `objective_status` is "c_open does not hold", it is not priced, and
+      its workload's $c_{open}$ is measured on that workload by a dated
+      entry before any of its arms is scored.
+    - Under 1,000 reopens, the check does not apply and the reopens are
+      priced unchecked. Their share of the read cost is then negligible, and
+      the mean of fewer timings is too noisy for a 10% test.
+  - Both values are in the contract, `prices.reopen_time_check` (amended in
+    place, with its reason).
+  - Stage 18 also reports each $\bar q$ arm's ratio (`qbar_reopen_checks`).
+    It does not refuse: the check refuses at pricing.
+- **(d) Attribution (amends D-20 §2f; PATHWAYS D §4).**
+  - Each level is charged the reopens its Gets and iterators made, both
+    kinds at $c_{open}$, at the level where they happen.
+  - Under slot blocking, the share $(k_0 - K_0)^+/k_0$ of L0's reopens moves
+    with its probes and seeks.
+  - The reopen bucket keeps only reopens of no known level, and on the Get
+    and iterator paths there are none. Proposition D.16 holds.
+- **(e) The controller (resolves D-20 §2g).**
+  - `c_open` is a required plugin key, $> 0$, with no default.
+    `plugin_config.py` passes stage 18's value. Only the preflight's smoke
+    runs may fill it, with a placeholder, and `03` refuses placeholders
+    anywhere else.
+  - State (G.2, H §2): each level gets $e^o_i$, its reads' reopens per
+    operation. Every agent gets $\tilde R^o = c_{open}/(c_w\bar\lambda_1)$
+    per operation, so $\tilde R^o e^o_i$ is level $i$'s reopen cost in the
+    units of $\tilde R^f e^f_i$. L0's state also carries its own $e^o_0$.
+  - The prior (H §7) and the Gate N3 rules price an L0 file's reads at
+    $c_f + \varepsilon c_{blk} + \rho_g c_{open}$ per Get and
+    $c_{sk} + \rho_s c_{open}$ per scan. Here $\rho_g$ and $\rho_s$ are L0's
+    measured reopens per probe and per seek since the controller started,
+    and 0 until measured. The slot-blocking charge includes L0's reopens.
+  - The decision and transition logs become schema 3, with `reopens`,
+    `slot_out_reopens` and `slot_in_reopens`.
+- **(f) $c_w$ on the new binary (the owner's choice).**
+  - The ten $\bar q$ arms run again on the new binary, into new folders
+    (`24_gate_n1_chain.sh` with `QBAR_ONLY=1 QBAR_TAG=d21`), and stage 18
+    takes $c_w$ from them as D-15 §3b says.
+  - $\bar q$ stays as recorded (D-14 §2; it is never overwritten). The new
+    arms' mean is reported beside it.
+  - These arms also measure each workload's own time per reopen, so the
+    check in (c) is first tested on both workloads before Gate N2.
+
+**3. Assumptions, stated.**
+- **The check holds the ratio fixed.** The timer covers the open, the
+  footer, index and filter reads, and the insert. $c_{open}$ is the Get's
+  extra time per reopen, measured by D-20's A/B. The check compares timer
+  with timer, so it assumes $c_{open}$ over the timer's time is the same in
+  every workload. A workload whose reopens cost more inside the open
+  (larger index or filter blocks, a colder page cache, contention for the
+  disk) shows. A change only outside the open does not.
+- **$\rho$ does not depend on the knobs**, in the prior and the rules. This
+  is D §1's approximation: more or larger levels change which tables stay
+  open.
+- **The timer is cheap.** It is two clock reads, two relaxed atomic adds
+  and two ticker increments per reopen, against a reopen of about 10 µs. ACT-4 and ARCH-5 on the
+  new binary check parity.
+
+**4. Unchanged.**
+- $c_f$, $c_{blk}$, $c_{sk}$ and $c_{open}$ are measured as D-20 §2b says.
+- $\bar q$ and its record (D-14 §2).
+- The run length (D-19), and everything else in D-13 to D-20.
+- D-20's prices (`d20-prices`, `a8e9329d`) price no arm of the new binary.
+
+**5. Implementation.**
+- Fork (`lib/rocksdb`):
+  - `db/rl_read_counters.h`: the three kinds, and `Add` with an amount.
+  - `db/table_cache.{h,cc}`: `FindTable`'s `rl_reopen`; `Get` passes
+    `kGetReopen`, and `NewIterator` passes `kIterReopen` for
+    `kUserIterator`.
+  - `include/rocksdb/statistics.h` and `monitoring/statistics.cc`: the two
+    tickers.
+  - `include/rocksdb/rl_controller_host.h`: `RLLevelReadCounts`' three
+    fields.
+  - `db/rl_controller_host.cc`: `ReadCounters`, and host log schema 2.
+  - Tests: `db/per_level_read_counters_test.cc` (Get reopens per probed
+    level, iterator reopens per table opened, job opens not counted, and
+    no reopens with every table open) and `db/rl_controller_host_test.cc`
+    (schema 2, and the stamp's reopen sums equal to the tickers).
+- Controller: `config` (`c_open` required), `state` (`e_o`, `R_o`,
+  `L0ReadPrices`), `attribution`, `prior`, `rules`, `log` (schema 3) and
+  `plugin`, each with its tests; `log_golden.jsonl` and `smoke_config.json`.
+- Pipeline:
+  - `research_objective.py`: `PRICES_SCHEMA` = 4, `reopen_reference` and
+    `reopen_check`.
+  - `04_generate_graphs.py`: `table_reopens` from the fork, plus
+    `reopen_seconds`, `reopen_time_ratio`, `reopen_check` and
+    `table_opens_less_created`.
+  - `18_calibrate_prices.py`: `reopen_timer` and `qbar_reopen_checks`.
+  - `host_log.py`: schema-2 rows.
+  - `plugin_config.py`: `c_open`.
+  - `24_gate_n1_chain.sh`: `QBAR_ONLY` and `QBAR_TAG`.
+  - The chain's fake `db_bench` and the price fixtures, moved to schema 4.
+
+**6. Node order.**
+1. Move `build-dbbench/prices.json` aside. D-20's copy is in
+   `~/node_ops/archive/d20-prices/`.
+2. `NVME=<results disk> QBAR_ONLY=1 QBAR_TAG=d21
+   scripts/dbbench_pipeline/24_gate_n1_chain.sh`. It runs:
+   - the preflight (13): it builds the new binary and plugin, runs tiers 1
+     and 2, ACT-1, ACT-4 and ARCH-5 at 10 pairs and the smoke runs, and
+     writes the marker;
+   - the ten $\bar q$ arms, about 3 hours;
+   - stage 18, about 25 minutes, which prints every $\bar q$ arm's reopen
+     check.
+3. Verdicts: parity (ACT-4, ARCH-5) on the new binary, and the reopen check
+   on both workloads. A workload whose check fails gets a dated entry before
+   Gate N2.
+4. Gate N2 (25), after D-17 and D-18.
+
+**Falsification.** This entry fails as a record if any of it is changed
+after the first run it governs has started.
+
 ---
 
 ## 2. Gate verdicts as measured

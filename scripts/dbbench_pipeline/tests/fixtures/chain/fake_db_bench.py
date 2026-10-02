@@ -7,7 +7,9 @@ lines and tickers of trees whose per-operation costs are known: 0.5 us a
 filter probe, 1 us a block read, 2 us a run seek, and 10 us a table reopen,
 which a capped run (open_files > 0) makes on half its probes and run seeks
 and an all-open run (open_files -1, D-20) never makes; both open 0.006
-tables per operation outside the timed work. FAKE_FAIL_WORKLOAD=assoc (or
+tables per operation outside the timed work. The fork's timer (D-21) puts
+each reopen at 8 us, in the price runs and in mixgraph alike, so every
+arm's reopen check holds (ratio 1). FAKE_FAIL_WORKLOAD=assoc (or
 powerlaw) makes every arm of that workload fail as an I/O error would.
 Only L1 and L2 merge, so 23 refuses the survival-weighted profile (no merges
 out of L0 and L3); at a base size in FAKE_SURVIVAL_BASES (bytes, space
@@ -45,6 +47,8 @@ if bench in ("readrandom", "readmissing", "seekrandom"):
     reopens = 0.0 if int(args.get("open_files", 1000)) == -1 else 0.5 * touched
     per_op += 10e-6 * reopens
     tick["no.file.opens"] = 0.006 + reopens
+    tick["read.table.reopen"] = reopens
+    tick["read.table.reopen.nanos"] = 8000 * reopens
     print(f"{bench:<12} : {per_op*1e6:11.3f} micros/op 1 ops/sec "
           f"{per_op*ops:.3f} seconds {ops} operations; (1 of 1 found)")
     print("STATISTICS:")
@@ -68,17 +72,24 @@ host, events, H, job = [], [], 3_000_000_000, 100
 
 
 def levels_row(scale):
-    return [[int(600 * scale), int(200 * scale), int(150 * scale), int(30 * scale)],
-            [int(400 * scale), int(100 * scale), int(50 * scale), int(20 * scale)]]
+    """Schema 2 (D-21): probe, pass, hit, seek, Get and iterator reopens,
+    and their nanoseconds at 8 us each."""
+    return [[int(600 * scale), int(200 * scale), int(150 * scale), int(30 * scale),
+             int(400 * scale), int(100 * scale), int(500 * scale) * 8000],
+            [int(400 * scale), int(100 * scale), int(50 * scale), int(20 * scale),
+             int(300 * scale), int(50 * scale), int(350 * scale) * 8000]]
 
 
 def tickers(scale, written, created):
     """created: SST files written so far, each opened once by its job."""
+    rows = levels_row(scale)
     return {"rocksdb.point.sst.probe": int(1000 * scale),
             "rocksdb.bloom.filter.full.positive": int(300 * scale),
             "rocksdb.bloom.filter.full.true.positive": int(200 * scale),
             "rocksdb.sorted.run.seek": int(50 * scale),
-            "rocksdb.no.file.opens": int(400 * scale) + created,
+            "rocksdb.no.file.opens": int(1000 * scale) + created,
+            "rocksdb.read.table.reopen": sum(r[4] + r[5] for r in rows),
+            "rocksdb.read.table.reopen.nanos": sum(r[6] for r in rows),
             "rocksdb.bytes.written": written}
 
 
@@ -97,7 +108,7 @@ def occupancy(fill2):
     return occ
 
 
-host.append({"type": "header", "schema": 1, "num_levels": nlev, "t_us": 0,
+host.append({"type": "header", "schema": 2, "num_levels": nlev, "t_us": 0,
              "wall_us": WS - 3_000_000})
 written = num * 1040
 stamp("settle", 500, WS - 2_000_000, num, H, 0, 1, written, ok=1,

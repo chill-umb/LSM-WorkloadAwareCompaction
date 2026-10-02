@@ -34,9 +34,11 @@ Values LevelPrior(const View& v, int level, const LevelControl& c,
                   const Config& cfg);
 
 // L0 at control c, from Proposition D.11's cost per operation
-// g(K) = beta_W c_w u m_1 C_1 / (K F) + beta_R (K / 2) [q_pt (c_f + eps c_blk)
-// + q_sc c_sk], over one L0 turnover. Compact is charged the write change at
-// once but credited the read change only while the slot is idle (H §7).
+// g(K) = beta_W c_w u m_1 C_1 / (K F) + beta_R (K / 2) [q_pt (c_f + eps c_blk
+// + rho_g c_open) + q_sc (c_sk + rho_s c_open)], over one L0 turnover, with
+// rho_g and rho_s L0's reopens per probe and per seek (D-21; L0ReadPrices).
+// Compact is charged the write change at once but credited the read change
+// only while the slot is idle (H §7).
 Values L0Prior(const View& v, const L0Control& c, const Config& cfg);
 
 }  // namespace rlc

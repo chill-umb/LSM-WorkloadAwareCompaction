@@ -183,9 +183,10 @@ View MakeView(const RLHostOptions& o, const RLTreeSnapshot& snap,
   v.flush_bytes = st.flush_bytes;
   if (st.flush_file_bytes > 0) v.F = st.flush_file_bytes;
 
-  for (auto* field : {&v.probes, &v.fp_reads, &v.hit_reads, &v.seeks, &v.rho,
-                      &v.xi, &v.overlap, &v.rho_tilde, &v.inflow, &v.job_ops,
-                      &v.N, &v.since_release}) {
+  for (auto* field : {&v.probes, &v.fp_reads, &v.hit_reads, &v.seeks,
+                      &v.get_reopens, &v.iter_reopens, &v.rho, &v.xi,
+                      &v.overlap, &v.rho_tilde, &v.inflow, &v.job_ops, &v.N,
+                      &v.since_release}) {
     field->assign(n, kNaN);
   }
   for (int i = 0; i < n; ++i) {
@@ -198,6 +199,8 @@ View MakeView(const RLHostOptions& o, const RLTreeSnapshot& snap,
       v.fp_reads[i] =
           since(now.filter_passes, start.filter_passes) - v.hit_reads[i];
       v.seeks[i] = since(now.seeks, start.seeks);
+      v.get_reopens[i] = since(now.get_reopens, start.get_reopens);
+      v.iter_reopens[i] = since(now.iter_reopens, start.iter_reopens);
     }
     if (i >= static_cast<int>(st.levels.size())) continue;
     const LevelStats& s = st.levels[i];
@@ -248,13 +251,28 @@ double FalsePositiveRate(const View& v) {
 }
 
 void PriceRatios(const View& v, const Config& cfg, double* r_f, double* r_b,
-                 double* r_sk) {
+                 double* r_sk, double* r_o) {
   // Per operation instead of per second: q_pt / lambda_1 is the same ratio.
   const double lambda1 = v.num_levels > 1 ? Ratio(v.inflow[1], v.ops) : kNaN;
   const double denominator = cfg.c_w * lambda1;
   *r_f = Ratio(Ratio(v.gets, v.ops) * cfg.c_f, denominator);
   *r_b = Ratio(Ratio(v.gets, v.ops) * cfg.c_blk, denominator);
   *r_sk = Ratio(Ratio(v.scans, v.ops) * cfg.c_sk, denominator);
+  // Reopens are counted per operation (e^o_i), so q / lambda_1 = 1 / lambda_1.
+  *r_o = Ratio(cfg.c_open, denominator);
+}
+
+void L0ReadPrices(const View& v, const Config& cfg, double* per_get,
+                  double* per_scan) {
+  const auto known = [](double x) { return std::isfinite(x) ? x : 0.0; };
+  const bool l0 = !v.probes.empty();
+  const double get_reopen =
+      l0 ? known(Ratio(v.get_reopens[0], v.probes[0])) : 0.0;
+  const double iter_reopen =
+      l0 ? known(Ratio(v.iter_reopens[0], v.seeks[0])) : 0.0;
+  *per_get =
+      cfg.c_f + FalsePositiveRate(v) * cfg.c_blk + get_reopen * cfg.c_open;
+  *per_scan = cfg.c_sk + iter_reopen * cfg.c_open;
 }
 
 const char* AgentName(Agent agent) {
@@ -301,10 +319,12 @@ const std::vector<std::string>& FeatureNames(Agent agent) {
                                                      "e_f",
                                                      "e_b",
                                                      "nu",
+                                                     "e_o",
                                                      "sigma",
                                                      "R_f",
                                                      "R_b",
                                                      "R_sk",
+                                                     "R_o",
                                                      "beta_w",
                                                      "beta_r",
                                                      "beta_s",
@@ -319,6 +339,7 @@ const std::vector<std::string>& FeatureNames(Agent agent) {
       "phi_1",         "get_write",
       "scan_write",    "R_f",
       "R_b",           "R_sk",
+      "R_o",           "e_o",
       "beta_w",        "beta_r",
       "beta_s",        "busy_share",
       "queue",         "slot_none",
@@ -388,8 +409,8 @@ std::vector<double> LevelFeatures(const View& v, int j, bool last,
   const double capacity = v.m[L] * v.C[L];
   double pi = 1;
   for (int k = 1; k < j; ++k) pi *= v.rho_tilde[k];
-  double r_f = 0, r_b = 0, r_sk = 0;
-  PriceRatios(v, cfg, &r_f, &r_b, &r_sk);
+  double r_f = 0, r_b = 0, r_sk = 0, r_o = 0;
+  PriceRatios(v, cfg, &r_f, &r_b, &r_sk, &r_o);
   f = {phi, c.anchor, c.timing, s, Ratio(v.since_release[j], N), phi_up, m_up,
        v.phi[j + 1], v.m[j + 1], burst,
        // G §3 defines the burst for j >= 2 only: L1's inflow is L0's
@@ -412,10 +433,12 @@ std::vector<double> LevelFeatures(const View& v, int j, bool last,
               Ratio(v.probes[j], v.gets),
               Ratio(v.fp_reads[j], v.gets),
               Ratio(v.seeks[j], v.scans),
+              Ratio(v.get_reopens[j] + v.iter_reopens[j], v.ops),
               cfg.c_s * N / (cfg.c_w * cfg.q_bar),
               r_f,
               r_b,
               r_sk,
+              r_o,
               cfg.beta_w,
               cfg.beta_r,
               cfg.beta_s,
@@ -425,8 +448,8 @@ std::vector<double> LevelFeatures(const View& v, int j, bool last,
 
 std::vector<double> L0Features(const View& v, const L0Control& c,
                                const LevelParts& interval, const Config& cfg) {
-  double r_f = 0, r_b = 0, r_sk = 0;
-  PriceRatios(v, cfg, &r_f, &r_b, &r_sk);
+  double r_f = 0, r_b = 0, r_sk = 0, r_o = 0;
+  PriceRatios(v, cfg, &r_f, &r_b, &r_sk, &r_o);
   const bool two_down = 2 <= v.last;
   std::vector<double> f = {
       Ratio(v.k0, v.K0),
@@ -440,6 +463,8 @@ std::vector<double> L0Features(const View& v, const L0Control& c,
       r_f,
       r_b,
       r_sk,
+      r_o,
+      Ratio(v.get_reopens[0] + v.iter_reopens[0], v.ops),
       cfg.beta_w,
       cfg.beta_r,
       cfg.beta_s,

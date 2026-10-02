@@ -48,15 +48,22 @@ def get_seconds(probes, blocks):
 
 REOPEN = 10e-6
 DB_OPEN = 0.006   # tables opened per operation when the DB opens, untimed
+TIMER = 8.3e-6    # the fork's timer of one reopen (D-21), short of c_open
 
 
-def tree(missing_probes, found_probes, runs, reopen_share=0.5):
+def tree(missing_probes, found_probes, runs, reopen_share=0.5, timed=True):
     """One tree's three benchmarks in both arms. A missing key reads a block
     only on a 1% filter false positive; a present key reads the block it is
     found in. The capped arm reopens a table on reopen_share of its probes
-    and run seeks; the all-open arm never does."""
+    and run seeks; the all-open arm never does. With timed, the fork counts
+    and times the reads' reopens (D-21) at TIMER each."""
     missing_blocks = 0.01 * missing_probes
     found_blocks = 1 + 0.01 * (found_probes - 1)
+
+    def reopened(n):
+        return ({"read_table_reopen": n, "read_table_reopen_nanos": TIMER * 1e9 * n}
+                if timed else {})
+
     arms = {}
     for arm in calibrate.ARMS:
         share = 0.0 if arm == "all_open" else reopen_share
@@ -66,16 +73,19 @@ def tree(missing_probes, found_probes, runs, reopen_share=0.5):
                 REOPEN * share * missing_probes,
                 point_sst_probe=missing_probes,
                 bloom_filter_full_positive=missing_blocks,
-                no_file_opens=DB_OPEN + share * missing_probes),
+                no_file_opens=DB_OPEN + share * missing_probes,
+                **reopened(share * missing_probes)),
             "readrandom": stdout(
                 "readrandom", get_seconds(found_probes, found_blocks) +
                 REOPEN * share * found_probes,
                 point_sst_probe=found_probes,
                 bloom_filter_full_positive=found_blocks,
-                no_file_opens=DB_OPEN + share * found_probes),
+                no_file_opens=DB_OPEN + share * found_probes,
+                **reopened(share * found_probes)),
             "seekrandom": stdout(
                 "seekrandom", 3e-6 + 2e-6 * runs + REOPEN * share * runs,
-                sorted_run_seek=runs, no_file_opens=DB_OPEN + share * runs),
+                sorted_run_seek=runs, no_file_opens=DB_OPEN + share * runs,
+                **reopened(share * runs)),
         }
     return arms
 
@@ -96,9 +106,11 @@ FAMILIES = ["assoc", "powerlaw_get95"]
 
 
 def write_row(i=0, family="assoc", **extra):
+    # 20000 reopens at the timer's 8.3 us: the reopen check holds (D-21).
     row = {"arm": "native", "size_ratio": "10", "settle_ok": "1",
            "dbbench_sha256": SHA, "sst_write_seconds": "2.0",
            "sst_bytes_written": "1000000000", "workload_family": family,
+           "table_reopens": "20000", "reopen_seconds": repr(20000 * TIMER),
            "result_directory": f"/r/{family}/{i}"}
     row.update(extra)
     return row
@@ -133,6 +145,42 @@ class PricesTest(unittest.TestCase):
         capped = calibrate.marginal_times([t["capped"] for t in TREES])
         self.assertRatio(capped["c_f"], 5.5e-6)
         self.assertRatio(calibrate.read_repeat(TREES)["c_f"], 0.5e-6)
+
+    def test_the_reopen_timer_is_the_capped_gets_time_per_reopen(self):
+        # D-21's reference: the fork's own timer, not c_open's marginal time.
+        self.assertRatio(calibrate.reopen_timer(TREES), TIMER)
+        self.assertRatio(calibrate.read_repeat(TREES)["c_open"], REOPEN)
+
+    def test_a_binary_without_the_reopen_timer_is_refused(self):
+        trees = [tree(9, 8, 10, timed=False), tree(5, 4.5, 6, timed=False),
+                 tree(4, 3.5, 5, timed=False)]
+        with self.assertRaisesRegex(ValueError, "timed no reopens.*D-21"):
+            calibrate.reopen_timer(trees)
+
+    def test_timed_reopens_beyond_the_opens_are_refused(self):
+        def more(t, i):
+            return t["capped"]["readmissing"].replace(
+                "rocksdb.no.file.opens COUNT : 4506000",
+                "rocksdb.no.file.opens COUNT : 4000000")
+        trees = replaced(TREES, "capped", "readmissing", more)
+        with self.assertRaisesRegex(ValueError, "more than its"):
+            calibrate.reopen_timer(trees)
+
+    def test_qbar_arms_are_checked_against_the_reference(self):
+        rows = [write_row(0),
+                write_row(1, table_reopens="20000",
+                          reopen_seconds=repr(20000 * TIMER * 1.2)),
+                write_row(2, table_reopens="500",
+                          reopen_seconds=repr(500 * TIMER)),
+                write_row(3, family="powerlaw_get95", table_reopens="",
+                          reopen_seconds="")]
+        checks = calibrate.qbar_reopen_checks(rows, TIMER, CONTRACT)
+        self.assertEqual([r["check"] for r in checks["assoc"]],
+                         ["held", "does not hold", "too few reopens"])
+        self.assertAlmostEqual(checks["assoc"][1]["ratio"], 1.2)
+        self.assertEqual(checks["powerlaw_get95"],
+                         [{"run": "/r/powerlaw_get95/3", "reopens": None,
+                           "ratio": None, "check": "no reopen counters"}])
 
     def test_an_all_open_arm_that_reopens_is_refused(self):
         # open_files -1 did not take: the all-open arm reopens as the capped.
@@ -321,8 +369,19 @@ class PricesTest(unittest.TestCase):
                 capture_output=True, text=True, cwd=PIPELINE)
             self.assertEqual(done.returncode, 0, done.stderr)
             record = json.loads((root / "prices.json").read_text())
-        self.assertEqual(record["schema"], 3)
+        self.assertEqual(record["schema"], 4)
         self.assertEqual(record["schema"], research_objective.PRICES_SCHEMA)
+        # D-21: the timer's reference, and every q-bar arm checked against it.
+        self.assertRatio(record["reopen_timer"]["seconds_per_reopen"], TIMER)
+        self.assertEqual(len(record["reopen_timer"]["values"]),
+                         calibrate.REPEATS)
+        self.assertEqual(research_objective.reopen_reference(record),
+                         record["reopen_timer"]["seconds_per_reopen"])
+        for family in FAMILIES:
+            self.assertEqual([r["check"] for r in
+                              record["qbar_reopen_checks"][family]],
+                             ["held"] * 5)
+        self.assertIn("reopen check, assoc q-bar arms", done.stdout)
         self.assertEqual(record["open_files"], {"capped": 1000, "all_open": -1})
         self.assertRatio(record["c_w"], 3e-9 * CORE)
         self.assertRatio(record["c_f"], 0.5e-6 * CORE)
@@ -338,6 +397,9 @@ class PricesTest(unittest.TestCase):
         first = per_op["T2/r1/capped/readmissing"]
         self.assertAlmostEqual(first["rocksdb.point.sst.probe"], 9)
         self.assertAlmostEqual(first["rocksdb.no.file.opens"], DB_OPEN + 4.5)
+        self.assertAlmostEqual(first["rocksdb.read.table.reopen"], 4.5)
+        self.assertAlmostEqual(first["rocksdb.read.table.reopen.nanos"],
+                               4.5 * TIMER * 1e9)
         self.assertAlmostEqual(
             per_op["T2/r1/all_open/readmissing"]["rocksdb.no.file.opens"], DB_OPEN)
 

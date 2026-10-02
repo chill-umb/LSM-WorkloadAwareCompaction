@@ -18,11 +18,13 @@ Values Clip(Values b, double b_max) {
   return b;
 }
 
-// L0's reads per operation since the start, priced.
+// L0's reads per operation since the start, priced, its reopens (D-21)
+// included.
 double L0ReadCost(const View& v, const Config& cfg) {
-  return Known(Ratio(
-      v.probes[0] * cfg.c_f + v.fp_reads[0] * cfg.c_blk + v.seeks[0] * cfg.c_sk,
-      v.ops));
+  return Known(Ratio(v.probes[0] * cfg.c_f + v.fp_reads[0] * cfg.c_blk +
+                         v.seeks[0] * cfg.c_sk +
+                         (v.get_reopens[0] + v.iter_reopens[0]) * cfg.c_open,
+                     v.ops));
 }
 
 // The mean of (k0 - K0)^+ / k0 over a job of job_ops operations starting now,
@@ -86,14 +88,14 @@ Values L0Prior(const View& v, const L0Control& c, const Config& cfg) {
   const double u = Ratio(v.user_bytes, v.ops);
   const double gets = Ratio(v.gets, v.ops);
   const double scans = Ratio(v.scans, v.ops);
-  const double eps = FalsePositiveRate(v);
+  double per_get = 0, per_scan = 0;
+  L0ReadPrices(v, cfg, &per_get, &per_scan);
   const double m1C1 = v.num_levels > 1 ? v.m[1] * v.C[1] : kNaN;
   const auto write = [&](double K) {
     return cfg.beta_w * cfg.c_w * u * m1C1 / (K * F);
   };
   const auto read = [&](double K) {
-    return cfg.beta_r * (K / 2) *
-           (gets * (cfg.c_f + eps * cfg.c_blk) + scans * cfg.c_sk);
+    return cfg.beta_r * (K / 2) * (gets * per_get + scans * per_scan);
   };
   const auto cost = [&](double K) { return write(K) + read(K); };
   // Over one turnover, N_0 operations, divided by c_w C_0.

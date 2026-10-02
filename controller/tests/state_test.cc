@@ -75,6 +75,32 @@ TEST(State, SameRatiosAtTwoLevelsGiveTheSameFeatures) {
   EXPECT_NEAR(Feature(Agent::kInterior, f2, "wait"), 150.0 / 10000, 1e-12);
 }
 
+// D-21: R^o = c_open / (c_w lambda_1) per operation, and e^o_j the level's
+// reopens per operation, so that R^o e^o_j is the level's reopen cost in
+// the units of R^f e^f_j.
+TEST(State, ReopensEnterAsARateAndAPriceRatio) {
+  View v = TestView();
+  v.get_reopens[2] = 2000;
+  v.iter_reopens[2] = 1000;
+  v.get_reopens[0] = 400;
+  v.iter_reopens[0] = 100;
+  const Config cfg = TestConfig();
+  double r_f = 0, r_b = 0, r_sk = 0, r_o = 0;
+  PriceRatios(v, cfg, &r_f, &r_b, &r_sk, &r_o);
+  const double lambda1 = v.inflow[1] / v.ops;
+  EXPECT_NEAR(r_o, cfg.c_open / (cfg.c_w * lambda1), 1e-9);
+  EXPECT_NEAR(r_f, 0.5 * cfg.c_f / (cfg.c_w * lambda1), 1e-9);
+  const auto f = LevelFeatures(v, 2, false, {}, {}, kNaN, cfg);
+  EXPECT_NEAR(Feature(Agent::kInterior, f, "e_o"), 0.03, 1e-12);
+  EXPECT_NEAR(Feature(Agent::kInterior, f, "R_o"), r_o, 1e-12);
+  EXPECT_EQ(Feature(Agent::kInterior,
+                    LevelFeatures(v, 3, false, {}, {}, kNaN, cfg), "e_o"),
+            0);
+  const auto l0 = L0Features(v, {4, 0}, {}, cfg);
+  EXPECT_NEAR(Feature(Agent::kL0, l0, "e_o"), 0.005, 1e-12);
+  EXPECT_NEAR(Feature(Agent::kL0, l0, "R_o"), r_o, 1e-12);
+}
+
 TEST(State, QueuePositionCountsLevelsRocksDBWouldTryFirst) {
   View v = TestView();
   v.score = {1.5, 1.2, 0.5, 1.1, 0.2, 0.9};
@@ -132,6 +158,9 @@ TEST(State, MakeViewReadsTheSnapshotAndTheTotals) {
   host.reads[2].probes = 900;
   host.reads[2].filter_passes = 30;
   host.reads[2].filter_hits = 20;
+  host.reads[2].get_reopens = 45;
+  host.reads[2].iter_reopens = 7;
+  host.reads[2].reopen_nanos = 520000;
   const View v = MakeView(host.options, *host.snapshot, stats, host.ops,
                           host.reads, {1, 2, 1, 1, 1}, 4);
   // Bytes being compacted are excluded (to within the whole-byte rounding).
@@ -146,6 +175,9 @@ TEST(State, MakeViewReadsTheSnapshotAndTheTotals) {
   EXPECT_EQ(v.ops, 1000);
   EXPECT_EQ(v.gets, 600);
   EXPECT_EQ(v.fp_reads[2], 10);
+  EXPECT_EQ(v.get_reopens[2], 45);  // D-21
+  EXPECT_EQ(v.iter_reopens[2], 7);
+  EXPECT_EQ(v.get_reopens[1], 0);
   EXPECT_NEAR(v.C[3], 32 * kMiB, 1e-6);
   // Unmeasured: nothing released, nothing flushed.
   EXPECT_TRUE(std::isnan(v.N[0]));

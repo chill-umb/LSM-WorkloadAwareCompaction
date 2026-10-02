@@ -63,6 +63,14 @@ TEST(Prior, CompactPaysTheSlotBlockingChargeWhenL0FallsDue) {
   // L0 far from due: no charge.
   v.k0_all = 1;
   EXPECT_NEAR(LevelPrior(v, 2, {}, TestConfig())[kCompact], 0, 1e-12);
+  // D-21: the charge carries L0's reopens at c_open, (3000 + 500) * 5000 /
+  // 100000 = 175 more per operation.
+  v.k0_all = 5;
+  v.job_ops[2] = 500;
+  v.get_reopens[0] = 3000;
+  v.iter_reopens[0] = 500;
+  EXPECT_NEAR(LevelPrior(v, 2, {}, TestConfig())[kCompact],
+              0.2 * (233 + 175) * 500 / c16, 1e-12);
 }
 
 TEST(Prior, DeferIsPricedByTheGarbageItKeepsAndTheBurstItBuilds) {
@@ -141,6 +149,34 @@ TEST(Prior, L0EarlyCompactionTradesOverlapForReads) {
   v.running = -1;
   v.scans = 100000;
   EXPECT_LT(L0Prior(v, c, cfg)[kCompact], 0);
+}
+
+// D-21: an L0 file's reads are priced with L0's reopens. 3000 reopens over
+// 30000 probes and 500 over 10000 seeks, at c_open = 5000: a Get pays 100 +
+// 0.012 * 1000 + 0.1 * 5000 = 612 per file, a scan 2000 + 0.05 * 5000 =
+// 2250, so g(K) = 3276.8 / K + 265.5 K and K* = 3.51 (5.06 without them).
+TEST(Prior, L0ReopensRaiseTheReadPrice) {
+  View v = TestView();
+  v.get_reopens[0] = 3000;
+  v.iter_reopens[0] = 500;
+  const Config cfg = TestConfig();
+  const double norm = 10000 / (4 * kMiB);
+  const auto g = [](double K) { return 3276.8 / K + 265.5 * K; };
+  const L0Control c{4, 0};
+  const Values b = L0Prior(v, c, cfg);
+  EXPECT_NEAR(b[kCompact], norm * (g(2) - g(4)), 1e-9);
+  EXPECT_NEAR(b[kDefer], norm * (g(3) - g(4)), 1e-9);
+  EXPECT_NEAR(b[kExpand], norm * (g(5) - g(4)), 1e-9);
+  EXPECT_GT(b[kExpand], 0);  // more L0 files now cost more than they save
+  // Other levels' reopens are not L0's.
+  View deep = TestView();
+  deep.get_reopens[2] = 30000;
+  deep.iter_reopens[3] = 10000;
+  const Values plain = L0Prior(TestView(), c, cfg);
+  const Values with_deep = L0Prior(deep, c, cfg);
+  for (int a = 0; a < kNumActions; ++a) {
+    EXPECT_EQ(plain[a], with_deep[a]);
+  }
 }
 
 }  // namespace

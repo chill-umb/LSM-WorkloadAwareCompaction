@@ -233,6 +233,7 @@ const std::set<std::string>& KnownKeys() {
                                                "c_f",
                                                "c_blk",
                                                "c_sk",
+                                               "c_open",
                                                "c_s",
                                                "q_bar",
                                                "decision_log",
@@ -347,7 +348,8 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       !r.Number("beta_r", &c->beta_r) || !r.Number("beta_s", &c->beta_s) ||
       !r.Number("c_w", &c->c_w) || !r.Number("c_f", &c->c_f) ||
       !r.Number("c_blk", &c->c_blk) || !r.Number("c_sk", &c->c_sk) ||
-      !r.Number("c_s", &c->c_s) || !r.Number("q_bar", &c->q_bar) ||
+      !r.Number("c_open", &c->c_open) || !r.Number("c_s", &c->c_s) ||
+      !r.Number("q_bar", &c->q_bar) ||
       !r.Number("setoptions_min_interval_ms", &c->setoptions_min_interval_ms) ||
       !r.String("mode", &c->mode_name)) {
     return false;
@@ -379,6 +381,9 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       !r.Check(c->c_w > 0 && c->c_s > 0, "need c_w > 0 and c_s > 0") ||
       !r.Check(c->c_f >= 0 && c->c_blk >= 0 && c->c_sk >= 0,
                "need c_f, c_blk, c_sk >= 0") ||
+      // D-21: the controller prices the reads' reopens, at stage 18's
+      // measured c_open; a config without it is refused, not defaulted.
+      !r.Check(c->c_open > 0, "need c_open > 0") ||
       !r.Check(c->q_bar > 0, "need q_bar > 0")) {
     return false;
   }

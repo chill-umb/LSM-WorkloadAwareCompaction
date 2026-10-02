@@ -32,14 +32,23 @@ order alternates by repeat. Under <work>/T<T>/r<repeat>/<arm>/<benchmark>/
           The arms must read alike (probes, block reads), the capped arm
           must reopen at least MIN_REOPEN_GAP more tables per Get on every
           point, and the all-open arm must reopen almost none.
+  reopen timer (D-21; not a price): the capped arm's reopen nanoseconds
+          over its reopens, both the fork's own tickers (read.table.reopen
+          and its .nanos), summed over the six Get points: the reference
+          against which 04 checks every run's own time per reopen. Every
+          capped Get point must time some reopens (a binary before D-21
+          times none), and no more than it opened.
 Writes: the q-bar native arms' rows of 04's summary.csv (D-14 §2), per run
   t_w   = sst_write_seconds / sst_bytes_written, the measured phase's own
-          flush and compaction jobs.
+          flush and compaction jobs. Each q-bar arm's own time per reopen is
+          also reported against the reference, by the contract's
+          reopen_time_check, for every workload before Gate N2.
 Each price is the median of its per-repeat (or per-run) values, with their
 min and max. Nothing is written when any value is not positive, a slope is
-not identified or an arm is not what it claims. prices.json (schema 3) also
-keeps every read process's seconds and tickers per operation and each tree's
-load command, so the fit can be audited.
+not identified or an arm is not what it claims. prices.json (schema 4) also
+keeps the reopen timer's median, min and max, every read process's seconds
+and tickers per operation and each tree's load command, so the fit can be
+audited.
 """
 
 from __future__ import annotations
@@ -85,6 +94,8 @@ OPEN_FILES = re.compile(r"--open_files=(-?\d+)")
 PROBE, BLOCK = "rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive"
 SEEK = "rocksdb.sorted.run.seek"
 FILE_OPENS = "rocksdb.no.file.opens"
+REOPENS = research_objective.READ_REOPENS
+REOPEN_NANOS = research_objective.READ_REOPEN_NANOS
 
 
 def parse(text: str, benchmark: str) -> tuple[float, dict[str, float]]:
@@ -174,11 +185,55 @@ def reopen_time(trees: list[dict[str, dict[str, str]]]) -> float:
     return extra_seconds / extra_reopens
 
 
+def reopen_timer(trees: list[dict[str, dict[str, str]]]) -> float:
+    """D-21's reference from one repeat: the capped arm's reopen seconds,
+    by the fork's timer, over its reopens, each summed over the trees and Get
+    benchmarks; trees: [{arm: {benchmark: stdout}}]."""
+    nanos = reopens = 0.0
+    for tree in trees:
+        for b in GETS:
+            _, tickers = parse(tree["capped"][b], b)
+            r, n = tickers.get(REOPENS, 0.0), tickers.get(REOPEN_NANOS, 0.0)
+            if not (r > 0 and n > 0):
+                raise ValueError(f"reopen timer: the capped {b} timed no "
+                                 "reopens; this db_bench does not count them "
+                                 "(D-21)")
+            if r > tickers.get(FILE_OPENS, 0.0):
+                raise ValueError(f"reopen timer: the capped {b} counted {r:.4f} "
+                                 "reopens per Get, more than its "
+                                 f"{tickers.get(FILE_OPENS, 0.0):.4f} opens")
+            nanos += n
+            reopens += r
+    return nanos / reopens / 1e9
+
+
 def read_repeat(trees: list[dict[str, dict[str, str]]]) -> dict[str, float]:
     """One repeat's t_f, t_blk, t_sk (all-open arm) and t_open (both arms);
     trees: [{arm: {benchmark: stdout}}]."""
     return {**marginal_times([tree["all_open"] for tree in trees]),
             "c_open": reopen_time(trees)}
+
+
+def qbar_reopen_checks(rows: list[dict], reference: float,
+                       contract: dict) -> dict[str, list[dict]]:
+    """Each q-bar arm's own time per reopen against the reference, by the
+    contract's reopen_time_check (D-21), per workload family. Reported, not
+    refused: 04 refuses to price an arm whose check fails."""
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        reopens = float(row.get("table_reopens") or "nan")
+        seconds = float(row.get("reopen_seconds") or "nan")
+        try:
+            check, ratio = research_objective.reopen_check(
+                contract, reference, reopens, seconds)
+        except ValueError:
+            check, ratio = "no reopen counters", math.nan
+        out.setdefault(row["workload_family"], []).append(
+            {"run": row.get("result_directory", "?"),
+             "reopens": reopens if math.isfinite(reopens) else None,
+             "ratio": ratio if math.isfinite(ratio) else None,
+             "check": check})
+    return out
 
 
 def arm_open_files(commands: dict[str, str]) -> dict[str, int]:
@@ -294,22 +349,37 @@ def main() -> int:
                   for r in range(1, REPEATS + 1)]
     values = {"c_w": t_w, **{k: [repeat[k] for repeat in per_repeat]
                              for k in ("c_f", "c_blk", "c_sk", "c_open")}}
+    timer = [reopen_timer([{a: {b: stdouts[f"T{t}/r{r}/{a}/{b}"]
+                                for b in READS} for a in ARMS}
+                           for t in SIZE_RATIOS])
+             for r in range(1, REPEATS + 1)]
+    reference = statistics.median(timer)
+    checks = qbar_reopen_checks(rows, reference, contract)
+    for family, runs in sorted(checks.items()):
+        ratios = ", ".join(f"{run['ratio'] or math.nan:.3f} {run['check']}"
+                           for run in runs)
+        print(f"reopen check, {family} q-bar arms (own time per reopen over "
+              f"stage 18's {reference * 1e6:.3f} us): {ratios}")
     per_operation = {}
     for name, text in stdouts.items():
         seconds, tickers = parse(text, name.rsplit("/", 1)[1])
         per_operation[name] = {"seconds": seconds, **{
-            k: tickers.get(k, 0.0) for k in (PROBE, BLOCK, SEEK, FILE_OPENS)}}
+            k: tickers.get(k, 0.0)
+            for k in (PROBE, BLOCK, SEEK, FILE_OPENS, REOPENS, REOPEN_NANOS)}}
     load_commands = {f"T{t}": (args.work / f"T{t}" / "load" / "command.txt")
                      .read_text() for t in SIZE_RATIOS}
     seconds, spread = summarise(values)
     record = {
         "schema": research_objective.PRICES_SCHEMA,
-        "method": "PREREGISTRATION D-15 §3, as amended by D-20",
+        "method": "PREREGISTRATION D-15 §3, as amended by D-20 and D-21",
         "open_files": open_files,
         "currency": contract["prices"]["currency"],
         **prices(seconds, contract),
         "core_seconds_per_unit": seconds,
         "core_seconds_spread": spread,
+        "reopen_timer": {"seconds_per_reopen": reference, "min": min(timer),
+                         "max": max(timer), "values": timer},
+        "qbar_reopen_checks": checks,
         "read_processes_per_operation": per_operation,
         "load_commands": load_commands,
         "price_per_core_second": contract["prices"]["price_per_core_second"],

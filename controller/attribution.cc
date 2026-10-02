@@ -36,6 +36,8 @@ void AttributeSegment(const Segment& seg, std::vector<LevelParts>* parts) {
                   static_cast<double>(r.filter_hits);
     p.seeks += static_cast<double>(r.seeks);
     p.hit_reads += static_cast<double>(r.filter_hits);
+    p.reopens += static_cast<double>(r.get_reopens) +
+                 static_cast<double>(r.iter_reopens);
   }
   if (!seg.l0_due || seg.slot_level < 1 || !InRange(seg.slot_level, *parts) ||
       seg.reads.empty() || seg.k0 <= seg.K0) {
@@ -47,14 +49,18 @@ void AttributeSegment(const Segment& seg, std::vector<LevelParts>* parts) {
   const double fp = share * (static_cast<double>(l0.filter_passes) -
                              static_cast<double>(l0.filter_hits));
   const double seeks = share * static_cast<double>(l0.seeks);
+  const double reopens = share * (static_cast<double>(l0.get_reopens) +
+                                  static_cast<double>(l0.iter_reopens));
   LevelParts& from = (*parts)[0];
   from.slot_out_probes += probes;
   from.slot_out_fp_reads += fp;
   from.slot_out_seeks += seeks;
+  from.slot_out_reopens += reopens;
   LevelParts& to = (*parts)[seg.slot_level];
   to.slot_in_probes += probes;
   to.slot_in_fp_reads += fp;
   to.slot_in_seeks += seeks;
+  to.slot_in_reopens += reopens;
 }
 
 void AttributeJobEnd(const RLJobRecord& job, std::vector<LevelParts>* parts) {

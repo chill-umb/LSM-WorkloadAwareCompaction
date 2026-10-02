@@ -195,8 +195,9 @@ class EndToEndTest(unittest.TestCase):
         self.prices = self.tmp / "prices.json"
         record = {k: v for k, v in PRICES.items() if k != "c_s"}
         self.prices.write_text(json.dumps({
-            "schema": 3, **record,
-            "price_per_core_second": CONTRACT["prices"]["price_per_core_second"]}))
+            "schema": 4, **record,
+            "price_per_core_second": CONTRACT["prices"]["price_per_core_second"],
+            "reopen_timer": {"seconds_per_reopen": 8e-6}}))
         # 27 reads the live contract, which holds q-bar since 2026-10-02 and
         # refuses a --qbar that differs. These runs price with the stand-in
         # --qbar assoc=1000, so 27 sees the contract with q-bar unmeasured.

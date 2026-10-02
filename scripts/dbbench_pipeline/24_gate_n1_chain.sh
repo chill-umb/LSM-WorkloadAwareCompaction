@@ -13,6 +13,12 @@
 #   RESUME=1          after a failed night: 03 skips finished arms (delete a
 #                     failed arm's result and database folders first)
 #   ALLOW_ROOT_DISK=1 when NVME is meant to be on the root filesystem
+#   QBAR_ONLY=1 QBAR_TAG=<tag>
+#                     after a binary change (PREREGISTRATION D-21): reuse Gate
+#                     N1's reports in n1-<workload>, run only the preflight,
+#                     the q-bar arms (into qbar-<workload>-<tag>, so no earlier
+#                     result is touched) and the prices. q-bar itself stays as
+#                     recorded; the arms' mean is printed beside it
 set -Eeuo pipefail
 
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,11 +34,25 @@ source "$PIPELINE_DIR/chain_common.sh"
 # D-16 §6: a workload's run length is the longest of its three cells' rungs.
 rung() { "$PY" "$PIPELINE_DIR/gate_n1_reports.py" "$NVME/n1-$1"; }
 
+QBAR_ONLY="${QBAR_ONLY:-0}"
+QBAR_SUFFIX=""
+if [[ "$QBAR_ONLY" == 1 ]]; then
+  [[ "${QBAR_TAG:-}" =~ ^[A-Za-z0-9_]+$ ]] ||
+    fail "QBAR_ONLY=1 needs QBAR_TAG (letters, digits, _), naming the new q-bar folders"
+  QBAR_SUFFIX="-$QBAR_TAG"
+elif [[ "$QBAR_ONLY" != 0 ]]; then
+  fail "QBAR_ONLY must be 0 or 1"
+fi
+
 # One workload: Gate N1, then its q-bar arms. Run as a child process, so that
 # set -e holds inside it and its failure is reported, not fatal to the other.
 chain() {
   local w="$1" extra=() pids=() failed=0 T chosen size load
   [[ "$w" == powerlaw ]] && extra=("${POWERLAW[@]}")
+  if [[ "$QBAR_ONLY" == 1 ]]; then
+    qbar_arms "$w"
+    return 0
+  fi
   stamp "$w: Gate N1 pilots, native, T = 2/6/10, 3 repeats, 29M at 10% load"
   env ${extra[@]+"${extra[@]}"} EXPERIMENT_ARMS=native SIZE_RATIOS="2 6 10" \
     WORKLOAD_SIZES_M=29 LOAD_PERCENT=10 REPEATS=3 SESSION_ID="gate-n1-$w" \
@@ -55,21 +75,39 @@ chain() {
     fail "$w: an admission run failed; see $NVME/n1-$w/admission_T*.log"
   fi
   [[ "${STOP_AFTER_N1:-0}" == 1 ]] && return 0
+  qbar_arms "$w"
+}
 
+# The q-bar arms at the rung Gate N1 chose (D-14 §2), five native at T=10.
+qbar_arms() {
+  local w="$1" extra=() chosen size load
+  [[ "$w" == powerlaw ]] && extra=("${POWERLAW[@]}")
   chosen="$(rung "$w")"
   read -r size load <<< "$chosen"
   stamp "$w: q-bar arms, five native at T=10, ${size}M at ${load}% load"
   env ${extra[@]+"${extra[@]}"} EXPERIMENT_ARMS=native SIZE_RATIOS=10 \
     WORKLOAD_SIZES_M="$size" LOAD_PERCENT="$load" REPEATS=5 \
-    SESSION_ID="qbar-$w" RESULTS_ROOT="$NVME/qbar-$w" \
-    DB_ROOT="$NVME/qbar-dbs/$w" CONFIRM_EXPERIMENTS=YES \
+    SESSION_ID="qbar-$w$QBAR_SUFFIX" RESULTS_ROOT="$NVME/qbar-$w$QBAR_SUFFIX" \
+    DB_ROOT="$NVME/qbar-dbs$QBAR_SUFFIX/$w" CONFIRM_EXPERIMENTS=YES \
     "$PIPELINE_DIR/03_run_experiments.sh"
-  "$PY" "$PIPELINE_DIR/04_generate_graphs.py" --results "$NVME/qbar-$w" --summary-only
-  "$PY" - "$NVME/qbar-$w/graphs/summary.csv" "$w" <<'PY'
+  "$PY" "$PIPELINE_DIR/04_generate_graphs.py" --results "$NVME/qbar-$w$QBAR_SUFFIX" \
+    --summary-only
+  PYTHONPATH="$PIPELINE_DIR" "$PY" - "$NVME/qbar-$w$QBAR_SUFFIX/graphs/summary.csv" \
+    "$w" "$QBAR_ONLY" <<'PY'
 import csv, statistics, sys
+import research_objective
 rates = [float(r["throughput_ops_per_second"]) for r in csv.DictReader(open(sys.argv[1]))]
-print(f"=== {sys.argv[2]}: q-bar candidate {statistics.fmean(rates):.1f} ops/s "
-      f"(mean of {len(rates)} runs; record it by a dated amendment, D-14 §2)")
+mean = statistics.fmean(rates)
+if sys.argv[3] == "1":
+    family = {"assoc": "assoc", "powerlaw": "powerlaw_get95"}[sys.argv[2]]
+    recorded = research_objective.reference_rate(
+        research_objective.load_contract()[0], family)
+    print(f"=== {sys.argv[2]}: these q-bar arms' mean {mean:.1f} ops/s "
+          f"({len(rates)} runs); q-bar stays as recorded, {recorded:.1f} "
+          f"({(mean / recorded - 1) * 100:+.2f}%; D-21)")
+else:
+    print(f"=== {sys.argv[2]}: q-bar candidate {mean:.1f} ops/s "
+          f"(mean of {len(rates)} runs; record it by a dated amendment, D-14 §2)")
 PY
 }
 
@@ -78,7 +116,14 @@ if [[ "${1:-}" == workload ]]; then
   exit 0
 fi
 
-node_checks n1-assoc n1-powerlaw qbar-assoc qbar-powerlaw n1-dbs qbar-dbs
+if [[ "$QBAR_ONLY" == 1 ]]; then
+  node_checks "qbar-assoc$QBAR_SUFFIX" "qbar-powerlaw$QBAR_SUFFIX" "qbar-dbs$QBAR_SUFFIX"
+  for w in assoc powerlaw; do
+    rung "$w" >/dev/null || fail "QBAR_ONLY=1: no Gate N1 run length in $NVME/n1-$w"
+  done
+else
+  node_checks n1-assoc n1-powerlaw qbar-assoc qbar-powerlaw n1-dbs qbar-dbs
+fi
 
 stamp "preflight (13): builds, tiers 1 and 2, ACT-1, ACT-4 at $NIGHT_PARITY_PAIRS pairs, evaluator smoke"
 CONFIRM_PREFLIGHT_VERIFICATION=YES PARITY_PAIRS="$NIGHT_PARITY_PAIRS" \
@@ -96,8 +141,9 @@ if [[ "${STOP_AFTER_N1:-0}" == 1 ]]; then
   exit 0
 fi
 
-stamp "device prices (18, D-15 §3)"
-CONFIRM_PRICE_CALIBRATION=YES DB_ROOT="$NVME/prices-db" \
+stamp "device prices (18, D-15 §3, D-20, D-21)"
+CONFIRM_PRICE_CALIBRATION=YES DB_ROOT="$NVME/prices-db$QBAR_SUFFIX" \
   "$PIPELINE_DIR/18_calibrate_prices.sh" \
-  "$NVME/qbar-assoc/graphs/summary.csv" "$NVME/qbar-powerlaw/graphs/summary.csv"
+  "$NVME/qbar-assoc$QBAR_SUFFIX/graphs/summary.csv" \
+  "$NVME/qbar-powerlaw$QBAR_SUFFIX/graphs/summary.csv"
 stamp "done"

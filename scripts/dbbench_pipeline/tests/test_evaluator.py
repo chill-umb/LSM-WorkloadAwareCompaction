@@ -9,7 +9,9 @@ and 1500 B (the drain's job 14). Outside it, and never counted: the load's
 7777 B flush and 9999 B compaction, and a 5555 B flush after the drain.
 H is 10000 from op 290, 12000 from 400, 11500 from 500 and 13500 from 800,
 so the held byte-operations are 10000*110 + 12000*100 + 11500*300 +
-13500*200 = 8,450,000.
+13500*200 = 8,450,000. The reads reopen 680 - 100 = 580 tables in it (D-21),
+in 5,730,000 - 800,000 ns, 8.5 us each against prices.json's reference of
+8 us: a ratio of 1.0625, under the contract's minimum of 1000 reopens.
 """
 import hashlib
 import importlib.util
@@ -19,6 +21,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import research_objective
 
@@ -125,13 +128,87 @@ class EvaluatorTest(unittest.TestCase):
         self.assertEqual((row["filter_probes"], row["block_reading_probes"],
                           row["run_seeks"]), (1500, 600, 120))
 
-    def test_reopens_are_opens_less_the_new_files(self):
-        # D-20: 705 - 100 tables opened from n_w to the drain's end; jobs 10
-        # to 14 created 5 SSTs in that window (jobs 2 and 15 fall outside),
-        # each opened once by its own job, a write cost.
+    def test_reopens_are_the_forks_count_and_d20s_is_kept(self):
+        # D-21: the reads' reopens are the fork's ticker, 680 - 100, and their
+        # time 4,930,000 ns. D-20's count stays beside it as a cross-check:
+        # 705 - 100 tables opened from n_w to the drain's end, less the 5
+        # SSTs jobs 10 to 14 created in that window (jobs 2 and 15 fall
+        # outside), each opened once by its own job, a write cost.
         row = self.row()
+        self.assertEqual(row["table_reopens"], 580)
+        self.assertAlmostEqual(row["reopen_seconds"], 4.93e-3, places=12)
         self.assertEqual(row["sst_files_created"], 5)
-        self.assertEqual(row["table_reopens"], 600)
+        self.assertEqual(row["table_opens_less_created"], 600)
+
+    def test_reopen_level_sums_are_checked(self):
+        self.run.edit("host_log.jsonl", "[1000,400,300,70,230,40,2330000]",
+                      "[1000,400,300,70,230,40,2330001]")
+        self.assertIn("rocksdb.read.table.reopen.nanos", self.refusal())
+
+    def with_min_reopens(self, minimum):
+        """The contract with a lower minimum, so this fixture's 580
+        reopens are checked."""
+        contract = json.loads(json.dumps(CONTRACT))
+        contract["prices"]["reopen_time_check"]["min_reopens"] = minimum
+        return mock.patch.object(graphs.research_objective, "load_contract",
+                                 return_value=(contract, CONTRACT_SHA))
+
+    def test_too_few_reopens_are_priced_unchecked(self):
+        row = self.row()
+        self.assertEqual(row["reopen_check"], "too few reopens")
+        self.assertAlmostEqual(row["reopen_time_ratio"], 1.0625)
+        self.assertEqual(row["objective_status"], "priced")
+
+    def test_reopens_within_the_tolerance_are_priced(self):
+        with self.with_min_reopens(500):
+            row = self.row()
+        self.assertEqual(row["reopen_check"], "held")
+        self.assertEqual(row["objective_status"], "priced")
+
+    def test_c_open_that_does_not_hold_leaves_the_arm_unpriced(self):
+        # 8.5 us against a 7 us reference: a ratio of 1.214, beyond 10%.
+        body = json.loads((self.run.dir / "prices.json").read_text())
+        body["reopen_timer"] = {"seconds_per_reopen": 7e-6}
+        self.run.set_prices(json.dumps(body))
+        with self.with_min_reopens(500):
+            row = self.row()
+        self.assertEqual(row["reopen_check"], "does not hold")
+        self.assertAlmostEqual(row["reopen_time_ratio"], 8.5 / 7)
+        self.assertEqual(row["objective_status"], "c_open does not hold")
+        self.assertTrue(math.isnan(row["C_R"]))
+        self.assertTrue(math.isnan(row["J_balanced_cs1"]))
+        # Below it, by the same margin, too.
+        body["reopen_timer"] = {"seconds_per_reopen": 9.5e-6}
+        self.run.set_prices(json.dumps(body))
+        with self.with_min_reopens(500):
+            self.assertEqual(self.row()["reopen_check"], "does not hold")
+
+    def test_a_host_log_before_d21_is_not_priced(self):
+        # A schema-1 log (a binary before D-21): 4-wide rows, no reopen
+        # tickers. Its other counts stand; its reopens are not counted.
+        path = self.run.dir / "host_log.jsonl"
+        lines = []
+        for line in path.read_text().splitlines():
+            record = json.loads(line)
+            if record["type"] == "header":
+                record["schema"] = 1
+            if record["type"] == "stamp":
+                record["levels"] = [row[:4] for row in record["levels"]]
+                for ticker in (research_objective.READ_REOPENS,
+                               research_objective.READ_REOPEN_NANOS):
+                    record["tickers"].pop(ticker, None)
+            lines.append(json.dumps(record))
+        path.write_text("\n".join(lines) + "\n")
+        row = self.row()
+        self.assertEqual(row["objective_status"], "no reopen counters")
+        self.assertTrue(math.isnan(row["table_reopens"]))
+        self.assertEqual(row["table_opens_less_created"], 600)
+        self.assertEqual(row["filter_probes"], 1500)
+
+    def test_a_schema2_log_with_narrow_rows_is_refused(self):
+        self.run.edit("host_log.jsonl", "[1000,400,300,70,230,40,2330000]]",
+                      "[1000,400,300,70]]")
+        self.assertIn("not 7 wide", self.refusal())
 
     def test_more_new_files_than_opens_is_refused(self):
         self.run.edit("host_log.jsonl", '"tickers":{"rocksdb.no.file.opens":705,',
@@ -147,7 +224,7 @@ class EvaluatorTest(unittest.TestCase):
         row = self.row()
         self.assertEqual(row["objective_status"], "priced")
         costs = (1e-9 * 10500,
-                 1e-8 * 1500 + 1e-7 * 600 + 1e-6 * 120 + 1e-5 * 600,
+                 1e-8 * 1500 + 1e-7 * 600 + 1e-6 * 120 + 1e-5 * 580,
                  C_S / 100 * 8_450_000)
         for name, value in zip(("C_W", "C_R", "C_S"), costs):
             self.assertAlmostEqual(row[name] / value, 1.0, places=12)
@@ -211,12 +288,16 @@ class EvaluatorTest(unittest.TestCase):
         self.assertEqual(self.row()["objective_status"], "no reference rate")
 
     def test_bad_prices_are_refused(self):
-        good = {"schema": 3, "c_w": 1e-9, "c_f": 1e-8, "c_blk": 1e-7,
+        good = {"schema": 4, "c_w": 1e-9, "c_f": 1e-8, "c_blk": 1e-7,
                 "c_sk": 1e-6, "c_open": 1e-5, "price_per_core_second":
-                CONTRACT["prices"]["price_per_core_second"]}
+                CONTRACT["prices"]["price_per_core_second"],
+                "reopen_timer": {"seconds_per_reopen": 8e-6}}
         for key, value, text in (("c_f", 0, None), ("c_w", True, None),
                                  ("c_open", None, None), ("c_s", 1e-16, None),
-                                 ("c_w", None, '"c_w": Infinity')):
+                                 ("c_w", None, '"c_w": Infinity'),
+                                 ("reopen_timer", None, None),
+                                 ("reopen_timer", {"seconds_per_reopen": 0},
+                                  None)):
             with self.subTest(key=key, value=value):
                 run = Run()
                 self.addCleanup(run.close)
@@ -229,9 +310,11 @@ class EvaluatorTest(unittest.TestCase):
 
     def test_prices_not_per_core_second_are_refused(self):
         # D-15 §3a: the draft schema-1 file, or another core price; D-20:
-        # a schema-2 file, whose c_f carried the price runs' reopens.
+        # a schema-2 file, whose c_f carried the price runs' reopens; D-21:
+        # a schema-3 file, with no reopen-time reference.
         body = json.loads((self.run.dir / "prices.json").read_text())
         for bad in ({**body, "schema": 1}, {**body, "schema": 2},
+                    {**body, "schema": 3},
                     {**body, "price_per_core_second": 1e-4}):
             with self.subTest(bad=bad):
                 run = Run()

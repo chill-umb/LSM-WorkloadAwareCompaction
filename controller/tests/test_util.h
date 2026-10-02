@@ -68,6 +68,7 @@ inline Config TestConfig(Mode mode = Mode::kHoldOnly,
   c.c_f = 100;
   c.c_blk = 1000;
   c.c_sk = 2000;
+  c.c_open = 5000;
   c.c_s = 0.001;
   c.q_bar = 1000;
   c.setoptions_min_interval_ms = 100;
@@ -123,6 +124,9 @@ inline View TestView(int n = 6, double T = 2) {
   v.fp_reads.assign(n, 300);
   v.hit_reads.assign(n, 5000);
   v.seeks.assign(n, 10000);
+  // No reopens unless a test sets them (D-21), so the prices are c_f's.
+  v.get_reopens.assign(n, 0);
+  v.iter_reopens.assign(n, 0);
   v.rho.assign(n, 0.9);
   v.xi.assign(n, 0.3);
   v.overlap.assign(n, 1.5);
@@ -198,6 +202,7 @@ inline std::map<std::string, std::string> BaseConfig(const std::string& dir) {
           {"c_f", "100"},
           {"c_blk", "1000"},
           {"c_sk", "2000"},
+          {"c_open", "5000"},
           {"c_s", "0.001"},
           {"q_bar", "1000"},
           {"setoptions_min_interval_ms", "100"},
