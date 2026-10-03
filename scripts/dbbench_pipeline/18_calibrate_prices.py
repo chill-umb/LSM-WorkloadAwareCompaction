@@ -275,7 +275,9 @@ def write_runs(rows: list[dict], db_bench_sha256: str,
                 number(row, "settle_ok") != 1):
             raise ValueError(f"{where}: not a settled native arm at T=10")
         if row.get("dbbench_sha256") != db_bench_sha256:
-            raise ValueError(f"{where}: ran another db_bench binary")
+            raise ValueError(f"{where}: ran another db_bench binary "
+                             f"({row.get('dbbench_sha256')}, not "
+                             f"{db_bench_sha256}; executable plus librocksdb)")
         seconds = number(row, "sst_write_seconds")
         written = number(row, "sst_bytes_written")
         if not (math.isfinite(seconds) and seconds > 0 and
@@ -324,7 +326,10 @@ def main() -> int:
     parser.add_argument("--write-summary", type=Path, action="append",
                         required=True,
                         help="04 summary.csv of the q-bar native arms; repeatable")
-    parser.add_argument("--db-bench-sha256", required=True)
+    parser.add_argument("--db-bench-sha256", required=True,
+                        help="db_bench's identity as loaded (executable plus "
+                             "librocksdb; preflight_marker.py identity), the "
+                             "value 03 records as each arm's dbbench_sha256")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--check-writes", action="store_true",
                         help="only check the write runs, before the node time")

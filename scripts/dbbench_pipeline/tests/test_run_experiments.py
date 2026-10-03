@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import fingerprint as select
+import preflight_marker
 import research_objective
 
 PIPELINE = Path(__file__).resolve().parents[1]
@@ -78,6 +79,7 @@ class RunExperimentsTest(unittest.TestCase):
         cls.ran = run03(root, EXPERIMENT_ARMS="native static:uniform_0_75 "
                         "static:held", STATIC_PROFILE_held="1:1:2:1")
         cls.cell = root / "results" / "1M" / "T2"
+        cls.db_bench = root / "build" / "db_bench"
         cls.scored = run04(root / "results")
 
     @classmethod
@@ -122,6 +124,11 @@ class RunExperimentsTest(unittest.TestCase):
         self.assertEqual(held["level_target_multipliers"], "1x1x2x1")
         self.assertEqual(native["settle_hold_seconds"], 10)
         self.assertEqual(len(native["prices_sha256"]), 64)
+        # The binary is db_bench's identity as loaded, the value the marker,
+        # 18 and gate_n2_plan compute (preflight_marker.db_bench_identity).
+        identity = preflight_marker.db_bench_identity(self.db_bench)
+        self.assertEqual(native["dbbench_sha256"], identity)
+        self.assertEqual(self.metadata("native")["dbbench_sha256"], identity)
         # q-bar as the contract records it now (null until the amendment).
         self.assertEqual(native["reference_rate"],
                          research_objective.reference_rate(CONTRACT, "assoc"))

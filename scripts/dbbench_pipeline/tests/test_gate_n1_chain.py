@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import preflight_marker
+
 PIPELINE = Path(__file__).resolve().parents[1]
 REPO = PIPELINE.parents[1]
 FAKE = PIPELINE / "tests" / "fixtures" / "chain" / "fake_db_bench.py"
@@ -161,6 +163,9 @@ class ChainTest(unittest.TestCase):
         self.assertEqual(ran.stdout.count("q-bar stays as recorded"), 2)
         prices = json.loads((self.root / "build-dbbench" / "prices.json").read_text())
         self.assertEqual(prices["schema"], 4)
+        # 18 and 03 record one identity: db_bench as loaded.
+        self.assertEqual(prices["db_bench_sha256"], preflight_marker.db_bench_identity(
+            self.root / "build-dbbench" / "db_bench"))
         self.assertEqual(len(prices["write_summaries_sha256"]), 2)
         self.assertTrue(all("-d21" in path for path in prices["write_summaries_sha256"]))
         self.assertIn("reopen check, assoc q-bar arms", ran.stdout)

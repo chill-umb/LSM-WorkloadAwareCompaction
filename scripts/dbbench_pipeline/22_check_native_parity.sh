@@ -49,6 +49,13 @@ for arm in "${ARMS[@]}"; do
     exit 1
   }
 done
+# Each arm's db_bench as loaded: the executable plus its own librocksdb (the
+# stock build loads the stock library from its build directory).
+declare -A IDENTITY=()
+for arm in "${ARMS[@]}"; do
+  IDENTITY[$arm]="$("$PYTHON" "$PIPELINE_DIR/preflight_marker.py" identity \
+    --db-bench "${BINARY[$arm]}")"
+done
 if [[ "$PARITY_CHECK" == arch5 ]]; then
   [[ "$CONTROLLER_PLUGIN" = /* ]] && PLUGIN_PATH="$CONTROLLER_PLUGIN" \
     || PLUGIN_PATH="$PROJECT_ROOT/$CONTROLLER_PLUGIN"
@@ -126,7 +133,7 @@ for (( pair = 1; pair <= PARITY_PAIRS; pair++ )); do
     cp "$DB_DIR/LOG" "$dir/rocksdb_LOG.txt" 2>/dev/null || true
     {
       printf 'arm=%s\npair=%s\nseed=%s\nexit_code=%s\n' "$arm" "$pair" "$seed" "$status"
-      printf 'db_bench_sha256=%s\n' "$(sha256sum "${BINARY[$arm]}" | awk '{print $1}')"
+      printf 'db_bench_sha256=%s\n' "${IDENTITY[$arm]}"
     } > "$dir/metadata.env"
     rm -rf "$DB_DIR"
     (( status == 0 )) || {

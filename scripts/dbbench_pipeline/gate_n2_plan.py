@@ -18,7 +18,8 @@ PREREGISTRATION D-13 §4-5, D-14 §3, D-15 §3, D-19).
   check --prices <file> --db-bench <file> <workload>...
                         refuses unless q-bar is recorded for each workload and
                         the prices file is one 04 prices with, measured on
-                        this db_bench
+                        this db_bench (its identity as loaded: executable
+                        plus librocksdb, preflight_marker.db_bench_identity)
 
 Order within one (workload, T): every native and uniform_0_75 arm, repeat by
 repeat across the points; then 23 at each point; then the measured profiles,
@@ -299,12 +300,19 @@ def check(args) -> int:
             problems.append(f"q-bar for {w} ({f}) is not recorded in "
                             "config/research_objective_contract.json; D-13 §1 and "
                             "D-14 §2 freeze it before any Theta_s run")
+    # db_bench as loaded (executable plus its librocksdb), as 18 records it.
+    try:
+        identity = preflight_marker.db_bench_identity(args.db_bench)
+    except (OSError, preflight_marker.IdentityError) as error:
+        identity = None
+        problems.append(f"cannot identify db_bench {args.db_bench}: {error}")
     try:
         record = json.loads(args.prices.read_text())
         research_objective.checked_prices(record, contract)
-        if record.get("db_bench_sha256") != preflight_marker.file_sha256(args.db_bench):
+        if identity is not None and record.get("db_bench_sha256") != identity:
             raise ValueError(f"measured on db_bench {record.get('db_bench_sha256')}, "
-                             f"not on {args.db_bench}; D-15 §3e re-measures them "
+                             f"not on {args.db_bench} ({identity}, executable "
+                             "plus librocksdb); D-15 §3e re-measures them "
                              "after any binary change")
     except (OSError, ValueError, KeyError, AttributeError) as error:
         problems.append(f"prices {args.prices}: {error}; run 18 (D-15 §3e)")

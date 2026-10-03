@@ -90,7 +90,10 @@ if (( USES_SERVER )); then
   exit 1
 }
 fi
-DBBENCH_SHA256="$(sha256sum "$DB_BENCH" | awk '{print $1}')"
+# The binary's identity (metadata dbbench_sha256, fingerprint binary<sha>):
+# db_bench as loaded, i.e. the executable plus the librocksdb it loads, where
+# all the fork's code is. A file hash of db_bench alone misses a fork change.
+DBBENCH_SHA256="$("$PYTHON" "$PIPELINE_DIR/preflight_marker.py" identity --db-bench "$DB_BENCH")"
 # Written by 01_build_rocksdb.sh. A build directory predating it records the
 # architecture as unrecorded rather than blocking the run.
 BUILD_PROVENANCE="$(dirname "$DB_BENCH")/build_provenance.env"

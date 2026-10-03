@@ -34,4 +34,7 @@ ROCKSDB_SOURCE_DIR="$STOCK_SOURCE_DIR" DBBENCH_BUILD_DIR="$STOCK_BUILD_DIR" \
 DBBENCH_BUILD_DIR="$STOCK_BUILD_DIR" "$PIPELINE_DIR/02_build_db_bench.sh"
 printf 'rocksdb_commit=%s\n' "$STOCK_ROCKSDB_COMMIT" \
   >> "$STOCK_BUILD_DIR/build_provenance.env"
-echo "[stock] db_bench sha256: $(sha256sum "$STOCK_BUILD_DIR/db_bench" | awk '{print $1}')"
+# The executable plus the stock librocksdb it loads (preflight_marker.py).
+stock_identity="$(python3 "$PIPELINE_DIR/preflight_marker.py" identity \
+  --db-bench "$STOCK_BUILD_DIR/db_bench" --explain)"
+echo "[stock] db_bench identity (executable + librocksdb): $stock_identity"

@@ -51,7 +51,10 @@ rm -f "$PREFLIGHT_MARKER"
 echo "=== step 1: rebuild the Release db_bench and the plugin ==="
 "$PIPELINE_DIR/01_build_rocksdb.sh"
 "$PIPELINE_DIR/02_build_db_bench.sh"
-echo "db_bench sha256: $(sha256sum "$DB_BENCH" | awk '{print $1}')"
+# The identity 03 and the marker bind: the executable plus its librocksdb.
+DB_BENCH_IDENTITY="$("$PYTHON" "$PIPELINE_DIR/preflight_marker.py" identity \
+  --db-bench "$DB_BENCH" --explain)"
+echo "db_bench identity (executable + librocksdb): $DB_BENCH_IDENTITY"
 if [[ -d controller ]]; then
   # The plugin needs only the fork's headers, so it has its own small tree.
   # Step 7 binds its hash into the marker, and 03 checks it.

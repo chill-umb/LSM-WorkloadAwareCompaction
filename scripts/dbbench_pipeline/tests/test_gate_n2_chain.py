@@ -8,7 +8,6 @@ point, one session, each vector at its own point, a refused profile skipped);
 RESUME keeping a point's vectors; a top-up and the cross-T mode, started from
 another folder; a failure of 23 stopping one workload while the other
 finishes; and the refusals before any run."""
-import hashlib
 import importlib.util
 import json
 import os
@@ -18,6 +17,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import preflight_marker
 
 PIPELINE = Path(__file__).resolve().parents[1]
 REPO = PIPELINE.parents[1]
@@ -97,7 +98,8 @@ class GateN2ChainTest(unittest.TestCase):
         self.prices = {
             "schema": 4,
             "price_per_core_second": contract["prices"]["price_per_core_second"],
-            "db_bench_sha256": hashlib.sha256(db_bench.read_bytes()).hexdigest(),
+            # 18 records db_bench's identity as loaded, not its file hash.
+            "db_bench_sha256": preflight_marker.db_bench_identity(db_bench),
             "c_w": 1e-14, "c_f": 1e-11, "c_blk": 2e-11, "c_sk": 4e-11,
             "c_open": 2e-10, "reopen_timer": {"seconds_per_reopen": 8e-6}}
         (self.root / "build-dbbench" / "prices.json").write_text(json.dumps(self.prices))

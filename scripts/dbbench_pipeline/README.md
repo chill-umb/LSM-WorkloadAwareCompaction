@@ -26,6 +26,21 @@ the `db_bench` binary or the code in `rl_agent/`, `controller/` or this
 directory has changed since, or when a step the run's arms need was skipped
 (static arms need steps 1–4, `hold` and `rules` also 5, learned arms 1–6).
 
+**The binary's identity.** `db_bench` is a small executable that loads the
+fork's code from `librocksdb.so.<N>` in its build directory, so a hash of the
+`db_bench` file alone does not change when only the fork is rebuilt (it
+missed 31e087505 → 8e903efd9 on 2026-10-02). Every stage therefore records
+and compares one identity: a sha256 over the executable's bytes and the
+bytes of each `librocksdb` the dynamic loader resolves for it (via `ldd`;
+just the executable when RocksDB is linked in statically). It is computed in
+one place, `preflight_marker.db_bench_identity`, and bash stages call
+`preflight_marker.py identity --db-bench <path> [--explain]`. The names are
+unchanged: the marker's `db_bench_sha256`, each arm's `dbbench_sha256` and
+fingerprint segment `binary<sha>`, the prices' `db_bench_sha256` (18), 22's
+`db_bench_sha256`, and gate_n2_plan's prices check. A RocksDB library the
+loader cannot find stops the stage. Values recorded before this change are
+file hashes of `db_bench` alone and never match the new identity.
+
 **Controller arms** (`hold`, `rules`; plan §7 step 8). `03` loads the plugin
 (`--rl_plugin`) at the first mixgraph operation and destroys it after the
 drain. `plugin_config.py` composes each arm's config from the D-18 bounds

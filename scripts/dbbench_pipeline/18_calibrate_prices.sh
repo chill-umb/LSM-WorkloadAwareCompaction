@@ -42,7 +42,9 @@ fi
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
 [[ -x "$DB_BENCH" ]] || { echo "Missing $DB_BENCH; run 01 and 02." >&2; exit 1; }
-DB_BENCH_SHA256="$(sha256sum "$DB_BENCH" | awk '{print $1}')"
+# The prices' db_bench_sha256: db_bench's identity as loaded (the executable
+# plus its librocksdb), the value 03 records as each arm's dbbench_sha256.
+DB_BENCH_SHA256="$("$PYTHON" "$PIPELINE_DIR/preflight_marker.py" identity --db-bench "$DB_BENCH")"
 summaries=()
 for summary in "$@"; do
   summaries+=(--write-summary "$summary")
