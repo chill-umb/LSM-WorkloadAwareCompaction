@@ -1453,6 +1453,276 @@ with no changes.** All five of §2's operator-proposed rules stand as written:
 **Falsification.** This entry fails as a record if any of it is changed
 after the first run it governs has started.
 
+### D-22, 2026-10-03 — the read prices are measured on archived trees, at six size ratios in three builds, and must reproduce within 3% in a second session
+
+**Recorded after the d21id chain's prices (stage 18, 2026-10-03 11:42 UTC)
+and before any official run is priced under the prices it governs.** It amends D-15 §3
+(the trees, the repeats and the medians of $c_f$, $c_{blk}$ and $c_{sk}$) and
+leaves D-20's $c_{open}$ method and D-21's reopen timer unchanged. The owner
+made three choices on 2026-10-03, on the node operator's proposal:
+- 18 archived trees: $T$ = 2, 3, 4, 6, 8 and 10, three builds of each; the
+  capped arm only on build 1's trees at $T$ = 2, 6 and 10;
+- a second session must reproduce every read price within **3%**;
+- the trees are archived as `.tgz` files, kept on Chameleon storage for at
+  most a week, with the lasting copy on the owner's own machine, from which
+  any later node receives them.
+
+On the same day the owner also chose:
+- (f): a reboot of the node between the two sessions;
+- (g): one shared set of prices for every node that reproduces them within
+  3%;
+- (h): the sensitivity reports.
+
+The owner requires this before any price is final: "If this varies between
+sessions, then this is not a publishable result." The rules in §2 that turn
+these choices into code are the operator's proposal. The owner confirms them
+before §6's runs start.
+
+**Data seen before this entry:**
+- `build-dbbench/prices.d20.json` (2026-10-02 17:28 UTC) and
+  `prices.d21.json` (23:44 UTC), every read process's seconds and tickers
+  among them;
+- the library A/B report, `~/node_ops/reports/2026-10-03-0711-ab-library.md`;
+- the operator's plots of the two sessions' read points,
+  `~/node_ops/reports/stage18-points/` (CSV, `c_f.png`, `c_sk.png`);
+- the d21id chain's stage 18 prices, `build-dbbench/prices.json`
+  (2026-10-03 11:42 UTC, schema 4), which are provisional under this entry.
+
+**1. Why.**
+- **Two prices moved between sessions; three did not.** From the D-20
+  session to the D-21 session, $c_f$ went from 192.7 to 211.5 ns (+9.7%)
+  and $c_{sk}$ from 1657 to 1802 ns (+8.7%). $c_{blk}$ moved +0.5%,
+  $c_{open}$ −0.3% and $c_w$ −0.3%. A third session (d21id, 2026-10-03
+  11:42 UTC) gave $c_f$ 195.3 ns and $c_{sk}$ 1804 ns. $c_{blk}$, $c_{open}$
+  and $c_w$ again moved 1% or less.
+- **The library did not cause it.** The same-session A/B found the new
+  library at most 1.7% slower on filter-rejected Gets at $T$ = 10, unchanged
+  at $T$ = 2, and faster on seeks.
+- **The reported spread hid the movement.** Each session's five repeats ran
+  on one load of each tree, so their range shows only timing noise on that
+  load. The two sessions' ranges do not overlap: $c_f$ 187–199 ns, then
+  207–220 ns; $c_{sk}$ 1653–1675 ns, then 1747–1819 ns.
+- **The trees differ at every load.** The data is fixed (`--seed=1`); the
+  layout is not, because flushes and compactions run on background threads.
+  At $T$ = 2, filter probes per missing Get were 4.52, 4.73 and 4.58 in
+  three loads.
+- **One tree decides the slopes.** Filter probes per missing Get were
+  2.67–2.75 at $T$ = 6, 2.99 at $T$ = 10 and 4.52–4.73 at $T$ = 2. The two
+  larger ratios sit together, so each slope is in effect $T$ = 2 against
+  the other two.
+- **Some of the movement is not layout.** At $T$ = 2 the run seeks per seek
+  were the same in both sessions (7.563 and 7.559), but a seek took 4.3%
+  longer (13.08 to 13.65 µs). That is either the machine or a property of
+  the tree the counts miss. Rebuilt trees cannot tell the two apart; the
+  same bytes measured twice can.
+- **The two Get benchmarks disagree on $c_f$.** Fitted alone, per repeat
+  and then the median, `readmissing` gives 214, 219 and 216 ns per probe in
+  the three sessions, and `readrandom` 194, 264 and 221 ns. D-15 §3(c) fits
+  one shared slope, so `readrandom`'s changes moved $c_f$.
+
+**2. Decision.**
+- **(a) The trees.** 18 trees: $T$ ∈ {2, 3, 4, 6, 8, 10}, three builds of
+  each. Build $b$ of every $T$ forms set $b$ (b = 1, 2, 3). Each is built as
+  D-15 §3(b) builds today: `filluniquerandom` of the Programme 1 load
+  (2.9M keys, `--seed=1`), the pipeline's default options ($K_0$ = 4, base
+  16 MiB), `open_files` as the experiments, then `settle`, then
+  `levelstats`. A build whose `settle` does not end `ok=1` is discarded and
+  rebuilt, and that is reported. The builds run one at a time, pinned as
+  every run is.
+- **(a′) Age-based compaction is off in every price run.** The build and
+  every session pass `--ttl_seconds=0 --periodic_compaction_seconds=0`. By
+  default this fork compacts any file older than 30 days
+  (`db/column_family.cc:423-428`, `ttl` for block-based tables). An archived
+  tree opened more than 30 days after its build would otherwise compact
+  itself on open. The experiments never run for 30 days, so this changes
+  nothing they do.
+- **(b) The archive and its identity.**
+  - Each tree, as the build process leaves it, becomes one `.tgz` (names
+    sorted, numeric owners, `gzip -n`). The files' own time stamps are kept,
+    since RocksDB may read a file's modification time as its age.
+  - `MANIFEST.sha256` lists the sha256 of every file of every tree, and of
+    every `.tgz`. **The tree-set identity is the sha256 of that manifest.**
+  - A dated build record, a new entry, gives the identity, each tree's files
+    and bytes per level, the building binary's identity, and each build's
+    `settle` outcome.
+  - The archive is kept on Chameleon storage for at most a week. The lasting
+    copy is on the owner's own machine, checked against the manifest after
+    the transfer. Any later node receives it from there and checks it again.
+- **(c) One measurement session.**
+  - The sets run in order 1, 2, 3. For each set, its six trees are unpacked
+    from the archive into fresh folders under `DB_ROOT`, every file is
+    checked against the manifest, and each tree gets one unscored
+    `readrandom` of 1,000,000 operations to warm the page cache, as today.
+  - **Three rounds per set.** A round visits all six trees once and runs
+    `readmissing`, `readrandom` and `seekrandom` (`seek_nexts` 0) on each,
+    1,000,000 operations each, in its own process, all-open
+    (`open_files` −1). The visiting order rotates. Round 1 visits
+    2, 3, 4, 6, 8, 10; round 2 visits 4, 6, 8, 10, 2, 3; round 3 visits
+    8, 10, 2, 3, 4, 6. Slow drift within a set then falls on every tree
+    alike.
+  - **The $c_{open}$ block** runs after set 1's rounds, on set 1's trees at
+    $T$ = 2, 6 and 10. It is D-20 §2(b)'s procedure, unchanged: five
+    repeats, every read benchmark in both arms, the arms' order alternating
+    by repeat.
+  - After the session, every SST file named in the manifest must be present
+    and unchanged, and no other SST file may exist. Opening a database
+    writes new MANIFEST, OPTIONS and LOG files. That is expected, and it is
+    why every session starts from the archive, never from a copy that was
+    already opened.
+  - One session needs one binary. Its identity (6d80a52's sha256 over
+    db_bench and its librocksdb) and the tree-set identity go into
+    `prices.json`, with the kernel, the CPU governor, the free memory and
+    the uptime at the start.
+- **(d) Fits and prices.**
+  - Each (set, round) gives one $t_f$ and one $t_{blk}$, from D-15 §3(c)'s
+    fit over its 12 Get points (six trees, two benchmarks). It gives one
+    $t_{sk}$, from the least-squares slope over its six `seekrandom`
+    points. That is nine values of each per session.
+  - A session's price is the median of its nine values. Its minimum and
+    maximum, and each set's median, are reported.
+  - $c_{open}$ and the reopen-timer reference come from the $c_{open}$ block,
+    by D-20 §2(b) and D-21, each the median of its five repeats.
+- **(e) Reported, not refused.** For every (set, round), `prices.json`
+  keeps:
+  - `readmissing`'s and `readrandom`'s slopes, each fitted alone;
+  - each tree's residual from the fitted line.
+
+  It also keeps D-15 §3's three-tree values on the $c_{open}$ block's
+  all-open runs, the old method on the new trees, as a bridge to D-20 and
+  D-21.
+
+  **A seek's reopen, checked against a Get's.** D-20 §2(b) prices seeks'
+  reopens at the Gets' $c_{open}$, an assumption no number tested. The
+  $c_{open}$ block's `seekrandom` runs now test it. Their capped arm's
+  extra seconds over the all-open arm's, divided by its extra opens, give a
+  seek-based $c_{open}$, which is reported beside the Gets' value. On D-20's
+  and D-21's runs it was 10.5–10.7 µs, against 10.41–10.44 µs from the
+  Gets, at equal run seeks per seek in both arms.
+- **(f) The reproducibility test.**
+  - Two sessions, A and B, on the same binary and the same archive. Each
+    unpacks every tree afresh.
+  - The node is rebooted between them (`sudo reboot`), so session B
+    starts from a fresh boot, as any new node does.
+  - **It passes when each of $c_f$, $c_{blk}$, $c_{sk}$, $c_{open}$ and the
+    reopen-timer reference satisfies $|B - A| \le 0.03 \cdot (A + B)/2$.**
+    All five must pass.
+  - **On a pass,** each final price is the median of both sessions' values
+    (18 for $c_f$, $c_{blk}$ and $c_{sk}$; 10 for $c_{open}$ and the
+    reference), with the minimum and maximum reported. The pooled range is
+    the published uncertainty.
+  - **On a fail,** no price is final. The operator reports which price
+    failed, with the per-set and per-tree breakdown. **The test is not run
+    again until a new dated entry says what changes;** it is never repeated
+    until it passes.
+- **(g) A new node or a new binary.**
+  - It runs one session on the archived trees.
+  - If all five prices are within 3% of the final prices by (f)'s rule, the
+    final prices stand for that node or binary.
+  - If any is not, no run on that node or binary is priced until a dated
+    entry decides.
+  - This is OBJ-2's re-measurement on a hardware change. It replaces
+    rebuilding the trees.
+- **(h) Sensitivity.** Each gate's verdict is also computed with $c_f$ and
+  $c_{sk}$ both at the minimum of their pooled range, and both at the
+  maximum. They are reported beside the main result, as OBJ-2 already
+  reports every result at $c_s/2$ and $2c_s$. This is not a gate.
+- **(i) Refusals added to D-15 §3(d) and D-20 §2(c).** Stage 18 writes no
+  prices when:
+  - an unpacked file's sha256 differs from the manifest;
+  - after the session, an SST file named in the manifest is changed or
+    missing, or an SST file outside it exists (a compaction ran during the
+    reads);
+  - the archive's tree-set identity differs from the build record's;
+  - a set's six trees span less than D-15 §3(d)'s 1 probe per missing Get,
+    or 1 run seek per seek.
+- **(j) `prices.json` becomes schema 5.** It holds the tree-set identity,
+  both sessions' values, (e)'s diagnostics and the test's outcome.
+  - The official chains (`25` and later), `27` and `gate_n2_plan` refuse a
+    file whose test did not pass.
+  - `04` and `plugin_config` accept one only for a run marked diagnostic,
+    and write "provisional prices" into every output.
+  - Every price measured before this entry (D-20, D-21, d21id) is
+    provisional.
+
+**3. Assumptions, stated.**
+- **Three builds sample the layout's variation.** That is a small sample:
+  the pooled range is reported as observed, not as a confidence interval.
+- **Reads do not change a tree.** Leveled RocksDB has no read-triggered
+  compaction, the trees are settled, and (a′) turns off the age-based
+  compactions. (c) checks this every session.
+- **One set fits in memory.** Six trees of about 3.1 GB each, about 19 GB,
+  sit inside the node's 60 GB, so a round's reads stay warm-cache, as the
+  experiments' do.
+- **A later binary reads the archived trees as they are.** RocksDB reads
+  older table formats. The building binary is recorded; the measuring
+  binary's identity goes into each session's `prices.json`.
+- **The machine's state is recorded, not controlled,** beyond the pinning,
+  the `performance` governor and SMT being off.
+
+**4. Unchanged.**
+- D-15 §3's model: one shared slope for both Get benchmarks, an intercept
+  for each Get's fixed overhead, one thread, 1,000,000 operations per run,
+  warm cache, `dio0`.
+- D-20's $c_{open}$ method and refusals. D-21's timer and the 10% check
+  every run makes.
+- $c_w$, from the $\bar q$ arms' own jobs (D-14 §2, D-21). It moved 0.3%
+  between the D-20 and D-21 sessions, and it is not part of (f)'s test.
+- The money conversion, at the contract's price per core-second.
+
+**5. Implementation (operator).**
+- A new numbered stage, `29_build_price_trees.sh`, does (a) and (b). It
+  builds, checks `settle`, records `levelstats`, writes the manifest and the
+  `.tgz` files, and verifies them by unpacking.
+- `18_calibrate_prices.sh` and `.py` do (c) to (e) and (i). The read
+  benchmarks and the fits keep D-15's and D-20's code. The trees, the
+  rounds and the medians are new.
+- A comparison, `18_calibrate_prices.py compare A B`, does (f) and writes
+  the final schema-5 `prices.json`.
+- `research_objective.PRICES_SCHEMA` becomes 5, and the consumers in (j)
+  are changed to match.
+- The contract is edited in place, with this entry as the reason:
+  - `prices.device_times` names the six ratios, the three builds, the
+    archive and the test;
+  - a new key `prices.reproducibility_tolerance` = 0.03 is added.
+- Tier-1 tests cover:
+  - the manifest check (a changed file, an extra SST);
+  - (a′)'s two flags in every build and session command;
+  - the rotation order;
+  - the nine-value medians on fixtures;
+  - the seek-based $c_{open}$ check of (e);
+  - the 3% comparison at its edges;
+  - the schema-5 refusals.
+- New scripts get `.gitignore` `!` rules and `git add --chmod=+x`.
+
+**6. Node order.**
+1. The owner commits this entry.
+2. The operator implements §5. Tier 1 passes, then the preflight, which
+   writes a new marker (the code hash changes).
+3. `29` builds and archives the trees: about 25 minutes. The dated build
+   record follows.
+4. Session A: about 45 minutes. A reboot follows.
+5. Session B: about 45 minutes. Then `compare`, and the dated verdict
+   record.
+6. The owner copies the archive to their own machine and checks it against
+   the manifest.
+
+Steps 3 to 5 take about 2 hours of node time, plus the transfer. Today's
+stage 18 takes 22 minutes per session.
+
+**Predictions, made in advance.**
+- $c_{blk}$, $c_{open}$ and the reopen-timer reference agree between A and
+  B within 1%. On rebuilt trees they already moved 0.5% or less.
+- $c_f$ and $c_{sk}$ pass at 3% if the D-20/D-21 movement came from the
+  trees' layout, as the A/B report reads it. If $T$ = 2's longer seeks at
+  equal seek counts came from the machine, $c_{sk}$ may fail, and the same
+  bytes measured twice will show it.
+- No prediction is made for the new prices' level. Six trees can give a
+  different slope from three. None is made either for whether the two Get
+  benchmarks' own slopes agree.
+
+**Falsification.** This entry fails as a record if any part of it is
+changed after session A starts. A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured
