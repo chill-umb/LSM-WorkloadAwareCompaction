@@ -186,12 +186,22 @@ PARITY_STALL_FRACTION_MARGIN="${PARITY_STALL_FRACTION_MARGIN:-0.02}"
 # settle step waits for compaction and then holds h_w seconds with nothing
 # due; every mixgraph operation is then scored, on native and static arms.
 SETTLE_HOLD_SECONDS="${SETTLE_HOLD_SECONDS:-10}"
-# Money prices (OBJ-2), written by 18_calibrate_prices.sh on the node. 03
-# copies the file into every arm and records its hash in the fingerprint; an
-# arm run before it exists is scored without J (04: "no prices").
+# Money prices (OBJ-2), written by "18_calibrate_prices.py compare" from two
+# of 18's sessions (D-22 f). 03 copies the file into every arm and records
+# its hash in the fingerprint; an arm run before it exists is scored without
+# J (04: "no prices").
 PRICES_FILE="${PRICES_FILE:-$DBBENCH_BUILD_DIR/prices.json}"
 # 18's read benchmarks (D-15 §3): operations per process.
 PRICE_READS="${PRICE_READS:-1000000}"
+# 18's sessions (PREREGISTRATION D-22 c): each its own folder, never
+# overwritten; "18_calibrate_prices.py compare" turns two into PRICES_FILE.
+PRICE_SESSIONS_DIR="${PRICE_SESSIONS_DIR:-$DBBENCH_BUILD_DIR/price-sessions}"
+# A run marked diagnostic (D-22 j) may be priced with provisional prices: a
+# schema-4 file, or a schema-5 file of one session or of a failed test. 04
+# and the plugin config refuse them otherwise, and every output of a run
+# priced with them says "provisional prices". The preflight's smoke runs
+# (PLUGIN_PLACEHOLDERS=1) are diagnostic by definition.
+DIAGNOSTIC_RUN="${DIAGNOSTIC_RUN:-0}"
 
 # PREREGISTRATION D-16 §2: every Programme 1 tree loads the same keys, and a
 # longer run lengthens mixgraph only. The count is the rungs' common load in

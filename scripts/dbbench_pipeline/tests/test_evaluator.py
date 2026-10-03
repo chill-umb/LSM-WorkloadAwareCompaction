@@ -308,6 +308,39 @@ class EvaluatorTest(unittest.TestCase):
                 self.run = run
                 self.assertIn(key, self.refusal())
 
+    def test_final_prices_price_the_run(self):
+        row = self.row()
+        self.assertEqual(row["prices_status"], "final")
+        self.assertEqual(row["objective_status"], "priced")
+
+    def test_provisional_prices_price_only_a_diagnostic_run(self):
+        # D-22 (j): a schema-4 file, one session's, or a failed test's.
+        final = json.loads((self.run.dir / "prices.json").read_text())
+        schema4 = {k: v for k, v in final.items()
+                   if k not in ("kind", "reproducibility")}
+        failed = {**final, "kind": "failed",
+                  "reproducibility": {"passed": False, "tolerance": 0.03}}
+        for name, body in (("schema 4", {**schema4, "schema": 4}),
+                           ("session", {**schema4, "kind": "session"}),
+                           ("failed", failed)):
+            with self.subTest(name=name):
+                run = Run()
+                self.addCleanup(run.close)
+                run.set_prices(json.dumps(body))
+                self.run = run
+                row = self.row()
+                self.assertEqual(row["objective_status"],
+                                 "provisional prices, not a diagnostic run")
+                self.assertEqual(row["prices_status"], "provisional prices")
+                self.assertTrue(math.isnan(row["C_W"]))
+                self.assertTrue(math.isnan(row["J_balanced_cs1"]))
+                run.edit("metadata.env", "prices_sha256=",
+                         "diagnostic_run=1\nprices_sha256=")
+                row = self.row()
+                self.assertEqual(row["objective_status"], "priced")
+                self.assertEqual(row["prices_status"], "provisional prices")
+                self.assertFalse(math.isnan(row["J_balanced_cs1"]))
+
     def test_prices_not_per_core_second_are_refused(self):
         # D-15 §3a: the draft schema-1 file, or another core price; D-20:
         # a schema-2 file, whose c_f carried the price runs' reopens; D-21:

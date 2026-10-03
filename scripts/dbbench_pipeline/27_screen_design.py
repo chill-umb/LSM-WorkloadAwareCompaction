@@ -300,8 +300,12 @@ def main(argv=None) -> int:
         raise SystemExit("every --screen-runs must be between 2 and --full-runs - 1")
 
     contract, _ = research_objective.load_contract()
-    prices = (research_objective.checked_prices(
-        json.loads(args.prices.read_text()), contract) if args.prices else None)
+    try:
+        # Final prices only (PREREGISTRATION D-22 j).
+        prices = (research_objective.checked_prices(
+            json.loads(args.prices.read_text()), contract) if args.prices else None)
+    except ValueError as error:
+        raise SystemExit(f"--prices {args.prices}: {error}")
     qbars, seconds = pairs(args.qbar), pairs(args.seconds_per_run)
     static = contract["static_class"]
     points = admissible_points(static, args.flush_mib * MIB, args.slowdown_trigger)

@@ -96,7 +96,9 @@ class GateN2ChainTest(unittest.TestCase):
         self.contract.write_text(json.dumps(contract, indent=2) + "\n")
         # The fake db_bench times each reopen at 8 us (D-21).
         self.prices = {
-            "schema": 4,
+            "schema": 5, "kind": "final",
+            "reproducibility": {"passed": True, "tolerance":
+                                contract["prices"]["reproducibility_tolerance"]},
             "price_per_core_second": contract["prices"]["price_per_core_second"],
             # 18 records db_bench's identity as loaded, not its file hash.
             "db_bench_sha256": preflight_marker.db_bench_identity(db_bench),
@@ -359,10 +361,16 @@ class GateN2ChainTest(unittest.TestCase):
         draft.write_text(json.dumps({"schema": 1, "c_w": 1.0}))
         stale = Path(self.tmp.name) / "stale_prices.json"
         stale.write_text(json.dumps({**self.prices, "db_bench_sha256": "0" * 64}))
+        # D-22 (j): one session's prices are provisional; 25 refuses them.
+        session = Path(self.tmp.name) / "session_prices.json"
+        session.write_text(json.dumps({
+            **{k: v for k, v in self.prices.items() if k != "reproducibility"},
+            "kind": "session"}))
         five = Path(self.tmp.name) / "five.txt"
         five.write_text("".join(f"assoc 14 {b} {k} uniform_1 5\n" for b, k in POINTS[:5]))
         cases = [({"PRICES_FILE": str(Path(self.tmp.name) / "none.json")}, "run 18"),
-                 ({"PRICES_FILE": str(draft)}, "schema 4"),
+                 ({"PRICES_FILE": str(draft)}, "schema 5"),
+                 ({"PRICES_FILE": str(session)}, "provisional prices"),
                  ({"PRICES_FILE": str(stale)}, "re-measures them after any binary change"),
                  ({"PREFLIGHT_MARKER": str(Path(self.tmp.name) / "none")},
                   "no preflight marker for this db_bench"),

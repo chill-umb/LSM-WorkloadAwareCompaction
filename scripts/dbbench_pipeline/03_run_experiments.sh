@@ -408,6 +408,42 @@ if [[ -f "$PRICES_FILE" ]]; then
   PRICES_SHA256="$(sha256sum "$PRICES_FILE" | awk '{print $1}')"
   PRICES_SEGMENT=":prices${PRICES_SHA256}"
 fi
+# PREREGISTRATION D-22 (j): provisional prices price only a run marked
+# diagnostic; the preflight's smoke runs are diagnostic by definition. The
+# status goes into metadata.env; 04 and plugin_config decide by it.
+[[ "$DIAGNOSTIC_RUN" =~ ^[01]$ ]] || {
+  echo "DIAGNOSTIC_RUN must be 0 or 1." >&2
+  exit 1
+}
+# Only where placeholders are allowed: controller arms of a short smoke run.
+if (( CONTROLLER_MATRIX )) && [[ "$PLUGIN_PLACEHOLDERS" == 1 ]]; then
+  DIAGNOSTIC_RUN=1
+fi
+PRICES_STATUS=""
+if [[ -n "$PRICES_SHA256" ]]; then
+  PRICES_STATUS="$(PYTHONPATH="$PIPELINE_DIR" "$PYTHON" - "$PRICES_FILE" <<'PY'
+import json, sys
+import research_objective
+try:
+    contract, _ = research_objective.load_contract()
+    record = json.load(open(sys.argv[1]))
+    print("final" if research_objective.prices_final(record, contract)
+          else "provisional")
+except (ValueError, KeyError, AttributeError, OSError):
+    print("unreadable")
+PY
+)"
+  if [[ "$PRICES_STATUS" == provisional ]]; then
+    if (( DIAGNOSTIC_RUN )); then
+      echo "[prices] $PRICES_FILE holds provisional prices (D-22 j): this" \
+           "diagnostic run's J is provisional"
+    else
+      echo "[prices] $PRICES_FILE holds provisional prices (D-22 j): arms are" \
+           "scored without J, and controller arms are refused, unless" \
+           "DIAGNOSTIC_RUN=1" >&2
+    fi
+  fi
+fi
 
 # Controller arms (plan §5): the plugin 13 built, and each arm's config
 # composed now, so an undecided value stops the matrix before any run.
@@ -439,6 +475,7 @@ fi
 compose_plugin_config() {  # $1=arm, $2=output
   local placeholder_flag=()
   (( ! PLUGIN_PLACEHOLDERS )) || placeholder_flag=(--placeholders)
+  (( ! DIAGNOSTIC_RUN )) || placeholder_flag+=(--diagnostic)
   "$PYTHON" "$PIPELINE_DIR/plugin_config.py" --arm "$1" \
     --objective-mode "$CONTROLLER_OBJECTIVE_MODE" --family "$WORKLOAD_FAMILY" \
     --bounds "$ACTION_BOUNDS_FILE" --settings "$CONTROLLER_RULES_FILE" \
@@ -665,6 +702,7 @@ if [[ -f "$RESULTS_ROOT/effective_config.env" ]]; then
   recorded_session="$(recorded SESSION_ID)"
   recorded_prices="$(recorded PRICES_SHA256)"
   recorded_contract="$(recorded RESEARCH_OBJECTIVE_SHA256)"
+  recorded_diagnostic="$(recorded DIAGNOSTIC_RUN)"
 fi
 if [[ -z "$SESSION_ID" ]]; then
   SESSION_ID="${recorded_session:-$RUN_NAME}"
@@ -679,6 +717,12 @@ fi
 if [[ -n "$recorded_contract" && "$recorded_contract" != "$RESEARCH_OBJECTIVE_SHA256" ]]; then
   echo "$RESULTS_ROOT ran under another contract ($recorded_contract);" \
        "an amended contract starts a new matrix." >&2
+  exit 1
+fi
+# D-22 (j): one matrix is diagnostic or not, never both.
+if [[ -n "${recorded_diagnostic:-}" && "$recorded_diagnostic" != "$DIAGNOSTIC_RUN" ]]; then
+  echo "$RESULTS_ROOT ran with DIAGNOSTIC_RUN=$recorded_diagnostic, now" \
+       "$DIAGNOSTIC_RUN; resume it the same way." >&2
   exit 1
 fi
 if [[ -f "$RESULTS_ROOT/effective_config.env" && "$recorded_prices" != "$PRICES_SHA256" ]] &&
@@ -731,6 +775,7 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'SETTLE_HOLD_SECONDS=%q\n' "$SETTLE_HOLD_SECONDS"
   printf 'SESSION_ID=%q\n' "$SESSION_ID"
   printf 'PRICES_SHA256=%q\n' "$PRICES_SHA256"
+  printf 'DIAGNOSTIC_RUN=%q\n' "$DIAGNOSTIC_RUN"
   printf 'RESEARCH_OBJECTIVE_SHA256=%q\n' "$RESEARCH_OBJECTIVE_SHA256"
   printf 'PRICES_FILE=%q\n' "$PRICES_FILE"
 } > "$RESULTS_ROOT/effective_config.env"
@@ -1087,6 +1132,8 @@ PY
     printf 'cpu_governor=%s\n' "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | paste -sd, || echo unavailable)"
     printf 'thp_enabled=%s\n' "$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo unavailable)"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
+    printf 'diagnostic_run=%s\n' "$DIAGNOSTIC_RUN"
+    printf 'prices_status=%s\n' "${PRICES_STATUS:-none}"
     if is_controller_arm "$arm"; then
       printf 'plugin_sha256=%s\n' "$PLUGIN_SHA256"
       printf 'plugin_config_sha256=%s\n' "$plugin_config_sha"

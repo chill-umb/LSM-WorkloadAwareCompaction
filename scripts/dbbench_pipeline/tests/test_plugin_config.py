@@ -25,7 +25,10 @@ BOUNDS = {"m_min": 0.5, "m_max": 2.0, "k0_min": 2, "k0_cap": 8,
           "units": {"m_min": "documentation keys are ignored"}}
 SETTINGS = {"b_max": 2.0, "rules": "k0_tracking,garbage_hold",
             "rule_garbage_drop": 0.2, "rule_release_fill": 0.9}
-PRICES = {"schema": 4,
+# Final prices (PREREGISTRATION D-22 f): two sessions agreed.
+PRICES = {"schema": 5, "kind": "final",
+          "reproducibility": {"passed": True, "tolerance":
+                              CONTRACT["prices"]["reproducibility_tolerance"]},
           "price_per_core_second": CONTRACT["prices"]["price_per_core_second"],
           "c_w": 2e-15, "c_f": 3e-13, "c_blk": 4e-12, "c_sk": 5e-12,
           "c_open": 6e-11, "reopen_timer": {"seconds_per_reopen": 8.3e-6}}

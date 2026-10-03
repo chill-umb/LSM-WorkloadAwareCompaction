@@ -479,7 +479,8 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     contract, contract_hash = research_objective.load_contract()
     row: dict[str, object] = {name: math.nan for name in PROGRAMME1_FIELDS}
     row.update(settle_ok=math.nan, objective_status="not programme 1",
-               reopen_check="", prices_sha256="", reference_rate=math.nan)
+               reopen_check="", prices_sha256="", prices_status="",
+               reference_rate=math.nan)
     row.update(research_objective.objective_columns(
         contract, (math.nan, math.nan, math.nan)))
     settled = [int(v) for v in SETTLED.findall(text)]
@@ -632,12 +633,21 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     prices_sha256 = hashlib.sha256(prices_path.read_bytes()).hexdigest()
     if metadata.get("prices_sha256") != prices_sha256:
         raise InvalidArm("prices.json is not the file the run recorded")
+    # D-22 (j): provisional prices (a schema-4 file, one session's, or a
+    # failed test's) price only a run marked diagnostic, and say so.
+    diagnostic = metadata.get("diagnostic_run") == "1"
     try:
         record = json.loads(prices_path.read_text())
-        prices = research_objective.checked_prices(record, contract)
+        prices = research_objective.checked_prices(record, contract,
+                                                   provisional_ok=True)
         reference = research_objective.reopen_reference(record)
+        final = research_objective.prices_final(record, contract)
     except (ValueError, KeyError, AttributeError, json.JSONDecodeError) as error:
         raise InvalidArm(f"prices.json: {error}") from error
+    row["prices_status"] = "final" if final else "provisional prices"
+    if not (final or diagnostic):
+        row["objective_status"] = "provisional prices, not a diagnostic run"
+        return row
     if math.isnan(reopens):
         row["objective_status"] = "no reopen counters"
         return row
@@ -970,6 +980,13 @@ def main() -> int:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+    provisional = sum(1 for row in rows
+                      if row.get("prices_status") == "provisional prices")
+    if provisional:
+        print(f"provisional prices: {provisional} of {len(rows)} rows carry "
+              "prices that are not final (PREREGISTRATION D-22 j); their J "
+              "columns are diagnostic only")
 
     if args.summary_only:
         print(f"rows: {len(rows)}; refused: {len(refused)}; "

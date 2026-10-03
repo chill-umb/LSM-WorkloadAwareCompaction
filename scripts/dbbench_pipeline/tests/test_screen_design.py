@@ -195,7 +195,9 @@ class EndToEndTest(unittest.TestCase):
         self.prices = self.tmp / "prices.json"
         record = {k: v for k, v in PRICES.items() if k != "c_s"}
         self.prices.write_text(json.dumps({
-            "schema": 4, **record,
+            "schema": 5, "kind": "final", **record,
+            "reproducibility": {"passed": True, "tolerance":
+                                CONTRACT["prices"]["reproducibility_tolerance"]},
             "price_per_core_second": CONTRACT["prices"]["price_per_core_second"],
             "reopen_timer": {"seconds_per_reopen": 8e-6}}))
         # 27 reads the live contract, which holds q-bar since 2026-10-02 and

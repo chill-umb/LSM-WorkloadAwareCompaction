@@ -64,12 +64,13 @@
     "storage_price_per_byte_second": 3.0441400304414005e-17,
     "storage_price_source": "AWS us-east-1 EBS gp3, $0.08 per GB-month, GB = 1e9 bytes, month = 730 hours, retrieved 2026-09-30",
     "storage_price_must_be_positive": true,
-    "device_times": "c_w, c_f, c_blk, c_sk and c_open are core-seconds per unit, times price_per_core_second, measured on the node by 18_calibrate_prices as D-15 §3 and D-20 fix: c_w from the q-bar native arms' own flush and compaction jobs; c_f, c_blk and c_sk as marginal times from slopes across trees at T = 2, 6 and 10 with every table open (open_files -1); c_open, per table reopen, from the same reads run at the experiments' open_files against every table open; median of five repeats (reads) or of the q-bar runs (writes). Each run pays its own reads' table reopens, counted by the fork per level (rocksdb.read.table.reopen; D-21), at c_open, when its own time per reopen passes reopen_time_check",
+    "device_times": "c_w, c_f, c_blk, c_sk and c_open are core-seconds per unit, times price_per_core_second, measured on the node as D-15 §3, D-20 and D-22 fix: c_w by 18_calibrate_prices from the q-bar native arms' own flush and compaction jobs; c_f, c_blk and c_sk as marginal times from slopes across 18 archived trees (29_build_price_trees: T = 2, 3, 4, 6, 8 and 10, three builds of each, a tree-set identity by the sha256 of their manifest) with every table open (open_files -1), each (set, round) giving one value, a session's price the median of its nine; c_open, per table reopen, and the reopen-timer reference from set 1's trees at T = 2, 6 and 10 read at the experiments' open_files against every table open, median of five repeats. Two sessions on the same binary and archive, a reboot between them, must agree on c_f, c_blk, c_sk, c_open and the reference within reproducibility_tolerance; only then are the prices final (18_calibrate_prices compare: the median of both sessions' values). Each run pays its own reads' table reopens, counted by the fork per level (rocksdb.read.table.reopen; D-21), at c_open, when its own time per reopen passes reopen_time_check",
     "reopen_time_check": {
       "rule": "D-21: a run's own seconds per reopen (rocksdb.read.table.reopen.nanos over rocksdb.read.table.reopen, the fork's timer, from n_w to the end of the drain) over stage 18's (prices.json reopen_timer.seconds_per_reopen: the same timer on the capped Gets, median of five repeats). Outside 1 +- tolerance, c_open does not hold for the run and it is not priced; its workload's c_open is then measured on that workload by a dated entry before any of its arms is scored. Under min_reopens, the reopens are priced unchecked",
       "tolerance": 0.1,
       "min_reopens": 1000
     },
+    "reproducibility_tolerance": 0.03,
     "storage_price_sensitivity": [
       0.5,
       2.0
@@ -254,6 +255,11 @@
       "date": "2026-10-02",
       "entry": "PREREGISTRATION D-21",
       "reason": "after D-20's prices and the q-bar record, before any Theta_s run and before any arm was priced with schema 4: the fork counts and times the reads' table reopens per level; each run's reopens are that count, priced at c_open only when the run's own time per reopen is within 10% of stage 18's (reopen_time_check), and the controller prices them per level (resolving D-20 §2g)"
+    },
+    {
+      "date": "2026-10-03",
+      "entry": "PREREGISTRATION D-22",
+      "reason": "after the d21id chain's prices, before any Theta_s run and before any arm was priced under the prices it governs: c_f and c_sk moved about 9% between sessions on rebuilt trees, so the read prices are measured on 18 archived trees (T = 2, 3, 4, 6, 8 and 10, three builds each) and are final only when a second session, after a reboot, reproduces c_f, c_blk, c_sk, c_open and the reopen-timer reference within reproducibility_tolerance (0.03); every earlier price is provisional"
     }
   ],
   "suite_robustness": {

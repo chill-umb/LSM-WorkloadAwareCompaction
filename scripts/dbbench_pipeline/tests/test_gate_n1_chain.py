@@ -2,7 +2,8 @@
 db_bench (tests/fixtures/chain/fake_db_bench.py) and a stand-in preflight
 that writes the marker as 13 does. Every other stage is the real one: 03 and
 its marker and load checks, 04, 19 with the committed admission config, the
-run-length choice, the q-bar arms and 18. Checks the whole night, one
+run-length choice, the q-bar arms and one session of 18 on 29's archive
+(PREREGISTRATION D-22; none without PRICE_TREES). Checks the whole night, one
 workload failing while the other finishes, STOP_AFTER_N1, and the checks
 that fail before the preflight starts."""
 import json
@@ -71,11 +72,15 @@ class ChainTest(unittest.TestCase):
                 "FAKE_FAIL_WORKLOAD", "DBBENCH_BUILD_DIR", "PREFLIGHT_MARKER",
                 "PREFLIGHT_WORK_DIR", "PRICES_FILE", "DB_ROOT", "RESULTS_ROOT",
                 "SESSION_ID", "KEEP_DATABASES", "FAKE_SURVIVAL_BASES",
-                "QBAR_ONLY", "QBAR_TAG")
+                "QBAR_ONLY", "QBAR_TAG", "PRICE_TREES", "PRICE_TREES_SHA256",
+                "PRICE_SESSION", "PRICE_SESSIONS_DIR", "DIAGNOSTIC_RUN",
+                "FAKE_UNSETTLED_ONCE", "FAKE_COMPACT_ON_READ", "BUILD_ATTEMPTS",
+                "MIN_FREE_GB_BUILD", "MIN_FREE_GB_ARCHIVE", "MIN_FREE_GB_SESSION")
 
     def run24(self, cwd=None, script=None, **overrides) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items() if k not in self.SCRUBBED}
         env.update({"NVME": str(self.nvme), "MIN_FREE_GB": "0",
+                    "MIN_FREE_GB_SESSION": "0",
                     "DBBENCH_CPUS": "", "CONTROLLER_CPUS": "",
                     "PYTHON_VENV": str(self.venv), "ALLOW_CONCURRENT_RUNS": "1",
                     "ALLOW_ROOT_DISK": "1", **overrides})
@@ -102,20 +107,26 @@ class ChainTest(unittest.TestCase):
         self.assertTrue((self.nvme / "qbar-assoc" / "29M" / "T10").is_dir())
         self.assertTrue((self.nvme / "qbar-powerlaw" / "58M" / "T10").is_dir())
         self.assertEqual(ran.stdout.count("q-bar candidate"), 2)
-        prices = json.loads((self.root / "build-dbbench" / "prices.json").read_text())
-        self.assertEqual(prices["schema"], 4)
-        self.assertEqual(prices["open_files"], {"capped": 1000, "all_open": -1})
-        # D-21: the fake times every reopen at 8 us, in the price runs and in
-        # the q-bar arms alike, so every q-bar arm's check holds.
-        self.assertAlmostEqual(prices["reopen_timer"]["seconds_per_reopen"]
-                               / 8e-6, 1.0, places=6)
-        for family in ("assoc", "powerlaw_get95"):
-            self.assertEqual({r["check"] for r in
-                              prices["qbar_reopen_checks"][family]}, {"held"})
-        for key, seconds in (("c_f", 0.5e-6), ("c_blk", 1e-6), ("c_sk", 2e-6),
-                             ("c_open", 10e-6)):
-            self.assertAlmostEqual(prices["core_seconds_per_unit"][key] / seconds,
-                                   1.0, places=6, msg=key)
+        # D-22: no archive named, so no price session and no prices.
+        self.assertIn("no price session: PRICE_TREES is not set", ran.stdout)
+        self.assertFalse((self.root / "build-dbbench" / "prices.json").exists())
+        self.assertFalse((self.root / "build-dbbench" / "price-sessions").exists())
+
+    def build_price_trees(self) -> tuple[Path, str]:
+        """29's archive, built by the stand-in db_bench (D-22 a, b)."""
+        archive = Path(self.tmp.name) / "price-trees"
+        env = {k: v for k, v in os.environ.items() if k not in self.SCRUBBED}
+        env.update({"DBBENCH_CPUS": "", "CONTROLLER_CPUS": "",
+                    "PYTHON_VENV": str(self.venv), "CONFIRM_PRICE_TREES": "YES",
+                    "PRICE_TREES": str(archive), "MIN_FREE_GB_BUILD": "0",
+                    "MIN_FREE_GB_ARCHIVE": "0",
+                    "DB_ROOT": str(self.nvme / "price-build-db")})
+        built = subprocess.run(
+            ["bash", str(self.root / "scripts" / "dbbench_pipeline" /
+                         "29_build_price_trees.sh")],
+            cwd=self.root, env=env, capture_output=True, text=True, timeout=600)
+        self.assertEqual(built.returncode, 0, built.stderr[-3000:])
+        return archive, built.stdout.split("tree-set identity ")[1].split()[0]
 
     def test_a_failing_workload_leaves_the_other_to_finish(self):
         for failing, other in (("powerlaw", "assoc"), ("assoc", "powerlaw")):
@@ -150,7 +161,9 @@ class ChainTest(unittest.TestCase):
         self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
         pilots = self.nvme / "n1-assoc" / "graphs" / "summary.csv"
         before = pilots.stat().st_mtime_ns
-        ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d21")
+        archive, identity = self.build_price_trees()
+        ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d21", PRICE_TREES=str(archive),
+                         PRICE_TREES_SHA256=identity)
         self.assertEqual(ran.returncode, 0, ran.stdout[-3000:] + ran.stderr[-3000:])
         self.assertIn("stub preflight", ran.stdout)
         self.assertNotIn("Gate N1 pilots", ran.stdout)
@@ -161,8 +174,25 @@ class ChainTest(unittest.TestCase):
         # q-bar is not offered for recording again: it stays as recorded.
         self.assertNotIn("q-bar candidate", ran.stdout)
         self.assertEqual(ran.stdout.count("q-bar stays as recorded"), 2)
-        prices = json.loads((self.root / "build-dbbench" / "prices.json").read_text())
-        self.assertEqual(prices["schema"], 4)
+        # One session of D-22 (c), named after the tag; no prices file until
+        # a second session and 18's compare (D-22 f).
+        self.assertFalse((self.root / "build-dbbench" / "prices.json").exists())
+        prices = json.loads((self.root / "build-dbbench" / "price-sessions" /
+                             "qbar-d21" / "session.json").read_text())
+        self.assertEqual((prices["schema"], prices["kind"]), (5, "session"))
+        self.assertEqual(prices["tree_set_sha256"], identity)
+        self.assertEqual(prices["open_files"], {"capped": 1000, "all_open": -1})
+        # D-21: the fake times every reopen at 8 us, in the price runs and in
+        # the q-bar arms alike, so every q-bar arm's check holds.
+        self.assertAlmostEqual(prices["reopen_timer"]["seconds_per_reopen"]
+                               / 8e-6, 1.0, places=6)
+        for family in ("assoc", "powerlaw_get95"):
+            self.assertEqual({r["check"] for r in
+                              prices["qbar_reopen_checks"][family]}, {"held"})
+        for key, seconds in (("c_f", 0.5e-6), ("c_blk", 1e-6), ("c_sk", 2e-6),
+                             ("c_open", 10e-6)):
+            self.assertAlmostEqual(prices["core_seconds_per_unit"][key] / seconds,
+                                   1.0, places=6, msg=key)
         # 18 and 03 record one identity: db_bench as loaded.
         self.assertEqual(prices["db_bench_sha256"], preflight_marker.db_bench_identity(
             self.root / "build-dbbench" / "db_bench"))
@@ -185,6 +215,17 @@ class ChainTest(unittest.TestCase):
         ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d21")
         self.assertEqual(ran.returncode, 1)
         self.assertIn("qbar-assoc-d21 exists", ran.stderr)
+        # D-22 (i): a price session only on the recorded archive.
+        archive, identity = self.build_price_trees()
+        for overrides, message in (
+                ({"PRICE_TREES": str(archive), "PRICE_TREES_SHA256": "0" * 64},
+                 "not the archive's tree-set identity"),
+                ({"PRICE_TREES": str(self.nvme)}, "is not 29's archive")):
+            with self.subTest(message=message):
+                ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d22", **overrides)
+                self.assertEqual(ran.returncode, 1)
+                self.assertIn(message, ran.stderr)
+                self.assertNotIn("stub preflight", ran.stdout)
 
     def test_checks_fail_before_the_preflight(self):
         leftovers = {"n1-assoc": self.nvme / "a", "n1-dbs": self.nvme / "b"}

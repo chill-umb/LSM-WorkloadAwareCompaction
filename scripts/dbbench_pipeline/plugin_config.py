@@ -20,6 +20,11 @@ the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
 q-bar and the prices are measured. For the preflight's smoke runs only,
 --placeholders fills each missing value from PLACEHOLDERS and prints which;
 those configs exercise the code paths and price nothing.
+
+Prices must be final (PREREGISTRATION D-22 f) unless the run is marked
+diagnostic (--diagnostic, or --placeholders): provisional prices (D-22 j)
+are then accepted and "provisional prices" is printed on stderr, since the
+config itself takes no key the plugin does not read.
 """
 
 from __future__ import annotations
@@ -75,9 +80,11 @@ def _value(source: dict, key: str, where: str, missing: list[str]):
 def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             settings: dict, contract: dict, prices: dict | None,
             admission: dict, decision_log: str, transition_log: str,
-            placeholders: bool = False) -> tuple[dict, list[str]]:
+            placeholders: bool = False,
+            diagnostic: bool = False) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
-    otherwise a missing value raises ValueError naming every one)."""
+    otherwise a missing value raises ValueError naming every one).
+    Provisional prices only for a diagnostic run (D-22 j)."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
     missing: list[str] = []
@@ -111,8 +118,10 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             missing.append(f"{key} (prices file, stage 18)")
         config["c_s"] = contract["prices"]["storage_price_per_byte_second"]
     else:
-        # As 04 (D-15 §3a, D-20): priced per core-second, reopens apart.
-        checked = research_objective.checked_prices(prices, contract)
+        # As 04 (D-15 §3a, D-20, D-22): priced per core-second, reopens
+        # apart, final unless the run is diagnostic.
+        checked = research_objective.checked_prices(
+            prices, contract, provisional_ok=diagnostic or placeholders)
         config.update({key: checked[key] for key in (*PLUGIN_PRICES, "c_s")})
     config["k"] = admission["k"]
 
@@ -166,6 +175,9 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--placeholders", action="store_true",
                         help="preflight smoke runs only")
+    parser.add_argument("--diagnostic", action="store_true",
+                        help="a run marked diagnostic: provisional prices "
+                             "are accepted (D-22 j)")
     args = parser.parse_args()
     try:
         contract, _ = research_objective.load_contract()
@@ -179,10 +191,13 @@ def main() -> int:
             admission=json.loads(args.admission.read_text()),
             decision_log=args.decision_log,
             transition_log=args.transition_log,
-            placeholders=args.placeholders)
+            placeholders=args.placeholders, diagnostic=args.diagnostic)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1
+    if prices is not None and not research_objective.prices_final(prices, contract):
+        print(f"[plugin_config] provisional prices ({args.prices}; D-22 j): "
+              "a diagnostic run only", file=sys.stderr)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
     if filled:

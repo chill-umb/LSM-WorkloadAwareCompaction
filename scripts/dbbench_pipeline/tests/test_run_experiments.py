@@ -135,6 +135,9 @@ class RunExperimentsTest(unittest.TestCase):
 
     def test_prices_are_copied_and_04_scores_every_arm(self):
         self.assertTrue((self.cell / "native" / "prices.json").exists())
+        # The fixture's prices are final (D-22 f); the run is not diagnostic.
+        self.assertEqual(self.metadata("native")["prices_status"], "final")
+        self.assertEqual(self.metadata("native")["diagnostic_run"], "0")
         rows = summary(self.cell.parents[1])
         self.assertEqual(set(rows), {"native", "static:uniform_0_75",
                                      "static:held"})

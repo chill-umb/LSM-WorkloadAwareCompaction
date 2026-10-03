@@ -4,7 +4,11 @@
 #   2. per workload, Gate N1: three pilot native arms per T (PREREGISTRATION
 #      D-16), 04, and the admission test (19) for T = 2, 6 and 10;
 #   3. per workload, the q-bar arms at the run length Gate N1 picked (D-14 §2);
-#   4. the device prices (18, D-15 §3), which need both workloads' q-bar arms.
+#   4. one session of the device prices (18, D-15 §3, D-22 c) on 29's
+#      archived trees, which needs both workloads' q-bar arms; only when
+#      PRICE_TREES names the archive (with PRICE_TREES_SHA256, its identity;
+#      PRICE_SESSION names the session, n1 or qbar-<tag> by default). The
+#      prices are final only after a second session and 18's compare (D-22 f).
 # Each workload's chain runs as its own process, so a failure in one does not
 # stop the other. The checks at the start fail in seconds, while someone is
 # watching.
@@ -116,6 +120,25 @@ if [[ "${1:-}" == workload ]]; then
   exit 0
 fi
 
+# D-22: a price session only on 29's archive, checked now, in seconds.
+PRICE_SESSION="${PRICE_SESSION:-$([[ "$QBAR_ONLY" == 1 ]] && echo "qbar$QBAR_SUFFIX" || echo n1)}"
+if [[ -n "${PRICE_TREES:-}" ]]; then
+  [[ "$PRICE_SESSION" =~ ^[A-Za-z0-9_-]+$ ]] ||
+    fail "PRICE_SESSION=$PRICE_SESSION: letters, digits, _ and - only"
+  [[ -f "$PRICE_TREES/MANIFEST.sha256" && -f "$PRICE_TREES/build_record.json" ]] ||
+    fail "PRICE_TREES=$PRICE_TREES is not 29's archive"
+  [[ "$("$PY" "$PIPELINE_DIR/price_trees.py" identity --archive-dir "$PRICE_TREES")" \
+     == "${PRICE_TREES_SHA256:-}" ]] ||
+    fail "PRICE_TREES_SHA256 is not the archive's tree-set identity (D-22 i)"
+  [[ "$("$PY" -c 'import json, sys
+print(json.load(open(sys.argv[1]))["tree_set_sha256"])' "$PRICE_TREES/build_record.json")" \
+     == "$PRICE_TREES_SHA256" ]] ||
+    fail "build_record.json names another tree set than PRICE_TREES_SHA256 (D-22 i)"
+  [[ ! -e "$PRICE_SESSIONS_DIR/$PRICE_SESSION" ]] ||
+    fail "price session $PRICE_SESSION exists in $PRICE_SESSIONS_DIR; set PRICE_SESSION"
+  [[ ! -e "$NVME/prices-db$QBAR_SUFFIX/price-trees/$PRICE_SESSION" ]] ||
+    fail "$NVME/prices-db$QBAR_SUFFIX/price-trees/$PRICE_SESSION exists; set PRICE_SESSION"
+fi
 if [[ "$QBAR_ONLY" == 1 ]]; then
   node_checks "qbar-assoc$QBAR_SUFFIX" "qbar-powerlaw$QBAR_SUFFIX" "qbar-dbs$QBAR_SUFFIX"
   for w in assoc powerlaw; do
@@ -141,8 +164,16 @@ if [[ "${STOP_AFTER_N1:-0}" == 1 ]]; then
   exit 0
 fi
 
-stamp "device prices (18, D-15 §3, D-20, D-21)"
+if [[ -z "${PRICE_TREES:-}" ]]; then
+  stamp "no price session: PRICE_TREES is not set (D-22: 29 archives the" \
+        "trees, then 18 runs sessions A and B, then compare)"
+  stamp "done"
+  exit 0
+fi
+stamp "device prices, session $PRICE_SESSION (18, D-15 §3, D-20, D-21, D-22)"
 CONFIRM_PRICE_CALIBRATION=YES DB_ROOT="$NVME/prices-db$QBAR_SUFFIX" \
+  PRICE_SESSION="$PRICE_SESSION" PRICE_TREES="$PRICE_TREES" \
+  PRICE_TREES_SHA256="$PRICE_TREES_SHA256" \
   "$PIPELINE_DIR/18_calibrate_prices.sh" \
   "$NVME/qbar-assoc$QBAR_SUFFIX/graphs/summary.csv" \
   "$NVME/qbar-powerlaw$QBAR_SUFFIX/graphs/summary.csv"

@@ -138,10 +138,13 @@ NVME=/mnt/nvme scripts/dbbench_pipeline/24_gate_n1_chain.sh 2>&1 | tee ~/gate_n1
   it prices. `QBAR_ONLY=1 QBAR_TAG=<tag>` reuses Gate N1's reports in
   `n1-<workload>` and runs only the preflight, the q̄ arms (into
   `qbar-<workload>-<tag>`, `qbar-dbs-<tag>`; no earlier folder is touched)
-  and the prices, about 4.5–5 hours. q̄ stays as recorded: the new arms'
-  mean is printed beside it, and `18` prints each arm's reopen check (below).
-  Move the old `build-dbbench/prices.json` aside first, so the preflight's
-  smoke runs unpriced instead of refusing a stale file:
+  and, when `PRICE_TREES` and `PRICE_TREES_SHA256` name 29's archive, one
+  price session (`qbar-<tag>`, or `PRICE_SESSION`; D-22 g), about 4.5–5
+  hours. Without them it stops after the q̄ arms. q̄ stays as recorded: the
+  new arms' mean is printed beside it, and `18` prints each arm's reopen
+  check (below). Move the old `build-dbbench/prices.json` aside first, so
+  the q̄ arms run without prices, as D-15 §3(e) runs them (`03` would copy
+  the file into every arm):
 
   ```bash
   NVME=/mnt/nvme QBAR_ONLY=1 QBAR_TAG=d21 \
@@ -271,38 +274,102 @@ d. Gate N2, the static comparator. Four things must exist first, in this
         --output ~/qbar_record.md --write
       ```
    3. **The device prices** (OBJ-2, Gate N0 item 7; PREREGISTRATION D-15
-      §3 as amended by D-20), about 25 minutes: three settled trees at
-      T = 2, 6 and 10 for the read prices, every read run twice, at the
-      experiments' `open_files` and with every table open (so c_f, c_blk
-      and c_sk exclude table reopens, and c_open prices them), and the q̄
-      arms' own flushes and compactions for c_w, so it runs after step 2
-      and reads both workloads' `summary.csv`:
+      §3 as amended by D-20, D-21 and D-22), about 2 hours of node time:
+      the read prices on 29's 18 archived trees (T = 2, 3, 4, 6, 8 and 10,
+      three builds each), in two sessions with a reboot between them, and
+      the q̄ arms' own flushes and compactions for c_w, so it runs after
+      step 2 and reads both workloads' `summary.csv`.
 
-      ```bash
-      CONFIRM_PRICE_CALIBRATION=YES DB_ROOT=/mnt/nvme/prices-db \
-        scripts/dbbench_pipeline/18_calibrate_prices.sh \
-        /mnt/nvme/qbar-assoc/graphs/summary.csv \
-        /mnt/nvme/qbar-powerlaw/graphs/summary.csv
-      ```
+      a. **Build and archive the trees** (`29`, about 25 minutes, once).
+         The archive goes outside the repository; it must not exist yet.
+         Every build and read passes `--ttl_seconds=0
+         --periodic_compaction_seconds=0` (D-22 a′), a build that does not
+         settle `ok=1` is rebuilt (at most `BUILD_ATTEMPTS`, 3) and every
+         `.tgz` is unpacked again and checked against `MANIFEST.sha256`:
 
-      It stops in seconds, before any node time, unless `THREADS` is 1 and
-      the q̄ rows are settled `native` arms at T=10 on this binary, each
-      given once, at least five of each workload, and when the open-file
-      limit is under 16,384. It writes `build-dbbench/prices.json` (schema
-      4), which `03` copies into every later arm and records in the
-      fingerprint; the medians and spreads are in it. Schema 4 (D-21) adds
-      `reopen_timer`: the capped Gets' time per reopen by the fork's own
-      timer (`rocksdb.read.table.reopen.nanos` over
-      `rocksdb.read.table.reopen`), the reference for every run's reopen
-      check, and `qbar_reopen_checks`, each q̄ arm's own time against it.
-      `04` prices a run's reopens (the fork's count) only when its own time
-      per reopen is within the contract's `reopen_time_check` tolerance
-      (10%) of the reference; outside it, the arm's `objective_status` is
-      "c_open does not hold" and that workload's c_open must be measured on
-      it by a dated entry. Under 1,000 reopens the check does not apply.
-      Run 18 before the preflight when one exists: the preflight's evaluator
-      smoke prices its arm with this file, and `04` refuses a schema-2 or
-      schema-3 one.
+         ```bash
+         CONFIRM_PRICE_TREES=YES PRICE_TREES=~/node_ops/price_trees/<date> \
+           DB_ROOT=/mnt/nvme/price-build \
+           scripts/dbbench_pipeline/29_build_price_trees.sh 2>&1 | tee ~/price_trees.log
+         ```
+
+         It prints the tree-set identity (the sha256 of `MANIFEST.sha256`)
+         and writes `build_record.json` (each tree's settle attempts, files
+         and MB per level, bytes, the building binary). Both go into the
+         dated build record. The built trees stay in `DB_ROOT/price-build`;
+         the archive is the authority.
+      b. **Session A** (about 45 minutes). Each set is unpacked afresh into
+         `DB_ROOT`, checked file by file, warmed, read in three rotated
+         rounds with every table open; the c_open block runs after set 1;
+         after each set every SST must be unchanged and no new one exist:
+
+         ```bash
+         CONFIRM_PRICE_CALIBRATION=YES PRICE_SESSION=A \
+           PRICE_TREES=~/node_ops/price_trees/<date> PRICE_TREES_SHA256=<identity> \
+           DB_ROOT=/mnt/nvme/prices-db \
+           scripts/dbbench_pipeline/18_calibrate_prices.sh \
+           /mnt/nvme/qbar-assoc/graphs/summary.csv \
+           /mnt/nvme/qbar-powerlaw/graphs/summary.csv 2>&1 | tee ~/prices_A.log
+         ```
+
+         It stops in seconds, before any node time, unless `THREADS` is 1,
+         the archive's identity is `PRICE_TREES_SHA256` and its
+         `build_record.json`'s, every `.tgz` matches `ARCHIVES.sha256`, the
+         q̄ rows are settled `native` arms at T=10 on this binary, each given
+         once, at least five of each workload, and the open-file limit is at
+         least 16,384. A session is never measured over another: it writes
+         `build-dbbench/price-sessions/A/` (every run's command and stdout,
+         `machine.json`, `runs.log`, each tree's checks) and
+         `.../A/session.json` (schema 5, kind `session`): each price the
+         median of nine (set, round) values, their spread and each set's
+         median, `rounds` (each Get benchmark's slope alone, each tree's
+         residual), `copen_block` (c_open and the reopen timer per repeat,
+         D-15's three-tree fit, the seek-based c_open) and
+         `qbar_reopen_checks`, each q̄ arm's own time per reopen against the
+         session's reference.
+      c. **The owner reboots the node** (`sudo reboot`). No new preflight is
+         needed: the marker binds code and binaries, not the boot.
+      d. **Session B**: as b, with `PRICE_SESSION=B`.
+      e. **Compare** (D-22 f): each of c_f, c_blk, c_sk, c_open and the
+         reopen-timer reference passes when |B − A| ≤ 0.03 (A + B)/2. Keep the
+         current `prices.json` under another name first; compare refuses to
+         replace a file without `--replace`:
+
+         ```bash
+         python3 scripts/dbbench_pipeline/18_calibrate_prices.py compare \
+           build-dbbench/price-sessions/A/session.json \
+           build-dbbench/price-sessions/B/session.json \
+           --output build-dbbench/prices.json
+         ```
+
+         It refuses sessions on different binaries, archives or q̄ arms, and
+         two sessions with one boot id (no reboot). It prints each price's
+         A, B and difference, and each session's per-set medians. On a pass
+         (exit 0) the file is kind `final`, each price the median of both
+         sessions' values (18 for c_f, c_blk and c_sk; 10 for c_open and the
+         reference). On a fail (exit 1) it is kind `failed`: no price is
+         final, and the test is not run again until a dated entry says what
+         changes.
+
+      `03` copies `prices.json` into every later arm and records it in the
+      fingerprint. `04` prices a run's reopens (the fork's count) only when
+      its own time per reopen is within the contract's `reopen_time_check`
+      tolerance (10%) of the reference; outside it, the arm's
+      `objective_status` is "c_open does not hold" and that workload's
+      c_open must be measured on it by a dated entry. Under 1,000 reopens
+      the check does not apply.
+
+      **Provisional prices** (D-22 j): a schema-4 file (every price before
+      D-22), one session's record, or a failed compare. `25`, `27` and
+      `gate_n2_plan` refuse them. `04` and `plugin_config` accept them only
+      for a run marked diagnostic: `DIAGNOSTIC_RUN=1` for `03` (the
+      preflight's smoke runs, `PLUGIN_PLACEHOLDERS=1`, are diagnostic by
+      definition). `03` records `diagnostic_run` and `prices_status` in
+      `metadata.env`; `04` writes `prices_status` ("final" or "provisional
+      prices") on every priced row, leaves a non-diagnostic run with
+      provisional prices unpriced ("provisional prices, not a diagnostic
+      run"), and `plugin_config` refuses it. `04` refuses a schema-2 or
+      schema-3 file outright.
    4. **The two measured profiles** of Θ_s (D-14 §3), per grid point, from
       that point's `native` arms (run them first, in the same session). 25
       does this step. By hand, run it as 25 does, from the point's
@@ -377,8 +444,8 @@ d. Gate N2, the static comparator. Four things must exist first, in this
    (D-14 §3) is skipped and its reason printed (`=== <workload> <point>:
    refused …`, listed again at the end of the workload); any other failure
    of 23 stops that workload. It refuses without q̄ in the
-   contract, without a schema-2 `build-dbbench/prices.json` measured on this
-   `db_bench`, or
+   contract, without a final `build-dbbench/prices.json` (schema 5, D-22 f)
+   measured on this `db_bench`, or
    without a preflight marker for this code (rerun 13 after any change), and
    runs the disk checks of 24. See the cost first; the listing runs nothing:
 

@@ -1,7 +1,8 @@
 """18_calibrate_prices.py (PREREGISTRATION D-15 §3 as amended by D-20):
 marginal read times from three trees' all-open runs, the reopen time from
 the two arms, the write time from the q-bar native arms, money prices at the
-price per core-second, and every refusal.
+price per core-second, and every refusal. D-22's sessions on six ratios and
+its compare are test_price_sessions.py's.
 
 The synthetic trees obey the model exactly: every Get pays 2 us of overhead,
 0.5 us per filter probe and 1 us per block read; every seek 3 us plus 2 us
@@ -12,7 +13,6 @@ t_sk = 2 us and t_open = 10 us.
 import copy
 import csv
 import importlib.util
-import json
 import subprocess
 import sys
 import tempfile
@@ -204,17 +204,23 @@ class PricesTest(unittest.TestCase):
             calibrate.reopen_time(trees)
 
     def test_open_files_is_named_once_with_each_arms_value(self):
-        good = {"T2/r1/capped/readmissing": "db_bench --open_files=1000 --x=1",
-                "T2/r1/all_open/readmissing": "db_bench --open_files=-1 --x=1"}
+        age = "--ttl_seconds=0 --periodic_compaction_seconds=0"
+        capped = "s1/copen/T2/r1/capped/readmissing"
+        all_open = "s1/copen/T2/r1/all_open/readmissing"
+        good = {capped: f"db_bench --open_files=1000 {age} --x=1",
+                all_open: f"db_bench --open_files=-1 {age} --x=1",
+                "s2/round1/T3/readrandom": f"db_bench --open_files=-1 {age}"}
         self.assertEqual(calibrate.arm_open_files(good),
                          {"capped": 1000, "all_open": -1})
         for name, command, message in (
-                ("T2/r1/all_open/readmissing", "db_bench --x=1", "0 times"),
-                ("T2/r1/all_open/readmissing",
-                 "--open_files=1000 --open_files=-1", "2 times"),
-                ("T2/r1/all_open/readmissing", "--open_files=1000", "not -1"),
-                ("T2/r1/capped/readmissing", "--open_files=-1", "one positive"),
-                ("T6/r1/capped/readmissing", "--open_files=500", "one positive")):
+                (all_open, f"db_bench {age} --x=1", "0 times"),
+                (all_open, f"--open_files=1000 --open_files=-1 {age}", "2 times"),
+                (all_open, f"--open_files=1000 {age}", "not -1"),
+                ("s3/round2/T8/seekrandom", f"--open_files=1000 {age}", "not -1"),
+                (capped, f"--open_files=-1 {age}", "one positive"),
+                ("s1/copen/T6/r1/capped/readmissing", f"--open_files=500 {age}",
+                 "one positive"),
+                (capped, "--open_files=1000 --ttl_seconds=0", "D-22 a'")):
             commands = dict(good)
             commands[name] = command
             with self.assertRaisesRegex(ValueError, message, msg=command):
@@ -330,78 +336,29 @@ class PricesTest(unittest.TestCase):
                     {"c_w": value, "c_f": 1e-9, "c_blk": 1e-9, "c_sk": 1e-9,
                      "c_open": 1e-9}, CONTRACT)
 
-    def test_main_reads_the_layout_18_sh_writes(self):
+    def test_check_writes_reads_the_qbar_summaries(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            open_files = {"capped": "1000", "all_open": "-1"}
-            for ratio, trees in zip(calibrate.SIZE_RATIOS, TREES):
-                for repeat in range(1, calibrate.REPEATS + 1):
-                    for arm, runs in trees.items():
-                        for name, text in runs.items():
-                            out = (root / "work" / f"T{ratio}" / f"r{repeat}" /
-                                   arm / name)
-                            out.mkdir(parents=True)
-                            (out / "stdout.txt").write_text(text)
-                            (out / "command.txt").write_text(
-                                f"db_bench --open_files={open_files[arm]} "
-                                f"--benchmarks={name}")
-                load = root / "work" / f"T{ratio}" / "load"
-                load.mkdir()
-                (load / "command.txt").write_text(f"db_bench T{ratio}")
-            summary = root / "summary.csv"
+            summary = Path(tmp) / "summary.csv"
             with summary.open("w", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=list(write_row()))
                 writer.writeheader()
                 writer.writerows(
                     write_row(i, family, sst_write_seconds=str(i + 1))
                     for family in FAMILIES for i in range(5))
-            script = str(PIPELINE / "18_calibrate_prices.py")
             check = subprocess.run(
-                [sys.executable, script, "--check-writes", "--write-summary",
-                 str(summary), "--db-bench-sha256", SHA],
+                [sys.executable, str(PIPELINE / "18_calibrate_prices.py"),
+                 "check-writes", "--write-summary", str(summary),
+                 "--db-bench-sha256", SHA],
                 capture_output=True, text=True, cwd=PIPELINE)
             self.assertEqual(check.returncode, 0, check.stderr)
-            self.assertIn("10 runs", check.stdout)
-            done = subprocess.run(
-                [sys.executable, script, str(root / "work"), "--write-summary",
-                 str(summary), "--db-bench-sha256", SHA,
-                 "--output", str(root / "prices.json")],
+            self.assertIn("10 runs, median 3e-09 s/B", check.stdout)
+            wrong = subprocess.run(
+                [sys.executable, str(PIPELINE / "18_calibrate_prices.py"),
+                 "check-writes", "--write-summary", str(summary),
+                 "--db-bench-sha256", "c" * 64],
                 capture_output=True, text=True, cwd=PIPELINE)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            record = json.loads((root / "prices.json").read_text())
-        self.assertEqual(record["schema"], 4)
-        self.assertEqual(record["schema"], research_objective.PRICES_SCHEMA)
-        # D-21: the timer's reference, and every q-bar arm checked against it.
-        self.assertRatio(record["reopen_timer"]["seconds_per_reopen"], TIMER)
-        self.assertEqual(len(record["reopen_timer"]["values"]),
-                         calibrate.REPEATS)
-        self.assertEqual(research_objective.reopen_reference(record),
-                         record["reopen_timer"]["seconds_per_reopen"])
-        for family in FAMILIES:
-            self.assertEqual([r["check"] for r in
-                              record["qbar_reopen_checks"][family]],
-                             ["held"] * 5)
-        self.assertIn("reopen check, assoc q-bar arms", done.stdout)
-        self.assertEqual(record["open_files"], {"capped": 1000, "all_open": -1})
-        self.assertRatio(record["c_w"], 3e-9 * CORE)
-        self.assertRatio(record["c_f"], 0.5e-6 * CORE)
-        self.assertRatio(record["c_blk"], 1e-6 * CORE)
-        self.assertRatio(record["c_sk"], 2e-6 * CORE)
-        self.assertRatio(record["c_open"], 10e-6 * CORE)
-        for key in ("c_f", "c_open"):
-            self.assertEqual(len(record["core_seconds_spread"][key]["values"]),
-                             calibrate.REPEATS)
-        self.assertEqual(len(record["stdout_sha256"]), 90)
-        self.assertEqual(record["load_commands"]["T6"], "db_bench T6")
-        per_op = record["read_processes_per_operation"]
-        first = per_op["T2/r1/capped/readmissing"]
-        self.assertAlmostEqual(first["rocksdb.point.sst.probe"], 9)
-        self.assertAlmostEqual(first["rocksdb.no.file.opens"], DB_OPEN + 4.5)
-        self.assertAlmostEqual(first["rocksdb.read.table.reopen"], 4.5)
-        self.assertAlmostEqual(first["rocksdb.read.table.reopen.nanos"],
-                               4.5 * TIMER * 1e9)
-        self.assertAlmostEqual(
-            per_op["T2/r1/all_open/readmissing"]["rocksdb.no.file.opens"], DB_OPEN)
+            self.assertNotEqual(wrong.returncode, 0)
+            self.assertIn("another db_bench", wrong.stderr)
 
     def test_missing_result_line_is_refused(self):
         trees = replaced(TREES[:1], "all_open", "seekrandom",

@@ -27,8 +27,13 @@ DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk", "c_open")
 # The prices file's schema: 3 since D-20 added c_open, so a schema-2 file,
 # whose c_f carried the price runs' reopens, cannot price a run; 4 since D-21
 # added stage 18's time per reopen by the fork's own timer (reopen_timer),
-# the reference every run's reopens are checked against.
-PRICES_SCHEMA = 4
+# the reference every run's reopens are checked against; 5 since D-22
+# measures the read prices on archived trees in two sessions that must agree
+# within the contract's reproducibility_tolerance. Only a schema-5 file whose
+# test passed is final. A schema-4 file, or a schema-5 file of one session or
+# of a failed test, holds provisional prices: diagnostic runs only (D-22 j).
+PRICES_SCHEMA = 5
+PROVISIONAL_SCHEMAS = (4, 5)
 # The fork's tickers of the reads' reopens and their time (D-21).
 READ_REOPENS = "rocksdb.read.table.reopen"
 READ_REOPEN_NANOS = "rocksdb.read.table.reopen.nanos"
@@ -115,21 +120,46 @@ def validate_prices(prices: dict, contract: dict) -> dict:
             "c_s": float(storage)}
 
 
-def checked_prices(record: dict, contract: dict) -> dict:
-    """A prices.json record of stage 18 as money prices: schema 4, priced per
+def prices_final(record: dict, contract: dict) -> bool:
+    """Whether a prices.json record is final (D-22 f): schema 5, written by
+    18's compare from two sessions that agreed within this contract's
+    reproducibility_tolerance."""
+    test = record.get("reproducibility")
+    return (record.get("schema") == PRICES_SCHEMA and
+            record.get("kind") == "final" and isinstance(test, dict) and
+            test.get("passed") is True and
+            test.get("tolerance") ==
+            contract["prices"]["reproducibility_tolerance"])
+
+
+def checked_prices(record: dict, contract: dict,
+                   provisional_ok: bool = False) -> dict:
+    """A prices.json record of stage 18 as money prices: priced per
     core-second under this contract (D-15 §3a; a draft schema-1 file priced
     per whole machine is 16 times too high), with reopens priced apart
     (D-20; a schema-2 file's c_f carried the price runs' reopens) and a
     reference time per reopen (D-21; a schema-3 file has none), and
-    valid (OBJ-2)."""
-    if (record.get("schema") != PRICES_SCHEMA or
+    valid (OBJ-2). Final (D-22 f) unless provisional_ok, which only a run
+    marked diagnostic may pass (D-22 j)."""
+    if (record.get("schema") not in PROVISIONAL_SCHEMAS or
             record.get("price_per_core_second")
             != contract["prices"]["price_per_core_second"]):
         raise ValueError("not priced per core-second with reopens apart and a "
                          "reopen-time reference under this contract (schema "
-                         f"{PRICES_SCHEMA}, D-15 §3a, D-20, D-21)")
+                         f"{PRICES_SCHEMA}, D-15 §3a, D-20, D-21, D-22)")
+    if not (provisional_ok or prices_final(record, contract)):
+        raise ValueError("provisional prices: not two sessions that agreed "
+                         "within the contract's reproducibility_tolerance "
+                         "(D-22 f); only a run marked diagnostic may use "
+                         "them (D-22 j)")
     reopen_reference(record)
     return validate_prices(record, contract)
+
+
+def reproducible(a: float, b: float, tolerance: float) -> bool:
+    """D-22 (f): two sessions' values agree when |b - a| <= tolerance times
+    their mean."""
+    return abs(b - a) <= tolerance * (a + b) / 2
 
 
 def reopen_reference(record: dict) -> float:

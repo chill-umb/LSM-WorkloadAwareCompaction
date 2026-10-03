@@ -13,7 +13,14 @@ arm's reopen check holds (ratio 1). FAKE_FAIL_WORKLOAD=assoc (or
 powerlaw) makes every arm of that workload fail as an I/O error would.
 Only L1 and L2 merge, so 23 refuses the survival-weighted profile (no merges
 out of L0 and L3); at a base size in FAKE_SURVIVAL_BASES (bytes, space
-separated; test_gate_n2_chain.py) L0 and L3 merge too, and 23 computes it."""
+separated; test_gate_n2_chain.py) L0 and L3 merge too, and 23 computes it.
+
+For 29 (PREREGISTRATION D-22), filluniquerandom,settle,levelstats writes a
+small tree into --db (two SSTs, CURRENT, MANIFEST, OPTIONS, LOG) and prints
+levelstats; FAKE_UNSETTLED_ONCE=<folder> makes the first build of s1/T2 end
+ok=0. A read on a tree rewrites its LOG and adds an OPTIONS file, as opening
+a database does; FAKE_COMPACT_ON_READ=1 also writes a new SST, as a
+compaction would. Reads cover T = 2, 3, 4, 6, 8 and 10."""
 import json
 import os
 import sys
@@ -32,9 +39,36 @@ if bench == "compact":
 if bench == "filluniquerandom,settle":
     print("RL_SETTLED ok=1 wait_micros=5 hold_micros=10000000")
     sys.exit(0)
+if bench == "filluniquerandom,settle,levelstats":
+    db = Path(args["db"])
+    marker = os.environ.get("FAKE_UNSETTLED_ONCE")
+    if marker and db.as_posix().endswith("s1/T2") and not (Path(marker) / "s1-T2").exists():
+        (Path(marker) / "s1-T2").write_text("")
+        print("RL_SETTLED ok=0 wait_micros=5 hold_micros=0 reason=compaction pending")
+        sys.exit(1)
+    db.mkdir(parents=True, exist_ok=True)
+    for number, size in ((10, 4000), (11, 2000)):
+        (db / f"0000{number}.sst").write_bytes(
+            f"{db.name} {args.get('seed')} {number}\n".encode() * (size // 16))
+    (db / "CURRENT").write_text("MANIFEST-000005\n")
+    (db / "MANIFEST-000005").write_text(f"levels of {db.name}\n")
+    (db / "OPTIONS-000007").write_text(f"T={T}\n")
+    (db / "LOG").write_text("built\n")
+    print("RL_SETTLED ok=1 wait_micros=5 hold_micros=10000000")
+    print("\nLevel Files Size(MB)\n--------------------\n"
+          "  0        0        0\n  1        1        0\n  2        1        0\n")
+    sys.exit(0)
 if bench in ("readrandom", "readmissing", "seekrandom"):
     ops = int(args["reads"])
-    miss, found, runs = {2.0: (9, 8, 10), 6.0: (5, 4.5, 6), 10.0: (4, 3.5, 5)}[T]
+    if args.get("use_existing_db") == "1" and Path(args.get("db", "/nonexistent")).is_dir():
+        db = Path(args["db"])
+        with (db / "LOG").open("a") as log:
+            log.write(f"opened for {bench}\n")
+        (db / "OPTIONS-000099").write_text("reopened\n")
+        if os.environ.get("FAKE_COMPACT_ON_READ") == "1":
+            (db / "000099.sst").write_text("compacted\n")
+    miss, found, runs = {2.0: (9, 8, 10), 3.0: (7.5, 6.8, 8.5), 4.0: (6.5, 6, 7.5),
+                         6.0: (5, 4.5, 6), 8.0: (4.5, 4, 5.5), 10.0: (4, 3.5, 5)}[T]
     if bench == "seekrandom":
         per_op, tick = 3e-6 + 2e-6 * runs, {"sorted.run.seek": runs}
         touched = runs

@@ -17,7 +17,8 @@ PREREGISTRATION D-13 §4-5, D-14 §3, D-15 §3, D-19).
                         has the initial native runs; fails if 23 fails
   check --prices <file> --db-bench <file> <workload>...
                         refuses unless q-bar is recorded for each workload and
-                        the prices file is one 04 prices with, measured on
+                        the prices file is final (two of 18's sessions that
+                        agreed, PREREGISTRATION D-22 f and j), measured on
                         this db_bench (its identity as loaded: executable
                         plus librocksdb, preflight_marker.db_bench_identity)
 
@@ -315,7 +316,8 @@ def check(args) -> int:
                              "plus librocksdb); D-15 §3e re-measures them "
                              "after any binary change")
     except (OSError, ValueError, KeyError, AttributeError) as error:
-        problems.append(f"prices {args.prices}: {error}; run 18 (D-15 §3e)")
+        problems.append(f"prices {args.prices}: {error}; run 18's two "
+                        "sessions and its compare (D-15 §3e, D-22 f)")
     if problems:
         raise ValueError("\n".join(problems))
     return 0
