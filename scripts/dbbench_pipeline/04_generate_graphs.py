@@ -459,6 +459,21 @@ def sst_write_seconds(events: list[dict], start_us: int, end_us: int,
     return seconds
 
 
+EXPLORATORY_MARKER = "EXPLORATORY"
+
+
+def exploratory_run(run_dir: Path) -> bool:
+    """Whether run_dir lies below a PREREGISTRATION D-24 §2 EXPLORATORY
+    marker (written by 25 with N2_EXPLORATORY=1) that says exploratory=1.
+    The marker sits in each configuration's results root, a few levels
+    above its runs."""
+    for folder in (run_dir, *run_dir.parents):
+        marker = folder / EXPLORATORY_MARKER
+        if marker.is_file():
+            return "exploratory=1" in marker.read_text().splitlines()
+    return False
+
+
 def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
                        events: list[dict], mixgraph_ops: float) -> dict:
     """The measured phase from the host log: from the measure_start stamp
@@ -479,8 +494,8 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     contract, contract_hash = research_objective.load_contract()
     row: dict[str, object] = {name: math.nan for name in PROGRAMME1_FIELDS}
     row.update(settle_ok=math.nan, objective_status="not programme 1",
-               reopen_check="", prices_sha256="", prices_status="",
-               reference_rate=math.nan)
+               reopen_check="", checks_reported_only="", prices_sha256="",
+               prices_status="", reference_rate=math.nan)
     row.update(research_objective.objective_columns(
         contract, (math.nan, math.nan, math.nan)))
     settled = [int(v) for v in SETTLED.findall(text)]
@@ -657,8 +672,13 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
         contract, reference, reopens, reopen_seconds)
     row.update(reopen_check=check, reopen_time_ratio=ratio)
     if check == "does not hold":
-        row["objective_status"] = "c_open does not hold"
-        return row
+        # D-24 §1 item 4: on the exploratory track every per-run check is
+        # reported only, so the run is priced and the failure stays in
+        # reopen_check.
+        if not (diagnostic and exploratory_run(run_dir)):
+            row["objective_status"] = "c_open does not hold"
+            return row
+        row["checks_reported_only"] = "c_open"
     costs = research_objective.priced_costs(
         prices, rate, flush + compaction, row["filter_probes"],
         row["block_reading_probes"], row["run_seeks"], reopens, held)

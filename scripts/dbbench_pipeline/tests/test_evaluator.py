@@ -183,6 +183,42 @@ class EvaluatorTest(unittest.TestCase):
         with self.with_min_reopens(500):
             self.assertEqual(self.row()["reopen_check"], "does not hold")
 
+    def test_c_open_is_reported_only_on_an_exploratory_diagnostic_run(self):
+        # D-24 §1 item 4: on the exploratory track the check is reported,
+        # and the run is priced. Both the diagnostic flag and the marker
+        # are needed.
+        body = json.loads((self.run.dir / "prices.json").read_text())
+        body["reopen_timer"] = {"seconds_per_reopen": 7e-6}
+        self.run.set_prices(json.dumps(body))
+        marker = self.run.root / "EXPLORATORY"
+        marker.write_text("exploratory=1\nsession_id=explore-test\n")
+        with self.with_min_reopens(500):
+            row = self.row()
+        # Not diagnostic: the marker alone changes nothing.
+        self.assertEqual(row["objective_status"], "c_open does not hold")
+        self.assertEqual(row["checks_reported_only"], "")
+        self.run.edit("metadata.env", "prices_sha256=",
+                      "diagnostic_run=1\nprices_sha256=")
+        with self.with_min_reopens(500):
+            row = self.row()
+        self.assertEqual(row["reopen_check"], "does not hold")
+        self.assertAlmostEqual(row["reopen_time_ratio"], 8.5 / 7)
+        self.assertEqual(row["checks_reported_only"], "c_open")
+        self.assertEqual(row["objective_status"], "priced")
+        self.assertFalse(math.isnan(row["C_R"]))
+        self.assertFalse(math.isnan(row["J_balanced_cs1"]))
+        # Diagnostic without the marker, or with a marker that does not
+        # say exploratory=1: unpriced, as before.
+        marker.write_text("exploratory=0\n")
+        with self.with_min_reopens(500):
+            self.assertEqual(self.row()["objective_status"],
+                             "c_open does not hold")
+        marker.unlink()
+        with self.with_min_reopens(500):
+            row = self.row()
+        self.assertEqual(row["objective_status"], "c_open does not hold")
+        self.assertTrue(math.isnan(row["C_R"]))
+
     def test_a_host_log_before_d21_is_not_priced(self):
         # A schema-1 log (a binary before D-21): 4-wide rows, no reopen
         # tickers. Its other counts stand; its reopens are not counted.
