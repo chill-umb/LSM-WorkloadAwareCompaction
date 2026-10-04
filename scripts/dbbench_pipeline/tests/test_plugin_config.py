@@ -38,7 +38,20 @@ ALWAYS = {"mode", "decision_log", "transition_log", "m_min", "m_max",
           "k0_min", "k0_cap", "epsilon", "phi_min", "alpha", "kappa_d",
           "kappa_a", "setoptions_min_interval_ms", "k", "b_max", "beta_w",
           "beta_r", "beta_s", "c_w", "c_f", "c_blk", "c_sk", "c_open", "c_s",
-          "q_bar"}
+          "q_bar", "cost_model"}
+# A schema-6 (cost model 2) record for the learner arms (D-23, D-24 §2).
+KINDS = ("flush", "l0", "deep", "move")
+TYPES = ("probe", "block", "seek", "reopen", "step", "iblock", "memtable",
+         "get0", "scan0", "put")
+PRICES6 = {**PRICES, "schema": 6, "kind": "provisional", "cost_model": 2,
+           "c_cr": 0.0, "c_st": 3.4e-16, "c_ib": 0.0, "c_mt": 1e-15,
+           "c_get0": 2e-15, "c_sc0": 3e-15, "c_put": 4e-15,
+           "job_prices": {"flush": 2.5e-12, "l0": 1.5e-12, "deep": 3.1e-12,
+                          "move": 2.9e-12},
+           "kappa": {"lambda": 0.0, "B": {x: 1e-9 for x in TYPES},
+                     "J": {x: {k: 0.0 for k in KINDS} for x in TYPES}},
+           "n_win": 1000}
+LEARNER = {"explore": 0.1, "push_interval_ms": 1000, "weights_required": 0}
 
 
 def compose(arm="rules", contract=CONTRACT, **changes):
@@ -76,6 +89,48 @@ class ComposeTest(unittest.TestCase):
         # A threshold of a rule that is off is not sent: the plugin refuses
         # no unknown key, but sends only what its rules read.
         self.assertNotIn("rule_release_fill", config)
+
+    def test_a_learner_arm_gets_cost_model_2_and_its_settings(self):
+        config, filled = compose("learned", contract=with_qbar(61234.5),
+                                 prices=PRICES6, diagnostic=True,
+                                 learner=LEARNER, weights_path="/w.bin",
+                                 seed=4)
+        self.assertEqual(filled, [])
+        self.assertEqual(config["mode"], "learned")
+        self.assertEqual(config["cost_model"], 2)
+        self.assertEqual(config["c_job_deep"], 3.1e-12)
+        self.assertEqual(config["p_dev"], PRICES6["price_per_core_second"])
+        self.assertEqual(config["kappa_b_put"], 1e-9)
+        self.assertEqual(config["kappa_j_probe_move"], 0.0)
+        self.assertEqual(config["n_win"], 1000)
+        self.assertEqual((config["explore"], config["seed"],
+                          config["weights_path"]), (0.1, 4, "/w.bin"))
+        prior, _ = compose("prior", contract=with_qbar(61234.5),
+                           prices=PRICES6, diagnostic=True, learner=LEARNER,
+                           seed=4)
+        self.assertEqual(prior["mode"], "prior-only")
+        self.assertNotIn("weights_path", prior)
+        self.assertNotIn("push_interval_ms", prior)
+        # The hold and rules arms stay on cost model 1.
+        hold, _ = compose("hold", contract=with_qbar(61234.5))
+        self.assertEqual(hold["cost_model"], 1)
+        self.assertNotIn("c_st", hold)
+
+    def test_a_learner_arm_refuses_cost_model_1_prices_and_missing_keys(self):
+        with self.assertRaisesRegex(ValueError, "schema 6"):
+            compose("learned", contract=with_qbar(61234.5), learner=LEARNER,
+                    weights_path="/w.bin", seed=1)
+        with self.assertRaisesRegex(ValueError, "weights_path"):
+            compose("learned", contract=with_qbar(61234.5), prices=PRICES6,
+                    diagnostic=True, learner=LEARNER, seed=1)
+        with self.assertRaisesRegex(ValueError, "explore"):
+            compose("prior", contract=with_qbar(61234.5), prices=PRICES6,
+                    diagnostic=True, learner={}, seed=1)
+        broken = json.loads(json.dumps(PRICES6))
+        del broken["kappa"]["B"]["put"]
+        with self.assertRaisesRegex(ValueError, "kappa.B.put"):
+            compose("prior", contract=with_qbar(61234.5), prices=broken,
+                    diagnostic=True, learner=LEARNER, seed=1)
 
     def test_hold_needs_no_rules(self):
         config, _ = compose("hold", contract=with_qbar(1.0))

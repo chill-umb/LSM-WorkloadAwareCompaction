@@ -207,6 +207,7 @@ inline std::map<std::string, std::string> BaseConfig(const std::string& dir) {
           {"c_s", "0.001"},
           {"q_bar", "1000"},
           {"setoptions_min_interval_ms", "100"},
+          {"cost_model", "1"},
           {"decision_log", "\"" + dir + "/decisions.jsonl\""},
           {"transition_log", "\"" + dir + "/transitions.jsonl\""}};
 }

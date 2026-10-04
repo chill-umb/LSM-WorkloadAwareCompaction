@@ -14,6 +14,7 @@ using ROCKSDB_NAMESPACE::RLHostOptions;
 using ROCKSDB_NAMESPACE::RLJobRecord;
 using ROCKSDB_NAMESPACE::RLLevelReadCounts;
 using ROCKSDB_NAMESPACE::RLOpCounts;
+using ROCKSDB_NAMESPACE::RLStepCounts;
 using ROCKSDB_NAMESPACE::RLTreeSnapshot;
 
 namespace {
@@ -50,8 +51,39 @@ std::vector<RLLevelReadCounts> Delta(
     d[i].get_reopens = Minus(now[i].get_reopens, before[i].get_reopens);
     d[i].iter_reopens = Minus(now[i].iter_reopens, before[i].iter_reopens);
     d[i].reopen_nanos = Minus(now[i].reopen_nanos, before[i].reopen_nanos);
+    d[i].hidden_steps = Minus(now[i].hidden_steps, before[i].hidden_steps);
   }
   return d;
+}
+
+RLStepCounts Delta(const RLStepCounts& now, const RLStepCounts& before) {
+  RLStepCounts d;
+  d.probes = Minus(now.probes, before.probes);
+  d.block_probes = Minus(now.block_probes, before.block_probes);
+  d.run_seeks = Minus(now.run_seeks, before.run_seeks);
+  d.reopens = Minus(now.reopens, before.reopens);
+  d.nexts_found = Minus(now.nexts_found, before.nexts_found);
+  d.iter_skips = Minus(now.iter_skips, before.iter_skips);
+  d.gets = Minus(now.gets, before.gets);
+  d.scans = Minus(now.scans, before.scans);
+  d.puts = Minus(now.puts, before.puts);
+  return d;
+}
+
+// How far back a short job's window can start: n_win before its end, and a
+// margin for the records' delay (they arrive within a poll).
+uint64_t RingKeep(const Config& cfg) {
+  return cfg.cost_model == 2 ? 4 * static_cast<uint64_t>(cfg.v2.n_win) : 0;
+}
+
+bool LearnerMode(const Config& cfg) {
+  return cfg.mode == Mode::kPriorOnly || cfg.mode == Mode::kLearned;
+}
+
+// A level's divisor C_i (L0: C_0 = K0_cfg F, H §3).
+double Divisor(const View& v, int level) {
+  if (level == 0) return v.k0_cfg * v.F;
+  return level < static_cast<int>(v.C.size()) ? v.C[level] : kNaN;
 }
 
 std::string CheckOptions(const RLHostOptions& o) {
@@ -125,6 +157,11 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   std::vector<RLLevelReadCounts> reads;
   host_->ReadCounters(&reads);
   reads.resize(n_);
+  const RLStepCounts steps = host_->StepCounts();
+  prev_steps_ = steps;
+  ring_.Reset({StepOps(steps), steps});
+  decision_ops_.assign(n_, {});
+  rng_.seed(static_cast<uint64_t>(cfg_.seed));
   last_snapshot_ = host_->Snapshot();
   stats_.Reset(n_, ops, reads);
   clock_.Add(now_(), ops.total());
@@ -179,6 +216,10 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
           .Num("kappa_a", b.kappa_a)
           .Num("k", cfg_.k)
           .Num("setoptions_min_interval_ms", cfg_.setoptions_min_interval_ms)
+          .Num("cost_model", cfg_.cost_model)
+          .Num("explore", cfg_.explore)
+          .Num("seed", cfg_.seed)
+          .Str("weights_path", cfg_.weights_path)
           .Nums("m", m_applied_)
           .Num("k0", k0_applied_)
           .str());
@@ -234,6 +275,7 @@ void Controller::Poll(bool decide) {
   std::vector<RLLevelReadCounts> reads;
   host_->ReadCounters(&reads);
   reads.resize(n_);
+  const RLStepCounts steps = host_->StepCounts();
   const std::shared_ptr<const RLTreeSnapshot> snapshot = host_->Snapshot();
   // The previous snapshot's due levels still count when trimming the op
   // clock: a job's begin record can arrive after the snapshot in which its
@@ -252,9 +294,11 @@ void Controller::Poll(bool decide) {
   segment.k0 = prev_k0_all_;
   segment.K0 = k0_applied_;
   segment.held = prev_held_;
+  segment.steps = Delta(steps, prev_steps_);
   AttributeSegment(segment, &parts_);
   prev_ops_ = ops;
   prev_reads_ = reads;
+  prev_steps_ = steps;
 
   std::vector<RLJobRecord> jobs;
   {
@@ -264,7 +308,13 @@ void Controller::Poll(bool decide) {
   if (lost_jobs_.exchange(false, std::memory_order_relaxed)) {
     EnterFallback("a job record was lost in the job callback");
   }
-  for (const RLJobRecord& job : jobs) stats_.OnJob(job, clock_, &parts_);
+  // The windows use the poll samples only, as the evaluator uses the host
+  // log's periodic snap records only (cost_model_v2.window).
+  for (const RLJobRecord& job : jobs) {
+    if (cfg_.cost_model == 2) RecordJob(job);
+    stats_.OnJob(job, clock_, &parts_);
+  }
+  if (cfg_.cost_model == 2) ring_.Add({StepOps(steps), steps}, RingKeep(cfg_));
   // Trim only after this poll's records have read their waits (G §3), and
   // keep samples back to the oldest due-since either snapshot shows.
   const uint64_t current_due =
@@ -299,10 +349,13 @@ void Controller::Poll(bool decide) {
         JsonLine("drain").Uint("op", ops.total()).Uint("t_us", now).str());
     Invalidate("drain");
   }
+  if (decide && !fallback_ && !draining_ && cfg_.mode == Mode::kLearned) {
+    PollWeights(ops.total(), now);
+  }
   if (decide && !fallback_ && !draining_ && last_snapshot_) {
     std::vector<DecisionRecord> made;
     if (!last_snapshot_->write_stopped) {
-      made = Decide(*last_snapshot_, ops, reads, now);
+      made = Decide(*last_snapshot_, ops, reads, steps, now);
     }
     std::string error;
     const bool ok = Flush(ops.total(), now, !made.empty(), &error);
@@ -326,12 +379,15 @@ void Controller::Poll(bool decide) {
 
 std::vector<DecisionRecord> Controller::Decide(
     const RLTreeSnapshot& snapshot, const RLOpCounts& ops,
-    const std::vector<RLLevelReadCounts>& reads, uint64_t now) {
+    const std::vector<RLLevelReadCounts>& reads, const RLStepCounts& steps,
+    uint64_t now) {
   const Bounds& b = cfg_.bounds;
   const bool hold_only = cfg_.mode == Mode::kHoldOnly;
+  const bool learner = LearnerMode(cfg_);
   // The controller's own values: they reach RocksDB at the next Apply.
   View v =
       MakeView(options_, snapshot, stats_, ops, reads, m_target_, k0_target_);
+  FillCostModel2(&v, stats_, steps, cfg_);
   const uint64_t op = ops.total();
   std::vector<double> m = m_target_;
   std::vector<DecisionRecord> made;
@@ -355,6 +411,27 @@ std::vector<DecisionRecord> Controller::Decide(
     r.mode = cfg_.mode_name;
     std::vector<double> state;
     Choice choice;
+    Opening next;
+    // The learner modes: Q per action and the draws, two per decision so
+    // the generator's stream does not depend on which branch is taken.
+    const auto learn = [&](Agent agent) {
+      std::uniform_real_distribution<double> unit(0.0, 1.0);
+      const double u_explore = unit(rng_);
+      const double u_pick = unit(rng_);
+      Values q{};
+      const char* tag = "prior";
+      const Model* model = nullptr;
+      if (cfg_.mode == Mode::kLearned) {
+        model = weights_.Find(agent, level);
+        tag = model != nullptr ? "learned" : "cold";
+      }
+      std::array<double, kNumActions> f{};
+      if (model != nullptr) f = Forward(*model, state);
+      for (int a = 0; a < kNumActions; ++a) q[a] = -r.b[a] + f[a];
+      r.q.assign(q.begin(), q.end());
+      r.weights = model != nullptr ? weights_.version : 0;
+      return DecideLearner(q, r.mask, cfg_.explore, u_explore, u_pick, tag);
+    };
     if (level == 0) {
       const L0Control c = RelaxL0(l0_, turnovers, options_.l0_trigger, b);
       v.K0 = c.K0(b);
@@ -362,7 +439,9 @@ std::vector<DecisionRecord> Controller::Decide(
       r.mask = L0Mask(c, v.k0, v.K0, b);
       r.b = L0Prior(v, c, cfg_);
       state = L0Features(v, c, parts_[0], cfg_);
-      choice = DecideL0(cfg_, v, c, r.mask, parts_[0]);
+      choice = learner ? learn(Agent::kL0)
+                       : DecideL0(cfg_, v, c, r.mask, parts_[0]);
+      next.value_before = v.K0;
       l0_ = ActL0(c, choice.action, v.k0, b);
       r.old_value = k0_applied_;
       r.requested = l0_.K0(b);
@@ -378,7 +457,9 @@ std::vector<DecisionRecord> Controller::Decide(
       r.b = LevelPrior(v, level, c, cfg_);
       state = LevelFeatures(v, level, last, c, parts_[level],
                             stats_.levels[level].wait_carry, cfg_);
-      choice = DecideLevel(cfg_, v, level, last, r.mask);
+      choice = learner ? learn(r.agent)
+                       : DecideLevel(cfg_, v, level, last, r.mask);
+      next.value_before = c.m();
       controls_[level] = Act(c, choice.action, v.phi[level], b);
       m[level] = controls_[level].m();
       r.old_value = m_applied_[level];
@@ -394,9 +475,27 @@ std::vector<DecisionRecord> Controller::Decide(
     if (closing.waits > 0) {
       stats_.levels[level].wait_carry = closing.wait_ops / closing.waits;
     }
-    CloseInterval(level, v, r.agent, state, r.mask, r.b, op, r.id, true,
-                  choice.action);
+    next.agent = r.agent;
+    next.state = state;
+    next.mask = r.mask;
+    next.b = r.b;
+    next.id = r.id;
+    next.has_action = true;
+    next.action = choice.action;
+    next.value_after = r.requested;
+    if (learner) {
+      // H §3's neighbour charge reads the neighbours as they are now, the
+      // levels above with this poll's decisions applied.
+      if (level >= 1) next.up = Neighbour(v, level - 1, m);
+      if (level + 1 <= v.last && level + 1 < n_) {
+        next.down = Neighbour(v, level + 1, m);
+      }
+    }
+    CloseInterval(level, v, next, op);
     last_decision_op_[level] = op;
+    std::deque<uint64_t>& points = decision_ops_[level];
+    points.push_back(op);
+    while (points.size() > 256) points.pop_front();
     made.push_back(r);
   }
   // Hold-only never repairs and never applies: it is native RocksDB under
@@ -421,6 +520,137 @@ std::vector<DecisionRecord> Controller::Decide(
     last_id_ = made.back().id;
   }
   return made;
+}
+
+NeighbourView Controller::Neighbour(const View& v, int level,
+                                   const std::vector<double>& m) const {
+  NeighbourView n;
+  const Bounds& b = cfg_.bounds;
+  if (level == 0) {
+    View w = v;
+    w.K0 = l0_.K0(b);
+    n.agent = Agent::kL0;
+    n.mask = L0Mask(l0_, w.k0, w.K0, b);
+    n.b = L0Prior(w, l0_, cfg_);
+    n.state = L0Features(w, l0_, parts_[0], cfg_);
+    n.c_bytes = Divisor(v, 0);
+    return n;
+  }
+  const bool last = level == v.last;
+  const LevelControl& c = controls_[level];
+  n.agent = last ? Agent::kLast : Agent::kInterior;
+  n.mask = LevelMask(m, level, last, c, v.phi[level], v.T, b);
+  n.b = LevelPrior(v, level, c, cfg_);
+  n.state = LevelFeatures(v, level, last, c, parts_[level],
+                          stats_.levels[level].wait_carry, cfg_);
+  n.c_bytes = Divisor(v, level);
+  return n;
+}
+
+void Controller::RecordJob(const RLJobRecord& job) {
+  using Kind = RLJobRecord::Kind;
+  const StepSample sample{job.op, job.steps};
+  if (job.kind == Kind::kCompactionBegin || job.kind == Kind::kFlushBegin) {
+    auto& begins =
+        job.kind == Kind::kFlushBegin ? flush_begins_ : compaction_begins_;
+    begins[job.job_id] = sample;
+    // A failed job sends no end record: keep the map bounded.
+    while (begins.size() > 64) begins.erase(begins.begin());
+    return;
+  }
+  const bool flush = job.kind == Kind::kFlushEnd;
+  auto& begins = flush ? flush_begins_ : compaction_begins_;
+  const auto it = begins.find(job.job_id);
+  const bool has_begin = it != begins.end();
+  StepSample begin;
+  if (has_begin) {
+    begin = it->second;
+    begins.erase(it);
+  }
+  // A failed job is charged nothing (cost_model_v2.jobs_from_host_log).
+  if (!job.ok) return;
+  const int start = flush ? -1 : job.start_level;
+  const int level = flush ? 0 : start;
+  if (level < 0 || level >= n_) return;
+  const int kind = KindOf(flush, job.trivial, start);
+  const double s = flush ? 0.0 : static_cast<double>(job.s);
+  const double o = flush ? 0.0 : static_cast<double>(job.o);
+  const double x = kind == kMove ? 0.0 : static_cast<double>(job.x);
+  const Window w = JobWindow(has_begin, begin, sample, ring_, cfg_.v2.n_win);
+  JobLineRecord line;
+  line.level = level;
+  line.interval = intervals_[level].id;
+  line.kind = kind;
+  line.job_id = job.job_id;
+  line.start_level = start;
+  line.output_level = job.output_level;
+  line.s = s;
+  line.o = o;
+  line.x = x;
+  line.has_begin = has_begin;
+  line.n_begin = begin.op;
+  line.n_end = job.op;
+  line.win_start = w.start_op;
+  line.win_ops = w.ops;
+  line.win_own = w.own;
+  line.win_counts.assign(w.counts.begin(), w.counts.end());
+  if (has_begin) {
+    for (const uint64_t point : decision_ops_[level]) {
+      line.decision_points += point > begin.op && point < job.op ? 1 : 0;
+    }
+  }
+  transitions_.Write(JobLine(line));
+  if (!flush) {
+    double read = 0, write = 0;
+    Interference(cfg_, kind, s, o, x, Rho(cfg_, w.counts, w.ops), &read,
+                 &write);
+    stats_.AddCharge(level, job.trivial, read, write);
+  }
+}
+
+void Controller::PollWeights(uint64_t op, uint64_t now) {
+  const double interval_us = cfg_.push_interval_ms * 1000;
+  if (weights_polled_ &&
+      static_cast<double>(Minus(now, last_weights_poll_us_)) < interval_us) {
+    return;
+  }
+  const bool first = !weights_polled_;
+  weights_polled_ = true;
+  last_weights_poll_us_ = now;
+  uint64_t version = 0;
+  std::string error;
+  LoadStatus status = PeekVersion(cfg_.weights_path, &version, &error);
+  if (status == LoadStatus::kMissing) {
+    if (first && cfg_.weights_required) {
+      EnterFallback("weights required but missing: " + error);
+    } else if (first) {
+      decisions_.Write(JsonLine("weights_missing")
+                           .Uint("op", op)
+                           .Uint("t_us", now)
+                           .Str("path", cfg_.weights_path)
+                           .str());
+    }
+    return;
+  }
+  if (status == LoadStatus::kInvalid) {
+    EnterFallback(error);
+    return;
+  }
+  if (version <= weights_.version) return;
+  Weights loaded;
+  status = LoadWeights(cfg_.weights_path, &loaded, &error);
+  if (status == LoadStatus::kMissing) return;  // replaced between the reads
+  if (status != LoadStatus::kOk) {
+    EnterFallback(error);
+    return;
+  }
+  weights_ = std::move(loaded);
+  decisions_.Write(JsonLine("weights")
+                       .Uint("op", op)
+                       .Uint("t_us", now)
+                       .Uint("version", weights_.version)
+                       .Uint("models", weights_.models.size())
+                       .str());
 }
 
 bool Controller::Flush(uint64_t op, uint64_t now, bool new_changes,
@@ -487,10 +717,11 @@ bool Controller::Flush(uint64_t op, uint64_t now, bool new_changes,
   return ok;
 }
 
-void Controller::CloseInterval(int level, const View& v, Agent agent,
-                               const std::vector<double>& state,
-                               const Mask& mask, const Values& b, uint64_t op,
-                               uint64_t id, bool has_action, Action action) {
+void Controller::CloseInterval(int level, const View& v, const Opening& next,
+                               uint64_t op) {
+  const Agent agent = next.agent;
+  const std::vector<double>& state = next.state;
+  const Mask& mask = next.mask;
   Interval& open = intervals_[level];
   TransitionRecord t;
   t.level = level;
@@ -511,21 +742,34 @@ void Controller::CloseInterval(int level, const View& v, Agent agent,
   t.next_agent = agent;
   t.next_state = state;
   t.next_mask = mask;
+  t.next_b = next.b;
+  if (level < v.num_levels) {
+    t.c_bytes = Divisor(v, level);
+    if (level < static_cast<int>(v.N.size())) t.n_ops = v.N[level];
+  }
+  t.value_before = open.value_before;
+  t.value_after = open.value_after;
+  t.up = open.up;
+  t.down = open.down;
   t.valid = open.valid && open.agent == agent;
   t.invalid = !open.valid ? open.invalid : t.valid ? "" : "agent changed";
   transitions_.Write(TransitionLine(t));
 
   parts_[level] = LevelParts();
   open = Interval();
-  open.id = id;
+  open.id = next.id;
   open.start_op = op;
   open.agent = agent;
   open.state = state;
   open.mask = mask;
-  open.b = b;
-  open.has_action = has_action;
-  open.action = action;
-  open.valid = has_action && !fallback_ && !draining_;
+  open.b = next.b;
+  open.has_action = next.has_action;
+  open.action = next.action;
+  open.value_before = next.value_before;
+  open.value_after = next.value_after;
+  open.up = next.up;
+  open.down = next.down;
+  open.valid = next.has_action && !fallback_ && !draining_;
   open.invalid = open.valid  ? ""
                  : fallback_ ? "fallback"
                  : draining_ ? "drain"
@@ -618,8 +862,9 @@ void Controller::Stop() noexcept {
         open.valid = false;
         open.invalid = "closed at stop";
       }
-      CloseInterval(level, v, open.agent, {}, Mask{}, Values{}, ops.total(), 0,
-                    false, Action::kHold);
+      Opening none;
+      none.agent = open.agent;
+      CloseInterval(level, v, none, ops.total());
     }
     decisions_.Write(JsonLine("stop")
                          .Uint("op", ops.total())

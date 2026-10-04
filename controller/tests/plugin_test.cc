@@ -117,10 +117,10 @@ TEST_F(PluginTest, AnInvalidConfigFallsBackOnceAndSaysWhy) {
 
 TEST_F(PluginTest, AnUnbuiltModeFallsBack) {
   FakeHost host;
-  Controller controller(&host, Config({{"mode", "\"learned\""}}));
+  Controller controller(&host, Config({{"mode", "\"remote-inference\""}}));
   EXPECT_TRUE(controller.fallback());
   controller.Stop();
-  EXPECT_NE(Decisions()[1].find("not built yet"), std::string::npos);
+  EXPECT_NE(Decisions()[1].find("not built"), std::string::npos);
 }
 
 TEST_F(PluginTest, HoldOnlyDecidesAndLogsButNeverCallsSetOptions) {

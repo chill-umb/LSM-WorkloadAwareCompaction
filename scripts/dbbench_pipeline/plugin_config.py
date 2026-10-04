@@ -14,6 +14,15 @@ value, so no value is chosen when an arm starts.
   prices (18, D-15)      c_w c_f c_blk c_sk c_open (D-21: the controller
                          prices each level's reopens at stage 18's c_open)
   D-16                   config/admission_test.json: k
+  cost model 2 (D-23)    the learner arms only (prior, learned): from a
+                         schema-6 prices file (stage 30; cost_model_v2's
+                         load_prices), c_cr c_job_<kind> c_st c_ib c_mt
+                         c_get0 c_sc0 c_put p_dev lambda n_win and every
+                         kappa_b_<type> and kappa_j_<type>_<kind>; hold and
+                         rules arms run under cost model 1
+  learner settings       LEARNER_SETTINGS_FILE (D-24 §2, exploratory):
+                         explore, push_interval_ms, weights_required; the
+                         seed and the weights path come from the arm
 
 Every value missing, or null, in its file is listed and the arm is refused:
 the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
@@ -37,7 +46,10 @@ from pathlib import Path
 
 import research_objective
 
-PLUGIN_MODES = {"hold": "hold-only", "rules": "rules"}
+PLUGIN_MODES = {"hold": "hold-only", "rules": "rules", "prior": "prior-only",
+                "learned": "learned"}
+LEARNER_ARMS = ("prior", "learned")
+LEARNER_KEYS = ("explore", "push_interval_ms", "weights_required")
 # The device prices controller/config.cc reads, c_open among them since
 # PREREGISTRATION D-21 (resolving D-20 §2g): measured by stage 18, never a
 # default; only the preflight's smoke runs fill a missing one.
@@ -67,7 +79,28 @@ PLACEHOLDERS = {
     "c_w": 1e-14, "c_f": 1e-12, "c_blk": 1e-11, "c_sk": 1e-11, "c_open": 1e-10,
     "rules": ",".join(RULE_THRESHOLDS), "rule_l0_early_read_ratio": 1.0,
     "rule_garbage_drop": 0.1, "rule_release_fill": 0.5,
+    "explore": 0.1, "push_interval_ms": 1000, "weights_required": 0,
+    "seed": 1,
 }
+
+
+def cost_model_2_keys(record: dict) -> dict:
+    """Cost model 2's plugin keys from a schema-6 prices record, checked by
+    the evaluator's loader (ValueError otherwise), so the plugin, the
+    trainer and 04 price with one set of values."""
+    import cost_model_v2
+    p = cost_model_v2.load_prices(record)
+    keys = {"c_cr": p.c_cr, "c_st": p.base["step"], "c_ib": p.base["iblock"],
+            "c_mt": p.base["memtable"], "c_get0": p.base["get0"],
+            "c_sc0": p.base["scan0"], "c_put": p.base["put"],
+            "p_dev": p.p_dev, "lambda": p.lam, "n_win": p.n_win}
+    for kind in cost_model_v2.KINDS:
+        keys[f"c_job_{kind}"] = p.job[kind]
+    for x in cost_model_v2.STEP_TYPES:
+        keys[f"kappa_b_{x}"] = p.kappa_b[x]
+        for kind in cost_model_v2.KINDS:
+            keys[f"kappa_j_{x}_{kind}"] = p.kappa_j[x][kind]
+    return keys
 
 
 def _value(source: dict, key: str, where: str, missing: list[str]):
@@ -80,17 +113,21 @@ def _value(source: dict, key: str, where: str, missing: list[str]):
 def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             settings: dict, contract: dict, prices: dict | None,
             admission: dict, decision_log: str, transition_log: str,
-            placeholders: bool = False,
-            diagnostic: bool = False) -> tuple[dict, list[str]]:
+            placeholders: bool = False, diagnostic: bool = False,
+            learner: dict | None = None, weights_path: str | None = None,
+            seed: int | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
-    Provisional prices only for a diagnostic run (D-22 j)."""
+    Provisional prices only for a diagnostic run (D-22 j). A learner arm
+    needs a schema-6 prices file (cost model 2), the learner settings, and,
+    for learned, the weights path; its seed is the arm's."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
     missing: list[str] = []
     config: dict = {"mode": PLUGIN_MODES[arm],
                     "decision_log": decision_log,
-                    "transition_log": transition_log}
+                    "transition_log": transition_log,
+                    "cost_model": 2 if arm in LEARNER_ARMS else 1}
     for key in BOUND_KEYS:
         config[key] = _value(bounds, key, "D-18 action bounds", missing)
     config["b_max"] = _value(settings, "b_max", "Gate N3 settings", missing)
@@ -124,6 +161,26 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             prices, contract, provisional_ok=diagnostic or placeholders)
         config.update({key: checked[key] for key in (*PLUGIN_PRICES, "c_s")})
     config["k"] = admission["k"]
+    if arm in LEARNER_ARMS:
+        if prices is None:
+            raise ValueError(f"the {arm} arm needs a schema-6 prices file "
+                             "(cost model 2, stage 30)")
+        if prices.get("schema") != 6:
+            raise ValueError(f"the {arm} arm needs cost model 2's prices: "
+                             f"schema 6, not {prices.get('schema')!r}")
+        config.update(cost_model_2_keys(prices))
+        learner = learner or {}
+        config["explore"] = _value(learner, "explore", "learner settings",
+                                   missing)
+        if seed is None:
+            missing.append("seed (the arm's)")
+        config["seed"] = seed
+        if arm == "learned":
+            if not weights_path:
+                missing.append("weights_path (the arm's)")
+            config["weights_path"] = weights_path
+            for key in ("push_interval_ms", "weights_required"):
+                config[key] = _value(learner, key, "learner settings", missing)
 
     filled: list[str] = []
     if missing and placeholders:
@@ -134,6 +191,8 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
                 config.setdefault(threshold, None)
         for key, value in list(config.items()):
             if value is None:
+                if key not in PLACEHOLDERS:
+                    raise ValueError(f"{key} has no smoke placeholder")
                 config[key] = PLACEHOLDERS[key]
                 filled.append(key)
         missing = []
@@ -141,7 +200,7 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         raise ValueError(f"the {arm} arm's plugin config lacks: " +
                          "; ".join(missing))
     for key, value in config.items():
-        if key.endswith("_log") or key in ("mode", "rules"):
+        if key.endswith("_log") or key in ("mode", "rules", "weights_path"):
             continue
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or
                 not math.isfinite(value)):
@@ -178,6 +237,11 @@ def main() -> int:
     parser.add_argument("--diagnostic", action="store_true",
                         help="a run marked diagnostic: provisional prices "
                              "are accepted (D-22 j)")
+    parser.add_argument("--learner-settings", type=Path,
+                        help="the learner arms' settings (explore, "
+                             "push_interval_ms, weights_required)")
+    parser.add_argument("--weights-path", help="the learned arm's weights file")
+    parser.add_argument("--seed", type=int, help="the learner arms' seed")
     args = parser.parse_args()
     try:
         contract, _ = research_objective.load_contract()
@@ -191,7 +255,10 @@ def main() -> int:
             admission=json.loads(args.admission.read_text()),
             decision_log=args.decision_log,
             transition_log=args.transition_log,
-            placeholders=args.placeholders, diagnostic=args.diagnostic)
+            placeholders=args.placeholders, diagnostic=args.diagnostic,
+            learner=_load(args.learner_settings, "learner settings").get(
+                "plugin", {}),
+            weights_path=args.weights_path, seed=args.seed)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

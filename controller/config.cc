@@ -17,6 +17,49 @@ const double kForkMultiplierMax = 2.0;
 const char* const kRuleNames[5] = {"k0_tracking", "l0_early", "yield_slot",
                                    "garbage_hold", "neighbour_release"};
 
+const char* const kStepTypeNames[kNumStepTypes] = {
+    "probe", "block", "seek", "reopen", "step",
+    "iblock", "memtable", "get0", "scan0", "put"};
+const char* const kJobKindNames[kNumJobKinds] = {"flush", "l0", "deep",
+                                                 "move"};
+
+double Config::BasePrice(int type) const {
+  switch (type) {
+    case kProbe:
+      return c_f;
+    case kBlock:
+      return c_blk;
+    case kSeek:
+      return c_sk;
+    case kReopen:
+      return c_open;
+    default:
+      break;
+  }
+  if (cost_model != 2) return 0;
+  switch (type) {
+    case kStep:
+      return v2.c_st;
+    case kIBlock:
+      return v2.c_ib;
+    case kMemtable:
+      return v2.c_mt;
+    case kGet0:
+      return v2.c_get0;
+    case kScan0:
+      return v2.c_sc0;
+    case kPut:
+      return v2.c_put;
+    default:
+      return 0;
+  }
+}
+
+double Config::JobPrice(int kind) const {
+  return cost_model == 2 && kind >= 0 && kind < kNumJobKinds ? v2.job[kind]
+                                                             : 0;
+}
+
 bool Config::HasRule(const std::string& name) const {
   for (const std::string& rule : rules) {
     if (rule == name) return true;
@@ -238,8 +281,38 @@ const std::set<std::string>& KnownKeys() {
                                                "q_bar",
                                                "decision_log",
                                                "transition_log",
-                                               "setoptions_min_interval_ms"};
-  return kKnown;
+                                               "setoptions_min_interval_ms",
+                                               "cost_model",
+                                               "c_cr",
+                                               "c_job_flush",
+                                               "c_job_l0",
+                                               "c_job_deep",
+                                               "c_job_move",
+                                               "c_st",
+                                               "c_ib",
+                                               "c_mt",
+                                               "c_get0",
+                                               "c_sc0",
+                                               "c_put",
+                                               "p_dev",
+                                               "lambda",
+                                               "n_win",
+                                               "explore",
+                                               "seed",
+                                               "weights_path",
+                                               "push_interval_ms",
+                                               "weights_required"};
+  static const std::set<std::string> kWithKappa = [] {
+    std::set<std::string> keys = kKnown;
+    for (const char* x : kStepTypeNames) {
+      keys.insert(std::string("kappa_b_") + x);
+      for (const char* kind : kJobKindNames) {
+        keys.insert(std::string("kappa_j_") + x + "_" + kind);
+      }
+    }
+    return keys;
+  }();
+  return kWithKappa;
 }
 
 class Reader {
@@ -317,6 +390,53 @@ bool ParseRules(const std::string& text, std::vector<std::string>* rules,
   }
 }
 
+bool IsCostModel2Key(const std::string& key) {
+  static const std::set<std::string> kKeys = {
+      "c_cr", "c_job_flush", "c_job_l0", "c_job_deep", "c_job_move",
+      "c_st", "c_ib",        "c_mt",     "c_get0",     "c_sc0",
+      "c_put", "p_dev",      "lambda",   "n_win"};
+  return kKeys.count(key) > 0 || key.rfind("kappa_b_", 0) == 0 ||
+         key.rfind("kappa_j_", 0) == 0;
+}
+
+// As cost_model_v2.load_prices: c_cr, c_ib, lambda and every kappa may be 0;
+// the job prices, p_dev and the other step prices must be positive; n_win is
+// a positive integer.
+bool ParseCostModel2(Reader* r, CostModel2* v) {
+  const auto non_negative = [r](const std::string& key, double* out) {
+    return r->Number(key.c_str(), out) &&
+           r->Check(*out >= 0, "need " + key + " >= 0");
+  };
+  const auto positive = [r](const std::string& key, double* out) {
+    return r->Number(key.c_str(), out) &&
+           r->Check(*out > 0, "need " + key + " > 0");
+  };
+  if (!non_negative("c_cr", &v->c_cr) || !positive("c_st", &v->c_st) ||
+      !non_negative("c_ib", &v->c_ib) || !positive("c_mt", &v->c_mt) ||
+      !positive("c_get0", &v->c_get0) || !positive("c_sc0", &v->c_sc0) ||
+      !positive("c_put", &v->c_put) || !positive("p_dev", &v->p_dev) ||
+      !non_negative("lambda", &v->lambda) ||
+      !r->Integer("n_win", &v->n_win) || !r->Check(v->n_win > 0, "need n_win > 0")) {
+    return false;
+  }
+  for (int k = 0; k < kNumJobKinds; ++k) {
+    if (!positive(std::string("c_job_") + kJobKindNames[k], &v->job[k])) {
+      return false;
+    }
+  }
+  for (int x = 0; x < kNumStepTypes; ++x) {
+    const std::string type = kStepTypeNames[x];
+    if (!non_negative("kappa_b_" + type, &v->kappa_b[x])) return false;
+    for (int k = 0; k < kNumJobKinds; ++k) {
+      if (!non_negative("kappa_j_" + type + "_" + kJobKindNames[k],
+                        &v->kappa_j[x][k])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 bool ParseFlatJson(const std::string& text,
@@ -392,12 +512,60 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     c->mode = Mode::kHoldOnly;
   } else if (c->mode_name == "rules") {
     c->mode = Mode::kRules;
-  } else if (c->mode_name == "prior-only" || c->mode_name == "learned" ||
-             c->mode_name == "remote-inference") {
-    return r.Fail("mode \"" + c->mode_name +
-                  "\" is not built yet (plan §7 step 10)");
+  } else if (c->mode_name == "prior-only") {
+    c->mode = Mode::kPriorOnly;
+  } else if (c->mode_name == "learned") {
+    c->mode = Mode::kLearned;
+  } else if (c->mode_name == "remote-inference") {
+    return r.Fail("mode \"remote-inference\" is not built (Gate N6)");
   } else {
     return r.Fail("unknown mode \"" + c->mode_name + "\"");
+  }
+
+  if (!r.Integer("cost_model", &c->cost_model) ||
+      !r.Check(c->cost_model == 1 || c->cost_model == 2,
+               "need cost_model 1 or 2")) {
+    return false;
+  }
+  if (c->cost_model == 2 && !ParseCostModel2(&r, &c->v2)) return false;
+  if (c->cost_model == 1) {
+    for (const auto& entry : values) {
+      if (IsCostModel2Key(entry.first)) {
+        return r.Fail("\"" + entry.first + "\" needs cost_model 2");
+      }
+    }
+  }
+  const bool learner =
+      c->mode == Mode::kPriorOnly || c->mode == Mode::kLearned;
+  if (learner) {
+    // H §3 and §7 price the D-23 terms; the learner modes run under cost
+    // model 2 only (D-24 §2).
+    if (!r.Check(c->cost_model == 2,
+                 "mode \"" + c->mode_name + "\" needs cost_model 2") ||
+        !r.Number("explore", &c->explore) ||
+        !r.Check(c->explore >= 0 && c->explore < 1,
+                 "need 0 <= explore < 1") ||
+        !r.Integer("seed", &c->seed) || !r.Check(c->seed >= 0, "need seed >= 0")) {
+      return false;
+    }
+  } else if (r.Has("explore") || r.Has("seed")) {
+    return r.Fail("\"explore\" and \"seed\" are for prior-only and learned");
+  }
+  if (c->mode == Mode::kLearned) {
+    int required = 0;
+    if (!r.String("weights_path", &c->weights_path) ||
+        !r.Check(!c->weights_path.empty(), "need a weights_path") ||
+        !r.Number("push_interval_ms", &c->push_interval_ms) ||
+        !r.Check(c->push_interval_ms > 0, "need push_interval_ms > 0") ||
+        !r.Integer("weights_required", &required) ||
+        !r.Check(required == 0 || required == 1,
+                 "need weights_required 0 or 1")) {
+      return false;
+    }
+    c->weights_required = required == 1;
+  } else if (r.Has("weights_path") || r.Has("push_interval_ms") ||
+             r.Has("weights_required")) {
+    return r.Fail("the weights keys are for learned mode");
   }
 
   if (r.Has("rules")) {

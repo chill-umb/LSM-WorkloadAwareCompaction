@@ -3,6 +3,8 @@
 // without defaults, and the refused modes.
 #include "config.h"
 
+#include <set>
+
 #include "gtest/gtest.h"
 #include "test_util.h"
 
@@ -200,13 +202,16 @@ TEST(Config, BoundsMustLieWithinTheForks) {
   EXPECT_TRUE(Contains(Error(values), "[0.5, 2.0]"));
 }
 
-TEST(Config, UnbuiltModesAreRefused) {
-  for (const char* mode : {"prior-only", "learned", "remote-inference"}) {
-    auto values = BaseConfig("/tmp/x");
-    values["mode"] = std::string("\"") + mode + "\"";
-    EXPECT_TRUE(Contains(Error(values), "not built yet")) << mode;
-  }
+TEST(Config, RemoteInferenceIsRefusedAndTheLearnerModesNeedCostModel2) {
   auto values = BaseConfig("/tmp/x");
+  values["mode"] = "\"remote-inference\"";
+  EXPECT_TRUE(Contains(Error(values), "not built")) << Error(values);
+  for (const char* mode : {"prior-only", "learned"}) {
+    values = BaseConfig("/tmp/x");
+    values["mode"] = std::string("\"") + mode + "\"";
+    EXPECT_TRUE(Contains(Error(values), "needs cost_model 2")) << mode;
+  }
+  values = BaseConfig("/tmp/x");
   values["mode"] = "\"magic\"";
   EXPECT_TRUE(Contains(Error(values), "unknown mode"));
 }
@@ -257,6 +262,109 @@ TEST(Config, MissingFile) {
   std::string error;
   EXPECT_FALSE(LoadConfig("/nonexistent/config.json", &c, &error));
   EXPECT_TRUE(Contains(error, "cannot read"));
+}
+
+// Cost model 2's prices and the learner modes' keys (D-23 §3(d): required,
+// no defaults).
+std::map<std::string, std::string> V2Config(const std::string& dir) {
+  auto values = BaseConfig(dir);
+  values["cost_model"] = "2";
+  for (const char* key : {"c_cr", "c_ib", "lambda"}) values[key] = "0";
+  for (const char* key : {"c_job_flush", "c_job_l0", "c_job_deep",
+                          "c_job_move", "c_st", "c_mt", "c_get0", "c_sc0",
+                          "c_put", "p_dev"}) {
+    values[key] = "1.5";
+  }
+  values["n_win"] = "1000";
+  for (const char* x : kStepTypeNames) {
+    values[std::string("kappa_b_") + x] = "1e-9";
+    for (const char* kind : kJobKindNames) {
+      values[std::string("kappa_j_") + x + "_" + kind] = "0";
+    }
+  }
+  return values;
+}
+
+TEST(Config, CostModel2ParsesWithEveryPrice) {
+  Config c;
+  std::string error;
+  auto values = V2Config("/tmp/x");
+  values["c_job_deep"] = "3.25";
+  values["kappa_j_probe_deep"] = "0.5";
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  EXPECT_EQ(c.cost_model, 2);
+  EXPECT_EQ(c.v2.job[kDeepMerge], 3.25);
+  EXPECT_EQ(c.v2.kappa_j[kProbe][kDeepMerge], 0.5);
+  EXPECT_EQ(c.v2.kappa_b[kPut], 1e-9);
+  EXPECT_EQ(c.v2.n_win, 1000);
+  EXPECT_EQ(c.BasePrice(kStep), 1.5);
+  EXPECT_EQ(c.JobPrice(kMove), 1.5);
+}
+
+bool IsCostModel2KeyForTest(const std::string& key) {
+  static const std::set<std::string> kPrices = {
+      "c_cr", "c_job_flush", "c_job_l0", "c_job_deep", "c_job_move", "c_st",
+      "c_ib", "c_mt",        "c_get0",   "c_sc0",      "c_put",      "p_dev",
+      "lambda", "n_win"};
+  return kPrices.count(key) > 0 || key.rfind("kappa_b_", 0) == 0 ||
+         key.rfind("kappa_j_", 0) == 0;
+}
+
+TEST(Config, EveryCostModel2PriceIsRequiredAndChecked) {
+  const auto base = V2Config("/tmp/x");
+  for (const auto& entry : base) {
+    const std::string& key = entry.first;
+    if (!IsCostModel2KeyForTest(key)) continue;
+    auto values = base;
+    values.erase(key);
+    EXPECT_TRUE(Contains(Error(values), "missing \"" + key + "\"")) << key;
+    values = base;
+    values[key] = "-1";
+    EXPECT_FALSE(Error(values).empty()) << key;
+  }
+  auto values = base;
+  values["c_st"] = "0";  // a step price must be positive
+  EXPECT_TRUE(Contains(Error(values), "c_st > 0"));
+  values = base;
+  values["n_win"] = "10.5";
+  EXPECT_TRUE(Contains(Error(values), "integer"));
+  // Cost model 1 refuses cost model 2's keys rather than ignoring them.
+  values = base;
+  values["cost_model"] = "1";
+  EXPECT_TRUE(Contains(Error(values), "needs cost_model 2"));
+  values = base;
+  values["cost_model"] = "3";
+  EXPECT_TRUE(Contains(Error(values), "cost_model 1 or 2"));
+}
+
+TEST(Config, TheLearnerModesNeedTheirKeysAndOthersRefuseThem) {
+  auto values = V2Config("/tmp/x");
+  values["mode"] = "\"prior-only\"";
+  EXPECT_TRUE(Contains(Error(values), "missing \"explore\""));
+  values["explore"] = "0.1";
+  values["seed"] = "7";
+  Config c;
+  std::string error;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  EXPECT_EQ(c.mode, Mode::kPriorOnly);
+  values["explore"] = "1";
+  EXPECT_TRUE(Contains(Error(values), "explore < 1"));
+  values["explore"] = "0.1";
+  values["mode"] = "\"learned\"";
+  EXPECT_TRUE(Contains(Error(values), "missing \"weights_path\""));
+  values["weights_path"] = "\"/tmp/x/weights.bin\"";
+  values["push_interval_ms"] = "500";
+  values["weights_required"] = "1";
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  EXPECT_EQ(c.mode, Mode::kLearned);
+  EXPECT_TRUE(c.weights_required);
+  EXPECT_EQ(c.push_interval_ms, 500);
+  values["mode"] = "\"rules\"";
+  values["rules"] = "\"yield_slot\"";
+  EXPECT_TRUE(Contains(Error(values), "are for prior-only and learned"));
+  values.erase("explore");
+  values.erase("seed");
+  EXPECT_TRUE(Contains(Error(values), "weights keys are for learned"));
 }
 
 }  // namespace

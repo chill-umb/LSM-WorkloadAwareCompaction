@@ -34,6 +34,16 @@
 // Schema 2 (2026-10-01): "b" renamed "prior_cost"; interior state gains
 // "burst_absent"; cost parts gain "held_byte_ops"; flush_size and apply_held
 // lines are new.
+// Schema 4 (2026-10-04, D-23/D-24, plan step 10): cost parts gain the job
+// counts by kind, read_bytes, the hidden steps and their slot moves, the
+// global foreground steps, memtable_hidden, k0_ops and L0's raw reads; every
+// state gains H §2's cost-model-2 inputs (state.h); a transition gains
+// next_prior_cost, the divisor C and turnover N of its level, its value
+// before and after the action, and the neighbours' states, masks and
+// prior_cost at the decision (H §3's neighbour charge); a decision gains its
+// weights version and, in the learner modes, q; and the transition log gains
+// one "job" line per completed job (H §6, ARCH-7, ARCH-8), written before
+// the transition that closes its interval.
 #pragma once
 
 #include <cstdint>
@@ -48,7 +58,7 @@
 
 namespace rlc {
 
-constexpr int kLogSchema = 3;
+constexpr int kLogSchema = 4;
 
 // The shortest decimal that reads back as the same double; null if not
 // finite.
@@ -63,6 +73,7 @@ class JsonLine {
   JsonLine& Str(const char* key, const std::string& value);
   JsonLine& Null(const char* key);
   JsonLine& Nums(const char* key, const std::vector<double>& values);
+  JsonLine& NumsOrNull(const char* key, const std::vector<double>& values);
   JsonLine& Flags(const char* key, const Mask& mask);
   // {"name": value, ...}; null when values is empty.
   JsonLine& Features(const char* key, const std::vector<std::string>& names,
@@ -90,8 +101,22 @@ struct DecisionRecord {
   double old_value = 0, requested = 0, effective = 0;
   // After the action: anchor and timing, or at L0 anchor and offset.
   double anchor = 0, timing = 0;
+  // The weights version the decision used (0: none, Q = -b); and Q for
+  // every action in the learner modes (empty otherwise: null).
+  uint64_t weights = 0;
+  std::vector<double> q;
 };
 std::string DecisionLine(const DecisionRecord& r);
+
+// A neighbour's view at a level's decision (H §3): its agent, state, mask
+// and prior_cost now. Empty state: no neighbour (null).
+struct NeighbourView {
+  Agent agent = Agent::kInterior;
+  std::vector<double> state;
+  Mask mask{};
+  Values b{};
+  double c_bytes = kNaN;  // its divisor C_j (L0: C_0 = K0_cfg F)
+};
 
 struct TransitionRecord {
   int level = 0;
@@ -111,10 +136,40 @@ struct TransitionRecord {
   Agent next_agent = Agent::kInterior;
   std::vector<double> next_state;  // empty: null (closed without a decision)
   Mask next_mask{};
+  Values next_b{};
+  // The level's divisor C_i (L0: C_0 = K0_cfg F) and operations per
+  // turnover N_i at the close; m_i (L0: K_0) before and after the action
+  // that opened the interval; and the neighbours above and below at it.
+  double c_bytes = kNaN, n_ops = kNaN;
+  double value_before = kNaN, value_after = kNaN;
+  NeighbourView up, down;
   bool valid = true;
   std::string invalid;  // why not, when not valid
 };
 std::string TransitionLine(const TransitionRecord& r);
+
+// One completed job (H §6): charged at its completion to `level`'s open
+// interval `interval` (a flush: L0, its interference to the write-path
+// bucket), with its window's step counts by type, unpriced; the trainer and
+// the evaluator price them alike.
+struct JobLineRecord {
+  int level = 0;
+  uint64_t interval = 0;
+  int kind = 0;
+  int job_id = 0;
+  int start_level = -1, output_level = 0;
+  double s = 0, o = 0, x = 0;
+  bool has_begin = false;
+  uint64_t n_begin = 0, n_end = 0;
+  uint64_t win_start = 0;
+  double win_ops = 0;
+  bool win_own = false;
+  std::vector<double> win_counts;  // kNumStepTypes, cost_model_v2's order
+  // Decision points of the charged level strictly inside (n_begin, n_end)
+  // (ARCH-8); 0 without a begin record.
+  uint64_t decision_points = 0;
+};
+std::string JobLine(const JobLineRecord& r);
 
 class LogFile {
  public:

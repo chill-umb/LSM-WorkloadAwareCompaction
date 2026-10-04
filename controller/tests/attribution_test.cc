@@ -188,5 +188,83 @@ TEST(Attribution, RandomSegmentsPreserveEveryTotal) {
   EXPECT_NEAR(t.reopens, raw.reopens, 1e-6);
 }
 
+// Cost model 2 (D §4 as amended 2026-10-03, D-23).
+TEST(Attribution, HiddenStepsAreChargedToTheLevelAbove) {
+  std::vector<LevelParts> parts(5);
+  Segment s;
+  s.ops.seeks = 10;
+  s.reads.resize(5);
+  s.reads[0].hidden_steps = 7;   // L0's own entries: L0
+  s.reads[1].hidden_steps = 11;  // L1's: L0
+  s.reads[2].hidden_steps = 13;  // L2's: L1
+  s.reads[4].hidden_steps = 17;  // the last level's: L3
+  s.steps.iter_skips = 7 + 11 + 13 + 17 + 5;  // 5 over memtable entries
+  AttributeSegment(s, &parts);
+  EXPECT_EQ(parts[0].hidden_steps, 18);
+  EXPECT_EQ(parts[1].hidden_steps, 13);
+  EXPECT_EQ(parts[2].hidden_steps, 0);
+  EXPECT_EQ(parts[3].hidden_steps, 17);
+  EXPECT_EQ(parts[4].hidden_steps, 0);
+  // The memtable bucket's share, and the global counts, in every record.
+  for (const LevelParts& p : parts) {
+    EXPECT_EQ(p.memtable_hidden, 5);
+    EXPECT_EQ(p.fg_iter_skips, 53);
+    EXPECT_EQ(p.l0_hidden, 18);
+  }
+}
+
+TEST(Attribution, SlotBlockingMovesL0sHiddenStepChargeToo) {
+  std::vector<LevelParts> parts(5);
+  Segment s = L0Blocked(2, 6, 4);  // share 1/3
+  s.reads[0].hidden_steps = 30;
+  s.reads[1].hidden_steps = 30;
+  s.steps.iter_skips = 60;
+  AttributeSegment(s, &parts);
+  EXPECT_NEAR(parts[0].slot_out_hidden, 20, 1e-12);
+  EXPECT_EQ(parts[2].slot_in_hidden, parts[0].slot_out_hidden);
+  double charged = 0;
+  for (const LevelParts& p : parts) {
+    charged += p.hidden_steps - p.slot_out_hidden + p.slot_in_hidden;
+  }
+  EXPECT_NEAR(charged, 60, 1e-12);  // the total is unchanged (D.16)
+}
+
+TEST(Attribution, JobsAreCountedByKindAtTheirStartLevel) {
+  std::vector<LevelParts> parts(5);
+  AttributeJobEnd(FakeHost::Flush(1000), &parts);
+  AttributeJobEnd(FakeHost::Compaction(true, 1, 0, 400, 300, 650), &parts);
+  AttributeJobEnd(FakeHost::Compaction(true, 2, 2, 100, 200, 280), &parts);
+  auto move = FakeHost::Compaction(true, 3, 3, 500, 0, 0);
+  move.trivial = true;
+  AttributeJobEnd(move, &parts);
+  auto failed = FakeHost::Compaction(true, 4, 2, 100, 200, 0);
+  failed.ok = false;
+  AttributeJobEnd(failed, &parts);
+  EXPECT_EQ(parts[0].jobs_flush, 1);
+  EXPECT_EQ(parts[0].jobs_l0, 1);
+  EXPECT_EQ(parts[0].read_bytes, 700);
+  EXPECT_EQ(parts[2].jobs_deep, 1);  // the failed job is not counted
+  EXPECT_EQ(parts[2].read_bytes, 300);
+  EXPECT_EQ(parts[3].jobs_move, 1);
+  EXPECT_EQ(parts[3].read_bytes, 0);  // a move reads nothing
+  EXPECT_EQ(parts[3].write_bytes, 0);
+}
+
+TEST(Attribution, L0sPerFileReadsAndK0AreInEveryRecord) {
+  std::vector<LevelParts> parts(5);
+  Segment s = L0Blocked(-1, 3, 4);
+  s.l0_due = false;
+  s.steps.probes = 140;
+  AttributeSegment(s, &parts);
+  for (const LevelParts& p : parts) {
+    EXPECT_EQ(p.k0_ops, 3 * 100);
+    EXPECT_EQ(p.l0_probes, 90);
+    EXPECT_EQ(p.l0_block_probes, 30);  // every filter pass reads a block
+    EXPECT_EQ(p.l0_seeks, 40);
+    EXPECT_EQ(p.l0_reopens, 18);
+    EXPECT_EQ(p.fg_probes, 140);
+  }
+}
+
 }  // namespace
 }  // namespace rlc

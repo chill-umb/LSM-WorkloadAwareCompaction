@@ -81,6 +81,40 @@ std::vector<std::string> GoldenLines() {
   t.next_agent = Agent::kInterior;
   t.next_state.assign(FeatureNames(Agent::kInterior).size(), 0.25);
   t.next_mask = {true, false, true, true};
+  // Schema 4: cost model 2's parts, the divisor and turnover, the values
+  // around the action and the neighbours at the decision.
+  t.parts.jobs_deep = 2;
+  t.parts.jobs_move = 1;
+  t.parts.read_bytes = 3145728;
+  t.parts.hidden_steps = 77;
+  t.parts.slot_in_hidden = 2.5;
+  t.parts.fg_probes = 5000;
+  t.parts.fg_block_probes = 1200;
+  t.parts.fg_run_seeks = 7000;
+  t.parts.fg_reopens = 3;
+  t.parts.fg_nexts_found = 40000;
+  t.parts.fg_iter_skips = 900;
+  t.parts.memtable_hidden = 11;
+  t.parts.k0_ops = 2.5 * 23456;
+  t.parts.l0_probes = 1500;
+  t.parts.l0_block_probes = 300;
+  t.parts.l0_seeks = 2400;
+  t.parts.l0_hidden = 120;
+  t.next_b = {0, 0.5, -0.5, 0.75};
+  t.c_bytes = 8388608;
+  t.n_ops = 40000;
+  t.value_before = 1;
+  t.value_after = 0.952;
+  t.up.agent = Agent::kInterior;
+  t.up.state.assign(FeatureNames(Agent::kInterior).size(), 0.125);
+  t.up.mask = {true, true, true, false};
+  t.up.b = {0, 0.01, 0.02, 0.03};
+  t.up.c_bytes = 4194304;
+  t.down.agent = Agent::kLast;
+  t.down.state.assign(FeatureNames(Agent::kLast).size(), 2);
+  t.down.mask = {true, false, false, true};
+  t.down.b = {0, 0, 0, 0.5};
+  t.down.c_bytes = 16777216;
 
   // L0's interval opened at start: no state, no action, not replayable.
   TransitionRecord first;
@@ -113,8 +147,48 @@ std::vector<std::string> GoldenLines() {
   closed.valid = false;
   closed.invalid = "closed at stop";
 
-  return {DecisionLine(d), DecisionLine(l0), TransitionLine(t),
-          TransitionLine(first), TransitionLine(closed)};
+  // A learned decision: its weights version and Q per action.
+  DecisionRecord learned = d;
+  learned.id = 21;
+  learned.mode = "learned";
+  learned.reason = "greedy:learned";
+  learned.weights = 7;
+  learned.q = {0, -0.125, 0.5, 0.25};
+
+  // A merge's job line, and a short flush's, whose window reaches back n_win.
+  JobLineRecord job;
+  job.level = 2;
+  job.interval = 9;
+  job.kind = kDeepMerge;
+  job.job_id = 41;
+  job.start_level = 2;
+  job.output_level = 3;
+  job.s = 2097152;
+  job.o = 1048576;
+  job.x = 3000000;
+  job.has_begin = true;
+  job.n_begin = 101000;
+  job.n_end = 104000;
+  job.win_start = 101000;
+  job.win_ops = 3000;
+  job.win_own = true;
+  job.win_counts = {600, 140, 840, 0, 5000, 0, 1680, 1400, 280, 1320};
+  job.decision_points = 1;
+  JobLineRecord flush;
+  flush.level = 0;
+  flush.interval = 0;
+  flush.kind = kFlush;
+  flush.job_id = 42;
+  flush.start_level = -1;
+  flush.x = 1048576;
+  flush.n_end = 105000;
+  flush.win_start = 103900;
+  flush.win_ops = 1100;
+  flush.win_counts = {220, 50, 300, 0, 1800, 0, 620, 510, 110, 480};
+
+  return {DecisionLine(d),       DecisionLine(l0),      TransitionLine(t),
+          TransitionLine(first), TransitionLine(closed), DecisionLine(learned),
+          JobLine(job),          JobLine(flush)};
 }
 
 TEST(Log, LinesMatchTheGoldenFile) {

@@ -26,4 +26,16 @@ Choice DecideLevel(const Config& cfg, const View& v, int level, bool last,
   return FromRule(LevelRules(v, level, last, mask, cfg), mask);
 }
 
+Choice DecideLearner(const Values& q, const Mask& mask, double explore,
+                     double u_explore, double u_pick, const char* tag) {
+  if (u_explore < explore) {
+    return {PickAllowed(mask, u_pick), std::string("explore:") + tag};
+  }
+  int best = static_cast<int>(Action::kHold);
+  for (int a = 1; a < kNumActions; ++a) {
+    if (mask[a] && q[a] > q[best]) best = a;
+  }
+  return {static_cast<Action>(best), std::string("greedy:") + tag};
+}
+
 }  // namespace rlc

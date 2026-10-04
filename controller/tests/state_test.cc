@@ -65,6 +65,9 @@ TEST(State, SameRatiosAtTwoLevelsGiveTheSameFeatures) {
   const auto& names = FeatureNames(Agent::kInterior);
   for (size_t i = 0; i < names.size(); ++i) {
     if (names[i] == "pi" || names[i] == "sigma") continue;
+    // Not measured at either level (cost model 2's prices under cost model
+    // 1): NaN at both is the same input.
+    if (std::isnan(f2[i]) && std::isnan(f3[i])) continue;
     EXPECT_NEAR(f2[i], f3[i], 1e-12) << names[i];
   }
   EXPECT_NEAR(Feature(Agent::kInterior, f3, "sigma"),

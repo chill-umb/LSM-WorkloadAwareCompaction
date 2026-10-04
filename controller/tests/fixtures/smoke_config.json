@@ -10,6 +10,7 @@
   "c_s": 3.0441400304414005e-17,
   "c_sk": 1e-11,
   "c_w": 1e-14,
+  "cost_model": 1,
   "decision_log": "decisions.jsonl",
   "epsilon": 0.1,
   "k": 10,

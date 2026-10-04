@@ -58,6 +58,11 @@ struct LevelStats {
   // Mean slot wait per release, in operations, over the last interval with
   // a release (G §3 carries it forward).
   double wait_carry = kNaN;
+  // Cost model 2 (H §2 item 5): merges and trivial moves completed since
+  // the start, and their interference charges by part, in money.
+  double merges = 0, moves = 0;
+  double merge_intf_rd = 0, merge_intf_wr = 0;
+  double move_intf_rd = 0, move_intf_wr = 0;
 };
 
 class Stats {
@@ -74,6 +79,12 @@ class Stats {
   // started before the controller). After that the records alone decide: a
   // snapshot can show a job as running until the next score computation.
   int RunningLevel(int snapshot_level) const;
+  // The begin record of the latest started compaction not yet ended, or
+  // null; and of a running flush (a flush_begin without its end).
+  const RLJobRecord* RunningJob() const;
+  const RLJobRecord* RunningFlush() const;
+  // A completed job's interference charge (cost model 2), for H §2 item 5.
+  void AddCharge(int level, bool trivial, double read, double write);
 
   std::vector<LevelStats> levels;
   double flushes = 0, flush_bytes = 0;
@@ -89,6 +100,7 @@ class Stats {
     double wait_ops = -1;  // -1: no wait measured (not picked when due)
   };
   std::map<int, Running> running_;
+  std::map<int, RLJobRecord> flushes_running_;
   bool saw_compaction_ = false;
 };
 
@@ -129,12 +141,32 @@ struct View {
   std::vector<double> job_ops;        // mean operations served per merge
   std::vector<double> N;              // operations per turnover (§1.1)
   std::vector<double> since_release;  // operations since the last release
+
+  // Cost model 2's inputs (H §2 items 1, 2 and 5), filled by
+  // FillCostModel2; NaN under cost model 1.
+  bool slot_trivial = false;   // the running compaction is a trivial move
+  bool flush_running = false;  // a flush has begun and not ended
+  // The running compaction, if sourced at the level (L0: an L0 merge): its
+  // operations so far, S + O, and the interference it would be charged if
+  // it ended now, by part, in money (the H.6(iii) inputs, summed with the
+  // prices; the charge is linear in each type's quiet cost).
+  std::vector<double> own_ops, own_bytes, own_intf_rd, own_intf_wr;
+  // Over the level's merges since the start: the per-job price per merged
+  // source byte, the interference per merged source byte by part, and the
+  // same for its trivial moves per byte moved, all over c_w (item 5).
+  std::vector<double> c_job, c_tm, intf_rd, intf_wr, tm_rd, tm_wr;
 };
 
 View MakeView(const RLHostOptions& options, const RLTreeSnapshot& snapshot,
               const Stats& stats, const RLOpCounts& ops,
               const std::vector<RLLevelReadCounts>& reads,
               const std::vector<double>& m, int K0);
+
+// Fills the View's cost-model-2 inputs from the running jobs' begin records
+// and the counters now. Leaves them NaN under cost model 1.
+void FillCostModel2(View* v, const Stats& stats,
+                    const ROCKSDB_NAMESPACE::RLStepCounts& now,
+                    const Config& cfg);
 
 // f_j of §1.1 at the multipliers in effect; NaN where undefined.
 double Fanout(const View& v, int level);

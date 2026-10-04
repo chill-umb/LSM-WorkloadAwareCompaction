@@ -10,18 +10,29 @@
 // fallback away from non-native values. While a change is held, the logged
 // state describes the targets, not what RocksDB uses (log.h).
 //
+// The learner modes (plan step 10): prior-only decides on Q = -b, learned on
+// Q = -b + f_theta + delta_j from the weights file, re-read every
+// push_interval_ms when its version grows; both explore with probability
+// explore. Under cost model 2 every completed job gets a "job" line with its
+// window's step counts (jobs.h), and in the learner modes each transition
+// carries its neighbours' states at the decision (H §3).
+//
 // Fallback (A-Impl-8): an invalid config or host options, a failed Apply, a
-// failed log write or an exception applies m = 1 and the configured trigger,
-// logs why, and stops deciding. Attribution continues, so the transition log
+// failed log write, an invalid weights file (or a missing one when
+// weights_required) or an exception applies m = 1 and the configured
+// trigger, logs why, and stops deciding. Attribution continues, so the transition log
 // still covers the measured phase (OBJ-1). No exception leaves the plugin.
 #pragma once
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,8 +40,10 @@
 #include "actions.h"
 #include "attribution.h"
 #include "config.h"
+#include "jobs.h"
 #include "log.h"
 #include "masks.h"
+#include "mlp.h"
 #include "rocksdb/rl_controller_host.h"
 #include "state.h"
 
@@ -59,6 +72,18 @@ class Controller {
   bool fallback() const { return fallback_; }
 
  private:
+  // What a decision opens a level's next interval with.
+  struct Opening {
+    Agent agent = Agent::kInterior;
+    std::vector<double> state;
+    Mask mask{};
+    Values b{};
+    uint64_t id = 0;
+    bool has_action = false;
+    Action action = Action::kHold;
+    double value_before = kNaN, value_after = kNaN;
+    NeighbourView up, down;
+  };
   // An open decision interval of one level.
   struct Interval {
     uint64_t id = 0;  // 0: opened at start, without a decision
@@ -69,6 +94,8 @@ class Controller {
     Values b{};
     bool has_action = false;
     Action action = Action::kHold;
+    double value_before = kNaN, value_after = kNaN;
+    NeighbourView up, down;
     bool valid = false;
     std::string invalid = "opened at start";
   };
@@ -79,16 +106,23 @@ class Controller {
       const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
       const ROCKSDB_NAMESPACE::RLOpCounts& ops,
       const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
-      uint64_t now);
+      const ROCKSDB_NAMESPACE::RLStepCounts& steps, uint64_t now);
+  // A neighbour's state, mask and prior now, at its current control.
+  NeighbourView Neighbour(const View& v, int level,
+                          const std::vector<double>& m) const;
+  // Cost model 2: the job's window, its "job" line and its charge's share
+  // of the level's stats; before stats_.OnJob, so it lands in the interval
+  // open at its completion.
+  void RecordJob(const ROCKSDB_NAMESPACE::RLJobRecord& job);
+  // Learned mode: re-reads the weights file when its version grew.
+  void PollWeights(uint64_t op, uint64_t now);
   // Sends the targets to the host if they differ from what it last accepted
   // and the cap allows. Returns false, with the reason, if the host refused
   // them.
   bool Flush(uint64_t op, uint64_t now, bool new_changes, std::string* error);
   // Writes the level's transition and opens its next interval.
-  void CloseInterval(int level, const View& v, Agent agent,
-                     const std::vector<double>& state, const Mask& mask,
-                     const Values& b, uint64_t op, uint64_t id, bool has_action,
-                     Action action);
+  void CloseInterval(int level, const View& v, const Opening& next,
+                     uint64_t op);
   void EnterFallback(const std::string& reason);
   void FallbackNoThrow(const std::string& reason) noexcept;
   void Invalidate(const std::string& reason);
@@ -122,8 +156,21 @@ class Controller {
   std::vector<LevelParts> parts_;
   std::vector<Interval> intervals_;
   std::vector<uint64_t> last_decision_op_;
+  // Each level's recent decision points, for a job's count (ARCH-8).
+  std::vector<std::deque<uint64_t>> decision_ops_;
   uint64_t next_id_ = 1;
   bool flush_size_logged_ = false;
+
+  // Cost model 2: step-counter samples since the start, and the begin
+  // records of running compactions and flushes by job id.
+  StepRing ring_;
+  ROCKSDB_NAMESPACE::RLStepCounts prev_steps_;
+  std::map<int, StepSample> compaction_begins_, flush_begins_;
+  // The learner modes.
+  std::mt19937_64 rng_;
+  Weights weights_;
+  bool weights_polled_ = false;
+  uint64_t last_weights_poll_us_ = 0;
 
   // The previous poll's counters and sampled state, for the next segment.
   ROCKSDB_NAMESPACE::RLOpCounts prev_ops_;
