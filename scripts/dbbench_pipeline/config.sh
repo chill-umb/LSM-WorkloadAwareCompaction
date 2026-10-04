@@ -192,6 +192,11 @@ PARITY_STALL_FRACTION_MARGIN="${PARITY_STALL_FRACTION_MARGIN:-0.02}"
 # settle step waits for compaction and then holds h_w seconds with nothing
 # due; every mixgraph operation is then scored, on native and static arms.
 SETTLE_HOLD_SECONDS="${SETTLE_HOLD_SECONDS:-10}"
+# Host log counter snapshots (PREREGISTRATION D-23 §3(a), D-24 §2; the interim
+# binary's "snap" records): one every RL_HOST_LOG_STRIDE operations, n_str
+# (owner, 2026-10-04: 100 on the exploratory track). 0 writes none, and is
+# what a binary before the interim instruments needs.
+RL_HOST_LOG_STRIDE="${RL_HOST_LOG_STRIDE:-100}"
 # Money prices (OBJ-2), written by "18_calibrate_prices.py compare" from two
 # of 18's sessions (D-22 f). 03 copies the file into every arm and records
 # its hash in the fingerprint; an arm run before it exists is scored without

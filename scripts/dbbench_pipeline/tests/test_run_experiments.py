@@ -24,6 +24,10 @@ CONTRACT, _ = research_objective.load_contract()
 STUB = f"""#!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
+    --help)
+      # STUB_OLD=1: a binary before the interim instruments (D-23 §3(a)).
+      [[ "${{STUB_OLD:-0}}" == 1 ]] || echo "    -rl_host_log_stride (stub)"
+      exit 1 ;;
     --rl_host_log=*) log="${{a#*=}}" ;;
     --db=*) db="${{a#*=}}" ;;
     --benchmarks=*) bench="${{a#*=}}" ;;
@@ -107,6 +111,29 @@ class RunExperimentsTest(unittest.TestCase):
             self.assertIn("--rl_settle_hold_seconds=10", command)
             self.assertIn("--compaction_style=0", command)
             self.assertEqual(self.metadata(arm)["settle_hold_seconds"], "10")
+            # D-23 §3(a): counter snapshots every n_str operations, and the
+            # instrument subset in the run manifest (D-24 §2).
+            self.assertIn("--rl_host_log_stride=100", command)
+            self.assertEqual(self.metadata(arm)["rl_host_log_stride"], "100")
+            self.assertEqual(self.metadata(arm)["instrument_subset"],
+                             "interim-1")
+
+    def test_a_binary_without_snapshots_needs_stride_0(self):
+        # D-23 §3(a): a binary before the interim instruments cannot write
+        # counter snapshots; 03 refuses a positive stride on it, and runs it
+        # with stride 0, recording the subset it carries.
+        with tempfile.TemporaryDirectory() as tmp:
+            refused = run03(Path(tmp), STUB_OLD="1")
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("RL_HOST_LOG_STRIDE=0", refused.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = run03(Path(tmp), STUB_OLD="1", RL_HOST_LOG_STRIDE="0")
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            arm = Path(tmp) / "results" / "1M" / "T2" / "native"
+            self.assertNotIn("rl_host_log_stride",
+                             (arm / "command.txt").read_text())
+            self.assertIn("instrument_subset=d21",
+                          (arm / "metadata.env").read_text())
 
     def test_each_arm_gets_its_own_multipliers(self):
         self.assertNotIn("level_target_multipliers", self.command("native"))

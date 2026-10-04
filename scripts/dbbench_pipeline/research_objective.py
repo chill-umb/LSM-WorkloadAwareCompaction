@@ -33,7 +33,10 @@ DEVICE_PRICES = ("c_w", "c_f", "c_blk", "c_sk", "c_open")
 # test passed is final. A schema-4 file, or a schema-5 file of one session or
 # of a failed test, holds provisional prices: diagnostic runs only (D-22 j).
 PRICES_SCHEMA = 5
-PROVISIONAL_SCHEMAS = (4, 5)
+# Schema 6 (D-23 §3(d)): cost model 2's prices, written by stage 30. Until
+# D-23's calibrations and D-22's two sessions make one final, it is
+# provisional: diagnostic runs only.
+PROVISIONAL_SCHEMAS = (4, 5, 6)
 # The fork's tickers of the reads' reopens and their time (D-21).
 READ_REOPENS = "rocksdb.read.table.reopen"
 READ_REOPEN_NANOS = "rocksdb.read.table.reopen.nanos"

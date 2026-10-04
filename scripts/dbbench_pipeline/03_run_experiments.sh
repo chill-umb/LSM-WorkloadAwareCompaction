@@ -69,6 +69,29 @@ fi
   echo "Missing $DB_BENCH; run steps 01 and 02 first." >&2
   exit 1
 }
+# The interim instruments (PREREGISTRATION D-23 §3(a), D-24 §2): a binary
+# without --rl_host_log_stride writes no counter snapshots, so a positive
+# stride needs one that has it. instrument_subset, D-24 §2's run manifest,
+# records which instruments the binary carries.
+[[ "$RL_HOST_LOG_STRIDE" =~ ^[0-9]+$ ]] || {
+  echo "RL_HOST_LOG_STRIDE must be a whole number of operations." >&2
+  exit 1
+}
+# --help exits non-zero (gflags), so its text is read first, not piped.
+db_bench_help="$("$DB_BENCH" --help 2>&1 || true)"
+if grep -q 'rl_host_log_stride' <<<"$db_bench_help"; then
+  INSTRUMENT_SUBSET=interim-1
+else
+  INSTRUMENT_SUBSET=d21
+  if (( RL_HOST_LOG_STRIDE > 0 )); then
+    echo "$DB_BENCH has no --rl_host_log_stride (a binary before the interim" \
+         "instruments); set RL_HOST_LOG_STRIDE=0 to run it." >&2
+    exit 1
+  fi
+fi
+host_log_stride=()
+(( RL_HOST_LOG_STRIDE == 0 )) ||
+  host_log_stride=(--rl_host_log_stride="$RL_HOST_LOG_STRIDE")
 # Only the old stack's learned arms start the Python server.
 USES_SERVER=0
 for arm in $EXPERIMENT_ARMS; do
@@ -1089,6 +1112,7 @@ PY
     --benchmarks="rlsuspend,filluniquerandom,${settle_step}resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats"
     --rl_host_log="$result_dir/host_log.jsonl"
     --rl_settle_hold_seconds="$SETTLE_HOLD_SECONDS"
+    ${host_log_stride[@]+"${host_log_stride[@]}"}
     --num="$load_ops"
     --reads="$mixed_ops"
     "${DBBENCH_WORKLOAD[@]}"
@@ -1170,6 +1194,8 @@ PY
     # Present only on Programme 1 arms; 04 scores the settled phase on these.
     [[ -z "$settle_step" ]] ||
       printf 'settle_hold_seconds=%s\n' "$SETTLE_HOLD_SECONDS"
+    printf 'rl_host_log_stride=%s\n' "$RL_HOST_LOG_STRIDE"
+    printf 'instrument_subset=%s\n' "$INSTRUMENT_SUBSET"
     printf 'max_bytes_for_level_base=%s\n' "$MAX_BYTES_FOR_LEVEL_BASE"
     printf 'baseline_level_base_scale=%s\n' "${BASELINE_LEVEL_BASE_SCALE:-1}"
     printf 'num_levels=%s\n' "$NUM_LEVELS"

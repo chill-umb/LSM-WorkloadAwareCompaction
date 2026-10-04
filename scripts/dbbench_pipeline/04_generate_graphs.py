@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
+import cost_model_v2
 import host_log
 import research_objective
 
@@ -395,6 +396,17 @@ PROGRAMME1_FIELDS = (
     "table_opens_less_created", "sst_files_created", "drain_read_ticks",
     "held_byte_operations",
     "C_W", "C_R", "C_S")
+# Cost model 2's parts and report-only diagnostics (PATHWAYS D §1 as amended
+# 2026-10-03, D-23; D-24 §4), filled when the prices are schema 6.
+V2_FIELDS = (
+    "jobs_flush", "jobs_l0", "jobs_deep", "jobs_move", "compaction_bytes_read",
+    "job_part", "put_part", "read_base_part", "scan_step_part",
+    "iterator_block_part", "memtable_part", "fixed_read_part",
+    "interference_read", "interference_write", "interference_physical",
+    "physical_jobs_excluded", "reopen_expected_ratio",
+    "job_time_ratio_flush", "job_time_ratio_l0", "job_time_ratio_deep",
+    "job_time_ratio_move", "hidden_steps_level_share",
+    "scan_returned_steps", "scan_hidden_steps", "puts", "gets", "scans")
 
 
 def sst_bytes_in_window(events: list[dict], start_us: int,
@@ -474,8 +486,84 @@ def exploratory_run(run_dir: Path) -> bool:
     return False
 
 
+def flush_jobs_from_events(events: list[dict]) -> tuple[dict, dict]:
+    """Each flush job's SST bytes (table_file_creation) and wall span in
+    seconds (flush_started to flush_finished), by job id."""
+    flush_jobs = {int(e["job"]) for e in events
+                  if e.get("event") == "flush_started" and "job" in e}
+    sizes: dict[int, float] = {}
+    times: dict[tuple[str, int], int] = {}
+    for event in events:
+        kind = event.get("event")
+        if (kind == "table_file_creation" and
+                int(event.get("job", -1)) in flush_jobs):
+            job = int(event["job"])
+            sizes[job] = sizes.get(job, 0.0) + float(event.get("file_size", 0))
+        elif kind in ("flush_started", "flush_finished") and "job" in event:
+            times[kind, int(event["job"])] = int(event["time_micros"])
+    spans = {job: (times["flush_finished", job] - times["flush_started", job])
+             / 1e6 for job in flush_jobs
+             if ("flush_started", job) in times and
+             ("flush_finished", job) in times}
+    return sizes, spans
+
+
+def cost_model_v2_costs(record: dict, prices: dict, rate: float,
+                        records: list[dict], at: dict, events: list[dict],
+                        flush_bytes: float, held: float) -> dict:
+    """D-23's cost model over the measured phase (cost_model_v2.evaluate),
+    with the columns that report it. Host log schema 3 gives every
+    interference window exactly; schema 2 only the mean field (D-24 §4)."""
+    p = cost_model_v2.load_prices(record)
+    start, end = records[at["measure_start"]], records[at["drain_end"]]
+    sizes, spans = flush_jobs_from_events(events)
+    jobs = cost_model_v2.jobs_from_host_log(records, at["measure_start"],
+                                           at["drain_end"], sizes, spans)
+    exact = records[0].get("schema", 0) >= 3
+    if exact:
+        logged = sum(job.x for job in jobs if job.kind == "flush")
+        if logged != flush_bytes:
+            raise ValueError(f"flush_end records hold {logged:.0f} flush bytes, "
+                             f"the event log {flush_bytes:.0f}")
+    counts = cost_model_v2.difference(cost_model_v2.type_counts(start["tickers"]),
+                                      cost_model_v2.type_counts(end["tickers"]))
+    result = cost_model_v2.evaluate(
+        p, rate, prices["c_s"], jobs, counts, end["op"] - start["op"], held,
+        exact, snaps=cost_model_v2.snapshots(records) if exact else None,
+        floor=cost_model_v2.phase_floor(start) if exact else None)
+
+    def delta(ticker):
+        return float(end["tickers"][ticker] - start["tickers"][ticker])
+
+    share = math.nan
+    if exact:
+        hidden = sum(r[host_log.HIDDEN] for r in end["levels"]) - sum(
+            r[host_log.HIDDEN] for r in start["levels"])
+        skips = delta(host_log.HIDDEN_TICKER)
+        share = hidden / skips if skips > 0 else math.nan
+    absent = "iterator blocks, the heap split" + (
+        "" if exact else ", per-level scan attribution")
+    result.update(
+        hidden_steps_level_share=share,
+        scan_returned_steps=delta("rocksdb.number.db.next.found"),
+        scan_hidden_steps=delta(host_log.HIDDEN_TICKER),
+        puts=counts["put"], gets=counts["get0"], scans=counts["scan0"],
+        reopen_expected_ratio=1 + result["s_open"],
+        cost_terms=("exact: jobs by kind, compaction bytes read and written, "
+                    "filter, block, seek and reopen reads, scan steps (one "
+                    "mean c_st), memtable, Put inserts, fixed parts, space; "
+                    "interference: " + ("exact windows" if exact else
+                                        "mean field (D-24 §4)") +
+                    "; absent: " + absent +
+                    ("; placeholder prices: " +
+                     ", ".join(record["placeholders"])
+                     if record.get("placeholders") else "")))
+    return result
+
+
 def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
-                       events: list[dict], mixgraph_ops: float) -> dict:
+                       events: list[dict], mixgraph_ops: float,
+                       reprice: Optional[Path] = None) -> dict:
     """The measured phase from the host log: from the measure_start stamp
     (n_w, the first mixgraph operation) to the drain_end stamp.
 
@@ -496,6 +584,9 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     row.update(settle_ok=math.nan, objective_status="not programme 1",
                reopen_check="", checks_reported_only="", prices_sha256="",
                prices_status="", reference_rate=math.nan)
+    row.update({name: math.nan for name in V2_FIELDS})
+    row.update(cost_model="", cost_terms="", interference_estimator="",
+               reprice_sha256="")
     row.update(research_objective.objective_columns(
         contract, (math.nan, math.nan, math.nan)))
     settled = [int(v) for v in SETTLED.findall(text)]
@@ -639,6 +730,14 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if metadata.get("research_objective_sha256") != contract_hash:
         row["objective_status"] = "run recorded another contract"
         return row
+    if reprice is not None:
+        # D-24 §2: an exploratory run's counts are kept so that it can be
+        # re-priced; only such runs may be priced by another file.
+        if not (metadata.get("diagnostic_run") == "1" and
+                exploratory_run(run_dir)):
+            raise InvalidArm("--reprice prices only exploratory diagnostic "
+                             "runs (PREREGISTRATION D-24 §2)")
+        prices_path = reprice
     if not prices_path.exists():
         row["objective_status"] = "no prices"
         return row
@@ -646,7 +745,9 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
         row["objective_status"] = "no reference rate"
         return row
     prices_sha256 = hashlib.sha256(prices_path.read_bytes()).hexdigest()
-    if metadata.get("prices_sha256") != prices_sha256:
+    if reprice is not None:
+        row["reprice_sha256"] = prices_sha256
+    elif metadata.get("prices_sha256") != prices_sha256:
         raise InvalidArm("prices.json is not the file the run recorded")
     # D-22 (j): provisional prices (a schema-4 file, one session's, or a
     # failed test's) price only a run marked diagnostic, and say so.
@@ -666,6 +767,21 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     if math.isnan(reopens):
         row["objective_status"] = "no reopen counters"
         return row
+    # Cost model 2 (D-23) when the prices are schema 6.
+    v2 = None
+    row["cost_model"] = 1
+    if record.get("cost_model") == 2:
+        try:
+            v2 = cost_model_v2_costs(record, prices, rate, records, at, events,
+                                     flush, held)
+        except (ValueError, KeyError) as error:
+            raise InvalidArm(f"cost model 2: {error}") from error
+        row.update({k: v for k, v in v2.items()
+                    if k in V2_FIELDS or k in ("cost_terms",
+                                               "interference_estimator")})
+        row["cost_model"] = 2
+        # D-24 §1 item 3: the reopen check compares with c0_open (1 + s_open).
+        reference *= 1 + v2["s_open"]
     # D-21: stage 18's c_open prices this run's reopens only if its own time
     # per reopen, by the same timer, is within the contract's tolerance.
     check, ratio = research_objective.reopen_check(
@@ -679,9 +795,12 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
             row["objective_status"] = "c_open does not hold"
             return row
         row["checks_reported_only"] = "c_open"
-    costs = research_objective.priced_costs(
-        prices, rate, flush + compaction, row["filter_probes"],
-        row["block_reading_probes"], row["run_seeks"], reopens, held)
+    if v2 is not None:
+        costs = (v2["C_W"], v2["C_R"], v2["C_S"])
+    else:
+        costs = research_objective.priced_costs(
+            prices, rate, flush + compaction, row["filter_probes"],
+            row["block_reading_probes"], row["run_seeks"], reopens, held)
     row.update(zip(("C_W", "C_R", "C_S"), costs))
     row.update(research_objective.objective_columns(contract, costs))
     row.update(objective_status="priced", reference_rate=rate,
@@ -689,7 +808,8 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     return row
 
 
-def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
+def collect_arm(run_dir: Path,
+                reprice: Optional[Path] = None) -> Optional[dict[str, object]]:
     """One completed arm's row. Raises InvalidArm for an arm that must not
     be scored."""
     if not (run_dir / "COMPLETED").exists() or not (run_dir / "run.log").exists():
@@ -704,7 +824,7 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
     events = read_events(run_dir / "rocksdb_LOG.txt")
     drain = parse_drain(text, events)
     programme1 = programme1_metrics(run_dir, text, metadata, events,
-                                    gets + puts + scans)
+                                    gets + puts + scans, reprice=reprice)
 
     # Whole-run tickers (cumulative since open; they include the bulk load).
     flush_bytes = tickers.get("rocksdb.flush.write.bytes", 0.0)
@@ -866,7 +986,8 @@ def collect_arm(run_dir: Path) -> Optional[dict[str, object]]:
     }
 
 
-def collect(results: Path) -> tuple[list[dict[str, object]], list[dict]]:
+def collect(results: Path, reprice: Optional[Path] = None
+            ) -> tuple[list[dict[str, object]], list[dict]]:
     """Rows of every completed arm, and the arms refused (InvalidArm) with
     their reasons."""
     rows, refused = [], []
@@ -875,7 +996,7 @@ def collect(results: Path) -> tuple[list[dict[str, object]], list[dict]]:
     # still matches a single arm root, where ** contracts to nothing.
     for completed in results.glob("**/*M/T*/**/COMPLETED"):
         try:
-            row = collect_arm(completed.parent)
+            row = collect_arm(completed.parent, reprice=reprice)
         except InvalidArm as error:
             refused.append({"result_directory": str(completed.parent),
                             "reason": str(error)})
@@ -981,10 +1102,16 @@ def main() -> int:
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument(
+        "--reprice", type=Path,
+        help="price every run with this prices file (schema 6, cost model 2) "
+        "instead of the one it recorded: exploratory diagnostic runs only "
+        "(PREREGISTRATION D-24 §2); write to another --output")
     args = parser.parse_args()
     results = args.results.resolve()
     output = (args.output or results / "graphs").resolve()
-    rows, refused = collect(results)
+    rows, refused = collect(
+        results, reprice=args.reprice.resolve() if args.reprice else None)
     output.mkdir(parents=True, exist_ok=True)
     # Refused arms are reported, never scored (A8); a refusal fails the stage.
     (output / "refused_arms.json").write_text(

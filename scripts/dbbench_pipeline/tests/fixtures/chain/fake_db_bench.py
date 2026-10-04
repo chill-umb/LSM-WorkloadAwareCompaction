@@ -27,6 +27,13 @@ import sys
 from pathlib import Path
 
 args = {}
+# 03 reads --help for the interim instruments' flag (D-23 §3(a)); like
+# gflags, --help exits non-zero. The stride is accepted and ignored: this
+# stand-in writes schema-2 host logs, which carry no snapshots.
+if "--help" in sys.argv[1:]:
+    print("    -rl_host_log_stride (stand-in)")
+    sys.exit(1)
+
 for a in sys.argv[1:]:
     if a.startswith("--") and "=" in a:
         k, v = a[2:].split("=", 1)
