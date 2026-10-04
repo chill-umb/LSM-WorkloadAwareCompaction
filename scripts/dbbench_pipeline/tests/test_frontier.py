@@ -52,6 +52,13 @@ class ComparatorTest(unittest.TestCase):
         # read b10: W + 10R + S -> B = 3; write b10: 10W + R + S -> A = 3.
         self.assertEqual(chosen("read", 10)["theta_star"], "B")
         self.assertEqual(chosen("write", 10)["theta_star"], "A")
+        # D-24 §2: every configuration ranked by J, lowest first.
+        for item in fa.comparators(POINTS, CONTRACT):
+            ranking = item["ranking"]
+            self.assertEqual(ranking[0], [item["theta_star"], item["J"]])
+            self.assertEqual(sorted(POINTS), sorted(n for n, _ in ranking))
+            values = [v for _, v in ranking]
+            self.assertEqual(values, sorted(values))
         self.assertEqual(chosen("read", 2)["J"], 3.0)
 
     def test_ties_are_listed(self):

@@ -147,7 +147,11 @@ def comparators(points: dict[str, tuple], contract: dict) -> list[dict]:
                     "column": research_objective.j_column(mode, beta, scale),
                     "theta_star": star, "ties": ties, "J": best,
                     "gap_to_next": (ranked[1] - best if len(ranked) > 1
-                                    else None)})
+                                    else None),
+                    # Every configuration by mean J, lowest first: the
+                    # exploratory screen's top three (D-24 §2).
+                    "ranking": [[n, values[n]] for n in
+                                sorted(values, key=lambda n: (values[n], n))]})
     return out
 
 
