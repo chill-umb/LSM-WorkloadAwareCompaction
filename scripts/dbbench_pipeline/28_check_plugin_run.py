@@ -200,7 +200,8 @@ def main() -> int:
                         help="db_bench's output (03's run.log)")
     parser.add_argument("--decisions", type=Path, required=True)
     parser.add_argument("--transitions", type=Path, required=True)
-    parser.add_argument("--mode", required=True, choices=("hold-only", "rules"))
+    parser.add_argument("--mode", required=True,
+                        choices=("hold-only", "rules", "prior-only", "learned"))
     parser.add_argument("--expect-fallback", action="store_true")
     parser.add_argument("--min-changes", type=int, default=0,
                         help="judged ACT-3 changes the run must contain")

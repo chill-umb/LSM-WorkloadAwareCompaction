@@ -306,6 +306,10 @@ class RefusalTest(unittest.TestCase):
         ({"SESSION_ID": "a b"}, "SESSION_ID must be"),
         # D-16 §2: a long Programme 1 run loads 2.9M keys; 20M at 29% is 5.8M.
         ({"WORKLOAD_SIZES_M": "20"}, "Programme 1 arms must load 2900000"),
+        # A learner arm prices with cost model 2 (D-23): schema-6 prices only.
+        ({"EXPERIMENT_ARMS": "learned", "DIAGNOSTIC_RUN": "1",
+          "CONTROLLER_PLUGIN": str(FIXTURE / "run.log")}, "schema 6"),
+        ({"EXPERIMENT_ARMS": "learner"}, "Unsupported"),
     )
 
     def test_a_rung_passes_the_load_check(self):

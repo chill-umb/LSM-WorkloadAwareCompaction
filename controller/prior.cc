@@ -13,6 +13,22 @@ constexpr int kExpand = static_cast<int>(Action::kExpand);
 
 double Known(double x) { return std::isfinite(x) ? x : 0.0; }
 
+// values[i], or NaN when the View does not carry it.
+double At(const std::vector<double>& values, int i) {
+  return i >= 0 && i < static_cast<int>(values.size()) ? values[i] : kNaN;
+}
+
+// Cost model 2 (H §7 as amended 2026-10-03, D-23): the growth of level j's
+// hidden-step charge when its held bytes grow by `held` (in C_j units), at
+// c_st per step, over one turnover and in units of c_w C_j: the charge is
+// assumed to grow in proportion to the level's bytes (0 until measured).
+double HiddenGrowth(const View& v, int j, double held, const Config& cfg) {
+  if (cfg.cost_model != 2 || !(held > 0)) return 0;
+  const double per_op = Ratio(At(v.hidden, j), v.ops);
+  return Known(cfg.beta_r * cfg.v2.c_st * per_op * Ratio(held, v.phi[j]) *
+               v.N[j] / (cfg.c_w * v.C[j]));
+}
+
 Values Clip(Values b, double b_max) {
   for (double& x : b) x = std::clamp(Known(x), -b_max, b_max);
   return b;
@@ -59,8 +75,30 @@ Values LevelPrior(const View& v, int j, const LevelControl& c,
   const double o_now = below ? Ratio(v.T * v.phi[j + 1], phi) : kNaN;
   const double job_ops = Known(v.job_ops[j]);
   const double merged = 1 - Known(v.xi[j]);
-  out[kCompact] = cfg.beta_w * merged * released *
-                      Known(Ratio(v.overlap[j], f) * (o_now - f)) +
+  const bool v2 = cfg.cost_model == 2;
+  // Cost model 2: the extra overlap is read as well as written (c_cr), and
+  // the merges' interference moves with their bytes Y = X + lambda (S + O)
+  // per source byte, Y(o) = (rho_j + o) + lambda (1 + o), from the level's
+  // realised charge per merged source byte. The read-cost timing part
+  // (rho_now against the merges' mean, H §7 (2)) contributes 0 until the
+  // read intensity reaches the prior.
+  const double cr = v2 ? cfg.v2.c_cr / cfg.c_w : 0.0;
+  const double extra = Known(Ratio(v.overlap[j], f) * (o_now - f));
+  double interference = 0;
+  if (v2) {
+    const double rho = Known(v.rho[j]);
+    const auto y = [&](double o) {
+      return (rho + o) + cfg.v2.lambda * (1 + o);
+    };
+    const double o_bar = Known(v.overlap[j]);
+    const double o_c = Known(Ratio(v.overlap[j], f) * o_now);
+    const double per_byte = cfg.beta_r * Known(At(v.intf_rd, j)) +
+                            cfg.beta_w * Known(At(v.intf_wr, j));
+    interference =
+        merged * released * per_byte * Known(Ratio(y(o_c), y(o_bar)) - 1);
+  }
+  out[kCompact] = cfg.beta_w * merged * released * (1 + cr) * extra +
+                  interference +
                   cfg.beta_r * SlotShare(v, job_ops) * L0ReadCost(v, cfg) *
                       job_ops / (cfg.c_w * v.C[j]);
 
@@ -73,12 +111,26 @@ Values LevelPrior(const View& v, int j, const LevelControl& c,
   const double overflow =
       std::max(0.0, Known(v.rho_tilde[j]) * held - headroom);
   const double rewrite = below ? Known(v.rho[j + 1] + v.overlap[j + 1]) : 0.0;
-  out[kDefer] =
-      cfg.beta_s * sigma * garbage * held + cfg.beta_w * overflow * rewrite;
+  // Cost model 2: the overflow is merged at level j + 1, read with its
+  // overlap (c_cr), at that level's per-job price and interference per
+  // merged source byte (H §7, deferral (4)).
+  double below_merge = 0;
+  if (v2 && below) {
+    below_merge =
+        cfg.beta_w * (cr * (1 + Known(v.overlap[j + 1])) +
+                      Known(At(v.c_job, j + 1))) +
+        cfg.beta_r * Known(At(v.intf_rd, j + 1)) +
+        cfg.beta_w * Known(At(v.intf_wr, j + 1));
+  }
+  out[kDefer] = cfg.beta_s * sigma * garbage * held +
+                cfg.beta_w * overflow * rewrite + overflow * below_merge +
+                HiddenGrowth(v, j, held, cfg);
 
-  // Expand: the space bound's growth, every added byte counted as held.
-  out[kExpand] = cfg.beta_s * sigma *
-                 std::max(0.0, Act(c, Action::kExpand, phi, b).m() - m);
+  // Expand: the space bound's growth, every added byte counted as held, and
+  // the hidden-step growth as for a deferral.
+  const double grown = std::max(0.0, Act(c, Action::kExpand, phi, b).m() - m);
+  out[kExpand] =
+      cfg.beta_s * sigma * grown + HiddenGrowth(v, j, grown, cfg);
   return Clip(out, cfg.b_max);
 }
 
@@ -91,8 +143,16 @@ Values L0Prior(const View& v, const L0Control& c, const Config& cfg) {
   double per_get = 0, per_scan = 0;
   L0ReadPrices(v, cfg, &per_get, &per_scan);
   const double m1C1 = v.num_levels > 1 ? v.m[1] * v.C[1] : kNaN;
+  // Cost model 2 adds each L0 merge's per-job price and the compaction
+  // read of L1's overlap, 1 / (K Q_F) merges per operation (H §7, g_J); the
+  // KF bytes every merge reads and writes are the same per operation at any
+  // K and cancel from every difference.
+  const double per_merge =
+      cfg.cost_model == 2
+          ? cfg.JobPrice(kL0Merge) + cfg.v2.c_cr * m1C1
+          : 0.0;
   const auto write = [&](double K) {
-    return cfg.beta_w * cfg.c_w * u * m1C1 / (K * F);
+    return cfg.beta_w * (cfg.c_w * m1C1 + per_merge) * u / (K * F);
   };
   const auto read = [&](double K) {
     return cfg.beta_r * (K / 2) * (gets * per_get + scans * per_scan);

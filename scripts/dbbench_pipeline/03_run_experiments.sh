@@ -34,6 +34,15 @@ scored from the first mixgraph operation to the end of the drain:
                      config is composed by plugin_config.py and refused while
                      a value it needs is undecided; every run is checked by
                      28_check_plugin_run.py.
+  prior, learned     the plugin's learner modes (plan step 10; D-24 §2's
+                     exploratory track): prior-only decides on the analytic
+                     prior, learned on Q = -b + f from the weights the trainer
+                     (rl_agent/learner/trainer.py, on CONTROLLER_CPUS) pushes
+                     while the arm runs; cost model 2's prices from a schema-6
+                     PRICES_FILE; settings in LEARNER_SETTINGS_FILE; chained
+                     checkpoints (LEARNER_CHAIN) and frozen evaluation
+                     (LEARNER_FROZEN, LEARNER_WEIGHTS_FILE) as config.sh says.
+                     Each learned arm is also reported by 21_check_learner.py.
 
 The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
 unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
@@ -144,7 +153,7 @@ fi
 arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
   local name variable
   case "$1" in
-    native|static:uniform_1|hold|rules) ;;
+    native|static:uniform_1|hold|rules|prior|learned) ;;
     static:uniform_0_75)
       printf '1'
       printf ':0.75%.0s' $(seq 2 "$NUM_LEVELS")
@@ -161,7 +170,10 @@ arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
     *) printf '%s' "$LEVEL_TARGET_MULTIPLIERS" ;;
   esac
 }
-is_controller_arm() { [[ "$1" == hold || "$1" == rules ]]; }
+is_controller_arm() {
+  [[ "$1" == hold || "$1" == rules || "$1" == prior || "$1" == learned ]]
+}
+is_learner_arm() { [[ "$1" == prior || "$1" == learned ]]; }
 is_programme1_arm() {
   [[ "$1" == native || "$1" == static:* ]] || is_controller_arm "$1"
 }
@@ -180,7 +192,7 @@ for arm in $EXPERIMENT_ARMS; do
   fi
   if is_programme1_arm "$arm"; then
     PROGRAMME1_MATRIX=1
-    [[ "$arm" =~ ^(native|hold|rules|static:[A-Za-z0-9_]+)$ ]] || {
+    [[ "$arm" =~ ^(native|hold|rules|prior|learned|static:[A-Za-z0-9_]+)$ ]] || {
       echo "Unsupported experiment arm: $arm" >&2
       exit 1
     }
@@ -495,24 +507,33 @@ if (( CONTROLLER_MATRIX )); then
   fi
 fi
 # Writes $1's config to $2 with its logs beside it; prints placeholder notes.
-compose_plugin_config() {  # $1=arm, $2=output
-  local placeholder_flag=()
+# A learner arm also takes its seed ($3) and, learned, its weights file
+# beside the config.
+compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
+  local placeholder_flag=() learner_flag=()
   (( ! PLUGIN_PLACEHOLDERS )) || placeholder_flag=(--placeholders)
   (( ! DIAGNOSTIC_RUN )) || placeholder_flag+=(--diagnostic)
+  if is_learner_arm "$1"; then
+    learner_flag=(--learner-settings "$LEARNER_SETTINGS_FILE"
+                  --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
+    (( ! LEARNER_FROZEN )) || learner_flag+=(--learner-phase evaluation)
+  fi
   "$PYTHON" "$PIPELINE_DIR/plugin_config.py" --arm "$1" \
     --objective-mode "$CONTROLLER_OBJECTIVE_MODE" --family "$WORKLOAD_FAMILY" \
     --bounds "$ACTION_BOUNDS_FILE" --settings "$CONTROLLER_RULES_FILE" \
     --prices "$PRICES_FILE" --admission config/admission_test.json \
     --decision-log "$(dirname "$2")/decisions.jsonl" \
     --transition-log "$(dirname "$2")/transitions.jsonl" \
-    --output "$2" ${placeholder_flag[@]+"${placeholder_flag[@]}"}
+    --output "$2" ${placeholder_flag[@]+"${placeholder_flag[@]}"} \
+    ${learner_flag[@]+"${learner_flag[@]}"}
 }
-# The config's identity: every value except where its logs go.
+# The config's identity: every value except where its logs and weights go
+# and the learner's seed, which varies by repeat as db_bench's does.
 plugin_config_sha256() {  # $1=config
   "$PYTHON" - "$1" <<'PY'
 import hashlib, json, sys
 config = json.load(open(sys.argv[1]))
-for key in ("decision_log", "transition_log"):
+for key in ("decision_log", "transition_log", "weights_path", "seed"):
     config.pop(key, None)
 print(hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest())
 PY
@@ -539,7 +560,7 @@ done
 }
 for arm in $EXPERIMENT_ARMS; do
   case "$arm" in
-    native|static:*|hold|rules) ;;  # checked above
+    native|static:*|hold|rules|prior|learned) ;;  # checked above
     regular|oracle|prior_only|rl|unconstrained_rl|unconstrained_prior_only) ;;
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
@@ -846,6 +867,79 @@ stop_server() {
 trap stop_server EXIT
 trap 'stop_server; exit 130' INT TERM
 
+# The learned arm's trainer (rl_agent/learner/trainer.py) on CONTROLLER_CPUS.
+# It reads the transition log while db_bench runs and stops by itself after
+# the plugin's stop line; a frozen arm runs none and copies its weights in.
+TRAINER_PID=""
+LEARNER_LAST_CHECKPOINT="$LEARNER_CHECKPOINT_IN"
+LEARNER_WEIGHTS_SHA256=""
+start_trainer() {  # result dir
+  local dir checkpoint_flag=() settings="$LEARNER_SETTINGS_FILE"
+  # The trainer runs from rl_agent/, so every path it gets is absolute.
+  dir="$(cd "$1" && pwd)"
+  [[ "$settings" = /* ]] || settings="$PROJECT_ROOT/$settings"
+  TRAINER_PID=""
+  if (( LEARNER_FROZEN )); then
+    [[ -f "$LEARNER_WEIGHTS_FILE" ]] || {
+      echo "LEARNER_FROZEN=1 needs LEARNER_WEIGHTS_FILE: '$LEARNER_WEIGHTS_FILE'" >&2
+      return 1
+    }
+    cp "$LEARNER_WEIGHTS_FILE" "$dir/weights.bin"
+    LEARNER_WEIGHTS_SHA256="$(sha256sum "$dir/weights.bin" | awk '{print $1}')"
+    return 0
+  fi
+  if [[ -n "$LEARNER_LAST_CHECKPOINT" ]]; then
+    [[ -f "$LEARNER_LAST_CHECKPOINT" ]] || {
+      echo "No learner checkpoint at $LEARNER_LAST_CHECKPOINT" >&2
+      return 1
+    }
+    checkpoint_flag=(--checkpoint-in "$(realpath "$LEARNER_LAST_CHECKPOINT")")
+  fi
+  (
+    cd "$PROJECT_ROOT/rl_agent" &&
+    exec ${CONTROLLER_LAUNCHER[@]+"${CONTROLLER_LAUNCHER[@]}"} "$PYTHON" -m learner.trainer \
+      --plugin-config "$dir/plugin_config.json" \
+      --transitions "$dir/transitions.jsonl" \
+      --decisions "$dir/decisions.jsonl" --weights "$dir/weights.bin" \
+      --archive "$dir/weights" --settings "$settings" \
+      --log "$dir/trainer.jsonl" --summary "$dir/trainer_summary.json" \
+      --checkpoint-out "$dir/trainer_checkpoint.pt" \
+      ${checkpoint_flag[@]+"${checkpoint_flag[@]}"}
+  ) > "$dir/trainer.out" 2>&1 &
+  TRAINER_PID=$!
+  # A warm start writes its first weights before the plugin's first poll.
+  if [[ -n "$LEARNER_LAST_CHECKPOINT" ]]; then
+    local waited=0
+    while [[ ! -f "$dir/weights.bin" ]] && kill -0 "$TRAINER_PID" 2>/dev/null \
+        && (( waited < 120 )); do
+      sleep 1; waited=$(( waited + 1 ))
+    done
+    [[ -f "$dir/weights.bin" ]] || {
+      echo "The trainer wrote no warm-start weights; see $dir/trainer.out" >&2
+      return 1
+    }
+  fi
+}
+stop_trainer() {  # result dir; waits by PID, never by name
+  local dir="$1" waited=0 status=0
+  [[ -n "$TRAINER_PID" ]] || return 0
+  while kill -0 "$TRAINER_PID" 2>/dev/null &&
+      (( waited < LEARNER_STOP_TIMEOUT_SECONDS )); do
+    sleep 1; waited=$(( waited + 1 ))
+  done
+  if kill -0 "$TRAINER_PID" 2>/dev/null; then
+    echo "[trainer] still running after ${waited}s; sending SIGTERM" >&2
+    kill -TERM "$TRAINER_PID" 2>/dev/null || true
+    sleep 30
+    kill -KILL "$TRAINER_PID" 2>/dev/null || true
+  fi
+  wait "$TRAINER_PID" || status=$?
+  TRAINER_PID=""
+  (( status == 0 )) && [[ -f "$dir/trainer_summary.json" ]] || return 1
+  if (( LEARNER_CHAIN )); then
+    LEARNER_LAST_CHECKPOINT="$dir/trainer_checkpoint.pt"
+  fi
+}
 start_server() {  # result dir, policy seed, decay steps, eval, manifest, fingerprint
   local result_dir="$1" policy_seed="$2" decay_steps="$3" eval_mode="$4"
   local manifest_path="$5" fingerprint="$6" anneal_seconds="${7:-0}"
@@ -963,9 +1057,13 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     QBAR_FINGERPRINT="$QBAR_SEGMENT"
     PRICES_FINGERPRINT="$PRICES_SEGMENT"
   fi
+  local learner_seed=""
+  if is_learner_arm "$arm"; then
+    learner_seed=$(( POLICY_SEED_BASE + repeat * 100000 + size_m * 100 + ratio ))
+  fi
   if is_controller_arm "$arm"; then
     plugin_placeholders="$(compose_plugin_config "$arm" \
-      "$result_dir/plugin_config.json")" || exit 1
+      "$result_dir/plugin_config.json" "$learner_seed")" || exit 1
     [[ -z "$plugin_placeholders" ]] || echo "$plugin_placeholders"
     plugin_config_sha="$(plugin_config_sha256 "$result_dir/plugin_config.json")"
     plugin_flag=(--rl_plugin="$PLUGIN_PATH"
@@ -1091,6 +1189,9 @@ PY
     echo "current:  $fingerprint" >&2
     exit 1
   fi
+  if [[ "$arm" == learned ]]; then
+    start_trainer "$result_dir" || exit 5
+  fi
   if (( uses_server )); then
     local eval_mode=0
     # Both prior arms run the analytic prior with the learner frozen.
@@ -1164,6 +1265,16 @@ PY
       printf 'controller_objective_mode=%s\n' "$CONTROLLER_OBJECTIVE_MODE"
       # Smoke runs only: these values were not preregistered or measured.
       printf 'plugin_placeholders=%s\n' "${plugin_placeholders#*: }"
+    fi
+    if is_learner_arm "$arm"; then
+      printf 'learner_settings_sha256=%s\n' \
+        "$(sha256sum "$LEARNER_SETTINGS_FILE" | awk '{print $1}')"
+      printf 'learner_seed=%s\n' "$learner_seed"
+      printf 'learner_frozen=%s\n' "$LEARNER_FROZEN"
+      if [[ "$arm" == learned ]]; then
+        printf 'learner_checkpoint_in=%s\n' "${LEARNER_LAST_CHECKPOINT:-none}"
+        printf 'learner_weights_in=%s\n' "${LEARNER_WEIGHTS_SHA256:-none}"
+      fi
     fi
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'
@@ -1308,6 +1419,13 @@ PY
   set -e
   end_ns="$(date +%s%N)"
   (( ! uses_server )) || stop_server
+  if [[ "$arm" == learned ]]; then
+    stop_trainer "$result_dir" || {
+      touch "$result_dir/FAILED_TRAINER"
+      echo "The trainer failed; keeping the result and DB: $result_dir" >&2
+      exit 5
+    }
+  fi
   # D-13 §6: an arm whose tree did not settle is invalid and reported, and
   # the matrix goes on. db_bench has already stopped it after the load.
   # Only the tree's own state counts: a WaitForCompact error or a failed
@@ -1328,7 +1446,11 @@ PY
   # log line ran something other than its config; it is kept, not scored.
   if is_controller_arm "$arm"; then
     local plugin_mode=hold-only
-    [[ "$arm" != rules ]] || plugin_mode=rules
+    case "$arm" in
+      rules) plugin_mode=rules ;;
+      prior) plugin_mode=prior-only ;;
+      learned) plugin_mode=learned ;;
+    esac
     "$PYTHON" "$PIPELINE_DIR/28_check_plugin_run.py" \
       --stdout "$result_dir/run.log" \
       --decisions "$result_dir/decisions.jsonl" \
@@ -1338,6 +1460,14 @@ PY
         echo "The plugin check failed; keeping the result and DB: $result_dir" >&2
         exit 8
       }
+  fi
+  # The learner's criteria (H §9: ARCH-1, 2, 6, 8; ARCH-7 against 04 later)
+  # are reported, not enforced, on the exploratory track (D-24 §1 item 4).
+  if [[ "$arm" == learned ]]; then
+    "$PYTHON" "$PIPELINE_DIR/21_check_learner.py" --result "$result_dir" \
+      --output "$result_dir/learner_check.json" \
+      > "$result_dir/learner_check.log" 2>&1 \
+      || echo "[learner check] see $result_dir/learner_check.log" >&2
   fi
   if (( uses_server )); then
     set +e

@@ -208,6 +208,15 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     return config, sorted(filled)
 
 
+def learner_values(settings: dict, phase: str) -> dict:
+    """The plugin's learner keys: "plugin", with "evaluation" over it for a
+    frozen arm."""
+    values = dict(settings.get("plugin") or {})
+    if phase == "evaluation":
+        values.update(settings.get("evaluation") or {})
+    return values
+
+
 def _load(path: Path | None, what: str) -> dict:
     """A JSON object, or {} when the file does not exist (every value it
     holds is then reported missing)."""
@@ -242,6 +251,10 @@ def main() -> int:
                              "push_interval_ms, weights_required)")
     parser.add_argument("--weights-path", help="the learned arm's weights file")
     parser.add_argument("--seed", type=int, help="the learner arms' seed")
+    parser.add_argument("--learner-phase", choices=("training", "evaluation"),
+                        default="training",
+                        help="evaluation: the settings file's \"evaluation\" "
+                             "values over its \"plugin\" ones (a frozen arm)")
     args = parser.parse_args()
     try:
         contract, _ = research_objective.load_contract()
@@ -256,8 +269,9 @@ def main() -> int:
             decision_log=args.decision_log,
             transition_log=args.transition_log,
             placeholders=args.placeholders, diagnostic=args.diagnostic,
-            learner=_load(args.learner_settings, "learner settings").get(
-                "plugin", {}),
+            learner=learner_values(_load(args.learner_settings,
+                                         "learner settings"),
+                                   args.learner_phase),
             weights_path=args.weights_path, seed=args.seed)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)

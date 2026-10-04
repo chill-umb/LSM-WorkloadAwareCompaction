@@ -6,6 +6,7 @@
 // completed job with its window, and the learner's transitions carry their
 // neighbours (H §3).
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -177,6 +178,16 @@ TEST_F(LearnerTest, LearnedStartsColdThenUsesANewerWeightsVersion) {
     Turnover(&host);
     controller.Step();  // loads version 3, then decides with it
     EXPECT_FALSE(controller.fallback());
+  }
+  // For a cross-check by hand with the trainer and 21_check_learner.py.
+  if (const char* keep = std::getenv("RL_CONTROLLER_KEEP_LOGS")) {
+    std::filesystem::create_directories(keep);
+    for (const char* name : {"decisions.jsonl", "transitions.jsonl",
+                             "config.json"}) {
+      std::filesystem::copy_file(
+          dir_ + "/" + name, std::string(keep) + "/" + name,
+          std::filesystem::copy_options::overwrite_existing);
+    }
   }
   const auto lines = Decisions();
   EXPECT_EQ(CountType(lines, "weights_missing"), 1);

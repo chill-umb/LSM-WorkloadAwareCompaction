@@ -282,8 +282,17 @@ View MakeView(const RLHostOptions& o, const RLTreeSnapshot& snap,
   for (auto* field : {&v.probes, &v.fp_reads, &v.hit_reads, &v.seeks,
                       &v.get_reopens, &v.iter_reopens, &v.rho, &v.xi,
                       &v.overlap, &v.rho_tilde, &v.inflow, &v.job_ops, &v.N,
-                      &v.since_release}) {
+                      &v.since_release, &v.hidden}) {
     field->assign(n, kNaN);
+  }
+  const auto raw_hidden = [&](int i) {
+    return i < static_cast<int>(reads.size()) &&
+                   i < static_cast<int>(st.reads0.size())
+               ? since(reads[i].hidden_steps, st.reads0[i].hidden_steps)
+               : 0.0;
+  };
+  for (int i = 0; i < n; ++i) {
+    v.hidden[i] = i == 0 ? raw_hidden(0) + raw_hidden(1) : raw_hidden(i + 1);
   }
   // Until FillCostModel2: no job in flight, nothing priced.
   for (auto* field : {&v.own_ops, &v.own_bytes}) field->assign(n, 0.0);

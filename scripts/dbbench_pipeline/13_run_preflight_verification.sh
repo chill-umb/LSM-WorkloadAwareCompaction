@@ -125,7 +125,7 @@ echo "=== step 5: rules-mode smoke at 1M, T=2 ==="
 # Programme 1 arm. Then the fallback (A-Impl-8) end to end: a rules arm whose
 # bounds the plugin refuses (epsilon 2) must run to the drain in fallback,
 # which 03's own check refuses (exit 8) and 28 --expect-fallback accepts.
-# The fallback on a bad weights file joins with the learned mode (step 6).
+# The fallback on a bad weights file is step 6's.
 if [[ ! -d controller ]]; then
   skip 5 "no controller/ plugin (plan §3)"
 else
@@ -177,7 +177,84 @@ print(f"[step 5] evaluator: {rows[0]['measured_operations']} operations, "
 PY
   pass 5
 fi
-skip 6 "no learned mode yet (plan §7 step 10)"
+echo "=== step 6: learner smoke at 2M, T=2 ==="
+# One 03 learned arm in balanced mode (D-24 §2), its bounds by smoke
+# placeholders, priced with cost model 2 from a schema-6 file (stage 30
+# writes LEARNER_PRICES_FILE). Its settings are LEARNER_SETTINGS_FILE's with
+# a short push interval and a small batch, so that weights reach the plugin
+# within the run. 03 runs 28 on it; 21 --strict then requires ARCH-1 (no
+# NaN), ARCH-2 (no masked action or target argmax), ARCH-6 (C++ and Python
+# agree on 99.9% of decisions) and at least 3 versions loaded; 04 must score
+# it. Then the fallback (A-Impl-8) on a corrupt weights file: a frozen
+# learned arm must run to the drain in fallback, which 03 refuses (exit 8)
+# and 28 --expect-fallback accepts.
+LEARNER_PRICES="${LEARNER_PRICES_FILE:-$DBBENCH_BUILD_DIR/prices.provisional.json}"
+if [[ ! -d controller ]]; then
+  skip 6 "no controller/ plugin (plan §3)"
+elif [[ ! -f "$LEARNER_PRICES" ]]; then
+  skip 6 "no schema-6 prices at $LEARNER_PRICES (stage 30)"
+else
+  LEARNER_RESULTS="$PREFLIGHT_WORK_DIR/learner_smoke"
+  rm -rf "$LEARNER_RESULTS" "$DB_ROOT/preflight-learner-smoke"
+  mkdir -p "$LEARNER_RESULTS"
+  smoke_settings="$LEARNER_RESULTS/learner_settings.json"
+  "$PYTHON" - "$LEARNER_SETTINGS_FILE" "$smoke_settings" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+s["plugin"]["push_interval_ms"] = 1000
+s["learner"].update(batch=8, min_replay=8, target_every=20)
+json.dump(s, open(sys.argv[2], "w"), indent=2)
+PY
+  CONFIRM_EXPERIMENTS=YES EXPERIMENT_ARMS=learned WORKLOAD_SIZES_M=2 \
+    SIZE_RATIOS=2 REPEATS=1 RESUME=0 PLUGIN_PLACEHOLDERS=1 DIAGNOSTIC_RUN=1 \
+    CONTROLLER_OBJECTIVE_MODE=balanced PRICES_FILE="$LEARNER_PRICES" \
+    LEARNER_SETTINGS_FILE="$smoke_settings" LEARNER_CHAIN=0 \
+    LEARNER_CHECKPOINT_IN="" LEARNER_FROZEN=0 \
+    RESULTS_ROOT="$LEARNER_RESULTS/results" \
+    DB_ROOT="$DB_ROOT/preflight-learner-smoke" \
+    "$PIPELINE_DIR/03_run_experiments.sh"
+  learner_arm="$LEARNER_RESULTS/results/2M/T2/learned"
+  "$PYTHON" "$PIPELINE_DIR/21_check_learner.py" --result "$learner_arm" \
+    --strict --min-pushes 3 --output "$PREFLIGHT_WORK_DIR/learner_smoke_report.json"
+
+  LEARNER_FALLBACK="$PREFLIGHT_WORK_DIR/learner_fallback"
+  rm -rf "$LEARNER_FALLBACK" "$DB_ROOT/preflight-learner-fallback"
+  mkdir -p "$LEARNER_FALLBACK"
+  printf 'RLCW0001not a weights file' > "$LEARNER_FALLBACK/corrupt_weights.bin"
+  fallback=0
+  CONFIRM_EXPERIMENTS=YES EXPERIMENT_ARMS=learned WORKLOAD_SIZES_M=1 \
+    SIZE_RATIOS=2 REPEATS=1 RESUME=0 PLUGIN_PLACEHOLDERS=1 DIAGNOSTIC_RUN=1 \
+    CONTROLLER_OBJECTIVE_MODE=balanced PRICES_FILE="$LEARNER_PRICES" \
+    LEARNER_SETTINGS_FILE="$smoke_settings" LEARNER_FROZEN=1 \
+    LEARNER_WEIGHTS_FILE="$LEARNER_FALLBACK/corrupt_weights.bin" \
+    RESULTS_ROOT="$LEARNER_FALLBACK/results" \
+    DB_ROOT="$DB_ROOT/preflight-learner-fallback" \
+    "$PIPELINE_DIR/03_run_experiments.sh" || fallback=$?
+  (( fallback == 8 )) || {
+    echo "[step 6] FAIL: the corrupt-weights arm ended with exit $fallback," \
+         "not 03's plugin-check refusal (8)" >&2
+    exit 1
+  }
+  fallback_arm="$LEARNER_FALLBACK/results/1M/T2/learned"
+  "$PYTHON" "$PIPELINE_DIR/28_check_plugin_run.py" \
+    --stdout "$fallback_arm/run.log" \
+    --decisions "$fallback_arm/decisions.jsonl" \
+    --transitions "$fallback_arm/transitions.jsonl" --mode learned \
+    --expect-fallback --output "$PREFLIGHT_WORK_DIR/learner_fallback_report.json"
+  rm -rf "$DB_ROOT/preflight-learner-fallback"
+  "$PYTHON" "$PIPELINE_DIR/04_generate_graphs.py" \
+    --results "$LEARNER_RESULTS/results" --summary-only
+  "$PYTHON" - "$LEARNER_RESULTS/results/graphs/summary.csv" <<'PY'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+if len(rows) != 1 or rows[0]["settle_ok"] != "1":
+    raise SystemExit("[step 6] FAIL: the learned arm was not scored as a "
+                     "Programme 1 arm (no settled measured phase)")
+print(f"[step 6] evaluator: {rows[0]['measured_operations']} operations, "
+      f"throughput {float(rows[0]['throughput_ops_per_second']):.0f} ops/s")
+PY
+  pass 6
+fi
 
 echo "=== step 7: write the marker ==="
 # The plugin built in step 1 is bound into the marker (plan §6.4 step 7);

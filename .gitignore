@@ -92,6 +92,7 @@ gate1
 # Gate N3 settings, committed when preregistered.
 !config/action_bounds.json
 !config/controller_rules.json
+!config/learner_settings.json
 # The controller plugin's build file (plan §8). Its per-arm config is composed by
 # the pipeline, not committed, so it has no re-include.
 !controller/CMakeLists.txt

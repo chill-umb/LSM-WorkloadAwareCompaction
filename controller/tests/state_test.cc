@@ -316,5 +316,76 @@ TEST(State, OpClockKeepsSamplesBackToTheOldestDueSince) {
   EXPECT_LT(kept.size(), 205u);  // nothing older than needed
 }
 
+// Cost model 2's inputs (H §2 items 1, 2 and 5): the running job's
+// operations, bytes and accrued interference, the flush slot, and the job
+// price and interference per merged source byte.
+TEST(State, CostModel2InputsFromTheRunningJobAndTheLevelsMerges) {
+  FakeHost host;
+  Stats stats;
+  stats.Reset(5, host.ops, host.reads);
+  OpClock clock;
+  clock.Add(0, 0);
+  std::vector<LevelParts> parts(5);
+  Config cfg = TestConfig();
+  cfg.cost_model = 2;
+  cfg.v2.job[kDeepMerge] = 500;
+  cfg.v2.job[kMove] = 40;
+  cfg.v2.c_put = 50;
+  cfg.v2.p_dev = 1e9;
+  for (int x = 0; x < kNumStepTypes; ++x) cfg.v2.kappa_b[x] = 1e-9;
+  // Two finished merges of L2 (100 + 300 source bytes) and one move.
+  for (int id : {1, 2}) {
+    stats.OnJob(FakeHost::Compaction(false, id, 2, 0, 0, 0), clock, &parts);
+    stats.OnJob(FakeHost::Compaction(true, id, 2, id == 1 ? 100 : 300, 50, 400),
+                clock, &parts);
+  }
+  stats.AddCharge(2, false, 8, 4);
+  auto move = FakeHost::Compaction(true, 3, 2, 200, 0, 0);
+  move.trivial = true;
+  stats.OnJob(FakeHost::Compaction(false, 3, 2, 200, 0, 0), clock, &parts);
+  stats.OnJob(move, clock, &parts);
+  stats.AddCharge(2, true, 2, 0);
+  // A merge of L3 running since operation 1000, and a flush.
+  auto running = FakeHost::Compaction(false, 4, 3, 1000, 500, 0);
+  running.steps.gets = 600;
+  running.steps.puts = 400;
+  stats.OnJob(running, clock, &parts);
+  auto flush = FakeHost::Flush(0);
+  flush.kind = RLJobRecord::Kind::kFlushBegin;
+  flush.job_id = 5;
+  stats.OnJob(flush, clock, &parts);
+
+  View v = TestView();
+  test::RLStepCounts now;
+  now.gets = 1800;  // 1200 Gets and 300 Puts since the merge began
+  now.puts = 700;
+  now.probes = 3000;
+  FillCostModel2(&v, stats, now, cfg);
+  EXPECT_TRUE(v.flush_running);
+  EXPECT_FALSE(v.slot_trivial);
+  EXPECT_EQ(v.own_ops[3], 1500);
+  EXPECT_EQ(v.own_bytes[3], 1500);
+  EXPECT_EQ(v.own_ops[2], 0);
+  EXPECT_GT(v.own_intf_rd[3], 0);
+  EXPECT_GT(v.own_intf_wr[3], 0);
+  // Per merged source byte over c_w = 1: two merges of mean 200 bytes.
+  EXPECT_DOUBLE_EQ(v.c_job[2], 500.0 / 200);
+  EXPECT_DOUBLE_EQ(v.c_tm[2], 40.0 / 200);
+  EXPECT_DOUBLE_EQ(v.intf_rd[2], 8.0 / 400);
+  EXPECT_DOUBLE_EQ(v.intf_wr[2], 4.0 / 400);
+  EXPECT_DOUBLE_EQ(v.tm_rd[2], 2.0 / 200);
+  EXPECT_TRUE(std::isnan(v.c_job[4]));  // no merge yet
+  // The features carry them, level-free (C_3 = 32 MiB here).
+  const auto f = LevelFeatures(v, 3, false, {}, parts[3], kNaN, cfg);
+  EXPECT_DOUBLE_EQ(Feature(Agent::kInterior, f, "own_bytes"), 1500 / v.C[3]);
+  EXPECT_DOUBLE_EQ(Feature(Agent::kInterior, f, "flush_running"), 1);
+  // Under cost model 1 nothing is priced.
+  View w = TestView();
+  FillCostModel2(&w, stats, now, TestConfig());
+  EXPECT_EQ(w.own_ops[3], 1500);
+  EXPECT_TRUE(std::isnan(w.own_intf_rd[3]));
+  EXPECT_TRUE(std::isnan(w.c_job[2]));
+}
+
 }  // namespace
 }  // namespace rlc

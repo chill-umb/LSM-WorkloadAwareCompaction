@@ -187,8 +187,15 @@ c. The preflight, steps 1–4 (Release build, tiers 1–2, ACT-1, ACT-4, the
      scripts/dbbench_pipeline/13_run_preflight_verification.sh
    ```
 
-   Expected: `[step 1]` to `[step 5] PASS`, step 6 `SKIP` (no learned
-   mode yet), and `preflight marker written: build-dbbench/PREFLIGHT_PASSED`.
+   Expected: `[step 1]` to `[step 6] PASS` (step 6 is `SKIP` without a
+   schema-6 prices file at `LEARNER_PRICES_FILE`, default
+   `build-dbbench/prices.provisional.json`, which stage 30 writes), and
+   `preflight marker written: build-dbbench/PREFLIGHT_PASSED`. Step 6 runs
+   one `learned` arm at 2M, T=2, in balanced mode with the trainer, which
+   `21_check_learner.py --strict` must pass (no NaN, no masked action, C++
+   and Python inference agreeing on 99.9% of decisions, at least 3 weight
+   versions loaded), then one frozen `learned` arm with a corrupt weights
+   file, which must run to the drain in fallback (03 exits 8 on it).
    Step 4 runs ACT-4 and then ARCH-5 (`PARITY_CHECK=arch5`: the plugin in
    hold-only mode against the native arm); step 5 runs one `rules` arm at 1M
    with smoke placeholders, which must make at least one change and pass
@@ -571,3 +578,27 @@ Important limitations:
 
 To resume, reuse the same paths with `RESUME=1`. Only arms with a `COMPLETED`
 marker are skipped; inspect or remove a partial arm manually.
+
+### The learner arms (plan step 10; PREREGISTRATION D-24 §2, exploratory)
+
+`prior` (the plugin's prior-only mode) and `learned` (Q = -b + f from the
+trainer's weights) price with cost model 2, so `PRICES_FILE` must be a
+schema-6 file (stage 30). The bounds and `b_max` come from
+`ACTION_BOUNDS_FILE` and `CONTROLLER_RULES_FILE` as for every controller arm;
+`LEARNER_SETTINGS_FILE` (`config/learner_settings.json`, values proposed, not
+yet confirmed by the owner) holds the plugin's `explore`, push interval and
+`weights_required`, the frozen arms' `evaluation` values, and the trainer's
+settings. The exploratory runs are balanced mode:
+`CONTROLLER_OBJECTIVE_MODE=balanced`.
+
+A training sequence: one 03 call, `EXPERIMENT_ARMS=learned`, `REPEATS=<n>`;
+each arm's trainer (`rl_agent/learner/trainer.py`, on `CONTROLLER_CPUS`)
+starts from the previous arm's checkpoint (`LEARNER_CHAIN=1`; the first from
+`LEARNER_CHECKPOINT_IN`, empty for a cold start) and leaves
+`trainer_checkpoint.pt`, `weights.bin` (the last version), `weights/` (every
+version, for ARCH-6), `trainer.jsonl` and `trainer_summary.json` (with its
+ARCH-7 totals). A frozen evaluation: `LEARNER_FROZEN=1
+LEARNER_WEIGHTS_FILE=<a training arm's weights.bin>`; no trainer runs, and
+the plugin falls back unless the file is valid. Every learned arm is
+reported by `21_check_learner.py` (`learner_check.json`; report-only on the
+exploratory track).

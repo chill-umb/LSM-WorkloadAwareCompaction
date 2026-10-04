@@ -168,6 +168,23 @@ CONTROLLER_OBJECTIVE_MODE="${CONTROLLER_OBJECTIVE_MODE:-read}"
 ACTION_BOUNDS_FILE="${ACTION_BOUNDS_FILE:-config/action_bounds.json}"
 CONTROLLER_RULES_FILE="${CONTROLLER_RULES_FILE:-config/controller_rules.json}"
 PLUGIN_PLACEHOLDERS="${PLUGIN_PLACEHOLDERS:-0}"
+# The learner arms (03's prior and learned; plan step 10, PREREGISTRATION
+# D-24 §2's exploratory track, balanced mode: CONTROLLER_OBJECTIVE_MODE=
+# balanced). LEARNER_SETTINGS_FILE holds the plugin's explore, push interval
+# and weights_required ("plugin", or "evaluation" when frozen) and the
+# trainer's settings ("learner"). A learned arm starts the trainer
+# (rl_agent/learner/trainer.py) on CONTROLLER_CPUS. LEARNER_CHAIN=1 hands
+# each learned arm's checkpoint to the next one in the same 03 call, the
+# first starting from LEARNER_CHECKPOINT_IN (empty: a cold start).
+# LEARNER_FROZEN=1 runs no trainer: the plugin reads LEARNER_WEIGHTS_FILE,
+# copied into the arm, with the evaluation settings.
+LEARNER_SETTINGS_FILE="${LEARNER_SETTINGS_FILE:-config/learner_settings.json}"
+LEARNER_CHAIN="${LEARNER_CHAIN:-1}"
+LEARNER_CHECKPOINT_IN="${LEARNER_CHECKPOINT_IN:-}"
+LEARNER_FROZEN="${LEARNER_FROZEN:-0}"
+LEARNER_WEIGHTS_FILE="${LEARNER_WEIGHTS_FILE:-}"
+# Seconds a trainer may take to finish after db_bench exits.
+LEARNER_STOP_TIMEOUT_SECONDS="${LEARNER_STOP_TIMEOUT_SECONDS:-600}"
 # Written by 13, checked by 03 before any run larger than
 # PREFLIGHT_SHORT_RUN_MAX_M million operations (the preflight's own runs are
 # 1M and 2M).

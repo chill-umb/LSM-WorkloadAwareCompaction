@@ -141,6 +141,9 @@ struct View {
   std::vector<double> job_ops;        // mean operations served per merge
   std::vector<double> N;              // operations per turnover (§1.1)
   std::vector<double> since_release;  // operations since the last release
+  // Hidden steps charged to each level since the start (entries of level
+  // i + 1; L0: of L0 and L1), the fork's per-level counter (D §4).
+  std::vector<double> hidden;
 
   // Cost model 2's inputs (H §2 items 1, 2 and 5), filled by
   // FillCostModel2; NaN under cost model 1.

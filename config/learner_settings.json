@@ -1,0 +1,29 @@
+{
+  "status": "PROPOSED by the operator session of 2026-10-04 for PREREGISTRATION D-24 §2's exploratory track only; not confirmed by the owner; no gate run may use this file (the learner's values for Gate N4 are a later dated entry, D-18 draft §4).",
+  "plugin": {
+    "explore": 0.1,
+    "push_interval_ms": 30000,
+    "weights_required": 0
+  },
+  "evaluation": {
+    "explore": 0.02,
+    "weights_required": 1
+  },
+  "learner": {
+    "n_h": 2.0,
+    "hidden": 64,
+    "layers": 2,
+    "clip": 10.0,
+    "lr": 0.001,
+    "batch": 64,
+    "target_every": 200,
+    "huber": 1.0,
+    "grad_clip": 10.0,
+    "replay": 50000,
+    "min_replay": 256,
+    "echo": "own",
+    "seed": 1
+  },
+  "train_steps_per_transition": 4,
+  "torch_threads": 1
+}

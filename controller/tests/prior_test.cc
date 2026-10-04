@@ -179,5 +179,75 @@ TEST(Prior, L0ReopensRaiseTheReadPrice) {
   }
 }
 
+// Cost model 2 (H §7 as amended 2026-10-03, D-23).
+Config V2() {
+  Config c = TestConfig();
+  c.cost_model = 2;
+  c.v2.c_cr = 0.5;
+  c.v2.c_st = 10;
+  c.v2.lambda = 0.25;
+  c.v2.job[kL0Merge] = 1048576;
+  c.v2.job[kDeepMerge] = 1000;
+  c.v2.p_dev = 1e9;
+  return c;
+}
+
+View V2View() {
+  View v = TestView();
+  const int n = v.num_levels;
+  v.intf_rd.assign(n, 0.2);
+  v.intf_wr.assign(n, 0.1);
+  v.c_job.assign(n, 0.05);
+  v.hidden.assign(n, 0);
+  return v;
+}
+
+TEST(Prior, CostModel2ReadsTheExtraOverlapAndMovesItsInterference) {
+  View v = V2View();
+  SetPhi(&v, 2, 0.8);
+  SetPhi(&v, 3, 0.2);  // overlap now 0.75 * 0.5 = 0.375 per source byte
+  const double released = 0.8 * 0.05 / 1.05;
+  const auto y = [](double o) { return (0.9 + o) + 0.25 * (1 + o); };
+  const double expected =
+      0.7 * released * 1.5 * 0.75 * (0.5 - 2) +              // (c_w + c_cr)
+      0.7 * released * (0.2 + 0.1) * (y(0.375) / y(1.5) - 1);  // interference
+  EXPECT_NEAR(LevelPrior(v, 2, {}, V2())[kCompact], expected, 1e-12);
+  // Cost model 1 keeps its value.
+  EXPECT_NEAR(LevelPrior(v, 2, {}, TestConfig())[kCompact],
+              0.7 * released * 0.75 * (0.5 - 2), 1e-12);
+}
+
+TEST(Prior, CostModel2PricesTheOverflowAsMergesBelowAndTheHiddenSteps) {
+  View v = V2View();
+  SetPhi(&v, 2, 0.97);
+  SetPhi(&v, 3, 1.0);
+  const double held = 0.97 * 1.05 - 1;
+  const double garbage = 0.04 * 0.07 * held;
+  const double overflow = 0.93 * held;
+  // Read with its overlap at c_cr, plus level 3's job price and its
+  // interference per merged source byte.
+  const double below = 0.5 * (1 + 1.5) + 0.05 + 0.2 + 0.1;
+  EXPECT_NEAR(LevelPrior(v, 2, {}, V2())[kDefer],
+              garbage + overflow * 2.4 + overflow * below, 1e-12);
+  // 2 hidden steps per operation charged to level 2 grow with its bytes.
+  v.hidden[2] = 2 * v.ops;
+  const double growth = 10 * 2 * (held / 0.97) * v.N[2] / v.C[2];
+  EXPECT_NEAR(LevelPrior(v, 2, {}, V2())[kDefer],
+              garbage + overflow * (2.4 + below) + growth, 1e-12);
+  EXPECT_NEAR(LevelPrior(v, 2, {}, V2())[kExpand],
+              0.04 * 0.25 + 10 * 2 * (0.25 / 0.97) * v.N[2] / v.C[2], 1e-12);
+}
+
+TEST(Prior, CostModel2AddsEachL0MergesJobPriceAndOverlapRead) {
+  const View v = V2View();
+  const double norm = 10000 / (4 * kMiB);
+  // (c_job^0 + c_cr m_1 C_1) u / F = (1 + 4) * 409.6 = 2048 per K.
+  const auto g = [](double K) { return (3276.8 + 2048) / K + 128 * K; };
+  const L0Control c{4, 0};
+  const Values b = L0Prior(v, c, V2());
+  EXPECT_NEAR(b[kDefer], norm * (g(3) - g(4)), 1e-9);
+  EXPECT_NEAR(b[kExpand], norm * (g(5) - g(4)), 1e-9);
+}
+
 }  // namespace
 }  // namespace rlc

@@ -108,7 +108,8 @@ def write_atomic(w: WeightsFile, path: str) -> None:
 
 def decode(data: bytes, names_by_agent: dict) -> WeightsFile:
     """The inverse of encode; `names_by_agent` gives each agent's feature
-    names (the hash in the file must match them)."""
+    names, which the hash in the file must match. A model of an agent with
+    no names given is read unchecked (its names are None)."""
     if data[:8] != MAGIC:
         raise ValueError("bad magic")
     version, length, checksum = struct.unpack_from("<QQQ", data, 8)
@@ -128,9 +129,11 @@ def decode(data: bytes, names_by_agent: dict) -> WeightsFile:
     for _ in range(n_models):
         code, level, fhash, n_in, clip = take("<IiQId")
         agent = CODE_AGENTS[code]
-        names = list(names_by_agent[agent])
-        if features_hash(names) != fhash or len(names) != n_in:
-            raise ValueError(f"the {agent} model has other state inputs")
+        names = names_by_agent.get(agent)
+        if names is not None:
+            names = list(names)
+            if features_hash(names) != fhash or len(names) != n_in:
+                raise ValueError(f"the {agent} model has other state inputs")
         (n_layers,) = take("<I")
         layers, width = [], n_in
         for _ in range(n_layers):
