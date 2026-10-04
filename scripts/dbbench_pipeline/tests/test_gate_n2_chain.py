@@ -7,7 +7,11 @@ screen, then the sweep at one T (native before the measured profiles at each
 point, one session, each vector at its own point, a refused profile skipped);
 RESUME keeping a point's vectors; a top-up and the cross-T mode, started from
 another folder; a failure of 23 stopping one workload while the other
-finishes; and the refusals before any run."""
+finishes; the refusals before any run; and D-24 §2's exploratory screen
+(provisional prices accepted only there, its own session, folders and
+EXPLORATORY marker, and the formal sweep blind to it)."""
+import csv
+import hashlib
 import importlib.util
 import json
 import os
@@ -132,7 +136,8 @@ class GateN2ChainTest(unittest.TestCase):
                 "N2_WORKLOADS", "N2_RUN_LENGTH_assoc", "N2_RUN_LENGTH_powerlaw",
                 "WORKLOAD_SKEW", "WORKLOAD_PROFILE", "MIX_GET_RATIO",
                 "MIX_PUT_RATIO", "MIX_SEEK_RATIO", "EXPERIMENT_ARMS",
-                "MAX_BYTES_FOR_LEVEL_BASE", "L0_COMPACTION_TRIGGER")
+                "MAX_BYTES_FOR_LEVEL_BASE", "L0_COMPACTION_TRIGGER",
+                "N2_EXPLORATORY", "DIAGNOSTIC_RUN")
 
     def run25(self, *args, cwd=None, script=None, **overrides):
         env = {k: v for k, v in os.environ.items() if k not in self.SCRUBBED}
@@ -144,8 +149,17 @@ class GateN2ChainTest(unittest.TestCase):
         return subprocess.run(["bash", script, *args], cwd=cwd, env=env,
                               capture_output=True, text=True, timeout=1800)
 
-    def completed(self, workload="assoc") -> set:
-        return {p.parent for p in (self.nvme / f"n2-{workload}").glob("**/COMPLETED")}
+    def completed(self, workload="assoc", prefix="n2") -> set:
+        return {p.parent for p in (self.nvme / f"{prefix}-{workload}").glob("**/COMPLETED")}
+
+    def provisional_prices(self, **changes) -> dict:
+        """A schema-4 file, as build-dbbench/prices.json is before D-22's
+        sessions: provisional (D-22 j), measured on this db_bench."""
+        record = {**{k: v for k, v in self.prices.items()
+                     if k not in ("kind", "reproducibility")},
+                  "schema": 4, **changes}
+        (self.root / "build-dbbench" / "prices.json").write_text(json.dumps(record))
+        return record
 
     def plan_steps(self, stdout, workload):
         section = stdout.split(f"# workload {workload}: ")[1].split("# workload ")[0]
@@ -366,11 +380,20 @@ class GateN2ChainTest(unittest.TestCase):
         session.write_text(json.dumps({
             **{k: v for k, v in self.prices.items() if k != "reproducibility"},
             "kind": "session"}))
+        # A schema-4 file, every price before D-22: provisional too, and the
+        # formal sweep refuses it (only N2_EXPLORATORY=1 takes it, D-24 §2).
+        schema4 = Path(self.tmp.name) / "schema4_prices.json"
+        schema4.write_text(json.dumps({
+            **{k: v for k, v in self.prices.items()
+               if k not in ("kind", "reproducibility")}, "schema": 4}))
         five = Path(self.tmp.name) / "five.txt"
         five.write_text("".join(f"assoc 14 {b} {k} uniform_1 5\n" for b, k in POINTS[:5]))
         cases = [({"PRICES_FILE": str(Path(self.tmp.name) / "none.json")}, "run 18"),
                  ({"PRICES_FILE": str(draft)}, "schema 5"),
                  ({"PRICES_FILE": str(session)}, "provisional prices"),
+                 ({"PRICES_FILE": str(schema4)}, "provisional prices"),
+                 ({"PRICES_FILE": str(schema4), "N2_EXPLORATORY": "0"},
+                  "provisional prices"),
                  ({"PRICES_FILE": str(stale)}, "re-measures them after any binary change"),
                  ({"PREFLIGHT_MARKER": str(Path(self.tmp.name) / "none")},
                   "no preflight marker for this db_bench"),
@@ -394,6 +417,158 @@ class GateN2ChainTest(unittest.TestCase):
         ran = self.run25()
         self.assertEqual(ran.returncode, 1)
         self.assertIn("q-bar for assoc (assoc) is not recorded", ran.stderr)
+        self.assertFalse((self.nvme / "n2-assoc").exists())
+
+    def test_an_exploratory_screen(self):
+        """D-24 §2: N2_EXPLORATORY=1 runs the T = 10 screen at two repeats
+        (natives at five) on provisional prices, as D-22 (j)'s diagnostic
+        runs, in its own session and folders, with one EXPLORATORY marker in
+        every result folder. The formal sweep refuses those prices, and the
+        two plans never read each other's folders."""
+        self.provisional_prices()
+        sha = hashlib.sha256(
+            (self.root / "build-dbbench" / "prices.json").read_bytes()).hexdigest()
+        screen = {"N2_EXPLORATORY": "1", "N2_T": "10", "N2_REPEATS": "2",
+                  "N2_WORKLOADS": "assoc", "FAKE_SURVIVAL_BASES": SURVIVAL}
+        formal = {**screen, "N2_EXPLORATORY": "0"}
+
+        def natives(stdout):
+            return {p: k for (p, a), k in self.plan_steps(stdout, "assoc")[2].items()
+                    if a == "native"}
+
+        # A formal point with vectors runs its natives at the screen's two
+        # (they were measured); the screen's plan does not see that point.
+        held = self.nvme / "n2-assoc" / "T10-b16-k4"
+        held.mkdir(parents=True)
+        (held / "profiles.json").write_text("{}")
+        planned = self.run25("plan", **screen)
+        self.assertEqual(planned.returncode, 0, planned.stderr[-3000:])
+        self.assertIn("# EXPLORATORY screen (PREREGISTRATION D-24 §2)", planned.stdout)
+        self.assertIn(f"# session explore-n2-assoc; results {self.nvme}/explore-n2-assoc;"
+                      f" databases {self.nvme}/explore-n2-dbs/assoc", planned.stdout)
+        _, _, last = self.plan_steps(planned.stdout, "assoc")
+        self.assertEqual({(a, k) for (_, a), k in last.items()},
+                         {("native", 5), ("static:uniform_0_75", 2),
+                          *((a, 2) for a in MEASURED)})
+        self.assertEqual(len({p for p, _ in last}), len(POINTS))
+        self.assertIn("# assoc: 88 runs of 29M", planned.stdout)
+        listed = self.run25("plan", **formal)
+        self.assertEqual(listed.returncode, 0, listed.stderr[-3000:])
+        self.assertNotIn("EXPLORATORY", listed.stdout)
+        self.assertNotIn("# session", listed.stdout)
+        self.assertEqual(natives(listed.stdout)["T10-b16-k4"], 2)
+        shutil.rmtree(self.nvme / "n2-assoc")
+
+        # Formal mode refuses the provisional prices, before any run.
+        refused = self.run25(**formal)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("provisional prices", refused.stderr)
+        for name in ("n2-assoc", "explore-n2-assoc"):
+            self.assertFalse((self.nvme / name).exists(), name)
+
+        ran = self.run25(**screen)
+        self.assertEqual(ran.returncode, 0, ran.stdout[-3000:] + ran.stderr[-3000:])
+        self.assertIn("assoc: EXPLORATORY screen (D-24 §2", ran.stdout)
+        for name in ("n2-assoc", "n2-dbs", "n2-powerlaw", "explore-n2-powerlaw"):
+            self.assertFalse((self.nvme / name).exists(), name)
+        self.assertTrue((self.nvme / "explore-n2-dbs" / "assoc").is_dir())
+        explore = self.nvme / "explore-n2-assoc"
+        marker = env_file(explore / "EXPLORATORY")
+        self.assertEqual(
+            {k: marker[k] for k in ("exploratory", "session_id", "prices_sha256",
+                                    "prices_schema", "prices_status",
+                                    "db_bench_identity")},
+            {"exploratory": "1", "session_id": "explore-n2-assoc",
+             "prices_sha256": sha, "prices_schema": "4",
+             "prices_status": "provisional",
+             "db_bench_identity": self.prices["db_bench_sha256"]})
+        self.assertIn("D-24", marker["decision"])
+        text = (explore / "EXPLORATORY").read_text()
+        points = {explore / f"T10-b{b}-k{k}" for b, k in POINTS}
+        self.assertEqual(set(explore.glob("T*")), points)
+        runs = self.completed(prefix="explore-n2")
+        # Five natives, two of the rest; 23 refuses survival-weighted at 8 MiB.
+        self.assertEqual(len(runs), sum(5 + 2 + 2 + (2 if b != 8 else 0)
+                                        for b, _ in POINTS))
+        for folder in points | runs:
+            self.assertEqual((folder / "EXPLORATORY").read_text(), text, folder)
+        for run in runs:
+            meta = env_file(run / "metadata.env")
+            self.assertEqual((meta["session_id"], meta["diagnostic_run"],
+                              meta["prices_status"], meta["prices_sha256"]),
+                             ("explore-n2-assoc", "1", "provisional", sha), run)
+            self.assertIn(f":prices{sha}:", meta["experiment_fingerprint"])
+        for point in points:
+            config = env_file(point / "effective_config.env")
+            self.assertEqual((config["SESSION_ID"], config["DIAGNOSTIC_RUN"]),
+                             ("explore-n2-assoc", "1"))
+        # 04 prices every arm at the provisional prices, and says so.
+        with open(explore / "graphs" / "summary.csv") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), len(runs))
+        self.assertEqual({(r["session_id"], r["prices_status"], r["objective_status"])
+                          for r in rows},
+                         {("explore-n2-assoc", "provisional prices", "priced")})
+
+        # Each plan reads only its own folders: the screen's vectors are
+        # found by the screen, never by the formal sweep.
+        self.assertEqual(set(natives(self.run25("plan", **screen).stdout).values()), {2})
+        self.assertEqual(set(natives(self.run25("plan", **formal).stdout).values()), {5})
+
+        # A resume under other prices would be another screen: refused
+        # before any run, and the marker is left as it was.
+        self.provisional_prices(c_w=2e-14)
+        again = self.run25(**{**screen, "RESUME": "1"})
+        self.assertEqual(again.returncode, 1)
+        self.assertIn("records another screen", again.stderr)
+        self.assertEqual(self.completed(prefix="explore-n2"), runs)
+        self.assertEqual((explore / "EXPLORATORY").read_text(), text)
+
+    def test_exploratory_refusals_and_a_failed_arm(self):
+        """Exploratory mode relaxes only the final-prices rule; every other
+        check of the start stands. A failed arm's folder is marked too."""
+        record = self.provisional_prices()
+        draft = Path(self.tmp.name) / "draft_prices.json"
+        draft.write_text(json.dumps({"schema": 1, "c_w": 1.0}))
+        stale = Path(self.tmp.name) / "stale_prices.json"
+        stale.write_text(json.dumps({**record, "db_bench_sha256": "0" * 64}))
+        screen = {"N2_EXPLORATORY": "1", "N2_T": "10", "N2_REPEATS": "2",
+                  "N2_WORKLOADS": "assoc"}
+        cases = [({"PRICES_FILE": str(Path(self.tmp.name) / "none.json")}, "run 18"),
+                 ({"PRICES_FILE": str(draft)}, "schema 5"),
+                 ({"PRICES_FILE": str(stale)}, "re-measures them after any binary change"),
+                 ({"PREFLIGHT_MARKER": str(Path(self.tmp.name) / "none")},
+                  "no preflight marker for this db_bench"),
+                 ({"N2_REPEATS": "1"}, "at least 2"),
+                 ({"N2_EXPLORATORY": "yes"}, "N2_EXPLORATORY must be 0 or 1")]
+        for overrides, message in cases:
+            with self.subTest(message=message):
+                ran = self.run25(**{**screen, **overrides})
+                self.assertEqual(ran.returncode, 1)
+                self.assertIn(message, ran.stderr)
+                for name in ("n2-assoc", "explore-n2-assoc", "explore-n2-dbs"):
+                    self.assertFalse((self.nvme / name).exists(), name)
+        # A screen's folders found without RESUME, as the formal sweep's are.
+        (self.nvme / "explore-n2-dbs").mkdir()
+        ran = self.run25(**screen)
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("explore-n2-dbs exists", ran.stderr)
+        self.assertFalse((self.nvme / "explore-n2-assoc").exists())
+        (self.nvme / "explore-n2-dbs").rmdir()
+        # An arm that fails: the workload stops, and the failed arm's folder
+        # carries the marker as the finished ones do.
+        configs = Path(self.tmp.name) / "n2_configs.txt"
+        configs.write_text("assoc 10 16 4 uniform_1 2\n")
+        ran = self.run25(N2_EXPLORATORY="1", N2_CONFIGS=str(configs),
+                         FAKE_FAIL_WORKLOAD="assoc")
+        self.assertEqual(ran.returncode, 1)
+        self.assertIn("assoc FAILED", ran.stdout)
+        failed = (self.nvme / "explore-n2-assoc" / "T10-b16-k4" / "29M" / "T10" /
+                  "repeat-01" / "native")
+        self.assertTrue((failed / "metadata.env").exists())
+        self.assertFalse((failed / "COMPLETED").exists())
+        self.assertEqual((failed / "EXPLORATORY").read_text(),
+                         (self.nvme / "explore-n2-assoc" / "EXPLORATORY").read_text())
         self.assertFalse((self.nvme / "n2-assoc").exists())
 
     def test_the_marker_is_checked_with_the_plugin(self):

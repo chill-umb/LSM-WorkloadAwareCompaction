@@ -37,6 +37,16 @@
 #   N2_RUN_LENGTH_<workload>="<size M> <load %>"   instead of Gate N1's rung
 #   NVME (absolute; a relative one is read from the repo root, as in 24),
 #   RESUME, ALLOW_ROOT_DISK, MIN_FREE_GB as 24
+#   N2_EXPLORATORY=1            PREREGISTRATION D-24 §2's exploratory screen:
+#                               ranking only, no claim, never pooled with
+#                               Gate N2. Accepts provisional prices (still
+#                               measured on this db_bench), and runs as D-22
+#                               (j)'s diagnostic runs (DIAGNOSTIC_RUN=1).
+#                               Session explore-n2-<workload>, results under
+#                               $NVME/explore-n2-<workload>, databases under
+#                               $NVME/explore-n2-dbs, an EXPLORATORY marker
+#                               (prices sha256 and schema, the db_bench) in
+#                               every result folder. Everything else as above
 set -Eeuo pipefail
 
 # Files the user gives are read from where 25 was started, before the cd.
@@ -54,6 +64,17 @@ source "$PIPELINE_DIR/chain_common.sh"
 # A relative NVME is read from the repository root, as 24 and 03 read it.
 NVME="$(realpath -m -- "$NVME")"
 WORKLOADS="${N2_WORKLOADS:-assoc powerlaw}"
+# D-24 §2: the exploratory screen has its own sessions and folders, so the
+# evaluator can never pool it with the formal sweep's.
+EXPLORATORY="${N2_EXPLORATORY:-0}"
+[[ "$EXPLORATORY" =~ ^[01]$ ]] || fail "N2_EXPLORATORY must be 0 or 1"
+PREFIX=n2
+explore_check=() diagnostic=()
+if (( EXPLORATORY )); then
+  PREFIX=explore-n2
+  explore_check=(--exploratory)
+  diagnostic=(DIAGNOSTIC_RUN=1)
+fi
 if [[ "$DBBENCH_BUILD_DIR" = /* ]]; then
   DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
 else
@@ -73,8 +94,19 @@ run_length() {  # $1=workload; prints "<size M> <load %>"
 plan() {  # $1=workload $2=size
   "$PY" "$PIPELINE_DIR/gate_n2_plan.py" plan "$1" --nvme "$NVME" \
     --size "$2" ${N2_REPEATS:+--repeats "$N2_REPEATS"} ${N2_T:+--t "$N2_T"} \
-    ${N2_CONFIGS:+--configs "$N2_CONFIGS"} \
+    ${N2_CONFIGS:+--configs "$N2_CONFIGS"} --prefix "$PREFIX" \
     --write-buffer "$WRITE_BUFFER_SIZE" --slowdown "$L0_SLOWDOWN_TRIGGER"
+}
+
+# D-24 §2: the EXPLORATORY marker at $1 (the workload root), checked against
+# these prices and this db_bench, and copied into every result folder under
+# it and into the folders given after it. Nothing in formal mode.
+mark() {  # $1=workload, then folders
+  (( EXPLORATORY )) || return 0
+  local w="$1"
+  shift
+  "$PY" "$PIPELINE_DIR/gate_n2_plan.py" explore-marker --prices "$PRICES_FILE" \
+    --db-bench "$DB_BENCH" --session "$PREFIX-$w" "$NVME/$PREFIX-$w" "$@"
 }
 
 # One workload. Its WORKLOAD_SKEW, mix and profile are in the environment
@@ -89,11 +121,17 @@ chain() {
     stamp "$w: nothing planned"
     return 0
   fi
-  stamp "$w: Gate N2, ${size}M at ${load}% load, session n2-$w"
+  if (( EXPLORATORY )); then
+    stamp "$w: EXPLORATORY screen (D-24 §2; ranking only, never pooled with" \
+          "Gate N2), ${size}M at ${load}% load, session $PREFIX-$w"
+  else
+    stamp "$w: Gate N2, ${size}M at ${load}% load, session $PREFIX-$w"
+  fi
+  mark "$w"
   # The plan on fd 3, so nothing a step runs can read it from stdin.
   while read -r kind id T base k0 k arms <&3; do
     [[ "$kind" == run || "$kind" == profiles ]] || continue
-    root="$NVME/n2-$w/$id"
+    root="$NVME/$PREFIX-$w/$id"
     # The point's own vectors, checked against the point (loose end of 03)
     # and against the runs they were measured from. At the profiles step 23
     # runs first when the point has none; a failure of 23 that is not one of
@@ -120,11 +158,17 @@ chain() {
       keep+=("$arm")
     done
     (( ${#keep[@]} )) || continue
-    env ${vec[@]+"${vec[@]}"} EXPERIMENT_ARMS="${keep[*]}" SIZE_RATIOS="$T" \
+    # The point's folder is marked before 03 runs in it, and the arm
+    # folders 03 made after it returns, a failed arm's too.
+    mark "$w" "$root"
+    env ${vec[@]+"${vec[@]}"} ${diagnostic[@]+"${diagnostic[@]}"} \
+      EXPERIMENT_ARMS="${keep[*]}" SIZE_RATIOS="$T" \
       MAX_BYTES_FOR_LEVEL_BASE="$(( base * 1048576 ))" L0_COMPACTION_TRIGGER="$k0" \
       WORKLOAD_SIZES_M="$size" LOAD_PERCENT="$load" REPEATS="$k" RESUME=1 \
-      SESSION_ID="n2-$w" RESULTS_ROOT="$root" DB_ROOT="$NVME/n2-dbs/$w/$id" \
-      CONFIRM_EXPERIMENTS=YES "$PIPELINE_DIR/03_run_experiments.sh"
+      SESSION_ID="$PREFIX-$w" RESULTS_ROOT="$root" DB_ROOT="$NVME/$PREFIX-dbs/$w/$id" \
+      CONFIRM_EXPERIMENTS=YES "$PIPELINE_DIR/03_run_experiments.sh" ||
+      { k=$?; mark "$w" || true; exit "$k"; }
+    mark "$w"
   done 3<<< "$planned"
   if (( ${#not_run[@]} )); then
     stamp "$w: measured profiles not run (refused by 23, or waiting):"
@@ -132,10 +176,10 @@ chain() {
   fi
   # 3: some arm is refused, e.g. one that did not settle (D-13 §6); the
   # others are scored and the refusals listed.
-  "$PY" "$PIPELINE_DIR/04_generate_graphs.py" --results "$NVME/n2-$w" --summary-only || {
+  "$PY" "$PIPELINE_DIR/04_generate_graphs.py" --results "$NVME/$PREFIX-$w" --summary-only || {
     k=$?
     (( k == 3 )) || exit "$k"
-    stamp "$w: 04 refused arms; see $NVME/n2-$w/graphs/refused_arms.json"
+    stamp "$w: 04 refused arms; see $NVME/$PREFIX-$w/graphs/refused_arms.json"
   }
   stamp "$w: done"
 }
@@ -146,10 +190,16 @@ case "${1:-}" in
     exit 0
     ;;
   plan)
+    if (( EXPLORATORY )); then
+      echo "# EXPLORATORY screen (PREREGISTRATION D-24 §2): ranking only, never" \
+           "pooled with Gate N2; provisional prices accepted; diagnostic runs"
+    fi
     for w in $WORKLOADS; do
       chosen="$(run_length "$w")"
       read -r size load <<< "$chosen"
       echo "# workload $w: ${size}M at ${load}% load"
+      (( ! EXPLORATORY )) ||
+        echo "# session $PREFIX-$w; results $NVME/$PREFIX-$w; databases $NVME/$PREFIX-dbs/$w"
       plan "$w" "$size"
     done
     exit 0
@@ -165,7 +215,7 @@ esac
 if [[ -n "${N2_CONFIGS:-}" ]]; then
   node_checks
 else
-  node_checks n2-assoc n2-powerlaw n2-dbs
+  node_checks "$PREFIX-assoc" "$PREFIX-powerlaw" "$PREFIX-dbs"
 fi
 # With controller/ present, 13 binds the plugin's hash into the marker; check
 # it the way 03 does, or every start is refused.
@@ -176,7 +226,8 @@ plugin_args=()
   --arms "native static:uniform_0_75 static:survival_weighted static:last_level_emptying" ||
   fail "no preflight marker for this db_bench and this code: run 13 (README step c)"
 "$PY" "$PIPELINE_DIR/gate_n2_plan.py" check --prices "$PRICES_FILE" \
-  --db-bench "$DB_BENCH" $WORKLOADS || fail "refusing to start"
+  --db-bench "$DB_BENCH" ${explore_check[@]+"${explore_check[@]}"} $WORKLOADS ||
+  fail "refusing to start"
 for w in $WORKLOADS; do
   chosen="$(run_length "$w")"
   read -r size load <<< "$chosen"

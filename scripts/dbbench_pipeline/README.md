@@ -361,7 +361,8 @@ d. Gate N2, the static comparator. Four things must exist first, in this
 
       **Provisional prices** (D-22 j): a schema-4 file (every price before
       D-22), one session's record, or a failed compare. `25`, `27` and
-      `gate_n2_plan` refuse them. `04` and `plugin_config` accept them only
+      `gate_n2_plan` refuse them, except `25`'s exploratory screen
+      (`N2_EXPLORATORY=1`, D-24 §2, below). `04` and `plugin_config` accept them only
       for a run marked diagnostic: `DIAGNOSTIC_RUN=1` for `03` (the
       preflight's smoke runs, `PLUGIN_PLACEHOLDERS=1`, are diagnostic by
       definition). `03` records `diagnostic_run` and `prices_status` in
@@ -475,6 +476,21 @@ d. Gate N2, the static comparator. Four things must exist first, in this
      runs, and records them; resumes and top-ups reuse its vectors, and 25
      stops if those runs have changed since. After a failure, delete the
      failed arm's result and database folders, then rerun with `RESUME=1`.
+   - **The exploratory screen** (PREREGISTRATION D-24 §2): `N2_EXPLORATORY=1`.
+     It ranks configurations only: no claim, no gate verdict, never pooled
+     with Gate N2. It accepts provisional prices (still measured on this
+     `db_bench`) and runs its arms as diagnostic runs (`DIAGNOSTIC_RUN=1`), in
+     session `explore-n2-<workload>`, with results under
+     `$NVME/explore-n2-<workload>` and databases under `$NVME/explore-n2-dbs`.
+     Every result folder (the workload's, each point's, each arm's) carries the
+     same `EXPLORATORY` file: the session, the prices file's sha256, schema
+     and status, and the `db_bench` identity. A resume under other prices or
+     another `db_bench` is refused. Everything else is as above. D-24's screen:
+
+     ```bash
+     N2_EXPLORATORY=1 N2_WORKLOADS=assoc N2_T=10 N2_REPEATS=2 NVME=db ALLOW_ROOT_DISK=1 \
+       scripts/dbbench_pipeline/25_gate_n2_chain.sh plan
+     ```
 
    Score and build the hull per (workload, T):
 

@@ -13,9 +13,13 @@ REPEATS="${REPEATS:-1}"
 # experiment: ordinary paired/smoke runs with mandatory learner-health gating
 RL_RUN_PHASE="${RL_RUN_PHASE:-experiment}"
 
-# Pathway B1 --- the UDB `Assoc` column family of Cao et al., "Characterizing,
-# Modeling, and Benchmarking RocksDB Key-Value Workloads at Facebook", FAST
-# 2020. These are db_bench's own flag defaults for the same fit; the paper's
+# Pathway B1 --- after Cao et al., "Characterizing, Modeling, and Benchmarking
+# RocksDB Key-Value Workloads at Facebook", FAST 2020. The operation mix
+# (MIX_*_RATIO) is their UDB `Assoc` mix. The key-distribution (KEYRANGE_DIST_*,
+# KEY_DIST_*), value-size (VALUE_*) and scan-length (ITER_*) parameters are not
+# an `Assoc` fit: they are the fit they publish for ZippyDB (§7.3, Appendix
+# A.3), the only numeric mixgraph fit in the paper (PREREGISTRATION D-24 §1
+# item 13). These are db_bench's own flag defaults for that fit; the paper's
 # appendix, the RocksDB wiki and its section 7.4 disagree at the second decimal
 # and this picks the tool's values rather than silently choosing among them.
 #
@@ -44,7 +48,8 @@ MIX_MAX_SCAN_LENGTH="${MIX_MAX_SCAN_LENGTH:-10000}"
 # WORKLOAD_SKEW=2 is D-13's second Gate N2 workload, "YCSB-B operation mix
 # with power-law key popularity" (never Zipfian or YCSB-B): keyrange_num 1 and
 # no keyrange_dist, so mixgraph draws keys from f(x) = a x^b at KEY_DIST_A/B,
-# Assoc's own key-hotness fit. It needs MIX_GET_RATIO=0.95 MIX_PUT_RATIO=0.05
+# the key-hotness power law of the ZippyDB fit above (Cao et al. Appendix A.3),
+# not an `Assoc` fit. It needs MIX_GET_RATIO=0.95 MIX_PUT_RATIO=0.05
 # MIX_SEEK_RATIO=0, which 03 checks against the contract.
 WORKLOAD_SKEW="${WORKLOAD_SKEW:-1}"
 KEYRANGE_NUM="${KEYRANGE_NUM:-30}"          # skew-intensity axis; sweep {5, 30, 100}
@@ -59,10 +64,11 @@ KEY_DIST_B="${KEY_DIST_B:-0.3467}"
 # floor and the distribution adds sigma/(1-k) = 34.5 bytes on top, so 925.5
 # gives a measured mean of 960.4 --- the project's record size, kept so the
 # level ladder, the populated depth and the T sweep stay comparable with the
-# geometry every other constant is calibrated for. The paper's own theta is 0
-# (mean ~34 bytes); departing from it is deliberate and must be reported as
-# "Assoc key distribution and operation mix at the project's record size",
-# never as the published value distribution.
+# geometry every other constant is calibrated for. The ZippyDB fit's own theta
+# is 0 (mean ~34 bytes); departing from it is deliberate and must be reported
+# as "the `Assoc` operation mix on Cao et al.'s ZippyDB parameter fit, at the
+# project's record size" (D-1's label as D-24 §1 item 13 corrects it), never
+# as the published value distribution.
 #
 # MIX_MAX_VALUE_SIZE is NOT cosmetic: db_bench applies it as `val_size %
 # value_max` (db_bench_tool.cc:7316), so the 1024 default wraps the 6.85% of

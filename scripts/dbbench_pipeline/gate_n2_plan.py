@@ -15,12 +15,25 @@ PREREGISTRATION D-13 §4-5, D-14 §3, D-15 §3, D-19).
                         "skipped <name>: <why>" (no profiles.json yet). With
                         --compute, runs 23 first if the point has none and
                         has the initial native runs; fails if 23 fails
-  check --prices <file> --db-bench <file> <workload>...
+  check --prices <file> --db-bench <file> [--exploratory] <workload>...
                         refuses unless q-bar is recorded for each workload and
                         the prices file is final (two of 18's sessions that
                         agreed, PREREGISTRATION D-22 f and j), measured on
                         this db_bench (its identity as loaded: executable
-                        plus librocksdb, preflight_marker.db_bench_identity)
+                        plus librocksdb, preflight_marker.db_bench_identity).
+                        --exploratory (D-24 §2) also accepts provisional
+                        prices; every other check stands
+  explore-marker --prices <file> --db-bench <file> --session <id>
+                 <workload root> [<dir>...]
+                        D-24 §2's EXPLORATORY marker: written once at the
+                        workload root (refused if one there records other
+                        prices or another db_bench), then copied into each
+                        <dir> and every result directory under the root
+                        (03's results roots and its arm folders)
+
+The formal sweep's results are $NVME/n2-<workload>, session n2-<workload>; an
+exploratory screen's (D-24 §2) are $NVME/explore-n2-<workload>, session
+explore-n2-<workload>, so the two are never pooled (plan --prefix).
 
 Order within one (workload, T): every native and uniform_0_75 arm, repeat by
 repeat across the points; then 23 at each point; then the measured profiles,
@@ -39,9 +52,12 @@ exactly the point's settled native runs up to the last of them.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import preflight_marker
@@ -50,6 +66,12 @@ import research_objective
 PIPELINE = Path(__file__).resolve().parent
 MEASURED = ("survival_weighted", "last_level_emptying")
 SECONDS_PER_10M_OPERATIONS = 160  # rough node cost of one run, for the listing
+# Results folder and session prefixes: the formal sweep, and D-24 §2's
+# exploratory screen, which is never pooled with it.
+PREFIXES = ("n2", "explore-n2")
+MARKER = "EXPLORATORY"
+# What a resumed screen must share with the marker it started under.
+MARKER_BINDING = ("prices_sha256", "db_bench_identity")
 
 
 def family(contract: dict, workload: str) -> str:
@@ -201,7 +223,7 @@ def plan(args) -> int:
         configs, excluded = grid(sc, ts, n, args.write_buffer, args.slowdown)
     # D-19: levels Gate N1 left undecided are not decided here (D-16 §5
     # withdrawn), so every native arm runs the initial repeats.
-    root = args.nvme / f"n2-{args.workload}"
+    root = args.nvme / f"{args.prefix}-{args.workload}"
     planned = steps(configs, lambda p: (root / p / "profiles.json").exists(),
                     initial)
     print("\n".join(planned))
@@ -309,7 +331,10 @@ def check(args) -> int:
         problems.append(f"cannot identify db_bench {args.db_bench}: {error}")
     try:
         record = json.loads(args.prices.read_text())
-        research_objective.checked_prices(record, contract)
+        # D-24 §2: an exploratory screen runs on provisional prices, as
+        # D-22 (j)'s diagnostic runs; the formal sweep only on final ones.
+        research_objective.checked_prices(record, contract,
+                                          provisional_ok=args.exploratory)
         if identity is not None and record.get("db_bench_sha256") != identity:
             raise ValueError(f"measured on db_bench {record.get('db_bench_sha256')}, "
                              f"not on {args.db_bench} ({identity}, executable "
@@ -323,6 +348,57 @@ def check(args) -> int:
     return 0
 
 
+def read_marker(path: Path) -> dict:
+    return dict(line.split("=", 1) for line in path.read_text().splitlines()
+                if "=" in line)
+
+
+def explore_marker(args) -> int:
+    """D-24 §2: every exploratory result directory carries the same
+    EXPLORATORY file, saying what the runs are and what they were priced
+    with. Written once per workload root; a resume under other prices or
+    another db_bench is refused, so one screen has one of each."""
+    contract, _ = research_objective.load_contract()
+    record = json.loads(args.prices.read_text())
+    current = {
+        "prices_sha256": hashlib.sha256(args.prices.read_bytes()).hexdigest(),
+        "db_bench_identity": preflight_marker.db_bench_identity(args.db_bench)}
+    marker = args.root / MARKER
+    if marker.exists():
+        recorded = read_marker(marker)
+        changed = [f"{key} {recorded.get(key)} -> {current[key]}"
+                   for key in MARKER_BINDING if recorded.get(key) != current[key]]
+        if changed:
+            raise ValueError(f"{marker} records another screen ({'; '.join(changed)}); "
+                             "resume it with its own prices file and db_bench, or "
+                             "start a new screen in another folder")
+    else:
+        args.root.mkdir(parents=True, exist_ok=True)
+        fields = {
+            "exploratory": "1",
+            "decision": "PREREGISTRATION D-24 §2",
+            "use": "ranking only: no claim, no gate verdict; never pooled with "
+                   "the gate runs",
+            "session_id": args.session,
+            "prices_file": str(args.prices.resolve()),
+            **current,
+            "prices_schema": str(record.get("schema")),
+            "prices_status": ("final" if research_objective.prices_final(record, contract)
+                              else "provisional"),
+            "written_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        marker.write_text("".join(f"{k}={v}\n" for k, v in fields.items()))
+    # 03's results roots hold effective_config.env, its arm folders
+    # metadata.env; a partial arm has its metadata.env from the start.
+    targets = {d.resolve() for d in args.dirs}
+    targets |= {p.parent for name in ("metadata.env", "effective_config.env")
+                for p in args.root.resolve().rglob(name)}
+    for target in sorted(targets):
+        target.mkdir(parents=True, exist_ok=True)
+        if not (target / MARKER).exists():
+            shutil.copyfile(marker, target / MARKER)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -333,6 +409,9 @@ def main() -> int:
     p.add_argument("--repeats", type=int, help="default: the contract's initial")
     p.add_argument("--t", help="T values of the sweep, default Theta_s's")
     p.add_argument("--configs", type=Path, help="a named set instead of the sweep")
+    p.add_argument("--prefix", choices=PREFIXES, default="n2",
+                   help="results folder <nvme>/<prefix>-<workload> (default n2; "
+                        "explore-n2 for D-24 §2's exploratory screen)")
     p.add_argument("--write-buffer", type=int, required=True)
     p.add_argument("--slowdown", type=int, required=True)
     v = sub.add_parser("profiles")
@@ -346,10 +425,19 @@ def main() -> int:
     c = sub.add_parser("check")
     c.add_argument("--prices", type=Path, required=True)
     c.add_argument("--db-bench", type=Path, required=True)
+    c.add_argument("--exploratory", action="store_true",
+                   help="D-24 §2's screen: provisional prices accepted")
     c.add_argument("workloads", nargs="+")
+    m = sub.add_parser("explore-marker")
+    m.add_argument("--prices", type=Path, required=True)
+    m.add_argument("--db-bench", type=Path, required=True)
+    m.add_argument("--session", required=True)
+    m.add_argument("root", type=Path, help="the screen's workload root")
+    m.add_argument("dirs", type=Path, nargs="*", help="more folders to mark")
     args = parser.parse_args()
     try:
-        return {"plan": plan, "profiles": profiles, "check": check}[args.command](args)
+        return {"plan": plan, "profiles": profiles, "check": check,
+                "explore-marker": explore_marker}[args.command](args)
     except (ValueError, OSError) as error:
         raise SystemExit(str(error)) from error
 

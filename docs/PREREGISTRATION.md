@@ -1723,6 +1723,1229 @@ stage 18 takes 22 minutes per session.
 **Falsification.** This entry fails as a record if any part of it is
 changed after session A starts. A change is a new dated entry.
 
+### D-23, 2026-10-03 — cost model v2: $J_\beta$ prices every in-store cost of serving the operations, interference included; a new binary, calibrations before Gate N2, and per-run checks
+
+**Recorded before any run it governs.** No Gate N2 run and no $\Theta_s$ arm
+has run, no rule or learner arm beyond the preflight's smoke runs, and no
+calibration of a price this entry adds. The binary that carries the new
+instruments (PATHWAYS Gate N0 item 10) does not exist yet. The theory is
+`docs/PATHWAYS.md` as amended on 2026-10-03 and committed with this entry;
+its §0.7 says what changed. This entry records the decision, the measured
+facts it rests on, and what PATHWAYS leaves to it (§0.6 item 13): the
+instruments and the binary, the calibrations, the per-run checks, and the
+owner decisions still pending. It amends D-13 to D-22 only where §8 says.
+
+**Who decided what.**
+- The owner asked for the amendment on 2026-10-03, after the interference
+  critique: "We have to add interference, as it's a core RocksDB
+  mechanism", "We need to model every cost of operation in the tree", and
+  "Everything is based on the theoretical rigour."
+- The design was fixed the same day, on that instruction, in four files,
+  each overriding the one before:
+  - the brief, `~/node_ops/drafts/2026-10-03-cost-model-v2-brief.md`;
+  - the integration decisions,
+    `~/node_ops/drafts/2026-10-03-cost-model-v2-integration.md` (I-1 to
+    I-5, and its review-round decision on R-1);
+  - the integrator's log and its post-integration decisions,
+    `~/node_ops/drafts/amend-2026-10-03/INTEGRATION.md` (f);
+  - the fixes for the referee review and its re-review,
+    `~/node_ops/drafts/amend-2026-10-03/FIXES.md` (two rounds).
+- Where those files and PATHWAYS differ, PATHWAYS' text is the decision.
+- The rules in §3 to §6 that turn the design into instruments, calibrations
+  and checks are the node operator's proposal. The owner confirms them
+  before §3's node work starts. Every value §7 leaves open is fixed by a
+  later dated entry before the first run it governs.
+
+**Data seen before this entry:**
+- Gate N1's pilots (D-19) and the d21id $\bar q$ arms, re-read for per-job
+  time, $k_0$ during jobs, and scan counts;
+- the `Assoc` reopen ablation and the Get-time check
+  (`~/node_ops/reports/2026-10-03-1206-assoc-ablation.md`,
+  `-1436-get-time-vs-prices.md`);
+- the two contention runs (`-1514-contention-reads.md`,
+  `-1632-contention-reads.md`) and the plot made from them,
+  `interference_linearity.png`;
+- the interference critique (`-1816-interference-theory-critique.md`), and
+  the referee review and re-review of the amended PATHWAYS
+  (`-2114-pathways-v2-review.md`, `-2234-pathways-v2-rereview.md`; PATHWAYS
+  calls these two *the check reports*), which recount the figures from the
+  run data;
+- the d21id prices (`build-dbbench/prices.json`, schema 4), provisional
+  under D-22.
+
+No $\Theta_s$ outcome has been seen, and no price this entry adds has been
+measured.
+
+**1. The decision.**
+
+*(a) $J_\beta$ becomes cost model v2*, as PATHWAYS D §1 and D §2 state it.
+Its form stays $\beta_W\mathcal C_W + \beta_R\mathcal C_R + \beta_S\mathcal C_S$;
+two of the three costs gain terms.
+- $\mathcal C_W$:
+  - each background job $\iota$ is priced, at its completion,
+    $\tau^{job}_\iota = c^{\mathrm{kind}(\iota)}_{job} + c_{cr}(S_\iota + O_\iota) + c_wX_\iota$.
+    The kinds are a flush ($F$), a merge sourced at L0 ($0$: L0→L1 and
+    intra-L0), a merge sourced at a level $\ge 1$ ($d$, last-level
+    self-compactions included) and a trivial move ($tm$);
+  - a flush has $S_\iota = O_\iota = 0$. A trivial move's
+    $\tau^{job}_\iota$ is $c^{tm}_{job}$ alone (until now it cost nothing);
+    like every job, it also carries its interference charge;
+  - each Put pays its memtable insert, $c_{put}$. The write-ahead log is off
+    in every Programme 1 run (`wal1`), so $c_{wal}$ = 0;
+  - the write part of interference;
+  - so the job part of the write cost is
+    $\mathcal C^{job}_W = \sum_\iota\tau^{job}_\iota$, and the whole write
+    cost is $\mathcal C_W = \mathcal C^{job}_W + c_{put}\cdot(\text{Puts}) + \mathcal I^{\mathrm{wr}}$
+    (D §1; Lemma D.18(iii) for the job part).
+- $\mathcal C_R$:
+  - filter probes, block reads, run seeks and reopens, as before, at their
+    quiet prices $c^0_x$;
+  - a scan's iteration, $\bar c_{st}(R_{nx} + R_{hd}) + c_{ib}R_{ib}$, with
+    $c_{st}(r)$ nondecreasing in the heap size $r$; no result assumes it
+    convex in $r$ unless it says so;
+  - the memtable search, $c_{mt}$ per Get and per scan;
+  - each Get's and scan's fixed in-store set-up, $c^0_{get}$ and $c^0_{sc}$;
+  - the read part of interference.
+- $\mathcal C_S$ is unchanged.
+- New rows of D §1's metrics table: $W_r$, $\varpi^{\mathrm{kind}}$,
+  $\mathcal C_W$, $R_{nx}$, $R_{hd}$, $R_{ib}$, the iteration steps by heap,
+  and $\mathcal I$. $W$ is unchanged. The cost rate is D §1's amended $c(t)$.
+- Every price but $c_s$ is a device time converted at $p_{\mathrm{dev}}$,
+  D-15 §3(a)'s price per core-second; $c_s$ stays a storage price.
+
+*(b) The principles* (PATHWAYS §0.7).
+- **P-1, completeness**, in the scope PATHWAYS states.
+  - Priced: every device-time cost incurred inside the store (the RocksDB
+    library and its background threads) on behalf of the operation
+    sequence. A cost that no policy changes is priced too, in a shared
+    bucket, so that the level of $J_\beta$ is right.
+  - Not priced: the benchmark client's own work; the controller's own work
+    (its `SetOptions` calls and OPTIONS files, which carry no per-job price
+    and no interference charge) and the trainer; and waiting (stall time,
+    throughput, latency), which OBJ-6 reports.
+- **P-2, the reference-rate principle.** $J_\beta$ is a function of the
+  run's operation-indexed record $\mathfrak E$ (Lemma D.17). Wall time
+  enters only converted at $\bar q$, through two anchors free of wall time:
+  - the *operation anchor*, for space and for the byte part of
+    interference;
+  - the *priced-time anchor*, under which the busy part counts a job's
+    priced device time $t^{job}_\iota$ as $\bar q\,t^{job}_\iota$
+    operations.
+- **P-3, victim-side pricing, cause-side attribution.** Interference is
+  priced with the steps it slows: its read part in $\mathcal C_R$ (weight
+  $\beta_R$), its write part, on Put inserts, in $\mathcal C_W$ (weight
+  $\beta_W$). In the per-level rewards both parts go to the start level of
+  the job that caused them; a flush's go to the shared write-path bucket.
+  Foreground work (reads and Puts) slowing jobs is already inside the job
+  prices (A11) and is not charged again.
+- **P-4, measured counts, fixed prices.** $J_\beta$ multiplies counts
+  measured in the run by prices fixed in advance (A9). Every price that a run
+  can check with an instrument of the same source and phase is checked in
+  every run, as $c_{open}$ is (D-21).
+- **P-5, numbering.** Every existing number keeps its meaning. New results
+  in Pathway D are D.17 to D.19. D.20 to D.23 are not used, so that no
+  result is confused with a decision.
+
+*(c) Interference* (D §1, A10, Lemma D.17).
+- A10 is the physical model. A step of type $x$ served while the jobs
+  $\mathcal J$ run costs
+  $c^0_x\big(1 + \sum_{\iota\in\mathcal J}(\kappa^J_{x,\mathrm{kind}(\iota)} + \kappa^B_xv_\iota)\big)$:
+  linear in its features and additive over jobs. It covers every foreground
+  step: the read steps, the fixed parts and the Put insert.
+- The charge is not the physical slowdown. Each job carries one charge, made
+  at its completion:
+  $I_\iota = \bar q\sum_x\bar\varrho^{\,x}_\iota\big(\kappa^B_xY_\iota + \kappa^J_{x,\mathrm{kind}(\iota)}t^{job}_\iota\big)$,
+  with $\bar\varrho^{\,x}_\iota$ the quiet cost per operation of the type-$x$
+  steps over the job's window $W_\iota$.
+  - It contains no wall span, and it depends on how many operations the job
+    overlapped only through which operations its window holds (integration
+    decision I-2; Lemma D.17(v)). So a job run in a stall or in the drain is
+    charged like any other.
+  - The physical charge $I^{\text{phys}}_\iota$ is reported (OBJ-6) and
+    tested (OBJ-8), never priced.
+- **The window** (post-integration decision).
+  - $W_\iota$ is the job's own operations if it served at least
+    $n^{\mathrm{win}}$ of them. Otherwise it runs from the last counter
+    snapshot at or before $n^e_\iota - n^{\mathrm{win}}$ to $n^e_\iota$.
+  - $n^{\mathrm{win}}$ is a fixed operation count, set below the span of the
+    merges that Proposition D.11's (d2) relies on, so that every such merge
+    that serves at least $n^{\mathrm{win}}$ operations is charged over
+    exactly its own operations. A merge in a stall or the drain, or a
+    shorter one, reaches back before it began; OBJ-8(d) reports them.
+    $n^{\mathrm{str}}$ is the snapshots' stride. §4(e) says how both are
+    set.
+- **The drain** (post-integration decision). Its jobs pay
+  $\tau^{job}_\iota$ and interference. A job that runs only in the drain is
+  charged over the last $n^{\mathrm{win}}$ operations of the phase; one that
+  began during `mixgraph`, over the last $\max(\Delta n_\iota, n^{\mathrm{win}})$.
+  A controller arm drains under its fallback settings. The rule errs against
+  the controller, as the drain's bytes do.
+- No mean field in $J_\beta$. An analytic result that uses mean field says
+  so, with its error (A5).
+
+*(d) Attribution* (D §4, Proposition D.16).
+- Six shared buckets, on which no agent is rewarded: hit-read, reopen,
+  scan-base, memtable, write-path and fixed.
+- A job's $\tau^{job}_\iota$ and its $I_\iota$, read and write parts, go to
+  its start level: an intra-L0 compaction to L0, a last-level self-compaction to the
+  last level. A flush's $\tau^{job}_\iota$ goes to L0 and its $I_\iota$ to
+  the write-path bucket.
+- **Scan iteration, L0 last** (integration decision I-3). A step's price
+  splits into its base $c_{st}(1)$, the non-L0 increment
+  $c_{st}(r^-) - c_{st}(1)$ and L0's increment $c_{st}(r) - c_{st}(r^-)$,
+  with $r^- = \max(r^{\neg0}, 1)$. L0 pays its increment on every step. A
+  returned step's base goes to the scan-base bucket, and its non-L0
+  increment in equal shares to its non-L0 children (a memtable's share to
+  the memtable bucket).
+- **Hidden steps to the level above** (I-4, in the reading INTEGRATION (f)6
+  accepted). A hidden step's $c_{st}(r^-)$ goes to the level directly above
+  the level where the hidden entry lives: an entry in L1 or in an L0 file to
+  L0, an entry in a memtable to the memtable bucket. Its L0 increment stays
+  with L0.
+- Iterator blocks go to their table's level; $c_{mt}$ to the memtable
+  bucket; $c^0_{get}$, $c^0_{sc}$ and $c_{put}$ to the fixed bucket, its read
+  part weighted $\beta_R$ and its write part $\beta_W$.
+- Slot blocking also moves L0's hidden-step charge, its iterator blocks and
+  the same share of its heap increment. It does not move interference.
+- The neighbour charge's one-step prediction also moves the upper
+  neighbour's hidden-step input by the predicted $M^{hd}$ (H §3; ARCH-3,
+  amended).
+
+*(e) Assumptions, results, criteria and gates*, as PATHWAYS states them.
+- A9 (fixed prices), A10 (linear, additive interference) and A11 (in-situ
+  job prices) are new. A3′, A5, A7 and A8 are amended. A10 is tested on
+  every run by OBJ-8 for the timed read steps, and by the calibration
+  (OBJ-2) for the other step types.
+- The new, amended and re-checked results are those §0.7 lists. The
+  2026-09-29 statements in §0.7's table are corrected.
+- New criteria: OBJ-7, OBJ-8, OBJ-9, PROP-6, ARCH-7, ARCH-8, WL-3 and
+  CMP-9. Amended: OBJ-1, OBJ-2, OBJ-4, OBJ-6, ACT-4, ARCH-3 and ARCH-5.
+- Gate N0 gains items 10 (§3) and 11 (§4).
+- Gate N2 starts only after item 11, on item 10's binary, with every price,
+  $\kappa$ and its basis fixed before any $\Theta_s$ outcome is seen. Its
+  $\Theta_s$ arms at $K_0$ = 8 check D.11's (b2), (b3) and (d2). (b3) holds
+  at $K_0$ = 4 only on average, so its exposure is reported at $K_0$ = 4 and
+  8, and the secant slope gives D.11's corrected $B$. When (b2) or (d2)
+  fails at a trigger, as §9 defines failing, D.11's closed form is not used
+  there.
+- Gate N3's rules use the amended cost. Gate N4 adds OBJ-7 to OBJ-9, ARCH-7
+  and ARCH-8.
+- The stall rule stays (D-13 §8, D-14 §1, D-15 §1). The interference charge
+  closes only the interference route through stalls, by construction: a job
+  run in a stall is charged like any other. Stall time itself stays
+  unpriced, so a policy could still lower $J_\beta$ by deferring work until
+  writes stall, and the rule bars any claim that does.
+
+**2. The measured facts it rests on.** Node diagnostics of 2026-10-03,
+quoted as measured. None is a theorem. A figure derived from a model says
+so.
+
+1. **Interference: its size and its path**
+   (`~/node_ops/reports/2026-10-03-1632-contention-reads.md`, results in
+   `~/node_ops/contention_reads/2026-10-03-1632/`. The earlier run,
+   `-1514-`, had no neighbour database; its same-database arm agrees with
+   this run's within about 1 point).
+   - Setup: one reader thread, uniform keys, every table open; a
+     rate-limited writer at about 11 MB/s of user writes and about 100 MB/s
+     of compaction traffic; trees at T = 2, 6 and 10; one repeat.
+   - Levels 1 and below, with the writer in a *neighbouring* database,
+     compactions on / off: filter checks took 1.128 / 1.005 times their
+     quiet time, block reads 1.118 / 1.031. A seek at its own counts took
+     1.102 / 1.024, and 1.158 with the writer in the reader's own database.
+   - A compaction in another database slows reads as much as one in the
+     reader's own: the path is shared hardware, not the database. All three
+     trees agree.
+   - Size: about 0.12% (filter checks), 0.09% (block reads) and 0.08%
+     (seeks) per MB/s of compaction traffic. The write path alone adds
+     0.5–3 points. Sharing one database adds about 5.6 points to seeks.
+   - At T = 10 the writers' compaction ran harder than in the `mixgraph`
+     runs of the `Assoc` ablation (`-1206-`, `-1436-`): in `-1514-` the
+     `Assoc` and power-law writers ran 123 and 64 MB/s against the
+     ablation's 86 and 48.5 MB/s, about 1.3–1.4 times (the operator's
+     reading); the `-1632-` neighbour ran 126.5 MB/s, about 1.47 times.
+2. **The memtable search** (`-1514-`, `-1632-`, perf_level 4 timers):
+   about 0.22 µs per read (0.21–0.25 over both runs) whenever writes keep
+   the memtable
+   populated, the same in every configuration; 0 with an empty memtable.
+3. **Linearity** (`interference_linearity.png` in the repository root,
+   untracked when this entry was drafted; made by
+   `~/node_ops/diag/plot_interference_linearity.py` from both contention
+   runs; 21 points per panel, one repeat per tree; x is the background
+   compaction write rate):
+   - filter checks are linear in the rate: +0.9% + 0.108% per MB/s,
+     $R^2$ 0.88;
+   - block reads are roughly linear: +1.4% + 0.105% per MB/s, $R^2$ 0.90;
+   - run seeks are not: $R^2$ 0.52; most of the slowdown is there by about
+     40 MB/s, and the middle rate lies 8.3, 2.4 and 3.7 points above the
+     two-point line at T = 2, 6 and 10;
+   - quiet runs scatter by up to ±3.5, ±1.1 and ±4.3 points.
+   - The seek pattern suggests a part that does not grow with the byte
+     rate: a busy, per-job part. The low-rate seek points are same-database
+     runs, so part of it may be the 5.6 points that sharing one database
+     adds.
+   - Additivity over concurrent jobs cannot be tested from these runs: each
+     is one 20 s total.
+   - The regression slopes (about 0.11% per MB/s for all three steps) and
+     item 1's on-minus-off figures (0.12, 0.09, 0.08) are two estimates of
+     one quantity. Neither is a price.
+4. **Interference follows the tree's state** (critique Q2; per job, the
+   check reports `-2114-pathways-v2-review.md` and
+   `-2234-pathways-v2-rereview.md`; $k_0$ from the event log's `lsm_state`
+   over the measured phase; event and host logs under `db/qbar-assoc-d21id`,
+   `db/n1-assoc` and `db/n1-powerlaw`). On the seven native runs (the d21id
+   $\bar q$ arm and Gate N1's pilots, repeat 1) and on all 23 native runs of
+   those cells (every repeat):
+   - every L0→L1 merge ran with $k_0 = K_0$ = 4;
+   - the merges sourced at a level $\ge 1$ ran with L0 empty on average:
+     mean $k_0$ at most 0.13 per start level (time-weighted; 0.134
+     byte-weighted in the seven runs, 0.14 in all 23), and at most 0.05
+     pooled over a run's deeper merges;
+   - per job it is not exact: 0.9% and 5.4% of those merges at `Assoc`
+     T = 6 and 10 (repeat 1; 0.4–5.8% over all repeats; 3.8% on the
+     $\bar q$ arm) ran with one L0 file, never more. Trivial moves at
+     `Assoc` T = 10 did so more often: 14–30% of them, with a mean $k_0$ of
+     0.12–0.27 at their start;
+   - the cascade of deeper jobs after an L0 merge always ended before L0
+     next fell due, but at `Assoc` T = 10 its last job ran past the next
+     flush in 31–46% of L0 cycles on the $\bar q$ arm and 36–41% on the
+     pilots (4.5–8.4% at T = 6, at most 0.2% at T = 2): that is why some of
+     those jobs saw one L0 file;
+   - other default-point `Assoc` T = 10 runs reach more: the ablation arms
+     under `db/abl-assoc` (`asis`, and `pinned` with compactions on other
+     cores) had up to 6.6% and 8.8% of deeper merges at one L0 file, pooled
+     means up to 0.056 and 0.072, and up to 28% and 38% of trivial moves;
+   - no job sourced at a level $\ge 1$ ran while L0 held two or more files,
+     and none held the slot while L0 was due, so slot blocking had no
+     occasion.
+   - *Derived* (critique Q2, its model M2, provisional prices): mean field
+     gets the total within 2%, but its slope in $K_0$ is 2.8 times too
+     steep, and L0 bytes should pay 1.24–1.94 times what deeper bytes pay.
+5. **Per-job time** (operator diagnostics on Gate N1's pilots, repeat 1,
+   and the d21id $\bar q$ arm, reproduced in the check reports). The host
+   log's job span minus the event log's `compaction_time_micros`,
+   non-trivial jobs, `measure_start` to `drain_end`:
+   - a median of 2.7–3.5 ms per job, 71–128% of the counted compaction time
+     (`Assoc` T = 2: 45.7 s against 35.8 s);
+   - 4.5–5.3 ms for jobs sourced at L0, 2.7–3.5 ms for deeper ones;
+   - nearly independent of job size: 2.85 ms in the smallest decile, 3.18
+     ms in the largest (`Assoc` T = 10);
+   - 3.4–3.5 ms at T = 2 against 2.7–3.0 ms at T = 6 and 10 (the $\bar q$
+     arm, 2.97 ms);
+   - `compaction_time_micros` times only `RunSubcompactions`. The gap holds
+     the output directory's fsync, the opening of every new output file,
+     the install, mutex waits and listener work
+     (`db/compaction/compaction_job.cc` at `8e903efd9`);
+   - trivial moves took 2.5–3.3 ms each (the range of per-run medians):
+     4,151 moves (13.8 s) on `Assoc` and
+     2,153 (6.8 s) on the power law at T = 2, and 0.4–0.6 s per run at
+     T = 6 and 10;
+   - merges read 12–13% more than they write: 1.124 on the pilot and 1.127
+     on the $\bar q$ arm (`Assoc` T = 10; event logs, the check reports);
+   - per busy second, L1 and L2 bytes would pay 1.9 and 2.6 times what L0
+     bytes pay; per job, 12 and 21 times (critique Q4; 11.7 and 21.0,
+     recomputed from the $\bar q$ arm's event log, repeat 1, in
+     `-2306-pathways-v2-final-check.md`).
+6. **D-15 §3(b)'s per-byte write time depends on $T$**: it was higher at
+   T = 2 than at T = 10, by 6.5–7.1% on `Assoc` and 2.2–3.2% on the power
+   law, paired by repeat (means 6.7% and 2.8%; critique P3, recomputed from
+   `sst_write_seconds` over `sst_bytes_written` in
+   `db/n1-assoc/graphs/summary.csv` and `db/n1-powerlaw/graphs/summary.csv`,
+   the check reports).
+7. **Scans** (Gate N1's pilots, `Assoc`, repeat 1, `db/n1-assoc`, tickers
+   between the host log's `measure_start` and `drain_end` stamps,
+   reproduced in the check reports; the power law issues no scans):
+   - each scan returns about 543 entries (543.5 on repeat 1, 542–546 over
+     the three repeats): about 496M `Next`s per 26.1M operations;
+   - hidden entries stepped over: 570M at T = 2 and 114M at T = 10, so 1.15
+     and 0.23 per returned entry. That is about 11 (T = 2), 5 (T = 6) and
+     5.4 (T = 10) times what uniformly spread garbage would give (10.8–11.0,
+     5.1–5.5 and 5.4–5.5 over the three repeats; `scan_internal_skips` and
+     `scan_returned_entries` against `space_amplification` in
+     `db/n1-assoc/graphs/summary.csv`): hidden versions sit on hot keys.
+     Garbage during a run can exceed garbage at its end, so these are upper
+     estimates of the concentration;
+   - data-block cache misses, Gets and scans together: 296.8M against
+     178.8M; run seeks: 7.9M against 3.75M;
+   - the client spent 410 s at T = 2 (repeat 1; at least 409 s in every
+     repeat) against at least 208 s at T = 10 outside its Get, Seek and
+     write calls. About 200 s of it
+     depends on the configuration and was unpriced: more than T = 2's whole
+     priced $\mathcal C_R$, about 88 s at the d21id prices without reopens.
+8. **Reopens** (`-1206-assoc-ablation.md`): `Assoc`'s reads took 1.256
+   times stage 18's time per reopen; 1.154 without writes; 1.071 without
+   writes and scans; the power law 1.040. Multiplicatively, the writes
+   account for about 0.09, the scans' pollution of the caches about 0.08,
+   and the rest about 0.07.
+9. **Gets against the quiet prices** (`-1436-get-time-vs-prices.md`):
+   - the rest of a quiet `Assoc` Get, reopens left out, took 0.74 of the
+     uniform-key prediction (0.715–0.780); the whole Get, with its reopens
+     at the reference, 0.85–0.87. With writes the rest took 0.958, and on
+     the power law 1.075;
+   - on stage 18's d21id runs, the Get fit's intercept is 74 ns on
+     RocksDB's internal Get timer against 157 ns on db_bench's. The seek
+     fit on the internal Seek timer has a negative intercept, −724 ns. The
+     contention runs' quiet seek intercepts were +184 ns (`-1514-`) and
+     +491 ns (`-1632-`);
+   - settle leaves 0 or 3 L0 files, depending on background timing.
+10. **Step timers cost time.** At perf_level 4 a Get took about half as long
+    again (1,698 against 1,101 ns, T = 2 misses, `-1514-`; critique Q4).
+    The timers' overhead pulls loaded-to-quiet ratios toward 1.
+11. **Job spans in operations.** Trivial moves served at most 461
+    operations on the pilots and 484 on the $\bar q$ arm in their first
+    repeats, and 503 and 546 over all repeats. An L0 merge took about
+    39 ms at `Assoc` T = 10, about 2,700 operations at $\bar q$ (critique
+    Q2).
+12. **Read prices move between sessions**: $c_f$ by 9.7% (D-22 §1).
+
+**3. Instruments and binary.**
+
+*(a) The fork changes* (Gate N0 item 10). They make a new binary.
+- Job-boundary step counters: the host log's `job_begin` and `job_end`
+  records carry the cumulative counters of every priced foreground step type
+  (read steps by type, and the counts of Gets, scans and Puts), with the
+  stamps $n^b_\iota$ and $n^e_\iota$.
+- Flush begin and end records, with the same stamps and counters.
+- Counter snapshots: the same counters, with their operation stamp, every
+  $n^{\mathrm{str}}$ operations.
+- Per-level hidden-step counters, keyed by the level where the hidden entry
+  lives, and per-level iterator-block counters, aggregated across threads,
+  with a global ticker for each count that has none (OBJ-9).
+- Heap child counts: each iteration step by its $r^{\mathrm{L0}}$ and
+  $r^{\neg0}$ and by its type (returned, or hidden with its entry's level),
+  with the levels of the non-L0 children of returned steps.
+- The interference timer: SST-read time, at least D-21's reopen timer,
+  split by whether at least one background job (a flush included) is
+  running, with the matching counts, in §5's strata.
+- The scan set-up timer: an in-store timer of each scan's set-up, the
+  iterator's creation and the fixed part of its first `Seek`, excluding the
+  run seeks that $c_{sk}$ prices, with its count of scans. $c^0_{sc}$ is
+  measured from it (§4(d)). It is in this binary, like every other
+  instrument, so every calibration runs on the one binary CMP-9 requires.
+- A counter read at an event may include part of the operation in progress,
+  so a window can be off by one operation's steps at each end. Whether the
+  fork reads the counters as of the last completed operation instead is
+  pending (§7, item C).
+
+*(b) What runs again on it.*
+- The fork's tier-2 tests for every new counter, record and timer, in the
+  Debug tree; the tier-1 tests of the evaluator and the plugin.
+- The preflight (13), which writes a new marker.
+- ACT-4 and ARCH-5: the new instruments must not move native compaction
+  (A-Impl-10).
+- Every price is bound to its binary. D-22's read prices reach this binary
+  through D-22 §2(g), or D-22's two sessions run on it (§4(f)). The hull is
+  measured on it. Under CMP-9, every arm of a comparison runs one binary
+  identity (6d80a52's, `db_bench` with its library) and is scored with one
+  prices file, one $\kappa$ and one $\bar q$.
+
+*(c) Gate N1's reuse.* Gate N1's outcome (D-19) is reused on this binary on
+D-19 §4's ground, as PATHWAYS G §4 states it: the new counters and timers
+observe, and change neither what RocksDB compacts or when, nor the
+foreground's speed, since the admission test's $\omega_i$ is counted in
+operations.
+- ACT-4 and ARCH-5 on this binary test the compaction side.
+- The foreground's speed is tested, as PATHWAYS G §4 says, by the native
+  arms' throughput on this binary, paired against the pilots', within a
+  margin pending under §7 item 4. The reference arms' throughput is also
+  reported beside $\bar q$ (§4(c)). The instruments' own cost is bounded
+  through the timer's sampling (§7, item B).
+- If either side fails, the reuse stops, and a dated entry reopens Gate N1
+  before any price, comparator arm or pilot reuse on this binary.
+
+*(d) Pipeline and contract* (the operator's).
+- The evaluator gains $\mathcal C_W$'s read bytes, its jobs by kind, its
+  Put inserts ($c_{put}$ per Put) and its write part of interference;
+  $\mathcal C_R$'s iteration, memtable, fixed-part and read-interference
+  terms; the read and write parts of every $I_\iota$, from the host log
+  alone; the physical interference (OBJ-6); and OBJ-7 to OBJ-9. The plugin's attribution log
+  gains the same terms, by the same estimator (OBJ-1, ARCH-7).
+- Each new price is a required plugin key with no default, as $c_{open}$ is
+  (D-21 §2(e)). A $\kappa$ may be 0.
+- `prices.json` gains a new schema, which holds the new prices, $\kappa$ and
+  its basis, $n^{\mathrm{win}}$ and $n^{\mathrm{str}}$. Official runs refuse
+  an older schema.
+- The contract is amended in place, with this entry as the reason:
+  `authority` names the amended theory and this entry, and
+  `prices.device_times` names the new prices. Values enter when the dated
+  entries of §7 fix them.
+
+*(e) Node order.*
+1. The owner commits this entry with PATHWAYS and confirms §3 to §6.
+2. Dated entries decide §7 items B (the timer's sampling) and C (how the
+   counters are read), which shape the binary.
+3. The operator implements (a) and (d). Tiers 1 and 2 pass.
+4. The preflight on the new binary. Verdicts: ACT-4 and ARCH-5, and the
+   throughput side of (c).
+5. A dated entry decides §7 item A's rule for $n^{\mathrm{win}}$ and
+   $n^{\mathrm{str}}$, so that their values follow from the reference arms
+   by that rule. Then the reference arms (§4(c)), and the job prices,
+   $n^{\mathrm{win}}$ and $n^{\mathrm{str}}$ from them.
+6. Dated entries decide §7 items D and E. Then the new trees with garbage
+   are built and archived (§4(b)), with their dated build record.
+7. Two price sessions with a reboot between them (§4(f)). A dated
+   calibration record follows.
+8. The dated entries of §7 that govern Gate N2.
+9. Gate N2 (`25`), after D-17 and D-18.
+
+D-22's own sessions may run first, on the current binary, as D-22 §6
+orders. Their prices then reach the new binary only through D-22 §2(g).
+
+**4. Calibrations before Gate N2** (Gate N0 item 11). The designs below are
+the operator's proposal. The counts, rates and grids are proposed with the
+implementation and confirmed by the owner before the runs (§7, item D).
+Common rules:
+- every calibration runs on the new binary. Every instrument the
+  calibrations need is in it (§3(a)); nothing that items D and E decide
+  changes it (CMP-9);
+- the reader's keys and the price trees' loads are uniform, as stage 18's
+  are, unless §7 item 2 decides that the foreground prices are measured per
+  workload; then each is measured with that workload's keys and Puts;
+- every price, $\kappa$ and its basis is fixed and recorded before any
+  $\Theta_s$ outcome is seen;
+- each price is a device time, converted at $p_{\mathrm{dev}}$;
+- no fit writes a price that is not positive or not identified, as D-15
+  §3(d), D-20 §2(c) and D-22 §2(i) refuse. The spans that make a price
+  identified are pending (§7, item E);
+- each is re-measured on any hardware or binary change.
+
+*(a) $\kappa$ (A10).*
+- **Reader.** One thread, warm cache, every table open (capped `open_files`
+  for reopens), on archived trees, pinned as runs are. Its own database is
+  never written, so its tree, memtable and caches stay as they are.
+- **Writer: the neighbour design** (`-1632-`). A second `db_bench` writes
+  its own copy of a tree on the same machine, so only shared hardware links
+  it to the reader. Compactions on against off separate compaction traffic
+  from the write path. On the new binary the writer's own host log gives its
+  jobs' kinds, bytes and spans, so each run has its byte rates and its busy
+  time by kind. One same-database arm, at the `Assoc` T = 10 rate, measures
+  what sharing one database adds.
+- **Linearity: a rate sweep.** Quiet, and at least four writer rates, on
+  each tree, spanning the compaction traffic at every $T$ the experiments
+  run. At T = 10 the ablation's `mixgraph` runs had 48–86 MB/s (`-1206-`,
+  `-1436-`); over T = 2 to 10 the pilots span about 20–88 MB/s
+  (`-2306-pathways-v2-final-check.md`). The critique proposes about 25, 50,
+  100 and 150 MB/s.
+- **The basis: a job-size sweep at fixed byte rates.** The writer's job
+  size changes (its target file size and level base, or its $T$) while its
+  compaction bytes read and written per second both stay fixed, so jobs per
+  second and busy time change and bytes per second do not. Where both rates
+  cannot be held (a change of $T$ moves the read/write mix), the
+  coefficients are fitted jointly over all runs, with the busy fraction by
+  kind, the read-byte rate and the written-byte rate as regressors.
+- **Read against written bytes.** A second sweep holds the bytes written
+  fixed and changes the bytes read (a writer whose merges drop much,
+  against one whose merges drop nothing), to weigh the two in $Y_\iota$.
+- **Flushes, apart from the neighbour's own Puts.** In the "write path
+  alone" arm the neighbour client's Puts run beside the reader, which never
+  happens with the experiments' one client. So that arm runs twice: with
+  the normal write buffer, and with one large enough that no flush happens
+  in the measured window. The difference is the flushes' effect; the
+  large-buffer arm is the Puts' own. Where the reader's step times can be
+  stamped and aligned with the writer's job spans (its host log), the
+  reader's time is also split by which neighbour jobs run at each moment:
+  none, a flush, a compaction, or both.
+- **Additivity: one running job against two.** Compactions alone (a
+  neighbour's manual compaction, with no writes), flushes alone (as above),
+  and both (writing with compactions on), at matched rates. In the
+  experiments at most one compaction and one flush overlap
+  (`max_background_jobs` = 2, one compaction slot), so this is the case
+  that matters. On arm averages, non-additivity shows only in proportion to
+  the overlap; the moment-by-moment split, where it is available, tests it
+  directly. Two neighbour compactions against one is reported beside it.
+- **Step timers** (perf_level 4, as in the contention runs):
+  - per-level table time on levels $\ge 1$, for filter checks and block
+    reads;
+  - the Seek call at its own counts, for run seeks;
+  - the time per step after the seeks, in `seekrandom` with `seek_nexts` >
+    0, for iteration steps and iterator blocks;
+  - `get_from_memtable_time` and `seek_on_memtable_time`, for the memtable
+    search;
+  - D-21's reopen timer, for reopens;
+  - the memtable-write timer, for Put inserts;
+  - and the fixed parts as (d) defines them.
+
+  The timers add about half to a Get and pull ratios toward 1. So loaded
+  and quiet runs are compared only at one timer level, and each $\kappa$ is
+  taken at perf_level 1, at the run's own counts, wherever an instrument
+  there suffices. The timer runs locate the slowdown by step and level, and
+  their dilution is reported.
+- **Step types:** filter checks, block reads, run seeks, iteration steps
+  (`seek_nexts` > 0), iterator blocks, memtable searches, reopens, Put
+  inserts, and the fixed parts of Gets and of scans. The calibration decides
+  which $\kappa$ are nonzero (§7, item 1).
+- The reader's keys are uniform, as stage 18's are. Whether $\kappa$ is also
+  measured with each workload's keys (locality moved the rest of `Assoc`'s
+  Gets by 26%, §2 item 9) goes with §7 item 2.
+- **What picks the basis** (the operator's reading rule; the owner decides,
+  §7 item 1):
+  - a slowdown that does not change with job size at a fixed byte rate:
+    per byte, $\kappa^J = 0$;
+  - a slowdown that follows busy time at a fixed byte rate: a busy part,
+    $\kappa^J$, per kind if the kinds differ;
+  - both: both features, fitted jointly with every $\kappa \ge 0$;
+  - the bytes in $Y_\iota$: $Y_\iota = X_\iota + \lambda(S_\iota + O_\iota)$,
+    with $\lambda$, the weight of a byte read against a byte written,
+    fitted where the sweeps identify it. $\lambda = 0$ counts bytes written
+    only, $\lambda = 1$ both alike, and bytes read only is
+    $Y_\iota = S_\iota + O_\iota$. One $\lambda$ for every step type keeps
+    A10's form; a $\lambda$ that differs by step type needs a dated
+    amendment of A10. $\lambda$ is part of $\kappa$'s basis, pending under
+    §7 item 1, and no default is set here: if the sweeps cannot identify
+    it, the owner decides it by a dated entry before any run it governs;
+  - a slowdown that follows the number of jobs, but neither busy time nor
+    bytes: A10's two features do not fit, and a dated entry amends A10
+    before Gate N2.
+
+  The plot's seeks (§2 item 3) already point to a part that does not grow
+  with bytes. So the sweep must be able to show a busy part, for seeks at
+  least, and to tell it apart from the same-database share.
+- **If linearity or additivity fails** for a step type, outside its
+  tolerance (§7 item 4):
+  - its $\kappa$ is not fixed, and no Gate N2 run starts;
+  - the operator reports the failure per step type and tree;
+  - a dated entry decides what changes: another form of A10; A10 kept as an
+    approximation over the experiments' range, with its measured error
+    stated wherever a result uses it; or that step's $\kappa$ set to 0, with
+    the error reported;
+  - the test is not repeated until that entry says what changes.
+
+  For additivity, the share of job time in which a flush and a compaction
+  overlapped on the reference arms is also reported, since it bounds what
+  non-additivity can move.
+
+*(b) The scan-step prices $c_{st}(r)$ and $c_{ib}$.*
+- **Trees with garbage.** D-22's trees are loaded without overwrites, so
+  they hide no versions. New trees are built as D-22 §2(a) builds, with
+  (a′)'s two flags, then overwritten with keys drawn as the workloads draw
+  them, so that hidden versions sit on hot keys as in the runs, then
+  settled. The grid spans the depths of T = 2 to 10, garbage from none to
+  at least the pilots' 1.15 hidden steps per returned entry, and two or
+  more block sizes (below). The trees
+  are archived and identified as D-22 §2(b) says, with a dated build
+  record.
+- **Runs.** `seekrandom` at several `seek_nexts` > 0, `Assoc`'s mean scan
+  length of about 543 among them, and at 0; every table open; one thread;
+  warm cache; each run in its own process. The new counters give the steps
+  by heap size, the hidden steps and the iterator blocks.
+- **Fit.** Seconds per scan on the scan's set-up, its run seeks at $c_{sk}$
+  (D-22's `seek_nexts` = 0 price, held fixed), its steps at $c_{st}(r)$, and
+  its blocks at $c_{ib}$.
+  - $c_{st}(r)$ takes the form the data support. Roughly affine in
+    $\log_2 r$ is expected; nondecreasing is required; convexity is not
+    assumed.
+  - Heap size moves with depth and with L0 files, hidden steps with
+    garbage, returned entries with `seek_nexts`, and blocks with both.
+  - Steps and blocks move together. Under D.19(v)'s block model a scan
+    loads about one block per $b_{\text{blk}}$ entries it steps through, so
+    `seek_nexts`, depth and garbage move both in proportion, and alone they
+    identify only $c_{st}(1) + c_{ib}/b_{\text{blk}}$. So the grid also
+    varies the entries per block: the same trees at two or more block sizes
+    (or value sizes, if a step's own cost is shown not to depend on its
+    entry's size). Where that still does not separate them, the fit reports
+    the combination it identifies, and a dated entry decides how it is
+    split.
+
+*(c) The job prices* $c^F_{job}$, $c^0_{job}$, $c^d_{job}$, $c^{tm}_{job}$
+and $c_{cr}$, with $c_w$ re-fitted.
+- **The reference arms:** D-14 §2's five `native` arms at T = 10 per
+  workload, with the settle step, the default options and the Gate N2 run
+  length, on the new binary after its preflight, run as D-21 §2(f) ran them
+  (with a new tag). Their mean throughput is reported beside $\bar q$.
+  $\bar q$ does not change unless §7 item 6 says so.
+- **The fit**, per run, over every job that completes from $n_w$ to the end
+  of the drain, by least squares:
+  wall span $= t^{\mathrm{kind}}_{job} + t_{cr}(S_\iota + O_\iota) + t_wX_\iota$,
+  in device-seconds.
+  - A span runs from `job_begin` to `job_end`, and for a flush between its
+    new begin and end records.
+  - A trivial move has $S_\iota = O_\iota = X_\iota = 0$, so $t^{tm}_{job}$
+    is its mean span. A flush has $S_\iota = O_\iota = 0$.
+  - Flushes and merges share $t_w$: a byte is taken to cost the same to
+    write in either, as $\tau^{job}_\iota$ prices it.
+- Each price is the median of the ten per-run values, with the minimum and
+  maximum reported (D-15 §3(b)'s rule). D-15's per-run $t_w$ is reported
+  beside it.
+- **$c_{cr}$ against $c_w$.** A merge's bytes read and written move together
+  (§2 item 5), so the fit may fix their sum better than either. The joint
+  fit is reported with its per-run spread and the correlation of the two
+  estimates. Which one is used is §7 item 11:
+  - the joint fit as it stands;
+  - $c_{cr}$ from a separate calibration in which read and written bytes
+    come apart (for instance merges of trees whose merges drop a known
+    share), with $c_w$ then fitted on the reference arms;
+  - or the sum alone, priced per byte written with $c_{cr}$ = 0.
+
+  A result that turns on the split says so (D §1).
+- On the reference arms OBJ-7's ratio is near 1 by construction, so OBJ-7
+  tests the other configurations. The per-job gap at T = 2 (3.4–3.5 ms) was
+  above T = 10's (2.97 ms), which the kinds may not absorb (§7 item 5).
+
+*(d) $c_{mt}$, the fixed parts and the Put insert.* No time is priced twice,
+and none from outside the store.
+- $c^0_{get}$, as PATHWAYS defines it (§1.1): the device time of the
+  store's Get call that does not depend on the tree (snapshot, SuperVersion
+  reference, lookup-key set-up and return), with the memtable search
+  ($c_{mt}$), every table step ($c_f$, $c_{blk}$, $c_{open}$) and the
+  client's own work excluded.
+  - It is measured as stage 18's Get intercept (D-15 §3(c)'s fit, whose
+    slopes carry the table steps; all-open, so without reopens), taken on
+    RocksDB's internal Get timer (`rocksdb.db.get.micros`), which leaves out
+    the client's work.
+  - The memtable search on the price trees (their memtables are empty;
+    `get_from_memtable_time` measures it) is subtracted. Anything else the
+    measurement holds beyond the definition is removed or shown negligible
+    (Gate N0 item 11).
+- $c_{mt}$: the whole memtable search per Get and per scan, when the
+  memtable holds what the experiments' memtables hold on average (the host
+  log's memtable fill at each L0 decision, H §2). It is the extra internal
+  time per read against the same reads with an empty memtable, at
+  perf_level 1, plus the empty memtable's search time that $c^0_{get}$
+  leaves out. The perf_level 4 memtable timers are a cross-check.
+- $c^0_{sc}$, as PATHWAYS defines it (§1.1): the device time of creating a
+  scan's iterator and of the fixed part of its first `Seek` (snapshot,
+  SuperVersion reference, merging-iterator set-up), with the run seeks
+  ($c_{sk}$), the memtable search ($c_{mt}$), the iteration steps and
+  iterator blocks ($c_{st}$, $c_{ib}$), any reopen ($c_{open}$) and the
+  client's own work excluded. It is §3(a)'s scan set-up timer's time per
+  scan on the quiet, all-open price trees, whose memtables are empty. The
+  seek fit's intercept is not used: it was negative on d21id (−724 ns), and
+  the internal Seek timer does not cover the iterator's creation.
+- $c_{put}$: the memtable insert of the workload's own Puts, with the WAL
+  off and the experiments' memtable size, on RocksDB's memtable-write and
+  internal write timers, with the Puts served while a flush runs reported
+  apart. It is per Put, plus a part per byte if the fit over the workload's
+  value sizes supports one; $c_{put}$ is then the mean over the workload's
+  Puts (D §1), which makes it depend on the workload: §7 item 2 decides
+  whether that stands.
+- Their $\kappa$ come from (a).
+
+*(e) The window and the stride.*
+- $n^{\mathrm{win}}$, by PATHWAYS' rule: a fixed operation count, below the
+  spans in operations of the merges Proposition D.11's (d2) relies on (the
+  L0 merges and the merges sourced at a level $\ge 1$). The reference arms
+  give each such merge's $\Delta n_\iota$, leaving out those in stalls or
+  in the drain, and $n^{\mathrm{win}}$ is set below the shortest of those
+  spans. How far below, and whether one value serves both workloads, is
+  pending (§7, item A).
+- $n^{\mathrm{str}}$: proposed no larger than $n^{\mathrm{win}}$, so that
+  rounding a window's start down to a snapshot adds at most as many
+  operations as the window holds. It is set with $n^{\mathrm{win}}$, and the
+  host log's size is reported. Its value is pending (item A).
+
+*(f) How the foreground prices enter D-22's sessions.*
+- $c_{st}(r)$, $c_{ib}$, $c_{mt}$, $c^0_{get}$, $c^0_{sc}$, $c_{put}$ and
+  every $\kappa$ are measured in each of two sessions on the new binary, in
+  D-22's design: archived trees, checked against their manifest
+  (D-22 §2(c)), and a reboot between the sessions (D-22 §2(f)). The new trees with garbage and the writer's
+  trees are archived the same way.
+- Each is reported with both sessions' values and $|B - A|$ over
+  $(A + B)/2$.
+- Whether D-22 §2(f)'s 3% test applies to each, so that a price that fails
+  it is not final, is pending (§7 item 10). $\kappa$ is a slope of about
+  0.1% per MB/s, measured once so far.
+- The job prices, $n^{\mathrm{win}}$ and $n^{\mathrm{str}}$ come from the
+  reference arms, outside the test, as $c_w$ does (D-22 §4).
+
+*(g) Sensitivity* (extends D-22 §2(h); PATHWAYS C §3). Each gate's verdict
+is also computed at the ends of each new price's reported range and of each
+$\kappa$'s, and reported beside the main result. This is not a gate.
+
+**5. Per-run checks.** Each runs over the measured phase, from $n_w$ to the
+end of the drain. Every tolerance, and what every failure means, is pending
+(§7 item 4), except OBJ-9's 1%, which PATHWAYS fixes; what an OBJ-9 fault
+means is §7 item B. D-21's precedent, under which a run outside its
+tolerance is not priced, is a precedent PATHWAYS names, not a decision.
+
+- **OBJ-7, the job prices.**
+  - Compares: the jobs' own summed wall spans with their priced device
+    time, $\sum_\iota t^{job}_\iota$, as a ratio, overall and per kind.
+    Ratios per start level and per configuration are reported.
+  - Instrument: the host log's job and flush records, the event log, and
+    the evaluator.
+  - A failure means the jobs took longer or shorter than the in-situ prices
+    (A11) say for this configuration; for instance, the per-job gap moved
+    with $T$ (§7 item 5).
+- **OBJ-8, interference.**
+  - (a) The evaluator computes every window, the read and write parts of
+    every $I_\iota$, and $\mathcal I$, from the host log alone.
+  - (b) The timer check. Per stratum, the SST-read time of the units served
+    while a job runs is compared with A10's *physical* prediction from the
+    run's own jobs: the stratum's own time per unit with no job running,
+    from the same run, times its count with a job running, times 1 plus the
+    unit-weighted mean of $\sum_{\iota\in\mathcal J(n)}s^{\text{phys}}_{x,\iota}$.
+    The comparison is made per stratum and summed over strata. Drain jobs
+    carry a charge but meet no read, so they do not enter.
+  - **The strata** (proposed): the step type (filter check, block read, run
+    seek, reopen, with a Get's and an iterator's reopens apart) by level,
+    with L0 apart from the levels below. That is also the table-size split:
+    L0's flush-sized files of about 2 MB against the 512 KiB files below.
+  - L0 is not split further by $k_0$. Every L0 merge runs at $k_0 = K_0$
+    (§2 item 4), so a stratum at $k_0 = K_0$ would have almost no units
+    served with no job running, and no baseline of its own. The $k_0$ mix
+    of each L0 stratum, with and without a job running, is reported beside
+    the check.
+  - The timer times the timed read steps only. Put inserts and the fixed
+    parts are not timed per run; their $\kappa$ are tested by the
+    calibration (OBJ-2), as A10 now says.
+  - Whether the timer samples operations, and at what rate, is pending
+    (item B).
+  - A failure means A10 or the calibrated $\kappa$ does not hold in that
+    run, or that a mix difference was left inside a stratum. The charge
+    stays well defined (Lemma D.17). What fails is the claim that it prices
+    the physical slowdown.
+  - (c) The calibration's linearity and additivity tests are recorded with
+    the prices.
+  - (d) The window guard, reported per run. Its first share decides
+    whether (d2) fails at a trigger, and its last whether (b2) does (§9),
+    each against a tolerance pending under §7 item 4:
+    - the share of merge bytes, by kind and start level, whose window
+      exceeded their own span;
+    - the jobs charged over a window that reached back before they began,
+      stalls and drain apart;
+    - (b3)'s exposure: the $\mathcal W$-weighted mean L0 count over the
+      windows of the deeper merges and trivial moves, and the share of them
+      with $k_0 \ge 1$, at every trigger, $K_0$ = 4 included;
+    - (b2)'s share: the share of L0-merge bytes in merges that did not
+      start at $k_0 = K$, did not take all $K$ files, or saw a flush
+      complete while they ran, from the event log's `lsm_state` and its
+      compaction and flush records.
+- **OBJ-9, the scan and memtable counters.**
+  - Compares: the per-level hidden steps (keyed by the entry's level),
+    iterator blocks and steps by heap children with their global tickers,
+    within 1% (PATHWAYS' value); and $R_{nx}$ and the counts of Gets, scans
+    and Puts across the arms of one workload and seed, which must be equal.
+    Any difference is a fault.
+  - What a fault means for the run is pending (item B). Proposed: its counts
+    are invalid and it is not priced.
+- **D-21's reopen check** runs as dated until §6 is decided.
+- **OBJ-6** reports, with no threshold: the physical interference beside the
+  charge; the share of compaction bytes in jobs that served no operation,
+  stalls and drain apart; the drain's charged interference; and the client
+  time that no price covers.
+- **CMP-9** reports every arm's checks with each comparison.
+
+**6. The proposed change to D-21's reopen check. Proposed, pending the
+owner. D-21 stands until a dated entry decides.**
+- **Why.** A reopen is a read step. Under A10, one served during jobs costs
+  $c^0_{open}(1 + \sum_\iota s^{\text{phys}}_{open,\iota})$. D-21 compares
+  the run's own seconds per reopen with stage 18's quiet reference, so it
+  expects 1 where A10 predicts more.
+- **The proposal** (PATHWAYS D §1). Compare the run's ratio with
+  $1 + \bar s_{open}$, the reopen-weighted mean physical surcharge that A10
+  predicts for the run's own jobs,
+  $\bar s_{open} = O^{-1}\sum_\iota s^{\text{phys}}_{open,\iota}\,O(n^b_\iota, n^e_\iota]$,
+  with $\kappa^J_{open}$ and $\kappa^B_{open}$ from §4(a). It uses the
+  physical surcharge, not the charge, because the timer measures the run's
+  own time.
+- **The alternative.** With OBJ-8's split timer, compare the reopens served
+  while no job runs with the reference directly: a check of $c^0_{open}$
+  alone.
+- The owner chooses one of the two (§7 item F); its tolerance under
+  interference is §7 item 4. Either is stratified by level or by table-size class: L0's files take
+  longer to reopen, and more of their reopens fall inside L0 merges. D-21's
+  floor of 1,000 reopens and its consequence stand unless that entry changes
+  them. The contract's `prices.reopen_time_check` changes only with it.
+- **What it can do for `Assoc`.** Of `Assoc`'s excess of 0.256 over 1,
+  removing the writes removes 0.102 (1.256 against 1.154; about 0.09 as a
+  multiplicative factor, §2 item 8), and that bounds what interference can
+  explain. The scans' cache pollution (about 0.08) and the rest (about 0.07)
+  remain. This entry does not decide `Assoc`'s $c_{open}$ (§7 item 3).
+
+**7. Pending owner decisions.** Nothing here resolves them. Each is decided
+by a later dated entry before the first run it governs.
+
+From PATHWAYS §0.7, numbered as there:
+1. **$\kappa$'s basis.** Per byte, per busy time or per job; which bytes
+   $Y_\iota$ count, $\lambda$ included (§4(a)); which $\kappa$ are nonzero; and whether the same-database
+   share enters $\kappa$. After the calibration (§4(a)); before Gate N2.
+   *Decided in D-24 §1 item 1.*
+2. **How the quiet read prices $c^0_x$ are measured**: on quiet uniform-key
+   trees, as stage 18 does, or per workload (the operator's open decision
+   D2). The rest of a quiet `Assoc` Get took 0.74 of the uniform-key
+   prediction (the whole Get 0.85–0.87). This also settles whether $c_{mt}$,
+   $c_{put}$ and $\kappa$ are per workload (A9), and so whether §4's trees
+   and reader keys stay uniform. Before Gate N2.
+   *Decided in D-24 §1 item 2.*
+3. **`Assoc`'s $c_{open}$** (the operator's open decision D3). Of its 1.256,
+   removing the writes explains about 0.09 as a factor (0.102 of the 0.256
+   excess), which bounds what interference can explain (the write path's
+   own effect is in it too); the rest is open. Before any `Assoc` arm is
+   priced (D-21 §2(c)).
+   *Decided in D-24 §1 item 3.*
+4. **The tolerances of the per-run checks, and what a failure means**:
+   D-21's check under interference (§6), OBJ-7 and OBJ-8; and the
+   tolerances of the calibration's tests of A10's linearity and additivity
+   (OBJ-2, OBJ-8(c); §4(a)). Added by this entry: the tolerances on
+   OBJ-8(d)'s share that defines a (d2) failure, and on its share of
+   L0-merge bytes that defines a (b2) failure (§9); and the tolerance on the
+   foreground's throughput, the margin for Gate N1's reuse (§3(c)). Before
+   Gate N2.
+   *Decided in D-24 §1 item 4.*
+5. **Whether the per-job prices need a dependence on the configuration
+   beyond the kinds.** The median gap was 3.4–3.5 ms at T = 2 against
+   2.7–3.0 ms at T = 6 and 10. Before Gate N2; C.4 then needs the rule it
+   states.
+   *Decided in D-24 §1 item 5.*
+6. **Whether $\bar q$ is re-measured on the new binary.** D-13 and D-14 tie
+   it to the Programme 1 binary. Before any $\Theta_s$ run.
+   *Decided in D-24 §1 item 6.*
+7. **Whether $\Theta_s$ gains a priced profile per mode** (Theorem A.2(iv),
+   C §1). Before any $\Theta_s$ run.
+   *Decided in D-24 §1 item 7.*
+8. **Whether the admission test's support screen compares Proposition G.2's
+   new level inputs**, for any future pool (G §4). Before any level is
+   admitted to a pool.
+   *Decided in D-24 §1 item 8.*
+9. **H §7's sign convention.** Keep $Q_j = -b + f_\theta + \delta_j$, with
+   $b$ a change in normalised cost as `controller/prior.h` computes it, or
+   redefine $b$ as a change in reward, which flips the code's sign. Before
+   the first learner run (Gate N4). Until then PATHWAYS uses the code's
+   convention.
+   *Decided in D-24 §1 item 9.*
+10. **Whether D-22's 3% test applies to $\kappa$ and to each new foreground
+    price** (§4(f)). Before any of them is final.
+    *Decided in D-24 §1 item 10.*
+11. **How the fit separates $c_{cr}$ from $c_w$**, or whether only their sum
+    is priced (§4(c)). Before Gate N2.
+    *Decided in D-24 §1 item 11.*
+12. **Whether CMP-7 and Definition C.5's regret use $J_\beta$, or $J_\beta$
+    less the policy-independent buckets** (the scan-base bucket, the fixed
+    bucket and the memtable bucket's searches). Before any regret is
+    computed.
+    *Decided in D-24 §1 item 12.*
+13. **The workload's label.** The project uses ZippyDB's published
+    key-range, key, value-size and scan-length parameters with `Assoc`'s
+    operation mix, so D-1's label misattributes the distributions, and so
+    does the comment in `scripts/dbbench_pipeline/config.sh`. Before the
+    label is used in the paper or the comment changes, by an entry that
+    names D-1.
+    *Decided in D-24 §1 item 13.*
+
+Left open here. PATHWAYS assigns A, C, D and E to this entry (§0.6 item 13,
+§0.7, D §1); B is not in PATHWAYS; F is pending there too:
+- **A.** The rule that turns the reference arms' merge spans into
+  $n^{\mathrm{win}}$ (how far below the shortest span it is set), whether
+  one value serves both workloads, and the stride $n^{\mathrm{str}}$.
+  Before the reference arms run (§3(e)), so that the values follow from
+  them by rule.
+- **B.** Whether OBJ-8's timer samples operations, and at what rate, before
+  the new binary is built; and what an OBJ-9 fault means, before Gate N2.
+  (§5 proposes the strata and that Put inserts and the fixed parts are not
+  timed per run. The owner confirms them with §3 to §6.)
+- **C.** Whether the fork reads the host log's counters as of the last
+  completed operation (exact windows) or at the event (windows off by at
+  most one operation's steps at each end). Before the new binary is built.
+- **D.** The calibration details §4 leaves to the implementation: the
+  writer rates, the repeats, the large write buffer of §4(a), and the grid
+  of trees with garbage with its block sizes. None of them changes the
+  binary. Before the calibration runs.
+- **E.** For each new fit, the spans that make its price identified, and so
+  its refusals. Before the calibration runs.
+- **F.** §6's choice between the two comparisons (its tolerance is item
+  4). Before D-21's check changes.
+  *Decided in D-24 §1 item 3.*
+
+**8. What is unchanged, and what this entry amends.** D-13 to D-22 stand,
+except at these points:
+- **D-13 §1.** The priced device times are no longer only $c_w$, $c_f$,
+  $c_{blk}$ and $c_{sk}$, and D-20's $c_{open}$: §1(a)'s prices join them.
+  The two money prices (the instance price and $c_s$), $\beta^\star$ and
+  $\bar q$ are unchanged.
+  D-13's predictions stand as its record; the forward predictions are
+  PATHWAYS D §5 as revised (§9).
+- **D-13 §2** (write accounting) and **§7** (retirements) are unchanged.
+  Scans are now priced by their seeks and their iteration, so P0-1's
+  retirement stands.
+- **D-15 §3(a)** is unchanged. PATHWAYS writes its price per core-second as
+  $p_{\mathrm{dev}}$.
+- **D-15 §3(b).** $c_w$ is re-fitted with $c_{cr}$ and the per-job prices,
+  on the reference arms, on the new binary (§4(c)). It is now the price of
+  one more byte written by a job, not a job's whole time per byte. For the
+  new binary this replaces D-21 §2(f)'s re-measurement of $c_w$.
+- **D-15 §3(c).** The Get fit's intercept, taken on the internal Get timer
+  and less the memtable search, gives $c^0_{get}$ (§4(d)). The fit is otherwise unchanged, as amended by
+  D-20 and D-22.
+- **D-15 §3(d), D-20 §2(c) and D-22 §2(i)** gain §4's refusals.
+- **D-20 §2(f) and D-21 §2(d).** There are now six shared buckets. Reopens
+  are still charged at the level where they happen, and the reopen bucket
+  keeps only reopens of no known level. A reopen's slowdown under a job is
+  charged to the job.
+- **D-21 §2(c)** stands until §6 is decided.
+- **D-21 §2(e).** The controller's prior and the Gate N3 rules use the
+  amended cost and the new prices (H §7, Gate N3), and each new price is a
+  plugin key as $c_{open}$ is.
+- **D-22.** Its sessions gain §4(f)'s prices and new archived trees with
+  garbage. Its §2(g) governs the new binary. Its §2(h) sensitivity reports
+  extend to the new prices and $\kappa$ (§4(g)). Its §4 rule, that $c_w$ is
+  outside the 3% test, extends to the job prices. Its schema-5
+  `prices.json` is followed by a new schema (§3(d)).
+- **D-14** (the stall rule's time base, $\bar q$, the two measured
+  profiles), **D-15 §1–§2**, **D-16** and **D-19** are unchanged. Gate N1's
+  outcome is reused on the new binary on D-19 §4's ground (§3(c)).
+- **D-1** is unchanged; its label is §7 item 13.
+- D-17 (the Gate N2 screen) and D-18 (the action bounds) are still in draft.
+  D-17's screen works on the vectors $(\mathcal C_W, \mathcal C_R, \mathcal C_S)$
+  and takes the amended terms with them (Proposition C.4).
+
+**9. Falsification and consequences.**
+
+*Predictions, made in advance.* PATHWAYS D §5 as revised on 2026-10-03 and
+committed with this entry. Its magnitudes are provisional until §7 items 1
+to 4 are decided.
+- **Read priority.** Little or no room beyond the static comparator on
+  stationary `Assoc`. The L0 trigger's optimum rises, and has a floor
+  wherever interference on reads is positive. Scan iteration is probably the
+  largest read cost on `Assoc` that depends on the configuration, so read
+  priority's comparator there is expected at the larger $T$. Lever (e) does
+  not beat the best static trigger on stationary `Assoc`. Lever (f) gives no
+  measurable gain at the default point.
+- **Write priority.** The comparator is expected among configurations with
+  fewer, larger jobs: larger $T$, larger $K_0$.
+- **Space priority.** The room on `Assoc` stays small. Its optima move toward
+  the configurations that hold the least garbage on hot keys.
+- **OBJ-7.** At T = 2 the ratio of job spans to priced job time is above
+  T = 10's, since the prices come from T = 10 arms and both the per-job gap
+  and the per-byte write time were higher at T = 2 (§2 items 5 and 6). No
+  size is predicted.
+- **`Assoc`'s reopens.** Under §6's proposal too, `Assoc`'s ratio stays
+  outside D-21's 10%: interference can explain at most the writes' part,
+  0.102 of the 0.256 excess (about 0.09 as a factor).
+- No prediction is made for $\kappa$'s basis or for any new price's value.
+
+*What would falsify a decision, and what then.*
+- **The instruments observe and do not act** (§3(c)). Falsified if ACT-4 or
+  ARCH-5 fails on the new binary, or the foreground's throughput moves
+  beyond its tolerance. Then no price, comparator arm or reuse of
+  Gate N1 is made on that binary until a dated entry decides.
+- **A10.** Falsified for a step type if the calibration's linearity or
+  additivity test fails: §4(a)'s consequence follows. In a run, a failed
+  OBJ-8 takes the consequence §7 item 4 fixes. Either way the charge stays
+  defined; the claim that $\mathcal I$ prices the physical slowdown is not
+  made for that step type.
+- **A11.** Falsified if OBJ-7's ratios move with the configuration beyond
+  their tolerance. Then §7 item 5 decides a dependence on the
+  configuration, and C.4 needs the rule it states.
+- **The window rule and D.11's cycle.**
+  - (d2) fails at a trigger when OBJ-8(d)'s share, the merge bytes whose
+    window ran past their own span, is above a tolerance pending under §7
+    item 4. Short jobs, such as trivial moves and short flushes, fail (d2)
+    job by job at every trigger by construction; they hold no merge bytes,
+    so they do not enter the share, and their charges are small (D.11's
+    guard).
+  - (b2) fails at a trigger, likewise, when the share of L0-merge bytes in
+    merges that did not start at $k_0 = K$, did not take all $K$ files, or
+    saw a flush complete while they ran exceeds a tolerance, also pending
+    under §7 item 4. OBJ-8(d) reports that share per run, from the event
+    log's `lsm_state` and its compaction and flush records.
+  - When either fails at a trigger, D.11's closed form is not used there,
+    and Gate N2 compares the admissible triggers directly; D.11's integer
+    form (iii) still holds (D.11's guard, Gate N2). The failure is reported
+    with the measured exposure.
+- **D-22's 3% test**, if §7 item 10 applies it to a new price: on a fail no
+  price is final, and the test is not run again until a dated entry says
+  what changes.
+- **This entry fails as a record** if any part of it is changed after the
+  first reference arm or calibration run on the new binary has started. A
+  change is a new dated entry.
+
+### D-24, 2026-10-04 — the owner's decisions on D-23's pending items, and an exploratory track to the first learner run
+
+**Recorded before any run it governs.** No run under D-23 has started: the
+new binary is not built, and no calibration, reference arm or $\Theta_s$ arm
+has run. No exploratory run (§2) has started. The owner decided both sections
+on 2026-10-04 (UTC). §1 accepts the node operator's recommendations on the
+items that D-23 §7 and PATHWAYS §0.7 leave pending. §2 adds an exploratory
+track, which changes no gate. D-23's §7 items 1 to 13 and F are marked
+decided here; its items A to E stay pending. §4 names each earlier point
+this entry amends.
+
+**1. D-23's pending items** (PATHWAYS §0.7), numbered as there.
+1. **$\kappa$'s basis, and $\lambda$.** The calibration decides them, by
+   D-23 §4(a)'s rate sweep, job-size sweep, and one job against two. The
+   model allows both a byte-rate part ($\kappa^B$) and a busy part
+   ($\kappa^J$) for each step type. The owner decides only if the
+   calibration cannot identify them, by a dated entry before any run it
+   governs.
+2. **The quiet read prices $c^0_x$ are measured per workload**, with that
+   workload's key distribution, inside D-22's sessions, not as one
+   uniform-key set. By D-23 §4's common rule, the other foreground prices
+   and $\kappa$ are then measured with each workload's keys and Puts too.
+3. **`Assoc`'s $c_{open}$ is measured on `Assoc` itself**, as item 2 says.
+   - D-21's per-run check is amended as D-23 §6 proposed: the run's time per
+     reopen is compared with its quiet value times $(1 + \bar s_{open})$,
+     that is, the run's ratio to the quiet reference with
+     $1 + \bar s_{open}$, not with 1. It is stratified by level or
+     table-size class, as D-23 §6 says.
+   - The 10% tolerance is kept. D-21's floor of 1,000 reopens and its
+     consequence stand. D-23 §6's alternative, a direct check on the
+     reopens served while no job runs, is not adopted.
+4. **The per-run checks' tolerances** are each set from the calibration's
+   own spread, about 2 to 3 times the session-to-session difference, by a
+   dated entry before Gate N2.
+   - This covers OBJ-7, OBJ-8 with its (d2) and (b2) guards, the
+     calibration's tests of linearity and additivity, and Gate N1's reuse
+     margin. The same entry says what each failure means.
+   - During the exploratory track (§2) every check is reported only.
+5. **The per-job prices are fixed per job kind.** A calibrated state term
+   (for example, the number of files in the tree) is added only if OBJ-7
+   fails at T = 2, by a dated entry. The owner rejected rolling-average
+   prices: they bring wall time back into $J_\beta$ (Lemma D.17) and price
+   different arms at different rates.
+6. **$\bar q$ stays fixed** and is not re-measured on the new binary. The
+   new binary's rate is reported beside it.
+   - The owner rejected a rolling-average $\bar q$ for the same reasons: it
+     would break D.15's per-operation space charge, Lemma D.17, A8 and the
+     hull results, which need one price scale per workload.
+   - The value is the recorded one (the $\bar q$ record of 2026-10-02:
+     69,021.5 ops/s for `Assoc`, 120,609.3 for the power law; the
+     contract's `reference_rate`). The instruction called it "the d21id
+     value". No $\bar q$ was recorded from the d21id arms, whose mean D-21
+     §2(f) reports beside $\bar q$, so this entry reads it as the recorded
+     value. If the owner meant the d21id arms' mean, that is a new dated
+     entry before any run it governs.
+7. **$\Theta_s$ gains the priced profile** of Theorem A.2(iv), for the
+   headline balanced mode only, at the formal Gate N2. It is not in the
+   exploratory screen (§2).
+8. **The support screen of the admission test is deferred** until a pool
+   exists (D-19: none now). The entry that admits a level decides it.
+9. **H §7's sign convention is the code's.** $b$ is a change in normalised
+   cost, and $Q_j = -b + f_\theta + \delta_j$.
+10. **D-22's 3% test applies to the new base prices**: $c_{st}(r)$,
+    $c_{ib}$, $c_{mt}$, $c_{put}$, $c^0_{get}$ and $c^0_{sc}$. For $\kappa$
+    the rule is different, and both parts must hold:
+    - the two sessions' estimates agree within their combined confidence
+      interval;
+    - the slowdown each predicts at the reference compaction traffic
+      agrees within 1 percentage point.
+11. **$c_{cr}$ against $c_w$.** D-23 §4(a)'s job-size sweep adds a
+    garbage-heavy neighbour, whose merges read far more than they write, to
+    identify $c_{cr}$. If it is still not identified, $c_{cr}$ and $c_w$ are
+    fitted combined, with the restriction stated.
+12. **Regret** (CMP-7, Definition C.5) is computed on $J_\beta$ less the
+    policy-independent buckets (memtable, scan-base, fixed). The regret on
+    the full $J_\beta$ is reported beside it. The write-path bucket stays
+    in, since it depends on $K_0$.
+13. **The workload's label is corrected.**
+    - The operation mix is Cao et al.'s `Assoc` mix. The key, value-size and
+      scan-length parameters are their ZippyDB fit (FAST 2020, §7.3,
+      App. A.3).
+    - D-1's paper label is corrected accordingly. D-1's choices, its two
+      departures from the published fit among them, stand.
+    - The comment in `scripts/dbbench_pipeline/config.sh` is corrected in
+      the same commit as this entry, and the paper names the workload this
+      way.
+
+**2. The exploratory track** (owner, 2026-10-04). Its goal is a learner
+running and producing results by Thursday 2026-10-08.
+- **Everything in it is exploratory.**
+  - It supports no claim and no gate verdict, and its runs are never pooled
+    with gate runs.
+  - Its results are kept under their own sessions and roots (`explore-*`),
+    with an `EXPLORATORY` marker.
+  - They use provisional prices, so they run as D-22 §2(j)'s diagnostic
+    runs: `04` and `plugin_config` write "provisional prices" into every
+    output.
+  - The gate track (D-23's calibrations, the formal Gate N2 on the final
+    binary, Gates N3 onward) is unchanged and resumes after it.
+- **Scope.** `Assoc` only; the power law is code-ready but not run. T = 10
+  only.
+- **The exploratory screen.**
+  - $\Theta_s$ at T = 10 on the current binary: all 8 admissible
+    $(K_0, \text{base})$ points times D-13 §4's 4 profiles, 2 repeats each,
+    and the native arms with 5.
+  - It is priced at the provisional prices (`build-dbbench/prices.json`,
+    schema 4).
+  - Its only use is ranking. The top 3 configurations by mean $J_\beta$ in
+    balanced mode are re-run with 3 seed-paired repeats on the interim
+    binary, beside native, for the learner comparison.
+- **Provisional prices.**
+  - The job prices come from the existing reference ($\bar q$) arms' host
+    logs.
+  - $\kappa$, the scan-step prices, $c_{mt}$, $c_{put}$ and the fixed parts
+    come from one-session diagnostics.
+  - D-22's two-session protocol follows later, in the gate track.
+  - Every exploratory run's counts are kept, so that it can be re-priced.
+- **An interim binary** carries a subset of Gate N0 item 10's instruments,
+  and its run manifest records the subset. Until the full instruments
+  exist, per-level scan attribution follows a provisional rule, recorded
+  with that manifest. The formal Gate N2 runs on the final binary.
+- **Plan order.** The learner (implementation plan step 10) is built now, on
+  a separate branch and worktree, and run before Gate N3, for this track
+  only. The implementation plan's §7 order otherwise stands.
+- **Learner settings.** Balanced mode ($\beta$ = 1, 1, 1), at item 6's
+  $\bar q$. Inference runs in the plugin's **learned** mode (owner,
+  2026-10-04): the C++ MLP forward pass (`mlp.{h,cc}`) on weights the
+  trainer exports, as the implementation plan §3 specifies. It is built in
+  a separate session, on a separate branch and worktree, never in the tree
+  a running chain uses.
+- **Scores.** A configuration's score is its mean $J_\beta$ over its
+  seed-paired repeats, never its best. Comparisons are paired by seed, with
+  Student-t intervals (`07`).
+
+**3. A clarification, not a change: what a configuration is.**
+- A configuration of $\Theta_s$ is $(K_0, \text{base}, \text{profile})$.
+- (Workload, $T$) is the cell. Repeats are seed-paired within a cell.
+- $\theta^\star_\beta$ is the configuration with the lowest mean $J_\beta$ in
+  the cell, per mode (D-13 §4). C-6's cross-$T$ comparator is its variant
+  across $T$ (D-13 §4's cross-$T$ check).
+
+**4. What this entry amends, and what stays open.**
+- **D-1:** its paper label (item 13). Its choices stand.
+- **D-13 §4:** $\Theta_s$ gains the priced profile, in balanced mode, at the
+  formal Gate N2 (item 7).
+- **D-15 §3(c), D-20 §2(b) and D-22 §2(c)–(d):** the read prices,
+  $c_{open}$ included, are measured per workload, with its keys (items 2
+  and 3). D-22's trees, rounds, sessions, reboot and 3% test are otherwise
+  unchanged.
+- **D-21 §2(c):** the reopen check compares with $1 + \bar s_{open}$; the
+  10% tolerance is kept (item 3).
+- **D-23:**
+  - §7 items 1 to 13 and F are decided here;
+  - $\lambda$ and the basis are decided by the calibration (item 1);
+  - §4(a)'s job-size sweep gains a garbage-heavy neighbour, for §4(c)'s
+    $c_{cr}$ (item 11);
+  - §4(f)'s 3% question is settled by item 10;
+  - §5's tolerances are set as item 4 says.
+- **The implementation plan's §7 order:** changed for the exploratory track
+  only (§2).
+- **The contract** is amended in place, with this entry as the reason,
+  where it records these values: `prices.reopen_time_check.rule`,
+  `static_class.profiles` and the workload label.
+- **Still open:**
+  - D-23 §7 items A to E.
+- **Settled here (owner, 2026-10-04):**
+  - the inference mode: learned (§2);
+  - item 10's "reference compaction traffic": the mean background
+    compaction write rate, in MB/s, over the measured phase of the
+    reference arms (D-14 §2's five native arms at T = 10 per workload), on
+    the binary the price sessions run. The calibration record states its
+    value before the sessions;
+  - which terms of $J_\beta$ the exploratory runs on the current binary
+    price. The current binary has no job-boundary read counters, no
+    per-level hidden-step or iterator-block counters, and no scan set-up
+    or interference timer. So:
+    - priced from counts: the job terms (per kind, bytes read and
+      written), the read terms of D-21, the scan's returned and hidden
+      steps (global tickers differenced between the host log's stamps),
+      the memtable, Put and fixed parts, and space;
+    - priced by an approximation: interference, each job charged by D-23's
+      formula $\bar q\,\bar\rho_\iota(\kappa^B Y_\iota + \kappa^J t^{\text{job}}_\iota)$,
+      with $\bar\rho_\iota$ replaced by the run's mean quiet read cost per
+      operation over the measured phase. The current binary has no
+      job-boundary read counters, so the job's own window cannot be used
+      (the mean-field form, whose total the critique found within 2%);
+    - not priced: iterator blocks apart from the step price, and every
+      per-level scan attribution.
+
+    The same terms are priced for every configuration, so the ranking is
+    like for like. Each run's manifest records which terms are exact,
+    approximate or absent.
+
+**Falsification.** This entry fails as a record if any part of it is
+changed after the first run it governs has started, exploratory or gate. A
+change is a new dated entry. An exploratory result that is pooled with gate
+runs, or cited as a gate verdict or a claim, breaks §2.
+
 ---
 
 ## 2. Gate verdicts as measured
