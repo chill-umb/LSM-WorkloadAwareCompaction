@@ -31,6 +31,7 @@ using ROCKSDB_NAMESPACE::RLJobRecord;
 using ROCKSDB_NAMESPACE::RLLevelReadCounts;
 using ROCKSDB_NAMESPACE::RLLevelSnapshot;
 using ROCKSDB_NAMESPACE::RLOpCounts;
+using ROCKSDB_NAMESPACE::RLStepCounts;
 using ROCKSDB_NAMESPACE::RLTreeSnapshot;
 
 constexpr double kMiB = 1024.0 * 1024.0;
@@ -323,6 +324,10 @@ class FakeHost : public RLControllerHost {
     std::lock_guard<std::mutex> lock(mu);
     *out = reads;
   }
+  RLStepCounts StepCounts() const override {
+    std::lock_guard<std::mutex> lock(mu);
+    return steps;
+  }
   void SetJobCallback(std::function<void(const RLJobRecord&)> cb) override {
     std::function<void(const RLJobRecord&)> previous;
     {
@@ -361,6 +366,7 @@ class FakeHost : public RLControllerHost {
   std::shared_ptr<RLTreeSnapshot> snapshot;
   RLOpCounts ops;
   std::vector<RLLevelReadCounts> reads;
+  RLStepCounts steps;
   bool draining = false;
   bool fail_apply = false;
   bool apply_unseen = false;  // accept an Apply but never publish it

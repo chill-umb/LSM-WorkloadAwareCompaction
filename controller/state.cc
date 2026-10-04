@@ -62,8 +62,15 @@ void Stats::OnJob(const RLJobRecord& job, const OpClock& clock,
                   std::vector<LevelParts>* parts) {
   const int n = static_cast<int>(levels.size());
   const bool in_range = job.start_level >= 0 && job.start_level < n;
-  saw_compaction_ = saw_compaction_ || job.kind != RLJobRecord::Kind::kFlushEnd;
+  saw_compaction_ = saw_compaction_ ||
+                    job.kind == RLJobRecord::Kind::kCompactionBegin ||
+                    job.kind == RLJobRecord::Kind::kCompactionEnd;
   switch (job.kind) {
+    case RLJobRecord::Kind::kFlushBegin:
+      // D-23 §3(a): a flush's begin record. Its step counters open the
+      // flush's interference window (the write-path bucket), which the
+      // learner's attribution adds (plan step 10).
+      break;
     case RLJobRecord::Kind::kFlushEnd:
       if (job.ok) {
         flushes += 1;
