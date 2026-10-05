@@ -2,7 +2,7 @@
   "status": "PROPOSED by the operator session of 2026-10-04 for PREREGISTRATION D-24 §2's exploratory track only; not confirmed by the owner; no gate run may use this file (the learner's values for Gate N4 are a later dated entry, D-18 draft §4).",
   "plugin": {
     "explore": 0.1,
-    "push_interval_ms": 30000,
+    "push_interval_ms": 5000,
     "weights_required": 0
   },
   "evaluation": {
