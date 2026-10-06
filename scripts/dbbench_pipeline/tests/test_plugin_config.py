@@ -90,6 +90,32 @@ class ComposeTest(unittest.TestCase):
         # no unknown key, but sends only what its rules read.
         self.assertNotIn("rule_release_fill", config)
 
+    def test_beta_star_other_than_the_headline_is_diagnostic_only(self):
+        def weights(mode, **changes):
+            sources = {"bounds": BOUNDS, "settings": SETTINGS,
+                       "prices": PRICES, "admission": ADMISSION,
+                       "contract": with_qbar(1.0), "decision_log": "d.jsonl",
+                       "transition_log": "t.jsonl", **changes}
+            config, _ = pc.compose("rules", mode, "assoc", **sources)
+            return config["beta_w"], config["beta_r"], config["beta_s"]
+        # A reported beta* (2, 5, 10) in a diagnostic run: only beta changes.
+        self.assertEqual(weights("write", beta_star=5, diagnostic=True),
+                         (5.0, 1.0, 1.0))
+        self.assertEqual(weights("read", beta_star=5, diagnostic=True),
+                         (1.0, 5.0, 1.0))
+        self.assertEqual(weights("space", beta_star=2, diagnostic=True),
+                         (1.0, 1.0, 2.0))
+        # beta* does not enter balanced mode.
+        self.assertEqual(weights("balanced", beta_star=5, diagnostic=True),
+                         (1.0, 1.0, 1.0))
+        # The headline, named or not, needs no diagnostic run.
+        self.assertEqual(weights("read", beta_star=10), (1.0, 10.0, 1.0))
+        self.assertEqual(weights("read"), (1.0, 10.0, 1.0))
+        with self.assertRaisesRegex(ValueError, "diagnostic run only"):
+            weights("write", beta_star=5)
+        with self.assertRaisesRegex(ValueError, "not one the contract reports"):
+            weights("write", beta_star=3, diagnostic=True)
+
     def test_a_learner_arm_gets_cost_model_2_and_its_settings(self):
         config, filled = compose("learned", contract=with_qbar(61234.5),
                                  prices=PRICES6, diagnostic=True,

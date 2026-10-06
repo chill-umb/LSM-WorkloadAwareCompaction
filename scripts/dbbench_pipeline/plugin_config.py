@@ -10,7 +10,9 @@ value, so no value is chosen when an arm starts.
                          H §7), and for a rules arm "rules" and the
                          threshold of each rule switched on
   the contract (D-13)    beta_w beta_r beta_s of the objective mode at the
-                         headline beta*; c_s; q_bar of the workload family
+                         headline beta* (or, in a diagnostic run only, at
+                         --beta-star, one of the beta* the contract
+                         reports); c_s; q_bar of the workload family
   prices (18, D-15)      c_w c_f c_blk c_sk c_open (D-21: the controller
                          prices each level's reopens at stage 18's c_open)
   D-16                   config/admission_test.json: k
@@ -115,12 +117,15 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             admission: dict, decision_log: str, transition_log: str,
             placeholders: bool = False, diagnostic: bool = False,
             learner: dict | None = None, weights_path: str | None = None,
-            seed: int | None = None) -> tuple[dict, list[str]]:
+            seed: int | None = None,
+            beta_star: float | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
     needs a schema-6 prices file (cost model 2), the learner settings, and,
-    for learned, the weights path; its seed is the arm's."""
+    for learned, the weights path; its seed is the arm's. beta_star other
+    than the headline only for a diagnostic run, and only one the contract
+    reports (so that 04 scores the run at the beta* it ran under)."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
     missing: list[str] = []
@@ -143,8 +148,17 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
                     config[threshold] = _value(settings, threshold,
                                                "Gate N3 settings", missing)
 
+    headline = contract["objective"]["headline_beta_star"]
+    if beta_star is not None and float(beta_star) != float(headline):
+        reported = contract["objective"]["reported_beta_star"]
+        if float(beta_star) not in [float(b) for b in reported]:
+            raise ValueError(f"beta* {beta_star:g} is not one the contract "
+                             f"reports ({reported})")
+        if not diagnostic:
+            raise ValueError(f"beta* {beta_star:g} is not the headline "
+                             f"({headline}): a diagnostic run only")
     weights = research_objective.mode_weights(
-        contract, objective_mode, contract["objective"]["headline_beta_star"])
+        contract, objective_mode, headline if beta_star is None else beta_star)
     config.update(beta_w=weights[0], beta_r=weights[1], beta_s=weights[2])
     config["q_bar"] = research_objective.reference_rate(contract, family)
     if config["q_bar"] is None:
@@ -251,6 +265,10 @@ def main() -> int:
                              "push_interval_ms, weights_required)")
     parser.add_argument("--weights-path", help="the learned arm's weights file")
     parser.add_argument("--seed", type=int, help="the learner arms' seed")
+    parser.add_argument("--beta-star", type=float,
+                        help="the priority modes' beta* (default the "
+                             "contract's headline); another reported beta* "
+                             "only with --diagnostic")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
@@ -272,7 +290,8 @@ def main() -> int:
             learner=learner_values(_load(args.learner_settings,
                                          "learner settings"),
                                    args.learner_phase),
-            weights_path=args.weights_path, seed=args.seed)
+            weights_path=args.weights_path, seed=args.seed,
+            beta_star=args.beta_star)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

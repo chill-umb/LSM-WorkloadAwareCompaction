@@ -165,6 +165,9 @@ CONTROLLER_TEST_BUILD_DIR="${CONTROLLER_TEST_BUILD_DIR:-build-controller-debug}"
 # arm. PLUGIN_PLACEHOLDERS=1 fills the gaps with smoke values, and only runs
 # of at most PREFLIGHT_SHORT_RUN_MAX_M million operations accept it.
 CONTROLLER_OBJECTIVE_MODE="${CONTROLLER_OBJECTIVE_MODE:-read}"
+# The priority modes' beta* (empty: the contract's headline). Another of the
+# contract's reported beta* only in a DIAGNOSTIC_RUN=1 matrix (plugin_config).
+CONTROLLER_BETA_STAR="${CONTROLLER_BETA_STAR:-}"
 ACTION_BOUNDS_FILE="${ACTION_BOUNDS_FILE:-config/action_bounds.json}"
 CONTROLLER_RULES_FILE="${CONTROLLER_RULES_FILE:-config/controller_rules.json}"
 PLUGIN_PLACEHOLDERS="${PLUGIN_PLACEHOLDERS:-0}"

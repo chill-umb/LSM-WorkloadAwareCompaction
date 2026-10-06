@@ -513,6 +513,9 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
   local placeholder_flag=() learner_flag=()
   (( ! PLUGIN_PLACEHOLDERS )) || placeholder_flag=(--placeholders)
   (( ! DIAGNOSTIC_RUN )) || placeholder_flag+=(--diagnostic)
+  # beta* other than the headline: plugin_config refuses it unless diagnostic.
+  [[ -z "$CONTROLLER_BETA_STAR" ]] ||
+    placeholder_flag+=(--beta-star "$CONTROLLER_BETA_STAR")
   if is_learner_arm "$1"; then
     learner_flag=(--learner-settings "$LEARNER_SETTINGS_FILE"
                   --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
@@ -1263,6 +1266,7 @@ PY
       printf 'plugin_sha256=%s\n' "$PLUGIN_SHA256"
       printf 'plugin_config_sha256=%s\n' "$plugin_config_sha"
       printf 'controller_objective_mode=%s\n' "$CONTROLLER_OBJECTIVE_MODE"
+      printf 'controller_beta_star=%s\n' "${CONTROLLER_BETA_STAR:-headline}"
       # Smoke runs only: these values were not preregistered or measured.
       printf 'plugin_placeholders=%s\n' "${plugin_placeholders#*: }"
     fi
