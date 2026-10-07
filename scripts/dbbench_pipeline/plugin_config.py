@@ -118,16 +118,23 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             placeholders: bool = False, diagnostic: bool = False,
             learner: dict | None = None, weights_path: str | None = None,
             seed: int | None = None,
-            beta_star: float | None = None) -> tuple[dict, list[str]]:
+            beta_star: float | None = None,
+            apply_at_op: int | None = None, apply_m: str | None = None,
+            apply_k0: int | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
     needs a schema-6 prices file (cost model 2), the learner settings, and,
     for learned, the weights path; its seed is the arm's. beta_star other
     than the headline only for a diagnostic run, and only one the contract
-    reports (so that 04 scores the run at the beta* it ran under)."""
+    reports (so that 04 scores the run at the beta* it ran under). A
+    scheduled change (apply_at_op with apply_m, optionally apply_k0: the
+    step-response arm, owner 2026-10-07) is for the hold arm in a diagnostic
+    run only."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
+    schedule = scheduled_change(arm, diagnostic, apply_at_op, apply_m,
+                                apply_k0)
     missing: list[str] = []
     config: dict = {"mode": PLUGIN_MODES[arm],
                     "decision_log": decision_log,
@@ -213,13 +220,46 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     if missing:
         raise ValueError(f"the {arm} arm's plugin config lacks: " +
                          "; ".join(missing))
+    config.update(schedule)
     for key, value in config.items():
-        if key.endswith("_log") or key in ("mode", "rules", "weights_path"):
+        if key.endswith("_log") or key in ("mode", "rules", "weights_path",
+                                           "apply_m"):
             continue
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or
                 not math.isfinite(value)):
             raise ValueError(f"{key} must be a finite number; got {value!r}")
     return config, sorted(filled)
+
+
+def scheduled_change(arm: str, diagnostic: bool, apply_at_op: int | None,
+                     apply_m: str | None, apply_k0: int | None) -> dict:
+    """The hold arm's scheduled change as config keys ({} when none): at the
+    first poll at or after operation apply_at_op the plugin applies apply_m
+    (":"-separated, one value per level, L0's 1) and apply_k0, once, then
+    holds (controller/config.h). The plugin checks the bounds and the length
+    against the host."""
+    if apply_at_op is None and apply_m is None and apply_k0 is None:
+        return {}
+    if arm != "hold":
+        raise ValueError(f"the {arm} arm takes no scheduled change: hold only")
+    if not diagnostic:
+        raise ValueError("a scheduled change is for a diagnostic run only")
+    if apply_at_op is None or apply_m is None:
+        raise ValueError("a scheduled change needs apply_at_op and apply_m")
+    if isinstance(apply_at_op, bool) or not isinstance(apply_at_op, int) or apply_at_op < 1:
+        raise ValueError(f"apply_at_op must be a positive integer; got {apply_at_op!r}")
+    try:
+        values = [float(x) for x in apply_m.split(":")]
+    except ValueError:
+        raise ValueError(f"apply_m must be ':'-separated numbers; got {apply_m!r}") from None
+    if not all(math.isfinite(v) and v > 0 for v in values) or values[0] != 1:
+        raise ValueError(f"apply_m needs finite positive values and L0's 1; got {apply_m!r}")
+    out = {"apply_at_op": apply_at_op, "apply_m": apply_m}
+    if apply_k0 is not None:
+        if isinstance(apply_k0, bool) or not isinstance(apply_k0, int) or apply_k0 < 1:
+            raise ValueError(f"apply_k0 must be a positive integer; got {apply_k0!r}")
+        out["apply_k0"] = apply_k0
+    return out
 
 
 def learner_values(settings: dict, phase: str) -> dict:
@@ -269,6 +309,14 @@ def main() -> int:
                         help="the priority modes' beta* (default the "
                              "contract's headline); another reported beta* "
                              "only with --diagnostic")
+    parser.add_argument("--apply-at-op", type=int,
+                        help="hold arm, diagnostic only: the operation at or "
+                             "after which the scheduled change is applied")
+    parser.add_argument("--apply-m",
+                        help="the scheduled multipliers, ':'-separated, one "
+                             "per level (L0's 1)")
+    parser.add_argument("--apply-k0", type=int,
+                        help="the scheduled L0 trigger (default: keep it)")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
@@ -291,7 +339,9 @@ def main() -> int:
                                          "learner settings"),
                                    args.learner_phase),
             weights_path=args.weights_path, seed=args.seed,
-            beta_star=args.beta_star)
+            beta_star=args.beta_star,
+            apply_at_op=args.apply_at_op, apply_m=args.apply_m,
+            apply_k0=args.apply_k0)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

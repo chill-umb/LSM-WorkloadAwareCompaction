@@ -506,5 +506,96 @@ TEST_F(PluginTest, AHostErrorNeverLeavesThePlugin) {
   EXPECT_TRUE(controller.fallback());
 }
 
+// The step-response arm (owner, 2026-10-07): hold-only with a scheduled
+// change makes exactly one SetOptions call, at the first poll at or after
+// apply_at_op, and holds the new values from then on.
+TEST_F(PluginTest, HoldOnlyAppliesItsScheduledChangeOnceThenHolds) {
+  FakeHost host;
+  {
+    Controller controller(&host, Config({{"apply_at_op", "150000"},
+                                         {"apply_m", "\"1:1:2:1:1\""},
+                                         {"apply_k0", "6"}}));
+    EXPECT_FALSE(controller.fallback());
+    Serve(&host);  // 100k operations: before apply_at_op
+    controller.Step();
+    EXPECT_TRUE(host.applied.empty());
+    host.AddOps(60000, 0);  // 160k: the first poll at or after it
+    controller.Step();
+    ASSERT_EQ(host.applied.size(), 1u);
+    EXPECT_EQ(host.applied[0].first, (std::vector<double>{1, 1, 2, 1, 1}));
+    EXPECT_EQ(host.applied[0].second, 6);
+    host.AddOps(60000, 0);
+    Turnover(&host);
+    controller.Step();
+    EXPECT_EQ(host.applied.size(), 1u);  // then it holds
+    EXPECT_FALSE(controller.fallback());
+  }
+  EXPECT_EQ(host.snapshot->level_target_multipliers,
+            (std::vector<double>{1, 1, 2, 1, 1}));
+  const auto decisions = Decisions();
+  EXPECT_EQ(CountType(decisions, "apply_scheduled"), 1);
+  ASSERT_EQ(CountType(decisions, "apply"), 1);
+  for (const std::string& line : decisions) {
+    if (line.find("\"type\":\"apply\"") != std::string::npos) {
+      EXPECT_NE(line.find("\"scheduled\":1"), std::string::npos) << line;
+      EXPECT_NE(line.find("\"ok\":1"), std::string::npos) << line;
+      EXPECT_NE(line.find("\"seen\":1"), std::string::npos) << line;
+      EXPECT_NE(line.find("\"op\":160000"), std::string::npos) << line;
+    }
+  }
+  // Decisions after the change see the new values in effect.
+  bool l2_after = false;
+  for (const std::string& line : decisions) {
+    if (line.find("\"type\":\"decision\"") != std::string::npos &&
+        line.find("\"level\":2,") != std::string::npos &&
+        line.find("\"effective\":2,") != std::string::npos) {
+      l2_after = true;
+    }
+  }
+  EXPECT_TRUE(l2_after);
+  EXPECT_EQ(CountType(decisions, "fallback"), 0);
+}
+
+TEST_F(PluginTest, AScheduledChangeOfTheWrongLengthFallsBackAtTheStart) {
+  FakeHost host;
+  {
+    Controller controller(
+        &host, Config({{"apply_at_op", "1"}, {"apply_m", "\"1:1:2\""}}));
+    EXPECT_TRUE(controller.fallback());
+    Serve(&host);
+    controller.Step();
+  }
+  EXPECT_TRUE(host.applied.empty());  // the values in effect were already 1
+  bool said = false;
+  for (const std::string& line : Decisions()) {
+    if (line.find("\"type\":\"fallback\"") != std::string::npos) {
+      said = line.find("apply_m needs one value per level (5)") !=
+             std::string::npos;
+    }
+  }
+  EXPECT_TRUE(said);
+}
+
+TEST_F(PluginTest, AFailedScheduledChangeFallsBack) {
+  FakeHost host;
+  Controller controller(&host, Config({{"apply_at_op", "50000"},
+                                       {"apply_m", "\"1:1:2:1:1\""}}));
+  host.fail_apply = true;
+  Serve(&host);
+  controller.Step();
+  EXPECT_TRUE(controller.fallback());
+  controller.Stop();
+  const auto decisions = Decisions();
+  EXPECT_EQ(CountType(decisions, "fallback"), 1);
+  bool refused = false;
+  for (const std::string& line : decisions) {
+    if (line.find("\"type\":\"apply\"") != std::string::npos) {
+      refused = line.find("\"ok\":0") != std::string::npos &&
+                line.find("\"scheduled\":1") != std::string::npos;
+    }
+  }
+  EXPECT_TRUE(refused);
+}
+
 }  // namespace
 }  // namespace rlc

@@ -521,6 +521,11 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
                   --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
     (( ! LEARNER_FROZEN )) || learner_flag+=(--learner-phase evaluation)
   fi
+  # The hold arm's scheduled change (step-response runs, diagnostic only).
+  if [[ "$1" == hold && -n "$HOLD_APPLY_AT_OP" ]]; then
+    learner_flag+=(--apply-at-op "$HOLD_APPLY_AT_OP" --apply-m "$HOLD_APPLY_M")
+    [[ -z "$HOLD_APPLY_K0" ]] || learner_flag+=(--apply-k0 "$HOLD_APPLY_K0")
+  fi
   "$PYTHON" "$PIPELINE_DIR/plugin_config.py" --arm "$1" \
     --objective-mode "$CONTROLLER_OBJECTIVE_MODE" --family "$WORKLOAD_FAMILY" \
     --bounds "$ACTION_BOUNDS_FILE" --settings "$CONTROLLER_RULES_FILE" \
@@ -1279,6 +1284,10 @@ PY
         printf 'learner_checkpoint_in=%s\n' "${LEARNER_LAST_CHECKPOINT:-none}"
         printf 'learner_weights_in=%s\n' "${LEARNER_WEIGHTS_SHA256:-none}"
       fi
+    fi
+    if [[ "$arm" == hold ]]; then
+      # The scheduled change the composed config carries (none: empty).
+      printf 'hold_apply=%s\n' "$("$PYTHON" -c 'import json, sys; c = json.load(open(sys.argv[1])); print("" if "apply_at_op" not in c else "|".join(str(c.get(k, "")) for k in ("apply_at_op", "apply_m", "apply_k0")))' "$result_dir/plugin_config.json")"
     fi
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'

@@ -4,6 +4,7 @@
 // and the plugin then runs in fallback (A-Impl-8).
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -101,6 +102,14 @@ struct Config {
   std::string weights_path;
   double push_interval_ms = 0;
   bool weights_required = false;
+  // Hold-only only (owner, 2026-10-07: the step-response test of the
+  // settling condition C3): at the first poll at or after operation
+  // apply_at_op, apply apply_m (one value per level, ":"-separated in the
+  // config, L0's 1) and apply_k0 (0: keep the L0 trigger in effect) once,
+  // then hold them as hold-only holds any values. 0: never (ARCH-5's arm).
+  uint64_t apply_at_op = 0;
+  std::vector<double> apply_m;
+  int apply_k0 = 0;
   std::string decision_log;
   std::string transition_log;
 

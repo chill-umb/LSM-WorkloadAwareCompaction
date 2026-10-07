@@ -142,6 +142,38 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(hold["cost_model"], 1)
         self.assertNotIn("c_st", hold)
 
+    def test_the_hold_arms_scheduled_change(self):
+        """The step-response arm (owner, 2026-10-07): hold only, diagnostic
+        only, apply_at_op with apply_m, apply_k0 optional; none by default."""
+        common = dict(contract=with_qbar(61234.5))
+        hold, _ = compose("hold", **common)
+        for key in ("apply_at_op", "apply_m", "apply_k0"):
+            self.assertNotIn(key, hold)
+        hold, _ = compose("hold", diagnostic=True, apply_at_op=2900000,
+                          apply_m="1:1:2:1", **common)
+        self.assertEqual((hold["apply_at_op"], hold["apply_m"]),
+                         (2900000, "1:1:2:1"))
+        self.assertNotIn("apply_k0", hold)
+        hold, _ = compose("hold", diagnostic=True, apply_at_op=5,
+                          apply_m="1:1:2:1", apply_k0=4, **common)
+        self.assertEqual(hold["apply_k0"], 4)
+        refusals = [
+            (dict(apply_at_op=5, apply_m="1:2"), "diagnostic run only"),
+            (dict(diagnostic=True, apply_at_op=5), "needs apply_at_op and apply_m"),
+            (dict(diagnostic=True, apply_m="1:2"), "needs apply_at_op and apply_m"),
+            (dict(diagnostic=True, apply_at_op=0, apply_m="1:2"), "positive integer"),
+            (dict(diagnostic=True, apply_at_op=5, apply_m="2:1"), "L0's 1"),
+            (dict(diagnostic=True, apply_at_op=5, apply_m="1:x"), "separated numbers"),
+            (dict(diagnostic=True, apply_at_op=5, apply_m="1:2", apply_k0=0),
+             "apply_k0 must be a positive integer"),
+        ]
+        for changes, message in refusals:
+            with self.subTest(changes=changes), \
+                    self.assertRaisesRegex(ValueError, message):
+                compose("hold", **common, **changes)
+        with self.assertRaisesRegex(ValueError, "hold only"):
+            compose("rules", diagnostic=True, apply_at_op=5, apply_m="1:2")
+
     def test_a_learner_arm_refuses_cost_model_1_prices_and_missing_keys(self):
         with self.assertRaisesRegex(ValueError, "schema 6"):
             compose("learned", contract=with_qbar(61234.5), learner=LEARNER,

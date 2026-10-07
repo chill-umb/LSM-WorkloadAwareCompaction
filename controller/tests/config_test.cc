@@ -367,5 +367,70 @@ TEST(Config, TheLearnerModesNeedTheirKeysAndOthersRefuseThem) {
   EXPECT_TRUE(Contains(Error(values), "weights keys are for learned"));
 }
 
+// The step-response arm (owner, 2026-10-07): hold-only may carry one
+// scheduled change; absent, hold-only is ARCH-5's arm as before.
+TEST(Config, HoldOnlyMayScheduleOneChange) {
+  auto values = BaseConfig("/tmp/x");
+  Config plain;
+  std::string error;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &plain, &error)) << error;
+  EXPECT_EQ(plain.apply_at_op, 0u);
+  EXPECT_TRUE(plain.apply_m.empty());
+  EXPECT_EQ(plain.apply_k0, 0);
+  values["apply_at_op"] = "2900000";
+  values["apply_m"] = "\"1:1:2:1:0.5\"";
+  Config c;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  EXPECT_EQ(c.apply_at_op, 2900000u);
+  EXPECT_EQ(c.apply_m, (std::vector<double>{1, 1, 2, 1, 0.5}));
+  EXPECT_EQ(c.apply_k0, 0);  // keep the L0 trigger in effect
+  values["apply_k0"] = "4";
+  Config k0;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &k0, &error)) << error;
+  EXPECT_EQ(k0.apply_k0, 4);
+}
+
+TEST(Config, AScheduledChangeIsCheckedAndForHoldOnlyOnly) {
+  const auto with = [](std::map<std::string, std::string> changes) {
+    auto values = BaseConfig("/tmp/x");
+    values["apply_at_op"] = "1000";
+    values["apply_m"] = "\"1:1:2:1:1\"";
+    for (const auto& change : changes) {
+      if (change.second.empty()) {
+        values.erase(change.first);
+      } else {
+        values[change.first] = change.second;
+      }
+    }
+    return values;
+  };
+  EXPECT_TRUE(Contains(Error(with({{"mode", "\"rules\""},
+                                   {"rules", "\"yield_slot\""}})),
+                       "the apply keys are for hold-only"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", ""}})), "missing \"apply_m\""));
+  EXPECT_TRUE(Contains(Error(with({{"apply_at_op", ""}})),
+                       "missing \"apply_at_op\""));
+  EXPECT_TRUE(Contains(Error(with({{"apply_at_op", "0"}})),
+                       "apply_at_op a positive integer"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_at_op", "10.5"}})),
+                       "apply_at_op a positive integer"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", "\"2:1:1\""}})),
+                       "L0's value must be 1"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", "\"1:2.5:1\""}})),
+                       "[m_min, m_max]"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", "\"1:0.25\""}})),
+                       "[m_min, m_max]"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", "\"1:x:1\""}})),
+                       "is not a number"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", "\"1::1\""}})),
+                       "is not a number"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_m", "2"}})),
+                       "\"apply_m\" must be a string"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_k0", "1"}})),
+                       "k0_min <= apply_k0 <= k0_cap"));
+  EXPECT_TRUE(Contains(Error(with({{"apply_k0", "9"}})),
+                       "k0_min <= apply_k0 <= k0_cap"));
+}
+
 }  // namespace
 }  // namespace rlc

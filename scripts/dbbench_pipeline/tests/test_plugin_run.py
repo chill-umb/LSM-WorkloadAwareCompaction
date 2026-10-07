@@ -165,6 +165,25 @@ class CheckPluginRunTest(unittest.TestCase):
         report = verdict(mode="hold-only", body=[apply(1, 0, 0)])
         self.assertEqual(report["failed_checks"], ["hold_only"])
 
+    def test_hold_only_with_a_scheduled_change_calls_exactly_once(self):
+        """The step-response arm (owner, 2026-10-07): one accepted apply
+        marked scheduled, at or after apply_at_op, and no other."""
+        plan = {"type": "apply_scheduled", "op": 0, "apply_at_op": 500,
+                "m": [1, 1, 2, 1], "k0": 0}
+        def sched(op, ok=1):
+            return {**apply(op, 0, 0, m=(1, 1, 2, 1), ok=ok), "scheduled": 1}
+        def failed(*body):
+            return verdict(mode="hold-only", body=list(body))["failed_checks"]
+        report = verdict(mode="hold-only", body=[plan, sched(600)])
+        self.assertEqual(report["verdict"], "passed")
+        self.assertEqual(report["checks"]["hold_only"]["scheduled_applies"], 1)
+        self.assertEqual(failed(plan), ["hold_only"])               # never made
+        self.assertEqual(failed(plan, sched(400)), ["hold_only"])   # too early
+        self.assertEqual(failed(plan, sched(600, ok=0)), ["hold_only"])
+        self.assertEqual(failed(plan, sched(600), sched(700)), ["hold_only"])
+        self.assertEqual(failed(plan, sched(600), apply(800, 0, 0)), ["hold_only"])
+        self.assertEqual(failed(sched(600)), ["hold_only"])         # no plan line
+
     def test_an_expected_fallback_passes(self):
         report = verdict(fallback=True, expect_fallback=True)
         self.assertEqual(report["verdict"], "passed", report["failed_checks"])

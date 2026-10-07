@@ -301,7 +301,10 @@ const std::set<std::string>& KnownKeys() {
                                                "seed",
                                                "weights_path",
                                                "push_interval_ms",
-                                               "weights_required"};
+                                               "weights_required",
+                                               "apply_at_op",
+                                               "apply_m",
+                                               "apply_k0"};
   static const std::set<std::string> kWithKappa = [] {
     std::set<std::string> keys = kKnown;
     for (const char* x : kStepTypeNames) {
@@ -444,6 +447,35 @@ bool ParseFlatJson(const std::string& text,
   return Parser(text, error).Object(out);
 }
 
+// apply_m: ":"-separated multipliers, each finite and within the bounds,
+// L0's exactly 1 (A-Impl-1: L0 is never scaled).
+static bool ParseApplyVector(const std::string& text, const Bounds& b,
+                             std::vector<double>* out, Reader* r) {
+  out->clear();
+  size_t start = 0;
+  for (;;) {
+    const size_t colon = text.find(':', start);
+    const std::string item = text.substr(
+        start, colon == std::string::npos ? std::string::npos : colon - start);
+    char* end = nullptr;
+    const double value = std::strtod(item.c_str(), &end);
+    if (item.empty() || end != item.c_str() + item.size() ||
+        !std::isfinite(value)) {
+      return r->Fail("apply_m: \"" + item + "\" is not a number");
+    }
+    out->push_back(value);
+    if (colon == std::string::npos) break;
+    start = colon + 1;
+  }
+  if ((*out)[0] != 1) return r->Fail("apply_m: L0's value must be 1");
+  for (size_t i = 1; i < out->size(); ++i) {
+    if ((*out)[i] < b.m_min || (*out)[i] > b.m_max) {
+      return r->Fail("apply_m: every value must lie in [m_min, m_max]");
+    }
+  }
+  return true;
+}
+
 bool ParseConfig(const std::string& text, Config* c, std::string* error) {
   std::map<std::string, JsonValue> values;
   if (!ParseFlatJson(text, &values, error)) return false;
@@ -550,6 +582,28 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     }
   } else if (r.Has("explore") || r.Has("seed")) {
     return r.Fail("\"explore\" and \"seed\" are for prior-only and learned");
+  }
+  if (r.Has("apply_at_op") || r.Has("apply_m") || r.Has("apply_k0")) {
+    if (c->mode != Mode::kHoldOnly) {
+      return r.Fail("the apply keys are for hold-only");
+    }
+    double at = 0;
+    std::string m;
+    if (!r.Number("apply_at_op", &at) ||
+        !r.Check(at >= 1 && at == std::floor(at) && at < 1e18,
+                 "need apply_at_op a positive integer") ||
+        !r.String("apply_m", &m) ||
+        !ParseApplyVector(m, c->bounds, &c->apply_m, &r)) {
+      return false;
+    }
+    c->apply_at_op = static_cast<uint64_t>(at);
+    if (r.Has("apply_k0") &&
+        (!r.Integer("apply_k0", &c->apply_k0) ||
+         !r.Check(c->apply_k0 >= c->bounds.k0_min &&
+                      c->apply_k0 <= c->bounds.k0_cap,
+                  "need k0_min <= apply_k0 <= k0_cap"))) {
+      return false;
+    }
   }
   if (c->mode == Mode::kLearned) {
     int required = 0;

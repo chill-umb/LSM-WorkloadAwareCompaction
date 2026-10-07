@@ -141,6 +141,12 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   }
   ok = ok && CheckConfigAgainstHost(cfg_, options_.l0_trigger,
                                     options_.l0_slowdown_trigger, &error);
+  if (ok && cfg_.apply_at_op > 0 &&
+      cfg_.apply_m.size() != static_cast<size_t>(n_)) {
+    error = "config: apply_m needs one value per level (" +
+            std::to_string(n_) + ")";
+    ok = false;
+  }
   // The logs the config names are opened even when a later value was
   // invalid, so the fallback is logged where the run looks for it.
   for (auto* log : {&decisions_, &transitions_}) {
@@ -223,6 +229,15 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
           .Nums("m", m_applied_)
           .Num("k0", k0_applied_)
           .str());
+  if (cfg_.apply_at_op > 0) {
+    decisions_.Write(JsonLine("apply_scheduled")
+                         .Uint("op", ops.total())
+                         .Uint("t_us", now_())
+                         .Uint("apply_at_op", cfg_.apply_at_op)
+                         .Nums("m", cfg_.apply_m)
+                         .Num("k0", cfg_.apply_k0)
+                         .str());
+  }
   if (!ok) EnterFallback(error);
   // Runs on RocksDB's threads: nothing may escape into the host. A record
   // that cannot be queued (out of memory) is counted, and the next poll falls
@@ -348,6 +363,10 @@ void Controller::Poll(bool decide) {
     decisions_.Write(
         JsonLine("drain").Uint("op", ops.total()).Uint("t_us", now).str());
     Invalidate("drain");
+  }
+  if (cfg_.apply_at_op > 0 && !scheduled_done_ && !fallback_ && !draining_ &&
+      ops.total() >= cfg_.apply_at_op) {
+    ApplyScheduled(ops.total(), now);
   }
   if (decide && !fallback_ && !draining_ && cfg_.mode == Mode::kLearned) {
     PollWeights(ops.total(), now);
@@ -715,6 +734,51 @@ bool Controller::Flush(uint64_t op, uint64_t now, bool new_changes,
     pending_first_id_ = 0;
   }
   return ok;
+}
+
+// Hold-only's scheduled change (owner, 2026-10-07): the step-response test
+// of the settling condition C3. Once, at the first poll at or after
+// apply_at_op, outside the decision cadence; hold-only then holds the new
+// values as it held the old ones. Logged as an "apply" line with
+// "scheduled": 1; a failed call falls back, as a failed Flush does.
+void Controller::ApplyScheduled(uint64_t op, uint64_t now) {
+  scheduled_done_ = true;
+  const int k0 = cfg_.apply_k0 > 0 ? cfg_.apply_k0 : k0_applied_;
+  std::string error;
+  const bool ok = host_->Apply(cfg_.apply_m, k0, &error);
+  bool seen = false;
+  uint64_t seen_generation = 0;
+  if (ok) {
+    const auto after = host_->Snapshot();
+    if (after) {
+      seen_generation = after->generation;
+      seen = after->level_target_multipliers == cfg_.apply_m &&
+             after->l0_trigger == k0;
+    }
+  }
+  decisions_.Write(JsonLine("apply")
+                       .Uint("op", op)
+                       .Uint("t_us", now)
+                       .Uint("first_id", 0)
+                       .Uint("last_id", 0)
+                       .Nums("m", cfg_.apply_m)
+                       .Num("k0", k0)
+                       .Uint("ok", ok ? 1 : 0)
+                       .Str("error", error)
+                       .Uint("seen", seen ? 1 : 0)
+                       .Uint("seen_generation", seen_generation)
+                       .Uint("scheduled", 1)
+                       .str());
+  if (!ok) {
+    EnterFallback("scheduled apply failed: " + error);
+    return;
+  }
+  applied_once_ = true;
+  last_apply_us_ = now;
+  m_applied_ = m_target_ = cfg_.apply_m;
+  k0_applied_ = k0_target_ = k0;
+  for (int i = 1; i < n_; ++i) controls_[i].timing = m_applied_[i];
+  l0_.offset = k0_applied_ - options_.l0_trigger;
 }
 
 void Controller::CloseInterval(int level, const View& v, const Opening& next,
