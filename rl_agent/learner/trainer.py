@@ -37,8 +37,8 @@ import torch  # noqa: E402
 
 from learner import reward as reward_module  # noqa: E402
 from learner.agent import Learner, Settings, Transition  # noqa: E402
-from learner.logs import (ACTIONS, SCHEMA, LogTail, finite,  # noqa: E402
-                          model_key, vector)
+from learner.logs import (ACTIONS, SCHEMA, LogTail, charge_of,  # noqa: E402
+                          finite, model_key, vector)
 from learner.prices import from_plugin_config  # noqa: E402
 from learner.weights import write_atomic  # noqa: E402
 
@@ -77,8 +77,11 @@ class Totals:
         return d
 
 
-def build(t: dict, jobs: list, pricing, learner: Learner):
-    """The replayable Transition of a transition line, or None (and why)."""
+def build(t: dict, jobs: list, pricing, learner: Learner, *,
+          charge: str = "counterfactual", extra: float = 0.0):
+    """The replayable Transition of a transition line, or None (and why).
+    Under the actual charge, `extra` is S + U (reward.actual_extra), added
+    to the level's own cost, and no neighbour case is built."""
     if t.get("schema") != SCHEMA:
         return None, "schema"
     if not t.get("valid"):
@@ -92,9 +95,9 @@ def build(t: dict, jobs: list, pricing, learner: Learner):
         return None, "no divisor or turnover"
     learner.note_names(t["agent"], list(t["state"].keys()))
     action = t["action"]
-    cost = reward_module.level_cost(pricing, t, jobs).weighted(pricing)
+    cost = reward_module.level_cost(pricing, t, jobs).weighted(pricing) + extra
     cases = []
-    if action != "hold":
+    if action != "hold" and charge == "counterfactual":
         for side, step in (("up", -1), ("down", 1)):
             nbr_state = t.get(f"{side}_state")
             if nbr_state is None:
@@ -123,7 +126,15 @@ class Trainer:
     def __init__(self, args, settings: dict, plugin_cfg: dict):
         self.args = args
         self.pricing = from_plugin_config(plugin_cfg)
-        self.settings = Settings.from_dict(settings["learner"])
+        # The plugin config says how a level is charged; the learner's own
+        # settings may repeat it but not contradict it.
+        self.charge = charge_of(plugin_cfg)
+        learner_settings = dict(settings["learner"])
+        if learner_settings.setdefault("charge", self.charge) != self.charge:
+            raise ValueError(
+                f"the learner settings' charge {learner_settings['charge']!r} "
+                f"is not the plugin config's {self.charge!r}")
+        self.settings = Settings.from_dict(learner_settings)
         self.push_s = float(plugin_cfg["push_interval_ms"]) / 1000.0
         self.steps_per_transition = float(settings["train_steps_per_transition"])
         self.learner = Learner(self.settings, self.pricing.c_w)
@@ -133,6 +144,11 @@ class Trainer:
         self.tail = LogTail(args.transitions)
         self.decisions = LogTail(args.decisions) if args.decisions else None
         self.pending = defaultdict(list)
+        # The actual charge: (start_level, job_weighted) of every job line in
+        # log order, and where each level's last transition left off.
+        self.foreign: list = []
+        self.foreign_mark = defaultdict(int)
+        self.actual = defaultdict(float)  # S and U per level, in money
         self.totals = Totals(self.pricing)
         self.skipped = defaultdict(int)
         self.added = 0
@@ -150,10 +166,24 @@ class Trainer:
         for r in self.tail.read():
             if r.get("type") == "job":
                 self.pending[(r["level"], r["interval"])].append(r)
+                if self.charge == "actual":
+                    self.foreign.append((
+                        r["start_level"],
+                        reward_module.job_weighted(self.pricing, r)))
             elif r.get("type") == "transition":
                 jobs = self.pending.pop((r["level"], r["id"]), [])
                 self.totals.add(r, jobs)
-                t, why = build(r, jobs, self.pricing, self.learner)
+                extra = 0.0
+                if self.charge == "actual":
+                    level = r["level"]
+                    below, inflow = reward_module.actual_extra(
+                        self.pricing, r, self.foreign[self.foreign_mark[level]:])
+                    self.foreign_mark[level] = len(self.foreign)
+                    self.actual[f"below_level_{level}"] += below
+                    self.actual[f"inflow_level_{level}"] += inflow
+                    extra = below + inflow
+                t, why = build(r, jobs, self.pricing, self.learner,
+                               charge=self.charge, extra=extra)
                 if t is None:
                     self.skipped[why] += 1
                 else:
@@ -233,6 +263,8 @@ class Trainer:
                    "unmatched_job_lines": sum(len(v) for v in self.pending.values()),
                    "audit_breaches": self.learner.audit_breaches,
                    "totals": self.totals.summary(),
+                   "charge": self.charge,
+                   "actual_charge": dict(self.actual),
                    "steps": {k: m.steps for k, m in self.learner.models.items()}}
         Path(self.args.summary).write_text(json.dumps(summary, indent=2) + "\n")
         self.log.close()

@@ -14,6 +14,11 @@ result directory:
           contain one of the level's decision points, the largest number d,
           and the jobs that served no operation
   pushes  weight versions the trainer wrote, and those the plugin loaded
+  charge  the plugin's charge (its start line) is the trainer's (its
+          summary), and the transition log carries the levels below
+          ("below", log schema 5) on every transition exactly when it is
+          "actual" (owner, 2026-10-06); runs from before it read as
+          counterfactual
 
 ARCH-7 (the trainer's priced totals against 04's) needs 04's cost model 2
 row for the same run: --evaluator gives it ({"C_W": ..., "C_R": ...}); on
@@ -23,7 +28,7 @@ the host log read the counters in separate callbacks; the interim interface
 
 On D-24 §2's exploratory track every criterion is reported only; --strict
 (the preflight's step 6) exits 1 when ARCH-1, 2 or 6 fails or fewer than
---min-pushes versions reached the plugin.
+--min-pushes versions reached the plugin, or the charge check fails.
 """
 
 from __future__ import annotations
@@ -118,6 +123,27 @@ def arch8(jobs: list) -> dict:
              f"gamma^{max_d})"], "levels": out, "max_d": max_d}
 
 
+def charge_check(decisions_all: list, records: list, summary: dict) -> dict:
+    """The charge the plugin ran under, the trainer priced with, and the
+    "below" entries the actual charge needs on every transition."""
+    start = next((d for d in decisions_all if d["type"] == "start"), {})
+    plugin = start.get("charge", "counterfactual")
+    trainer = summary.get("charge", "counterfactual")
+    transitions = [t for t in records if t["type"] == "transition"]
+    wrong = [t["id"] for t in transitions
+             if (t.get("below") is not None) != (plugin == "actual")]
+    problems = []
+    if plugin != trainer:
+        problems.append(f"the plugin ran charge {plugin!r}, the trainer "
+                        f"priced {trainer!r}")
+    if wrong:
+        problems.append(f"{len(wrong)} transitions "
+                        f"{'lack' if plugin == 'actual' else 'carry'} the "
+                        f"levels below under charge {plugin!r}")
+    return {"passed": not problems, "problems": problems, "plugin": plugin,
+            "trainer": trainer, "transitions": len(transitions)}
+
+
 def check(result: Path, evaluator: dict | None, min_pushes: int) -> dict:
     decisions_all = read_all(result / "decisions.jsonl")
     records = read_all(result / "transitions.jsonl")
@@ -171,7 +197,9 @@ def check(result: Path, evaluator: dict | None, min_pushes: int) -> dict:
         arch7["note"] = "04's cost model 2 row not given (--evaluator)"
     out["arch7"] = arch7
 
-    decisive = ("arch1", "arch2", "arch6", "pushes")
+    out["charge"] = charge_check(decisions_all, records, summary)
+
+    decisive = ("arch1", "arch2", "arch6", "pushes", "charge")
     failed = [k for k in decisive if not out[k]["passed"]]
     return {"verdict": "failed" if failed else "passed", "failed": failed,
             "report_only": ["arch7", "arch8"], **out}

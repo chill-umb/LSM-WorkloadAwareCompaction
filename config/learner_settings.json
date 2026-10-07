@@ -3,8 +3,10 @@
   "plugin": {
     "explore": 0.1,
     "push_interval_ms": 5000,
-    "weights_required": 0
+    "weights_required": 0,
+    "charge": "counterfactual"
   },
+  "charge_reason": "2026-10-06: \"charge\" added (owner chose the actual-cost charge for the next runs); \"counterfactual\" keeps the confirmed behaviour of every run so far, and 03's LEARNER_CHARGE=actual selects the new one.",
   "evaluation": {
     "explore": 0.02,
     "weights_required": 1

@@ -367,5 +367,37 @@ TEST(Config, TheLearnerModesNeedTheirKeysAndOthersRefuseThem) {
   EXPECT_TRUE(Contains(Error(values), "weights keys are for learned"));
 }
 
+TEST(Config, TheChargeIsOptionalForTheLearnerModesOnly) {
+  auto values = V2Config("/tmp/x");
+  values["mode"] = "\"prior-only\"";
+  values["explore"] = "0.1";
+  values["seed"] = "7";
+  Config c;
+  std::string error;
+  // Absent: the counterfactual charge of H §3, as before.
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  EXPECT_EQ(c.charge, "counterfactual");
+  EXPECT_FALSE(c.actual_charge);
+  values["charge"] = "\"actual\"";
+  Config actual;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &actual, &error)) << error;
+  EXPECT_EQ(actual.charge, "actual");
+  EXPECT_TRUE(actual.actual_charge);
+  values["charge"] = "\"counterfactual\"";
+  Config counterfactual;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &counterfactual, &error)) << error;
+  EXPECT_FALSE(counterfactual.actual_charge);
+  values["charge"] = "\"global\"";
+  EXPECT_TRUE(Contains(Error(values), "\"counterfactual\" or \"actual\""));
+  values["charge"] = "1";
+  EXPECT_TRUE(Contains(Error(values), "must be a string"));
+  // A mode without a reward refuses it.
+  values = V2Config("/tmp/x");
+  values["mode"] = "\"rules\"";
+  values["rules"] = "\"yield_slot\"";
+  values["charge"] = "\"actual\"";
+  EXPECT_TRUE(Contains(Error(values), "\"charge\" is for prior-only and learned"));
+}
+
 }  // namespace
 }  // namespace rlc

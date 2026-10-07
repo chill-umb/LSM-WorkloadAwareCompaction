@@ -299,6 +299,7 @@ const std::set<std::string>& KnownKeys() {
                                                "n_win",
                                                "explore",
                                                "seed",
+                                               "charge",
                                                "weights_path",
                                                "push_interval_ms",
                                                "weights_required"};
@@ -548,8 +549,17 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
         !r.Integer("seed", &c->seed) || !r.Check(c->seed >= 0, "need seed >= 0")) {
       return false;
     }
+    if (r.Has("charge") &&
+        (!r.String("charge", &c->charge) ||
+         !r.Check(c->charge == "counterfactual" || c->charge == "actual",
+                  "\"charge\" must be \"counterfactual\" or \"actual\""))) {
+      return false;
+    }
+    c->actual_charge = c->charge == "actual";
   } else if (r.Has("explore") || r.Has("seed")) {
     return r.Fail("\"explore\" and \"seed\" are for prior-only and learned");
+  } else if (r.Has("charge")) {
+    return r.Fail("\"charge\" is for prior-only and learned");
   }
   if (c->mode == Mode::kLearned) {
     int required = 0;

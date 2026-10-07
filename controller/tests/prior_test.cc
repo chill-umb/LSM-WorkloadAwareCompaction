@@ -249,5 +249,112 @@ TEST(Prior, CostModel2AddsEachL0MergesJobPriceAndOverlapRead) {
   EXPECT_NEAR(b[kExpand], norm * (g(5) - g(4)), 1e-9);
 }
 
+// The actual charge (owner, 2026-10-06): the merges from the level above
+// (P1) and the hidden steps one level down (P2), at V2View's numbers.
+Config Actual() {
+  Config c = V2();
+  c.charge = "actual";
+  c.actual_charge = true;
+  return c;
+}
+
+// One extra overlap byte of a merge from the level above: read and written,
+// beta_W (1 + c_cr / c_w) = 1.5, and its interference, (0.2 + 0.1) per
+// source byte times (1 + lambda) / Y(1.5), Y = (0.9 + 1.5) + 0.25 * 2.5.
+constexpr double kPerOverlapByte = 1.5 + 0.3 * 1.25 / 3.025;
+
+TEST(Prior, TheActualChargePricesTheMergesFromTheLevelAbove) {
+  const View v = V2View();
+  const auto added = [&](int level, int action) {
+    return LevelPrior(v, level, {}, Actual())[action] -
+           LevelPrior(v, level, {}, V2())[action];
+  };
+  // Level 2, expand by 0.25: Lemma D.8 at level 1, c_1 = 1.5 / f_1 = 0.75,
+  // so the overlap per source byte of level 1 grows by 0.75 * T * 0.25 /
+  // phi_1 = 0.75; over level 2's turnover level 1 merges (1 - xi) C_1 N_2 /
+  // N_1 = 0.7 * 2 C_1 = 0.7 C_2 source bytes: 0.525 C_2 extra overlap.
+  EXPECT_NEAR(added(2, kExpand), kPerOverlapByte * 0.525, 1e-12);
+  EXPECT_GT(added(2, kExpand), 0);
+  // Level 1 takes L0's model: N_1 u / (K F) = 20000 * 409.6 / (4 MiB) L0
+  // merges per turnover, each overlapping 0.25 C_1 more of L1.
+  EXPECT_NEAR(added(1, kExpand),
+              kPerOverlapByte * 20000 * 409.6 / (4 * kMiB) * 0.25, 1e-12);
+  // Hold is never priced.
+  EXPECT_EQ(LevelPrior(v, 2, {}, Actual())[kHold], 0);
+}
+
+TEST(Prior, TheActualChargeCreditsAnEarlyReleaseAndPricesADeferral) {
+  View v = V2View();
+  SetPhi(&v, 2, 0.8);
+  const double released = 0.8 * 0.05 / 1.05;
+  EXPECT_NEAR(LevelPrior(v, 2, {}, Actual())[kCompact] -
+                  LevelPrior(v, 2, {}, V2())[kCompact],
+              -kPerOverlapByte * 0.7 * 0.5 * 2 * 0.75 * 2 * released / 0.5,
+              1e-12);
+  SetPhi(&v, 2, 0.97);
+  const double held = 0.97 * 1.05 - 1;
+  EXPECT_NEAR(LevelPrior(v, 2, {}, Actual())[kDefer] -
+                  LevelPrior(v, 2, {}, V2())[kDefer],
+              kPerOverlapByte * 0.7 * 0.5 * 2 * 0.75 * 2 * held / 0.5, 1e-12);
+}
+
+TEST(Prior, TheActualChargePricesTheHiddenStepsOneLevelDown) {
+  View v = V2View();
+  // 3 hidden steps per operation charged to level 3 (over level 4's
+  // entries). Expanding level 2 by 0.25 keeps 0.93 * 0.25 C_2 out of level
+  // 3, which holds 0.5 C_3 = C_2: its charge falls by 23.25%, over level 2's
+  // turnover at c_st = 10, in units of C_2.
+  v.hidden[3] = 3 * v.ops;
+  const double p2 = 10 * 3 * (-0.93 * 0.25 / 1.0) * v.N[2] / v.C[2];
+  EXPECT_NEAR(LevelPrior(v, 2, {}, Actual())[kExpand] -
+                  LevelPrior(v, 2, {}, V2())[kExpand],
+              kPerOverlapByte * 0.525 + p2, 1e-12);
+  EXPECT_LT(p2, 0);
+  // An early release lands more there: the sign turns.
+  SetPhi(&v, 2, 0.8);
+  const double released = 0.8 * 0.05 / 1.05;
+  const double p2_compact =
+      10 * 3 * (0.93 * released / 1.0) * v.N[2] / v.C[2];
+  EXPECT_GT(p2_compact, 0);
+  EXPECT_NEAR(LevelPrior(v, 2, {}, Actual())[kCompact] -
+                  LevelPrior(v, 2, {}, V2())[kCompact],
+              -kPerOverlapByte * 0.7 * 0.5 * 2 * 0.75 * 2 * released / 0.5 +
+                  p2_compact,
+              1e-12);
+  // The deepest level has no level below.
+  const int last = v.num_levels - 1;
+  v.hidden.assign(v.num_levels, 3 * v.ops);
+  View no_hidden = v;
+  no_hidden.hidden.assign(v.num_levels, 0);
+  EXPECT_NEAR(LevelPrior(v, last, {}, Actual())[kExpand] -
+                  LevelPrior(v, last, {}, V2())[kExpand],
+              LevelPrior(no_hidden, last, {}, Actual())[kExpand] -
+                  LevelPrior(no_hidden, last, {}, V2())[kExpand],
+              1e-12);
+}
+
+TEST(Prior, TheActualChargeNeedsCostModel2AndMeasuredInputs) {
+  // Under cost model 1 the flag changes nothing (the learner modes run
+  // under cost model 2 only).
+  Config cm1 = TestConfig();
+  cm1.actual_charge = true;
+  View v = TestView();
+  SetPhi(&v, 2, 0.8);
+  for (int level = 1; level < v.num_levels; ++level) {
+    const Values a = LevelPrior(v, level, {}, cm1);
+    const Values b = LevelPrior(v, level, {}, TestConfig());
+    for (int x = 0; x < kNumActions; ++x) EXPECT_EQ(a[x], b[x]);
+  }
+  // Unmeasured turnovers: nothing is added.
+  View w = V2View();
+  w.hidden.assign(w.num_levels, 3 * w.ops);
+  w.N.assign(w.num_levels, kNaN);
+  for (int level = 1; level < w.num_levels; ++level) {
+    const Values a = LevelPrior(w, level, {}, Actual());
+    const Values b = LevelPrior(w, level, {}, V2());
+    for (int x = 0; x < kNumActions; ++x) EXPECT_EQ(a[x], b[x]) << level;
+  }
+}
+
 }  // namespace
 }  // namespace rlc

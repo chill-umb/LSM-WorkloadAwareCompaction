@@ -23,8 +23,10 @@ value, so no value is chosen when an arm starts.
                          kappa_b_<type> and kappa_j_<type>_<kind>; hold and
                          rules arms run under cost model 1
   learner settings       LEARNER_SETTINGS_FILE (D-24 §2, exploratory):
-                         explore, push_interval_ms, weights_required; the
-                         seed and the weights path come from the arm
+                         explore, push_interval_ms, weights_required, and
+                         charge ("counterfactual" when absent; --charge,
+                         03's LEARNER_CHARGE, overrides it); the seed and
+                         the weights path come from the arm
 
 Every value missing, or null, in its file is listed and the arm is refused:
 the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
@@ -52,6 +54,12 @@ PLUGIN_MODES = {"hold": "hold-only", "rules": "rules", "prior": "prior-only",
                 "learned": "learned"}
 LEARNER_ARMS = ("prior", "learned")
 LEARNER_KEYS = ("explore", "push_interval_ms", "weights_required")
+# How a learner arm's levels are charged for the cost they push onto other
+# levels: H §3's counterfactual neighbour charge, or the actual cost of the
+# levels below and of the merges into the level (owner, 2026-10-06; the
+# plugin's prior adds the matching terms). controller/config.cc and
+# rl_agent/learner/logs.py CHARGES name the same two.
+CHARGES = ("counterfactual", "actual")
 # The device prices controller/config.cc reads, c_open among them since
 # PREREGISTRATION D-21 (resolving D-20 §2g): measured by stage 18, never a
 # default; only the preflight's smoke runs fill a missing one.
@@ -118,16 +126,22 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             placeholders: bool = False, diagnostic: bool = False,
             learner: dict | None = None, weights_path: str | None = None,
             seed: int | None = None,
-            beta_star: float | None = None) -> tuple[dict, list[str]]:
+            beta_star: float | None = None,
+            charge: str | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
     needs a schema-6 prices file (cost model 2), the learner settings, and,
     for learned, the weights path; its seed is the arm's. beta_star other
     than the headline only for a diagnostic run, and only one the contract
-    reports (so that 04 scores the run at the beta* it ran under)."""
+    reports (so that 04 scores the run at the beta* it ran under). A learner
+    arm's charge is `charge`, else its settings' "charge", else
+    "counterfactual"; other arms refuse one."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
+    if charge is not None and arm not in LEARNER_ARMS:
+        raise ValueError(f"the {arm} arm takes no charge: the learner arms "
+                         f"{LEARNER_ARMS} only")
     missing: list[str] = []
     config: dict = {"mode": PLUGIN_MODES[arm],
                     "decision_log": decision_log,
@@ -189,6 +203,11 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         if seed is None:
             missing.append("seed (the arm's)")
         config["seed"] = seed
+        value = charge if charge is not None else learner.get(
+            "charge", "counterfactual")
+        if value not in CHARGES:
+            raise ValueError(f"charge must be one of {CHARGES}; got {value!r}")
+        config["charge"] = value
         if arm == "learned":
             if not weights_path:
                 missing.append("weights_path (the arm's)")
@@ -214,7 +233,8 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         raise ValueError(f"the {arm} arm's plugin config lacks: " +
                          "; ".join(missing))
     for key, value in config.items():
-        if key.endswith("_log") or key in ("mode", "rules", "weights_path"):
+        if key.endswith("_log") or key in ("mode", "rules", "weights_path",
+                                           "charge"):
             continue
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or
                 not math.isfinite(value)):
@@ -269,6 +289,9 @@ def main() -> int:
                         help="the priority modes' beta* (default the "
                              "contract's headline); another reported beta* "
                              "only with --diagnostic")
+    parser.add_argument("--charge", choices=CHARGES,
+                        help="the learner arms' charge (default: the "
+                             "settings' \"charge\", else counterfactual)")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
@@ -291,7 +314,7 @@ def main() -> int:
                                          "learner settings"),
                                    args.learner_phase),
             weights_path=args.weights_path, seed=args.seed,
-            beta_star=args.beta_star)
+            beta_star=args.beta_star, charge=args.charge)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

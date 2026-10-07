@@ -95,6 +95,72 @@ class TrainerTest(unittest.TestCase):
         # charge of a level whose neighbour has none is 0.
         self.assertEqual([m.agent for m in w.models], ["interior"])
 
+    def test_the_counterfactual_charge_is_unchanged(self):
+        """The golden interval's cost and neighbour cases are what the
+        trainer computed before the actual charge existed (e49da06)."""
+        from learner import reward
+        from learner.trainer import build
+        tr = self.trainer()
+        self.assertEqual(tr.charge, "counterfactual")
+        t, why = build(fx.interior_transition(), [fx.job_line()], tr.pricing,
+                       tr.learner)
+        self.assertEqual(why, "")
+        self.assertEqual(t.cost, 8518890.422446974)
+        self.assertEqual([c.key for c in t.neighbours], ["interior-1", "last"])
+        # The trainer passes no extra: the below entries are ignored.
+        self.append("transitions", fx.dumps(self.records(1)))
+        tr.ingest()
+        (replayed,) = tr.learner.replay["interior-2"]
+        self.assertEqual(replayed.cost, reward.level_cost(
+            tr.pricing, fx.interior_transition(), [fx.job_line()]).weighted(
+                tr.pricing))
+        self.assertEqual(len(replayed.neighbours), 2)
+
+    def test_the_actual_charge_adds_the_levels_below_and_the_inflow(self):
+        from learner import reward
+        cfg = fx.plugin_config()
+        cfg["charge"] = "actual"
+        Path(self.paths["plugin"]).write_text(json.dumps(cfg))
+        tr = self.trainer()
+        self.assertEqual(tr.charge, "actual")
+        self.assertEqual(tr.learner.s.charge, "actual")
+        p = tr.pricing
+        below3 = fx.job_line(level=3, start_level=3, output_level=4,
+                             interval=55, job=61)
+        inflow = fx.job_line(level=1, start_level=1, output_level=2,
+                             interval=56, job=62)
+        above = fx.job_line(level=0, start_level=0, kind="l0",
+                            output_level=1, interval=57, job=63)
+        own = fx.job_line(interval=100)
+        late = fx.job_line(level=4, start_level=4, output_level=5,
+                           interval=58, job=64)
+        records = [below3, inflow, above, own, fx.interior_transition(id=100),
+                   late, fx.job_line(interval=101),
+                   fx.interior_transition(id=101)]
+        self.append("transitions", fx.dumps(records))
+        self.assertEqual(tr.ingest(), 2)
+        first, second = tr.learner.replay["interior-2"]
+        t = fx.interior_transition()
+        listed = sum(reward.below_cost(p, e) for e in t["below"])
+        base = reward.level_cost(p, t, [fx.job_line()]).weighted(p)
+        w = reward.job_weighted
+        # The first interval: the job below (L3) and the L1 -> L2 merge; not
+        # L0's merge (above, not inflow) and not its own job twice.
+        self.assertAlmostEqual(first.cost, base + listed + w(p, below3) +
+                               w(p, inflow))
+        # A job logged after a transition goes to the level's next one.
+        self.assertAlmostEqual(second.cost, base + listed + w(p, late))
+        self.assertEqual((first.neighbours, second.neighbours), ([], []))
+        self.assertAlmostEqual(tr.actual["inflow_level_2"], w(p, inflow))
+        # The ARCH-7 totals still count each level's own costs once.
+        self.assertEqual(tr.totals.parts["jobs"], 2)
+
+    def test_the_settings_may_not_contradict_the_plugins_charge(self):
+        Path(self.paths["settings"]).write_text(
+            json.dumps(fx.settings(charge="actual")))
+        with self.assertRaisesRegex(ValueError, "charge"):
+            self.trainer()
+
     def test_stops_after_the_plugins_stop_line_and_saves(self):
         self.append("transitions", fx.dumps(self.records(6)))
         self.append("decisions", json.dumps({"type": "stop"}) + "\n")

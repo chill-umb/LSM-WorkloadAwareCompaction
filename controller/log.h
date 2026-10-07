@@ -44,8 +44,15 @@
 // weights version and, in the learner modes, q; and the transition log gains
 // one "job" line per completed job (H §6, ARCH-7, ARCH-8), written before
 // the transition that closes its interval.
+// Schema 5 (2026-10-06, the actual charge; owner's choice that day): a
+// transition gains "below", the read counts and held bytes of every level
+// below its own over its interval (kBelowFields, each level's rho~ at the
+// close; a level with all of them 0 is left out), when the plugin runs with
+// charge "actual"; null otherwise. The trainer charges level i for them
+// (rl_agent/learner/reward.py, actual_extra).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -58,7 +65,34 @@
 
 namespace rlc {
 
-constexpr int kLogSchema = 4;
+constexpr int kLogSchema = 5;
+
+// The fields a "below" entry carries: what reward.level_cost reads for a
+// level's charged reads, hidden steps and shadowed garbage.
+inline constexpr std::array<PartField, 16> kBelowFields = {{
+    {"probes", &LevelParts::probes},
+    {"fp_reads", &LevelParts::fp_reads},
+    {"seeks", &LevelParts::seeks},
+    {"reopens", &LevelParts::reopens},
+    {"slot_out_probes", &LevelParts::slot_out_probes},
+    {"slot_out_fp_reads", &LevelParts::slot_out_fp_reads},
+    {"slot_out_seeks", &LevelParts::slot_out_seeks},
+    {"slot_out_reopens", &LevelParts::slot_out_reopens},
+    {"slot_in_probes", &LevelParts::slot_in_probes},
+    {"slot_in_fp_reads", &LevelParts::slot_in_fp_reads},
+    {"slot_in_seeks", &LevelParts::slot_in_seeks},
+    {"slot_in_reopens", &LevelParts::slot_in_reopens},
+    {"hidden_steps", &LevelParts::hidden_steps},
+    {"slot_out_hidden", &LevelParts::slot_out_hidden},
+    {"slot_in_hidden", &LevelParts::slot_in_hidden},
+    {"held_byte_ops", &LevelParts::held_byte_ops}}};
+
+// One level below a transition's own, over that transition's interval.
+struct BelowLevel {
+  int level = 0;
+  LevelParts parts;
+  double rho_tilde = kNaN;  // at the close
+};
 
 // The shortest decimal that reads back as the same double; null if not
 // finite.
@@ -79,6 +113,8 @@ class JsonLine {
   JsonLine& Features(const char* key, const std::vector<std::string>& names,
                      const std::vector<double>& values);
   JsonLine& Parts(const char* key, const LevelParts& parts);
+  // [{"level": j, kBelowFields..., "rho_tilde": x}, ...]
+  JsonLine& Below(const char* key, const std::vector<BelowLevel>& levels);
   std::string str() const { return s_ + "}"; }
 
  private:
@@ -133,6 +169,9 @@ struct TransitionRecord {
   LevelParts parts;
   // g_i = (1 - rho~_i) B_i, the shadowed garbage (D §4), at the close.
   double b_bytes = kNaN, rho_tilde = kNaN;
+  // Schema 5, charge "actual" only (has_below): the levels below.
+  bool has_below = false;
+  std::vector<BelowLevel> below;
   Agent next_agent = Agent::kInterior;
   std::vector<double> next_state;  // empty: null (closed without a decision)
   Mask next_mask{};

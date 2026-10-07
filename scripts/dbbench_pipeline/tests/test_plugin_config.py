@@ -142,6 +142,30 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(hold["cost_model"], 1)
         self.assertNotIn("c_st", hold)
 
+    def test_a_learner_arms_charge(self):
+        """counterfactual unless the settings or --charge say actual; other
+        arms take none; anything else is refused."""
+        common = dict(contract=with_qbar(61234.5), prices=PRICES6,
+                      diagnostic=True, seed=4)
+        prior, _ = compose("prior", learner=LEARNER, **common)
+        self.assertEqual(prior["charge"], "counterfactual")
+        prior, _ = compose("prior", learner={**LEARNER, "charge": "actual"},
+                           **common)
+        self.assertEqual(prior["charge"], "actual")
+        learned, _ = compose("learned", learner=LEARNER, charge="actual",
+                             weights_path="/w.bin", **common)
+        self.assertEqual(learned["charge"], "actual")
+        learned, _ = compose("learned", learner={**LEARNER, "charge": "actual"},
+                             charge="counterfactual", weights_path="/w.bin",
+                             **common)
+        self.assertEqual(learned["charge"], "counterfactual")
+        with self.assertRaisesRegex(ValueError, "charge"):
+            compose("prior", learner={**LEARNER, "charge": "global"}, **common)
+        with self.assertRaisesRegex(ValueError, "takes no charge"):
+            compose("rules", charge="actual")
+        hold, _ = compose("hold", contract=with_qbar(61234.5))
+        self.assertNotIn("charge", hold)
+
     def test_a_learner_arm_refuses_cost_model_1_prices_and_missing_keys(self):
         with self.assertRaisesRegex(ValueError, "schema 6"):
             compose("learned", contract=with_qbar(61234.5), learner=LEARNER,

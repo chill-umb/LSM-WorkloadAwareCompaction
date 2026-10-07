@@ -1,4 +1,4 @@
-"""The plugin's logs (controller/log.h, schema 4): constants, a reader that
+"""The plugin's logs (controller/log.h, schema 5): constants, a reader that
 tails a growing file, and the shapes the learner reads."""
 
 from __future__ import annotations
@@ -8,8 +8,13 @@ import math
 import os
 from typing import Optional
 
-SCHEMA = 4
+SCHEMA = 5
 ACTIONS = ("hold", "compact", "defer", "expand")
+# How a level is charged for the cost it pushes onto other levels (the
+# plugin config's "charge"): H §3's counterfactual neighbour charge, or the
+# actual cost of the levels below and of the merges into it (owner,
+# 2026-10-06; schema 5's "below").
+CHARGES = ("counterfactual", "actual")
 AGENTS = ("l0", "interior", "last")
 # cost_model_v2's step types and kinds, in the plugin's order.
 STEP_TYPES = ("probe", "block", "seek", "reopen", "step", "iblock",
@@ -26,6 +31,21 @@ COST_KEYS = (
     "fg_probes", "fg_block_probes", "fg_run_seeks", "fg_reopens",
     "fg_nexts_found", "fg_iter_skips", "memtable_hidden", "k0_ops",
     "l0_probes", "l0_block_probes", "l0_seeks", "l0_reopens", "l0_hidden")
+# A "below" entry's counts (controller/log.h kBelowFields), besides "level"
+# and "rho_tilde".
+BELOW_KEYS = (
+    "probes", "fp_reads", "seeks", "reopens", "slot_out_probes",
+    "slot_out_fp_reads", "slot_out_seeks", "slot_out_reopens",
+    "slot_in_probes", "slot_in_fp_reads", "slot_in_seeks", "slot_in_reopens",
+    "hidden_steps", "slot_out_hidden", "slot_in_hidden", "held_byte_ops")
+
+
+def charge_of(cfg: dict) -> str:
+    """The plugin config's charge; absent is "counterfactual"."""
+    charge = cfg.get("charge", "counterfactual")
+    if charge not in CHARGES:
+        raise ValueError(f"charge must be one of {CHARGES}; got {charge!r}")
+    return charge
 
 
 def model_key(agent: str, level: int) -> str:

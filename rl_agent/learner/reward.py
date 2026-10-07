@@ -3,7 +3,17 @@
     r_i = -(c^beta_i + X_{i+1} + X_{i-1}) / (c_w C_i),
     c^beta_i = beta_W sum tau_job + beta_R Rd_i + sum I^beta + beta_S (c_s/q) sum g_i,
 
-priced from the plugin's counts (controller/log.h schema 4) with the
+or, under the plugin config's charge "actual" (owner, 2026-10-06; log
+schema 5),
+
+    r_i = -(c^beta_i + S^beta_{>i} + U^beta_i) / (c_w C_i),
+
+with S the measured beta-weighted cost of every level below i over i's
+interval (its "below" entries' charged reads, hidden steps and garbage, and
+the jobs sourced there), U, for i >= 1, the jobs sourced at level i - 1
+(L0 -> L1 merges for L1), and no neighbour charge (actual_extra);
+
+priced from the plugin's counts (controller/log.h schema 5) with the
 evaluator's formulas (cost_model_v2), so the trainer's totals and 04's agree
 (ARCH-7). The six shared buckets (hit-read, reopen, scan-base, memtable,
 write-path, fixed) go to no level and no reward.
@@ -26,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import prices as prices_module
-from .logs import ACTIONS, finite
+from .logs import ACTIONS, BELOW_KEYS, finite
 
 cost_model_v2 = prices_module.cost_model_v2
 
@@ -99,6 +109,44 @@ def level_cost(p: prices_module.Pricing, transition: dict,
             out.intf_read += read
             out.intf_write += write
     return out
+
+
+def job_weighted(p: prices_module.Pricing, line: dict) -> float:
+    """beta_W tau_job + I^beta of one job line, as c^beta_i charges a job of
+    its own level (LevelCost.weighted); 0 for a flush, whose interference is
+    the write-path bucket's and whose tau is L0's own."""
+    if line["kind"] == "flush":
+        return 0.0
+    tau, read, write = job_charges(p, line)
+    return p.beta_w * tau + p.beta_r * read + p.beta_w * write
+
+
+def below_cost(p: prices_module.Pricing, entry: dict) -> float:
+    """c^beta of one "below" entry without its jobs: the level's charged
+    reads, hidden steps and shadowed garbage, as level_cost prices a level's
+    own (absent counts are 0)."""
+    cost = {key: float(entry.get(key) or 0.0) for key in BELOW_KEYS}
+    t = {"cost": cost, "rho_tilde": entry.get("rho_tilde")}
+    return level_cost(p, t, []).weighted(p)
+
+
+def actual_extra(p: prices_module.Pricing, transition: dict,
+                 foreign: list) -> tuple[float, float]:
+    """(S, U) of the actual charge, in money, beta-weighted: S the levels
+    below the transition's own over its interval (its "below" entries and
+    the jobs sourced below), U the jobs sourced one level up. `foreign` is
+    (start_level, job_weighted) of every job line logged since the level's
+    previous transition (the plugin writes a job before the transition
+    that closes the interval it completed in, H §6)."""
+    level = transition["level"]
+    below = sum(below_cost(p, e) for e in transition.get("below") or [])
+    inflow = 0.0
+    for start, weighted in foreign:
+        if start > level:
+            below += weighted
+        elif level >= 1 and start == level - 1:
+            inflow += weighted
+    return below, inflow
 
 
 def buckets(p: prices_module.Pricing, cost: dict) -> dict[str, float]:

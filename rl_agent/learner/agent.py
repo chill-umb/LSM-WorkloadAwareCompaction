@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F_
 
-from .logs import key_agent_level
+from .logs import CHARGES, key_agent_level
 from .model import QNet
 from .reward import NeighbourCase
 from .weights import N_ACTIONS, WeightsFile
@@ -58,12 +58,21 @@ class Settings:
     min_replay: int       # transitions before a model trains
     echo: str             # "own" or "full" (H §3, §0.6 item 11)
     seed: int
+    # "counterfactual" (H §3's neighbour charge) or "actual" (no neighbour
+    # charge: the trainer adds the levels below and the merges into the
+    # level to its cost, reward.actual_extra). Optional; the trainer sets it
+    # from the plugin config.
+    charge: str = "counterfactual"
 
     @staticmethod
     def from_dict(d: dict) -> "Settings":
-        s = Settings(**{k: d[k] for k in Settings.__dataclass_fields__})
+        optional = {"charge"}
+        s = Settings(**{k: d[k] for k in Settings.__dataclass_fields__
+                        if k not in optional or k in d})
         if s.echo not in ECHO_VARIANTS:
             raise ValueError(f"echo must be one of {ECHO_VARIANTS}")
+        if s.charge not in CHARGES:
+            raise ValueError(f"charge must be one of {CHARGES}")
         if not (s.n_h > 0 and s.hidden > 0 and s.layers >= 1 and s.clip > 0 and
                 s.lr > 0 and s.batch > 0 and s.target_every > 0 and
                 s.replay >= s.batch and s.min_replay >= s.batch):
@@ -125,7 +134,10 @@ class Learner:
                    if case.mask[a])
 
     def neighbour_charge(self, t: Transition) -> float:
-        """X_{i+1} + X_{i-1} in money; 0 on hold (no cases)."""
+        """X_{i+1} + X_{i-1} in money; 0 on hold (no cases) and under the
+        actual charge, which builds none."""
+        if self.s.charge == "actual":
+            return 0.0
         total = 0.0
         for case in t.neighbours:
             if not (case.c_bytes and math.isfinite(case.c_bytes)):

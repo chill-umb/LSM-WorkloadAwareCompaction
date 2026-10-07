@@ -185,7 +185,8 @@ echo "=== step 6: learner smoke at 2M, T=2 ==="
 # within the run. 03 runs 28 on it; 21 --strict then requires ARCH-1 (no
 # NaN), ARCH-2 (no masked action or target argmax), ARCH-6 (C++ and Python
 # agree on 99.9% of decisions) and at least 3 versions loaded; 04 must score
-# it. Then the fallback (A-Impl-8) on a corrupt weights file: a frozen
+# it. The same smoke again under LEARNER_CHARGE=actual (21 also checks the
+# charge). Then the fallback (A-Impl-8) on a corrupt weights file: a frozen
 # learned arm must run to the drain in fallback, which 03 refuses (exit 8)
 # and 28 --expect-fallback accepts.
 LEARNER_PRICES="${LEARNER_PRICES_FILE:-$DBBENCH_BUILD_DIR/prices.provisional.json}"
@@ -216,6 +217,26 @@ PY
   learner_arm="$LEARNER_RESULTS/results/2M/T2/learned"
   "$PYTHON" "$PIPELINE_DIR/21_check_learner.py" --result "$learner_arm" \
     --strict --min-pushes 3 --output "$PREFLIGHT_WORK_DIR/learner_smoke_report.json"
+
+  # The actual charge (owner, 2026-10-06): the same smoke under
+  # LEARNER_CHARGE=actual, so the levels below in the transition log, the
+  # trainer's actual reward and the prior's added terms run before a long
+  # run does; 21's charge check requires them to agree.
+  LEARNER_ACTUAL="$PREFLIGHT_WORK_DIR/learner_actual"
+  rm -rf "$LEARNER_ACTUAL" "$DB_ROOT/preflight-learner-actual"
+  mkdir -p "$LEARNER_ACTUAL"
+  CONFIRM_EXPERIMENTS=YES EXPERIMENT_ARMS=learned WORKLOAD_SIZES_M=2 \
+    SIZE_RATIOS=2 REPEATS=1 RESUME=0 PLUGIN_PLACEHOLDERS=1 DIAGNOSTIC_RUN=1 \
+    CONTROLLER_OBJECTIVE_MODE=balanced PRICES_FILE="$LEARNER_PRICES" \
+    LEARNER_SETTINGS_FILE="$smoke_settings" LEARNER_CHAIN=0 \
+    LEARNER_CHECKPOINT_IN="" LEARNER_FROZEN=0 LEARNER_CHARGE=actual \
+    RESULTS_ROOT="$LEARNER_ACTUAL/results" \
+    DB_ROOT="$DB_ROOT/preflight-learner-actual" \
+    "$PIPELINE_DIR/03_run_experiments.sh"
+  "$PYTHON" "$PIPELINE_DIR/21_check_learner.py" \
+    --result "$LEARNER_ACTUAL/results/2M/T2/learned" --strict --min-pushes 3 \
+    --output "$PREFLIGHT_WORK_DIR/learner_actual_report.json"
+  rm -rf "$DB_ROOT/preflight-learner-actual"
 
   LEARNER_FALLBACK="$PREFLIGHT_WORK_DIR/learner_fallback"
   rm -rf "$LEARNER_FALLBACK" "$DB_ROOT/preflight-learner-fallback"

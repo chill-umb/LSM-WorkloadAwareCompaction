@@ -95,6 +95,16 @@ struct Config {
   // one), drawn from a generator seeded with seed.
   double explore = 0;
   int seed = 0;
+  // Prior-only and learned modes: how a level is charged for the cost it
+  // pushes onto other levels. "counterfactual" (the default, PATHWAYS H §3
+  // as written): the learned neighbour charge, and the prior of H §7 as it
+  // was. "actual" (owner, 2026-10-06): the trainer charges level i the
+  // measured cost of every level below it and of the merges from level i - 1
+  // into it, the transition log carries the levels below (log schema 5),
+  // and the prior adds the matching terms (prior.cc). Optional; any other
+  // mode refuses the key.
+  std::string charge = "counterfactual";
+  bool actual_charge = false;
   // Learned mode (H §6, A-Impl-8): the weights file, polled every
   // push_interval_ms. Absent at the start: Q = -b until it appears (cold
   // start), unless weights_required, which then falls back.

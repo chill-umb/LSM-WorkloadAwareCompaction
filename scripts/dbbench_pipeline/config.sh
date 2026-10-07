@@ -186,6 +186,12 @@ LEARNER_CHAIN="${LEARNER_CHAIN:-1}"
 LEARNER_CHECKPOINT_IN="${LEARNER_CHECKPOINT_IN:-}"
 LEARNER_FROZEN="${LEARNER_FROZEN:-0}"
 LEARNER_WEIGHTS_FILE="${LEARNER_WEIGHTS_FILE:-}"
+# How the learner arms charge a level for the cost it pushes onto other
+# levels: empty (the settings file's "charge", counterfactual when absent),
+# "counterfactual" (PATHWAYS H §3) or "actual" (the levels below and the
+# merges into the level, measured; the prior prices the same; owner,
+# 2026-10-06). plugin_config.py refuses anything else.
+LEARNER_CHARGE="${LEARNER_CHARGE:-}"
 # Seconds a trainer may take to finish after db_bench exits.
 LEARNER_STOP_TIMEOUT_SECONDS="${LEARNER_STOP_TIMEOUT_SECONDS:-600}"
 # Written by 13, checked by 03 before any run larger than

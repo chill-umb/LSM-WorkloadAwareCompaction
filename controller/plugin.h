@@ -154,6 +154,12 @@ class Controller {
   Stats stats_;
   OpClock clock_;
   std::vector<LevelParts> parts_;
+  // Charge "actual" only: every level's parts since the start, never reset,
+  // and each level's copy of them when its interval opened; their
+  // difference is every level's parts over that interval (the levels below
+  // in its transition, schema 5).
+  std::vector<LevelParts> totals_;
+  std::vector<std::vector<LevelParts>> opened_totals_;
   std::vector<Interval> intervals_;
   std::vector<uint64_t> last_decision_op_;
   // Each level's recent decision points, for a job's count (ARCH-8).

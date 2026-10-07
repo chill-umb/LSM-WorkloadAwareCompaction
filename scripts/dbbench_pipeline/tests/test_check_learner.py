@@ -25,9 +25,16 @@ from learner.logs import read_all  # noqa: E402
 GOLDEN = ROOT / "controller" / "tests" / "fixtures"
 
 
-def arm(tmp: Path, *, version=3, perturb=0.0, masked=False, loaded=True):
+def arm(tmp: Path, *, version=3, perturb=0.0, masked=False, loaded=True,
+        charge="counterfactual", trainer_charge=None, below=None):
     golden = read_all(GOLDEN / "log_golden.jsonl")
     t = next(l for l in golden if l["type"] == "transition" and l["valid"])
+    # The golden interval carries the levels below (schema 5); a plugin
+    # under the counterfactual charge logs null there.
+    if below is None:
+        below = charge == "actual"
+    if not below:
+        t["below"] = None
     job = next(l for l in golden if l["type"] == "job" and l["kind"] == "deep")
     names = {"interior": list(t["state"]), "l0": None, "last": None}
     for l in golden:
@@ -48,7 +55,10 @@ def arm(tmp: Path, *, version=3, perturb=0.0, masked=False, loaded=True):
                                               "expand"][action]}
     if masked:
         decision["mask"] = [1, 1, 0, 1]
-    lines = [{"type": "start"}] + ([{"type": "weights", "version": version}]
+    start = {"type": "start"}
+    if charge != "counterfactual":
+        start["charge"] = charge
+    lines = [start] + ([{"type": "weights", "version": version}]
                                    if loaded else []) + [decision,
                                                          {"type": "stop"}]
     (tmp / "decisions.jsonl").write_text(
@@ -58,8 +68,11 @@ def arm(tmp: Path, *, version=3, perturb=0.0, masked=False, loaded=True):
     (tmp / "weights").mkdir()
     (tmp / "weights" / f"weights.v{version}.bin").write_bytes(
         (GOLDEN / "mlp_golden.bin").read_bytes())
-    (tmp / "trainer_summary.json").write_text(json.dumps(
-        {"pushes": 1, "audit_breaches": 0, "totals": {"C_W": 2.0, "C_R": 3.0}}))
+    summary = {"pushes": 1, "audit_breaches": 0,
+               "totals": {"C_W": 2.0, "C_R": 3.0}}
+    if (trainer_charge or charge) != "counterfactual":
+        summary["charge"] = trainer_charge or charge
+    (tmp / "trainer_summary.json").write_text(json.dumps(summary))
     (tmp / "trainer.jsonl").write_text(json.dumps(
         {"type": "push", "models": {"interior-2": {
             "steps": 5, "td_abs": 0.1, "q_abs_max": 2.0, "nan": False}}}) + "\n")
@@ -90,6 +103,19 @@ class CheckLearnerTest(unittest.TestCase):
     def test_weights_that_never_reached_the_plugin_fail(self):
         r = self.run_check(loaded=False)
         self.assertIn("pushes", r["failed"])
+
+    def test_the_charge_is_one_charge_end_to_end(self):
+        self.assertEqual(self.run_check()["charge"]["plugin"], "counterfactual")
+        r = self.run_check(charge="actual")
+        self.assertEqual(r["verdict"], "passed", r)
+        self.assertEqual(r["charge"]["trainer"], "actual")
+        # The trainer priced another charge than the plugin ran.
+        r = self.run_check(charge="actual", trainer_charge="counterfactual")
+        self.assertIn("charge", r["failed"])
+        # The actual charge without the levels below, and the reverse.
+        self.assertIn("charge", self.run_check(charge="actual",
+                                               below=False)["failed"])
+        self.assertIn("charge", self.run_check(below=True)["failed"])
 
 
 if __name__ == "__main__":

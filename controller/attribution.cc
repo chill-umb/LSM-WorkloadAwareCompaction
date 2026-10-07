@@ -101,6 +101,14 @@ void AttributeSegment(const Segment& seg, std::vector<LevelParts>* parts) {
   to.slot_in_hidden += hidden;
 }
 
+LevelParts Subtract(const LevelParts& a, const LevelParts& b) {
+  LevelParts out;
+  for (const PartField& field : kPartFields) {
+    out.*field.second = a.*field.second - b.*field.second;
+  }
+  return out;
+}
+
 void AttributeJobEnd(const RLJobRecord& job, std::vector<LevelParts>* parts) {
   if (!job.ok) return;
   const double x = static_cast<double>(job.x);

@@ -266,5 +266,37 @@ TEST(Attribution, L0sPerFileReadsAndK0AreInEveryRecord) {
   }
 }
 
+TEST(Attribution, SubtractDifferencesEveryField) {
+  // Every field distinct, so a field left out of kPartFields or paired with
+  // the wrong member would show.
+  LevelParts a, b;
+  double x = 1;
+  for (const PartField& field : kPartFields) {
+    a.*field.second = 10 * x;
+    b.*field.second = 3 * x;
+    x += 1;
+  }
+  const LevelParts d = Subtract(a, b);
+  x = 1;
+  for (const PartField& field : kPartFields) {
+    EXPECT_EQ(d.*field.second, 7 * x) << field.first;
+    x += 1;
+  }
+  // Cumulative totals over two segments, differenced, give the second.
+  std::vector<LevelParts> totals(5);
+  AttributeSegment(L0Blocked(2, 6, 4), &totals);
+  const std::vector<LevelParts> after_first = totals;
+  AttributeSegment(L0Blocked(3, 5, 4), &totals);
+  std::vector<LevelParts> second(5);
+  AttributeSegment(L0Blocked(3, 5, 4), &second);
+  for (int level = 0; level < 5; ++level) {
+    const LevelParts diff = Subtract(totals[level], after_first[level]);
+    for (const PartField& field : kPartFields) {
+      EXPECT_NEAR(diff.*field.second, second[level].*field.second, 1e-9)
+          << level << " " << field.first;
+    }
+  }
+}
+
 }  // namespace
 }  // namespace rlc

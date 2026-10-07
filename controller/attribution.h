@@ -3,6 +3,8 @@
 // are applied later, by the trainer.
 #pragma once
 
+#include <array>
+#include <utility>
 #include <vector>
 
 #include "rocksdb/rl_controller_host.h"
@@ -67,6 +69,64 @@ struct LevelParts {
   double l0_probes = 0, l0_block_probes = 0, l0_seeks = 0, l0_reopens = 0;
   double l0_hidden = 0;  // hidden steps charged to L0 (entries of L0 and L1)
 };
+
+// Every LevelParts field with its log name, in the order the transition
+// log writes them (log.cc's Parts). The static_assert keeps the list
+// complete: every field is a double.
+using PartField = std::pair<const char*, double LevelParts::*>;
+inline constexpr std::array<PartField, 45> kPartFields = {{
+    {"write_bytes", &LevelParts::write_bytes},
+    {"probes", &LevelParts::probes},
+    {"fp_reads", &LevelParts::fp_reads},
+    {"seeks", &LevelParts::seeks},
+    {"hit_reads", &LevelParts::hit_reads},
+    {"reopens", &LevelParts::reopens},
+    {"slot_out_probes", &LevelParts::slot_out_probes},
+    {"slot_out_fp_reads", &LevelParts::slot_out_fp_reads},
+    {"slot_out_seeks", &LevelParts::slot_out_seeks},
+    {"slot_out_reopens", &LevelParts::slot_out_reopens},
+    {"slot_in_probes", &LevelParts::slot_in_probes},
+    {"slot_in_fp_reads", &LevelParts::slot_in_fp_reads},
+    {"slot_in_seeks", &LevelParts::slot_in_seeks},
+    {"slot_in_reopens", &LevelParts::slot_in_reopens},
+    {"ops", &LevelParts::ops},
+    {"gets", &LevelParts::gets},
+    {"scans", &LevelParts::scans},
+    {"writes", &LevelParts::writes},
+    {"user_bytes", &LevelParts::user_bytes},
+    {"busy_ops", &LevelParts::busy_ops},
+    {"inflow_bytes", &LevelParts::inflow_bytes},
+    {"wait_ops", &LevelParts::wait_ops},
+    {"waits", &LevelParts::waits},
+    {"held_byte_ops", &LevelParts::held_byte_ops},
+    {"jobs_flush", &LevelParts::jobs_flush},
+    {"jobs_l0", &LevelParts::jobs_l0},
+    {"jobs_deep", &LevelParts::jobs_deep},
+    {"jobs_move", &LevelParts::jobs_move},
+    {"read_bytes", &LevelParts::read_bytes},
+    {"hidden_steps", &LevelParts::hidden_steps},
+    {"slot_out_hidden", &LevelParts::slot_out_hidden},
+    {"slot_in_hidden", &LevelParts::slot_in_hidden},
+    {"fg_probes", &LevelParts::fg_probes},
+    {"fg_block_probes", &LevelParts::fg_block_probes},
+    {"fg_run_seeks", &LevelParts::fg_run_seeks},
+    {"fg_reopens", &LevelParts::fg_reopens},
+    {"fg_nexts_found", &LevelParts::fg_nexts_found},
+    {"fg_iter_skips", &LevelParts::fg_iter_skips},
+    {"memtable_hidden", &LevelParts::memtable_hidden},
+    {"k0_ops", &LevelParts::k0_ops},
+    {"l0_probes", &LevelParts::l0_probes},
+    {"l0_block_probes", &LevelParts::l0_block_probes},
+    {"l0_seeks", &LevelParts::l0_seeks},
+    {"l0_reopens", &LevelParts::l0_reopens},
+    {"l0_hidden", &LevelParts::l0_hidden},
+}};
+static_assert(sizeof(LevelParts) == kPartFields.size() * sizeof(double),
+              "kPartFields must list every LevelParts field");
+
+// a - b, field by field: a level's parts over an interval from two
+// cumulative totals (the actual charge's levels below, plugin.cc).
+LevelParts Subtract(const LevelParts& a, const LevelParts& b);
 
 // What happened between two polls, with the tree state sampled at the first.
 struct Segment {

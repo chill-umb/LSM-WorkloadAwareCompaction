@@ -30,6 +30,10 @@ using Values = std::array<double, kNumActions>;
 //            beta_W (rho_{j+1} + o_{j+1}) times the burst that overflows the
 //            level below (Theorem A.1)
 //   expand   beta_S sigma_j (m' - m)^+, the space bound (Lemma D.14)
+// Under the actual charge (cfg.actual_charge) each action also pays, for
+// the change delta in the level's held bytes (compact -released, defer and
+// expand the bytes added): the merges from level j - 1 into it (P1) and the
+// hidden-step charge of level j + 1 (P2); prior.cc says how.
 Values LevelPrior(const View& v, int level, const LevelControl& c,
                   const Config& cfg);
 

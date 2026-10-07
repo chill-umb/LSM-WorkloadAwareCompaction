@@ -120,6 +120,29 @@ class AgentTest(unittest.TestCase):
             Settings.from_dict(fx.settings(echo="both")["learner"])
         with self.assertRaises(ValueError):
             Settings.from_dict(fx.settings(min_replay=1)["learner"])
+        # The charge is optional: counterfactual when absent.
+        self.assertEqual(
+            Settings.from_dict(fx.settings()["learner"]).charge,
+            "counterfactual")
+        self.assertEqual(
+            Settings.from_dict(fx.settings(charge="actual")["learner"]).charge,
+            "actual")
+        with self.assertRaises(ValueError):
+            Settings.from_dict(fx.settings(charge="global")["learner"])
+
+    def test_the_actual_charge_has_no_neighbour_charge(self):
+        from learner.agent import Learner, Settings
+        learner = Learner(
+            Settings.from_dict(fx.settings(charge="actual")["learner"]),
+            c_w=2.0)
+        case = self.NeighbourCase(key="interior-3", c_bytes=1000.0,
+                                  mask=[1, 1, 1, 1], prior=[0, 5, 0, 0],
+                                  x_action=[1.0, 0, 0], x_hold=[0.0, 0, 0])
+        t = self.transition(neighbours=[case])
+        self.assertEqual(learner.neighbour_charge(t), 0.0)
+        r, own = learner.reward(t)
+        self.assertEqual(r, own)
+        self.assertAlmostEqual(own, -50.0 / (2.0 * 100.0))
 
 
 if __name__ == "__main__":

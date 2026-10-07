@@ -105,61 +105,32 @@ JsonLine& JsonLine::Features(const char* key,
 }
 
 JsonLine& JsonLine::Parts(const char* key, const LevelParts& p) {
-  const std::pair<const char*, double> fields[] = {
-      {"write_bytes", p.write_bytes},
-      {"probes", p.probes},
-      {"fp_reads", p.fp_reads},
-      {"seeks", p.seeks},
-      {"hit_reads", p.hit_reads},
-      {"reopens", p.reopens},
-      {"slot_out_probes", p.slot_out_probes},
-      {"slot_out_fp_reads", p.slot_out_fp_reads},
-      {"slot_out_seeks", p.slot_out_seeks},
-      {"slot_out_reopens", p.slot_out_reopens},
-      {"slot_in_probes", p.slot_in_probes},
-      {"slot_in_fp_reads", p.slot_in_fp_reads},
-      {"slot_in_seeks", p.slot_in_seeks},
-      {"slot_in_reopens", p.slot_in_reopens},
-      {"ops", p.ops},
-      {"gets", p.gets},
-      {"scans", p.scans},
-      {"writes", p.writes},
-      {"user_bytes", p.user_bytes},
-      {"busy_ops", p.busy_ops},
-      {"inflow_bytes", p.inflow_bytes},
-      {"wait_ops", p.wait_ops},
-      {"waits", p.waits},
-      {"held_byte_ops", p.held_byte_ops},
-      {"jobs_flush", p.jobs_flush},
-      {"jobs_l0", p.jobs_l0},
-      {"jobs_deep", p.jobs_deep},
-      {"jobs_move", p.jobs_move},
-      {"read_bytes", p.read_bytes},
-      {"hidden_steps", p.hidden_steps},
-      {"slot_out_hidden", p.slot_out_hidden},
-      {"slot_in_hidden", p.slot_in_hidden},
-      {"fg_probes", p.fg_probes},
-      {"fg_block_probes", p.fg_block_probes},
-      {"fg_run_seeks", p.fg_run_seeks},
-      {"fg_reopens", p.fg_reopens},
-      {"fg_nexts_found", p.fg_nexts_found},
-      {"fg_iter_skips", p.fg_iter_skips},
-      {"memtable_hidden", p.memtable_hidden},
-      {"k0_ops", p.k0_ops},
-      {"l0_probes", p.l0_probes},
-      {"l0_block_probes", p.l0_block_probes},
-      {"l0_seeks", p.l0_seeks},
-      {"l0_reopens", p.l0_reopens},
-      {"l0_hidden", p.l0_hidden}};
   Key(key);
   s_ += "{";
   bool first = true;
-  for (const auto& field : fields) {
+  for (const PartField& field : kPartFields) {
     s_ += (first ? "" : ",") + JsonString(field.first) + ":" +
-          JsonNumber(field.second);
+          JsonNumber(p.*field.second);
     first = false;
   }
   s_ += "}";
+  return *this;
+}
+
+JsonLine& JsonLine::Below(const char* key,
+                          const std::vector<BelowLevel>& levels) {
+  Key(key);
+  s_ += "[";
+  for (size_t i = 0; i < levels.size(); ++i) {
+    const BelowLevel& b = levels[i];
+    s_ += (i ? ",{" : "{") + JsonString("level") + ":" +
+          std::to_string(b.level);
+    for (const PartField& field : kBelowFields) {
+      s_ += "," + JsonString(field.first) + ":" + JsonNumber(b.parts.*field.second);
+    }
+    s_ += "," + JsonString("rho_tilde") + ":" + JsonNumber(b.rho_tilde) + "}";
+  }
+  s_ += "]";
   return *this;
 }
 
@@ -206,7 +177,13 @@ std::string TransitionLine(const TransitionRecord& r) {
   }
   line.Parts("cost", r.parts)
       .Num("b_bytes", r.b_bytes)
-      .Num("rho_tilde", r.rho_tilde)
+      .Num("rho_tilde", r.rho_tilde);
+  if (r.has_below) {
+    line.Below("below", r.below);
+  } else {
+    line.Null("below");
+  }
+  line
       .Str("next_agent", AgentName(r.next_agent))
       .Features("next_state", FeatureNames(r.next_agent), r.next_state);
   if (r.next_state.empty()) {

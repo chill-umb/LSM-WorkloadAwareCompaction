@@ -328,5 +328,85 @@ TEST_F(LearnerTest, TransitionsCarryTheNeighboursAndTheDivisor) {
   EXPECT_EQ(checked, 1);
 }
 
+// The actual charge (log schema 5): each transition carries every level
+// below its own over its interval, from the cumulative counters.
+TEST_F(LearnerTest, TheActualChargeLogsTheLevelsBelowOverEachInterval) {
+  FakeHost host;
+  {
+    Controller controller(&host, Config({{"mode", "\"prior-only\""},
+                                         {"explore", "0"},
+                                         {"seed", "3"},
+                                         {"charge", "\"actual\""}}));
+    Serve(&host);
+    controller.Step();
+    // Reads below L2 between its two decisions: probes and seeks at L3, and
+    // hidden steps over L4's entries, which D §4 charges to L3.
+    {
+      std::lock_guard<std::mutex> lock(host.mu);
+      host.reads[3].probes += 500;
+      host.reads[3].filter_passes += 30;
+      host.reads[3].filter_hits += 20;
+      host.reads[3].seeks += 40;
+      host.reads[4].probes += 9;
+      host.reads[4].hidden_steps += 70;
+    }
+    Turnover(&host);
+    controller.Step();
+  }
+  EXPECT_NE(Decisions().front().find("\"charge\":\"actual\""),
+            std::string::npos);
+  int checked = 0;
+  for (const std::string& t : OfType(Transitions(), "transition")) {
+    EXPECT_EQ(t.find("\"below\":null"), std::string::npos) << t;
+    if (t.find("\"valid\":1") == std::string::npos) continue;
+    // The line's own level (below's entries carry "level" too).
+    if (t.rfind("{\"type\":\"transition\",\"schema\":5,\"level\":2,", 0) !=
+        0) {
+      continue;
+    }
+    const size_t at = t.find("\"below\":[");
+    ASSERT_NE(at, std::string::npos) << t;
+    const std::string below = t.substr(at, t.find(']', at) - at);
+    // Level 3: its own reads, fp = passes - hits, and the hidden steps over
+    // L4's entries; level 4: its probes. Both carry their held bytes.
+    EXPECT_NE(below.find("{\"level\":3,\"probes\":500,\"fp_reads\":10,"
+                         "\"seeks\":40,\"reopens\":0,"),
+              std::string::npos)
+        << below;
+    const size_t l3 = below.find("{\"level\":3,");
+    const size_t l4 = below.find("{\"level\":4,");
+    ASSERT_NE(l4, std::string::npos) << below;
+    const std::string level3 = below.substr(l3, l4 - l3);
+    EXPECT_NE(level3.find("\"hidden_steps\":70,"), std::string::npos) << level3;
+    EXPECT_EQ(level3.find("\"held_byte_ops\":0,"), std::string::npos) << level3;
+    EXPECT_NE(below.find("{\"level\":4,\"probes\":9,"), std::string::npos);
+    // Nothing above level 2, and not level 2 itself.
+    EXPECT_EQ(below.find("\"level\":2,"), std::string::npos);
+    EXPECT_EQ(below.find("\"level\":1,"), std::string::npos);
+    ++checked;
+  }
+  EXPECT_EQ(checked, 1);
+}
+
+TEST_F(LearnerTest, TheCounterfactualChargeLogsNoLevelsBelow) {
+  FakeHost host;
+  {
+    Controller controller(&host, Config({{"mode", "\"prior-only\""},
+                                         {"explore", "0"},
+                                         {"seed", "3"}}));
+    Serve(&host);
+    controller.Step();
+    Turnover(&host);
+    controller.Step();
+  }
+  EXPECT_NE(Decisions().front().find("\"charge\":\"counterfactual\""),
+            std::string::npos);
+  const auto transitions = OfType(Transitions(), "transition");
+  ASSERT_FALSE(transitions.empty());
+  for (const std::string& t : transitions) {
+    EXPECT_NE(t.find("\"below\":null"), std::string::npos) << t;
+  }
+}
+
 }  // namespace
 }  // namespace rlc

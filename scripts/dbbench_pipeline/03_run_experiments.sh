@@ -520,6 +520,7 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
     learner_flag=(--learner-settings "$LEARNER_SETTINGS_FILE"
                   --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
     (( ! LEARNER_FROZEN )) || learner_flag+=(--learner-phase evaluation)
+    [[ -z "$LEARNER_CHARGE" ]] || learner_flag+=(--charge "$LEARNER_CHARGE")
   fi
   "$PYTHON" "$PIPELINE_DIR/plugin_config.py" --arm "$1" \
     --objective-mode "$CONTROLLER_OBJECTIVE_MODE" --family "$WORKLOAD_FAMILY" \
@@ -1275,6 +1276,8 @@ PY
         "$(sha256sum "$LEARNER_SETTINGS_FILE" | awk '{print $1}')"
       printf 'learner_seed=%s\n' "$learner_seed"
       printf 'learner_frozen=%s\n' "$LEARNER_FROZEN"
+      # The charge the composed config carries (plugin_config.py).
+      printf 'learner_charge=%s\n' "$("$PYTHON" -c 'import json, sys; print(json.load(open(sys.argv[1])).get("charge", "counterfactual"))' "$result_dir/plugin_config.json")"
       if [[ "$arm" == learned ]]; then
         printf 'learner_checkpoint_in=%s\n' "${LEARNER_LAST_CHECKPOINT:-none}"
         printf 'learner_weights_in=%s\n' "${LEARNER_WEIGHTS_SHA256:-none}"

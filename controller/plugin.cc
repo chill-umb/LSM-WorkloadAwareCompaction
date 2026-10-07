@@ -168,6 +168,10 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   prev_ops_ = ops;
   prev_reads_ = reads;
   parts_.assign(n_, LevelParts());
+  if (cfg_.actual_charge) {
+    totals_.assign(n_, LevelParts());
+    opened_totals_.assign(n_, totals_);
+  }
   intervals_.assign(n_, Interval());
   for (Interval& interval : intervals_) interval.start_op = ops.total();
   last_decision_op_.assign(n_, ops.total());
@@ -219,6 +223,7 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
           .Num("cost_model", cfg_.cost_model)
           .Num("explore", cfg_.explore)
           .Num("seed", cfg_.seed)
+          .Str("charge", cfg_.charge)
           .Str("weights_path", cfg_.weights_path)
           .Nums("m", m_applied_)
           .Num("k0", k0_applied_)
@@ -296,6 +301,7 @@ void Controller::Poll(bool decide) {
   segment.held = prev_held_;
   segment.steps = Delta(steps, prev_steps_);
   AttributeSegment(segment, &parts_);
+  if (cfg_.actual_charge) AttributeSegment(segment, &totals_);
   prev_ops_ = ops;
   prev_reads_ = reads;
   prev_steps_ = steps;
@@ -738,6 +744,27 @@ void Controller::CloseInterval(int level, const View& v, const Opening& next,
   if (level < static_cast<int>(v.B.size())) {
     t.b_bytes = v.B[level];
     t.rho_tilde = v.rho_tilde[level];
+  }
+  if (cfg_.actual_charge) {
+    // Every level below, over this interval: what the trainer's actual
+    // charge adds to level i's cost (log schema 5).
+    t.has_below = true;
+    std::vector<LevelParts>& opened = opened_totals_[level];
+    for (int j = level + 1; j < n_; ++j) {
+      BelowLevel b;
+      b.level = j;
+      b.parts = Subtract(totals_[j], opened[j]);
+      bool any = false;
+      for (const PartField& field : kBelowFields) {
+        any = any || b.parts.*field.second != 0;
+      }
+      if (!any) continue;
+      if (j < static_cast<int>(v.rho_tilde.size())) {
+        b.rho_tilde = v.rho_tilde[j];
+      }
+      t.below.push_back(b);
+    }
+    opened = totals_;
   }
   t.next_agent = agent;
   t.next_state = state;

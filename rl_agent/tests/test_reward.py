@@ -126,6 +126,56 @@ class PricingTest(unittest.TestCase):
                                delta=1e-9 * ev["C_R"])
 
 
+class ActualChargeTest(unittest.TestCase):
+    """The actual charge (owner, 2026-10-06; log schema 5): level i also
+    pays the levels below it over its interval and the jobs sourced one
+    level up, priced exactly as a level's own costs are."""
+
+    def setUp(self):
+        self.p = prices.from_plugin_config(fx.plugin_config())
+
+    def test_a_below_entry_is_priced_as_a_levels_own_reads(self):
+        below = fx.interior_transition()["below"]
+        self.assertEqual([e["level"] for e in below], [3, 4])
+        l3, l4 = below
+        # The golden file's level 3: charged probes (raw + slot-in), fp
+        # reads, seeks, reopens, hidden steps at c_st, and its garbage at
+        # rho~ 0.97; level 4 has no rho~ (null): no garbage.
+        expected3 = (100 * (1200 + 4.5) + 1000 * 12 + 2000 * 300 + 5000 * 7 +
+                     10 * 3100 + 0.001 / 1000 * (1 - 0.97) *
+                     l3["held_byte_ops"])
+        self.assertAlmostEqual(reward.below_cost(self.p, l3), expected3)
+        self.assertAlmostEqual(reward.below_cost(self.p, l4), 100 * 50 + 10 * 2)
+        # Absent counts are 0.
+        self.assertEqual(reward.below_cost(self.p, {"level": 5}), 0.0)
+
+    def test_a_foreign_job_is_priced_as_its_own_level_would_price_it(self):
+        t = fx.interior_transition()
+        job = fx.job_line()
+        own = reward.level_cost(self.p, t, [job]).weighted(self.p)
+        alone = reward.level_cost(self.p, t, []).weighted(self.p)
+        self.assertAlmostEqual(reward.job_weighted(self.p, job), own - alone)
+        self.assertEqual(reward.job_weighted(self.p, fx.flush_line()), 0.0)
+
+    def test_the_levels_below_and_the_inflow_from_the_level_above(self):
+        t = fx.interior_transition()  # level 2
+        foreign = [(3, 10.0), (4, 20.0), (7, 40.0),   # below: S
+                   (1, 300.0),                         # L1 -> L2: U
+                   (2, 5000.0), (0, 7000.0), (-1, 0.0)]  # own, above, flush
+        below, inflow = reward.actual_extra(self.p, t, foreign)
+        listed = sum(reward.below_cost(self.p, e) for e in t["below"])
+        self.assertAlmostEqual(below, listed + 70.0)
+        self.assertEqual(inflow, 300.0)
+        # L0 has no level above: a flush (start -1) is never inflow.
+        l0 = fx.interior_transition(level=0, below=None)
+        below, inflow = reward.actual_extra(self.p, l0, foreign)
+        self.assertEqual((below, inflow), (10 + 20 + 40 + 300 + 5000, 0.0))
+        # L1's inflow is the L0 merges.
+        l1 = fx.interior_transition(level=1, below=[])
+        self.assertEqual(reward.actual_extra(self.p, l1, foreign),
+                         (10 + 20 + 40 + 5000, 7000.0))
+
+
 class NeighbourTest(unittest.TestCase):
     def test_a_compaction_lands_its_merged_bytes_below(self):
         own = {"phi": 1.2, "rho": 0.9, "xi": 0.0}

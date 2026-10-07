@@ -115,6 +115,23 @@ std::vector<std::string> GoldenLines() {
   t.down.mask = {true, false, false, true};
   t.down.b = {0, 0, 0, 0.5};
   t.down.c_bytes = 16777216;
+  // Schema 5, charge "actual": the levels below over the interval.
+  t.has_below = true;
+  BelowLevel l3;
+  l3.level = 3;
+  l3.parts.probes = 1200;
+  l3.parts.fp_reads = 12;
+  l3.parts.seeks = 300;
+  l3.parts.reopens = 7;
+  l3.parts.slot_in_probes = 4.5;
+  l3.parts.hidden_steps = 3100;
+  l3.parts.held_byte_ops = 33554432.0 * 23456;
+  l3.rho_tilde = 0.97;
+  BelowLevel l4;
+  l4.level = 4;
+  l4.parts.probes = 50;
+  l4.parts.hidden_steps = 2;
+  t.below = {l3, l4};
 
   // L0's interval opened at start: no state, no action, not replayable.
   TransitionRecord first;

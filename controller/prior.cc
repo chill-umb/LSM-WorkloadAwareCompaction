@@ -29,6 +29,63 @@ double HiddenGrowth(const View& v, int j, double held, const Config& cfg) {
                v.N[j] / (cfg.c_w * v.C[j]));
 }
 
+// The actual charge (cfg.actual_charge; owner, 2026-10-06): level j's
+// reward also pays the merges from level j - 1 into it and every level below
+// it (rl_agent/learner/reward.py, actual_extra), so its prior prices what an
+// action that changes the level's held bytes by delta (in C_j units: + held
+// longer, - released early) does to them. Both terms over one turnover of
+// level j, N_j operations, in units of c_w C_j; positive is worse than hold.
+//
+// (P1) The merges from level j - 1 read and write the bytes of level j they
+// overlap, so they grow with level j's bytes. Each extra overlap byte is
+// read (c_cr) and written (c_w) at beta_W, and moves the merge's
+// interference by (1 + lambda) / Y(o_bar) of its charge per source byte (Y
+// linear in the overlap, as the compact term scales it), at level j - 1's
+// measured rho, overlap and interference. L1 takes L0's model (L0Prior):
+// u / (K F) L0 merges per operation, each overlapping all of L1, so delta
+// C_1 more bytes each. Deeper levels take Lemma D.8's, as the compact term
+// does one level up: o = c_{j-1} T phi_j / phi_{j-1} per source byte of
+// level j - 1, c_{j-1} = overlap / f_{j-1}, over its merged release in
+// steady state, (1 - xi_{j-1}) C_{j-1} N_j / N_{j-1} bytes per turnover of
+// level j. The number of merges does not move (H §7 (3)).
+double InflowMerges(const View& v, int j, double delta, const Config& cfg) {
+  if (j < 1 || j >= v.num_levels || delta == 0) return 0;
+  const int up = j - 1;
+  const double rho = Known(At(v.rho, up));
+  const double o_bar = Known(At(v.overlap, up));
+  const double y = (rho + o_bar) + cfg.v2.lambda * (1 + o_bar);
+  const double intf = cfg.beta_r * Known(At(v.intf_rd, up)) +
+                      cfg.beta_w * Known(At(v.intf_wr, up));
+  const double per_byte = cfg.beta_w * (1 + cfg.v2.c_cr / cfg.c_w) +
+                          Known(intf * Ratio(1 + cfg.v2.lambda, y));
+  double extra = 0;  // extra overlap bytes per turnover of level j, / C_j
+  if (up == 0) {
+    const double merges = Ratio(Ratio(v.user_bytes, v.ops), v.K0 * v.F);
+    extra = Known(At(v.N, j) * merges) * delta;
+  } else {
+    const double c = Ratio(At(v.overlap, up), Fanout(v, up));
+    extra = Known((1 - Known(At(v.xi, up))) * Ratio(v.C[up], v.C[j]) *
+                  Ratio(At(v.N, j), At(v.N, up)) * c * v.T *
+                  Ratio(delta, At(v.phi, up)));
+  }
+  return per_byte * extra;
+}
+
+// (P2) What level j keeps does not land in level j + 1: its bytes change by
+// -rho~_j delta C_j, and with them the hidden-step charge of level j + 1
+// (the steps over level j + 2's entries, v.hidden[j + 1]). The same
+// approximation as HiddenGrowth: that charge grows in proportion to the
+// level's bytes, at c_st per step (0 until measured).
+double HiddenBelow(const View& v, int j, double delta, const Config& cfg) {
+  const int below = j + 1;
+  if (below >= v.num_levels || delta == 0) return 0;
+  const double landed = -Known(At(v.rho_tilde, j)) * delta * v.C[j];
+  const double relative = Ratio(landed, At(v.phi, below) * v.C[below]);
+  const double per_op = Ratio(At(v.hidden, below), v.ops);
+  return Known(cfg.beta_r * cfg.v2.c_st * per_op * relative * At(v.N, j) /
+               (cfg.c_w * v.C[j]));
+}
+
 Values Clip(Values b, double b_max) {
   for (double& x : b) x = std::clamp(Known(x), -b_max, b_max);
   return b;
@@ -131,6 +188,17 @@ Values LevelPrior(const View& v, int j, const LevelControl& c,
   const double grown = std::max(0.0, Act(c, Action::kExpand, phi, b).m() - m);
   out[kExpand] =
       cfg.beta_s * sigma * grown + HiddenGrowth(v, j, grown, cfg);
+
+  // The actual charge: what each action does to the merges into the level
+  // and to the level below (P1, P2 above).
+  if (v2 && cfg.actual_charge) {
+    const auto pushed = [&](double delta) {
+      return InflowMerges(v, j, delta, cfg) + HiddenBelow(v, j, delta, cfg);
+    };
+    out[kCompact] += pushed(-released);
+    out[kDefer] += pushed(held);
+    out[kExpand] += pushed(grown);
+  }
   return Clip(out, cfg.b_max);
 }
 

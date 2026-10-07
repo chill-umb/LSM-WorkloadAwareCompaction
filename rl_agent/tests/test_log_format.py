@@ -154,6 +154,23 @@ class LogFormatTest(unittest.TestCase):
                 self.check_mask_and_b(t["next_mask"], t["next_prior_cost"])
         self.assertTrue(any(t["up_state"] for t in transitions))
 
+    def test_transitions_carry_the_levels_below_or_null(self):
+        # Schema 5: "below" is null unless the plugin runs the actual charge;
+        # then one entry per level below, deeper only, each with its counts
+        # and rho~.
+        transitions = [l for l in self.lines if l["type"] == "transition"]
+        listed = [t for t in transitions if t["below"] is not None]
+        self.assertTrue(listed)
+        self.assertTrue(any(t["below"] is None for t in transitions))
+        for t in listed:
+            levels = [e["level"] for e in t["below"]]
+            self.assertEqual(levels, sorted(levels))
+            self.assertTrue(all(level > t["level"] for level in levels))
+            for e in t["below"]:
+                self.assertEqual(list(e), ["level", *logs.BELOW_KEYS,
+                                           "rho_tilde"])
+                self.assertTrue(all(number_or_null(v) for v in e.values()))
+
     def test_job_lines(self):
         jobs = [l for l in self.lines if l["type"] == "job"]
         self.assertTrue(jobs)
