@@ -24,7 +24,9 @@ db_bench's output and the plugin's decision and transition logs.
              one that a later call left out fails. Needs at least
              --min-changes judged changes
   hold-only  no apply, apply_held or repair line: hold never calls
-             SetOptions (ARCH-5)
+             SetOptions (ARCH-5). With an apply_scheduled line (the
+             step-response arm, owner 2026-10-07), exactly one accepted apply
+             marked "scheduled", at or after its apply_at_op, and no other
   fallback   with --expect-fallback, a fallback line and a stop line saying
              fallback 1; otherwise neither
 
@@ -174,9 +176,29 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
            calls_seen=sum(1 for line in accepted if line.get("seen") == 1))
 
     if mode == "hold-only":
-        calls = [t for t in types if t in ("apply", "apply_held", "repair")]
-        record("hold_only", [f"{len(calls)} apply, apply_held or repair "
-                             "lines"] if calls else [])
+        calls = [line for line in decisions
+                 if line["type"] in ("apply", "apply_held", "repair")
+                 and not line.get("scheduled")]
+        scheduled = [line for line in decisions
+                     if line["type"] == "apply" and line.get("scheduled") == 1]
+        plan = [line for line in decisions if line["type"] == "apply_scheduled"]
+        problems = ([f"{len(calls)} apply, apply_held or repair lines"]
+                    if calls else [])
+        if plan:
+            at = plan[0].get("apply_at_op")
+            if len(scheduled) != 1:
+                problems.append(f"{len(scheduled)} scheduled applies, not one "
+                                f"(apply_at_op {at})")
+            elif scheduled[0].get("ok") != 1:
+                problems.append("the scheduled apply was refused: "
+                                f"{scheduled[0].get('error')}")
+            elif not isinstance(at, (int, float)) or scheduled[0].get("op", -1) < at:
+                problems.append(f"the scheduled apply at op "
+                                f"{scheduled[0].get('op')} came before "
+                                f"apply_at_op {at}")
+        elif scheduled:
+            problems.append("a scheduled apply without an apply_scheduled line")
+        record("hold_only", problems, scheduled_applies=len(scheduled))
 
     fallbacks = types.count("fallback")
     stop_fallback = decisions[-1].get("fallback") if types[-1:] == ["stop"] else None

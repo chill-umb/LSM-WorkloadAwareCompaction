@@ -192,6 +192,15 @@ LEARNER_WEIGHTS_FILE="${LEARNER_WEIGHTS_FILE:-}"
 # merges into the level, measured; the prior prices the same; owner,
 # 2026-10-06). plugin_config.py refuses anything else.
 LEARNER_CHARGE="${LEARNER_CHARGE:-}"
+# The hold arm's scheduled change (owner, 2026-10-07; the step-response test
+# of the settling condition C3; diagnostic runs only, plugin_config.py
+# refuses it otherwise): at the first poll at or after operation
+# HOLD_APPLY_AT_OP the plugin applies HOLD_APPLY_M (":"-separated, one value
+# per level, L0's 1) and HOLD_APPLY_K0 (empty: keep the L0 trigger), once.
+# Empty HOLD_APPLY_AT_OP: no change (ARCH-5's hold arm).
+HOLD_APPLY_AT_OP="${HOLD_APPLY_AT_OP:-}"
+HOLD_APPLY_M="${HOLD_APPLY_M:-}"
+HOLD_APPLY_K0="${HOLD_APPLY_K0:-}"
 # Seconds a trainer may take to finish after db_bench exits.
 LEARNER_STOP_TIMEOUT_SECONDS="${LEARNER_STOP_TIMEOUT_SECONDS:-600}"
 # Written by 13, checked by 03 before any run larger than
