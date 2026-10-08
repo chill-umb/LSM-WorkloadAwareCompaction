@@ -310,6 +310,14 @@ class RefusalTest(unittest.TestCase):
         ({"EXPERIMENT_ARMS": "learned", "DIAGNOSTIC_RUN": "1",
           "CONTROLLER_PLUGIN": str(FIXTURE / "run.log")}, "schema 6"),
         ({"EXPERIMENT_ARMS": "learner"}, "Unsupported"),
+        # The hold arm's start multipliers (owner, 2026-10-08): diagnostic
+        # runs only, and checked as a static profile is.
+        ({"EXPERIMENT_ARMS": "hold", "HOLD_START_M": "1:1:2:1"},
+         "diagnostic run only"),
+        ({"EXPERIMENT_ARMS": "hold", "HOLD_START_M": "1:1:3:1",
+          "DIAGNOSTIC_RUN": "1"}, "[0.5, 2.0]"),
+        ({"EXPERIMENT_ARMS": "hold", "HOLD_START_M": "1:1:2",
+          "DIAGNOSTIC_RUN": "1"}, "3 entries"),
     )
 
     def test_a_rung_passes_the_load_check(self):

@@ -195,6 +195,13 @@ LEARNER_WEIGHTS_FILE="${LEARNER_WEIGHTS_FILE:-}"
 HOLD_APPLY_AT_OP="${HOLD_APPLY_AT_OP:-}"
 HOLD_APPLY_M="${HOLD_APPLY_M:-}"
 HOLD_APPLY_K0="${HOLD_APPLY_K0:-}"
+# The hold arm's start multipliers (owner, 2026-10-08; the reverse step test:
+# load under a profile, change it at n_w with HOLD_APPLY_*; diagnostic runs
+# only, 03 refuses it otherwise): ":"-separated, one value per level, L0's 1,
+# given to db_bench from the open as a static profile is (so the fingerprint
+# carries it as its ltm segment). Empty: the hold arm starts at m = 1
+# (ARCH-5's hold arm).
+HOLD_START_M="${HOLD_START_M:-}"
 # Seconds a trainer may take to finish after db_bench exits.
 LEARNER_STOP_TIMEOUT_SECONDS="${LEARNER_STOP_TIMEOUT_SECONDS:-600}"
 # Written by 13, checked by 03 before any run larger than

@@ -153,7 +153,8 @@ fi
 arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
   local name variable
   case "$1" in
-    native|static:uniform_1|hold|rules|prior|learned) ;;
+    native|static:uniform_1|rules|prior|learned) ;;
+    hold) printf '%s' "$HOLD_START_M" ;;  # empty unless a diagnostic run sets it
     static:uniform_0_75)
       printf '1'
       printf ':0.75%.0s' $(seq 2 "$NUM_LEVELS")
@@ -202,6 +203,14 @@ for arm in $EXPERIMENT_ARMS; do
     echo "Arm $arm: multipliers must be \":\"-separated numbers: $vector" >&2
     exit 1
   }
+  if [[ "$arm" == hold && -n "$vector" ]]; then
+    (( DIAGNOSTIC_RUN )) || {
+      echo "HOLD_START_M (the hold arm's start multipliers) is for a" \
+           "diagnostic run only (DIAGNOSTIC_RUN=1)." >&2
+      exit 1
+    }
+    programme1_vectors+=("$arm=$vector")
+  fi
   if is_programme1_arm "$arm" && ! is_controller_arm "$arm"; then
     if [[ -n "$vector" ]]; then
       programme1_vectors+=("$arm=$vector")
@@ -1288,6 +1297,7 @@ PY
     if [[ "$arm" == hold ]]; then
       # The scheduled change the composed config carries (none: empty).
       printf 'hold_apply=%s\n' "$("$PYTHON" -c 'import json, sys; c = json.load(open(sys.argv[1])); print("" if "apply_at_op" not in c else "|".join(str(c.get(k, "")) for k in ("apply_at_op", "apply_m", "apply_k0")))' "$result_dir/plugin_config.json")"
+      printf 'hold_start_m=%s\n' "$HOLD_START_M"
     fi
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"
     printf 'level_compaction_dynamic_level_bytes=false\n'
