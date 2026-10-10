@@ -720,7 +720,7 @@ $c^0_{open}(1 + \bar s_{open})$ (D §1), keeping D-21's 10%.
 | $c^{\text{stage}}_i$, $c^{\text{drop}}_j$, $\Psi_j$ | priced cost per source byte entering merge stage $i$; priced saving per byte dropped at stage $j$; priced value of a byte dropped at stage $j$ (Proposition B.1″(ii)) | derived |
 | $e$, $k_e$, $\lvert e\rvert$, $N^{\text{hid}}_e$, $N^{\text{tab}}_e$, $n^{\text{sc}}_e$, $p_{\text{cov}}(y)$, $\bar c_{\text{hd},e}$, $c^{\text{hold}}_e$ | an obsolete version, its key and its table bytes; the operations at which it is resident and hidden, and at which it is in a table; the scans that step over it; the probability that one scan steps past key $y$; the mean price of one crossing; its holding price per operation (Proposition B.5) | derived |
 | $K^\star_\beta$, $K^\star_R$ | the L0 trigger that minimises the priced cost, and the read cost alone, in Proposition D.11's model (Proposition A.8) | derived |
-| $\varepsilon_I$, $\varepsilon_{hd}$; $\delta_{\text{rew}}$ | the interference and hidden-step parts of G.4's $\varepsilon_r$; PROP-6's margin | derived; preregistration |
+| $\varepsilon_I$, $\varepsilon_{hd}$; $\delta_{\text{rew}}$ | G.4's largest differences between two levels' expected normalised interference charges (priority-weighted; the interference part of $\varepsilon_r$) and hidden-step charges (before their weight, so $\beta_R\varepsilon_{hd}$ is the hidden-step part of $\varepsilon_r$); PROP-6's margin | derived; preregistration |
 | $\mathcal E_i$, $\mathcal E^\circ_i$, $\mathrm{Rd}_i$ | jobs sourced at level $i$ completing in an interval, and the same without flushes; the quiet priced read cost charged to level $i$ (H §3) | attribution log |
 | $A^\star_n$, $d_\iota$, $d$ | advantage gap (H.3); decision points strictly inside job $\iota$'s span, and their maximum (H.6) | derived |
 
@@ -3064,7 +3064,7 @@ interference charges, that span it.
     on it.
   - (iv-b) At $E = E_I = E^0_I = 0$, $c_{cr} = 0$, $\hat\kappa = 0$ and
     $\mathfrak w^B = \mathfrak w^J = 0$ it is the 2026-09-29 equation
-    $c\,f(\ln f - 1) = 1 + b/A$, with $A = \beta_Wc_wu$.
+    $c\,f(\ln f - 1) = 1 + b/(\beta_Wc_wu)$.
   - (iv-c) *How each new term moves $f^\star$, at a fixed priority.*
     - The per-job cost ($E$) raises $f^\star$: fewer levels. So does the busy
       charge of the per-job device time ($E_I$, $E^0_I$) at every optimum
@@ -3779,7 +3779,7 @@ direction.
 | # | Criterion | Threshold | Instrument |
 | --- | --- | --- | --- |
 | OBJ-1 | Flow identity (Lemma D.1, Proposition D.16; amended 2026-10-03, D-23) | on every arm that runs the plugin: the attribution log's per-level write charges — bytes written, compaction bytes read and jobs by kind, trivial moves included (flushes to L0, each compaction and trivial move to its start level, by completion time) — summed over levels and over every interval from $n_w$ to the end of the drain — intervals excluded from replay included — equal the evaluator's for the same window, with the log opening a partial interval for every level at $n_w$ and closing one at the end of the drain; any residual is listed by job and must consist only of jobs whose completion the two sources place on different sides of a boundary stamp. The log's per-level read counts — the probes, block reads, seeks and reopens, and the scan counts of OBJ-9 (hidden steps by the hidden entry's level, iterator blocks per level, steps by L0-file and other heap children) — taken before the slot-blocking rule moves any of them and with each level's hit block reads logged apart from its false-positive ones, equal the per-level counters' totals over the same window (their difference between the $n_w$ stamp and the end of the drain). The log's interference charges equal, job by job and part by part (read and write), the evaluator's $I_\iota$ computed from the same host-log job and flush records and counter snapshots (one estimator for both), and sum to $\mathcal I$. After the slot-blocking rule and the attribution of interference, of the hidden steps (to the level above the entry's) and of the heap increments (L0 last) (§4), per-level read charges plus the shared buckets' read parts (hit-read, reopen, scan-base, memtable, write-path, fixed) still sum to the global read cost $\mathcal C_R$, and the per-level write charges, the write part of interference included, plus the write-path and fixed buckets' write parts, to $\mathcal C_W$. Space is not checked here: the per-level charge is a garbage estimate (OBJ-3) | attribution log, event log, host log |
-| OBJ-2 | Prices calibrated (amended 2026-10-03, D-23) | all prices in money: device times for $c_w$, $c_{cr}$ and the per-job price of each kind ($c^F_{job}$, $c^0_{job}$, $c^d_{job}$, $c^{tm}_{job}$), fitted to the jobs' spans on the reference arms (D-23); $c_f, c_{blk}, c_{sk}, c_{open}$ measured quiet on the node (D-15 §3, D-20, D-22); $c_{st}(r)$ and $c_{ib}$ on price trees run with `seek_nexts` > 0 at several depths and garbage levels, and $c_{mt}$ (D-23); the fixed parts $c^0_{get}$, $c^0_{sc}$ (as §1.1 defines them; $c^0_{sc}$ from the scan set-up timer, Gate N0 item 10) and the Put insert $c_{put}$, separated from the client's own work and from $c_{mt}$ ($c_{wal}$ = 0 while the WAL is off, `wal1`); the interference coefficients $\kappa$, those of the Put insert and the fixed parts included, their basis and the bytes $Y_\iota$ they use, from a calibration that also tests A10's linearity (a rate sweep) and additivity (one job against two) (D-23), and the window length $n^{\mathrm{win}}$ (D §1); the new prices and $\kappa$ all calibrated on the one binary identity of CMP-9, and the existing prices re-checked on it; all converted at the instance price $p_{\mathrm{dev}}$. Every run's own time per reopen within D-21's tolerance of stage 18's reference (10%; otherwise the run is not priced), the reference multiplied by $1 + \bar s_{open}$ once a dated entry adopts that proposed change (D §1, §0.7), and every run passing OBJ-7 and OBJ-8; the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; every price and $\kappa$ fixed before any Gate N2 outcome is seen; re-measured on any hardware or binary change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
+| OBJ-2 | Prices calibrated (amended 2026-10-03, D-23) | all prices in money: device times for $c_w$, $c_{cr}$ and the per-job price of each kind ($c^F_{job}$, $c^0_{job}$, $c^d_{job}$, $c^{tm}_{job}$), fitted to the jobs' spans on the reference arms (D-23); $c_f, c_{blk}, c_{sk}, c_{open}$ measured quiet on the node (D-15 §3, D-20, D-22); $c_{st}(r)$ and $c_{ib}$ on price trees run with `seek_nexts` > 0 at several depths and garbage levels, and $c_{mt}$ (D-23); the fixed parts $c^0_{get}$, $c^0_{sc}$ (as §1.1 defines them; $c^0_{sc}$ from the scan set-up timer, Gate N0 item 10) and the Put insert $c_{put}$, separated from the client's own work and from $c_{mt}$ ($c_{wal}$ = 0 while the WAL is off, `wal1`); the interference coefficients $\kappa$, those of the Put insert and the fixed parts included, their basis and the bytes $Y_\iota$ they use, from a calibration that also tests A10's linearity (a rate sweep) and additivity (one job against two) (D-23), and the window length $n^{\mathrm{win}}$ (D §1); the new prices and $\kappa$ all calibrated on the one binary identity of CMP-9, and the existing prices re-checked on it; all converted at the instance price $p_{\mathrm{dev}}$. Every run's own time per reopen within D-21's tolerance of stage 18's reference (10%; otherwise the run is not priced), the reference multiplied by $1 + \bar s_{open}$ (adopted 2026-10-04 by D-24, §0.7 item 3; D §1), and every run passing OBJ-7 and OBJ-8; the storage price $c_s > 0$, both money prices fixed in advance (§0.6), and $\bar q$ per workload, in the fingerprint; every price and $\kappa$ fixed before any Gate N2 outcome is seen; re-measured on any hardware or binary change; every result also reported at $c_s/2$ and $2c_s$ | calibration script |
 | OBJ-3 | Space attribution | $\sum_ig_i$ and measured garbage at run end reported per arm. $\sum_ig_i$ targets only adjacent shadowing and undercounts (§4), so the criterion is on differences: across $\Theta_s$ at Gate N2, the ratio's spread and the slope of $\Delta\sum_ig_i$ on $\Delta$(measured garbage) are reported, and a tolerance on the ratio is fixed from them before Gate N4; at Gate N4 the learner's paired $\Delta\sum_ig_i$ against its comparator must agree in sign with $\Delta$(measured garbage) whenever that difference's paired interval excludes zero, and its ratio must lie within that tolerance | reference compaction, event log |
 | OBJ-4 | Per-level read counters | per-level counters taken at the sites of §4 (the version's level: `FilePicker` hits in `Version::Get`; seeks per L0 file and per level iterator), so that a trivially moved file's reads are charged to its new level; block reads split into the hit's read and false-positive reads (§4); the reads' reopens counted and timed in `TableCache::FindTable` at the level the read passes in, Gets and iterators apart (D-21); their sums match the global counters within 1% (the read half of Proposition D.16). Amended 2026-10-03 (D-23): the scan counters of OBJ-9 (hidden steps keyed by the hidden entry's level, iterator blocks, heap child counts) are taken at the same sites and obey the same 1% rule, and the foreground-step counters of every priced type (read steps by type, and the counts of Gets, scans and Puts), cumulative, are written into the host log's begin and end records of every job and flush and every $n^{\mathrm{str}}$ operations (OBJ-8) | per-level counters, tickers, host log |
 | OBJ-5 | Mode recorded | $\beta$, mode and $\bar q$ in every arm's manifest and fingerprint | `metadata.env` |
@@ -4998,8 +4998,8 @@ before D-23 plus the per-job and read-byte terms (which (c2) covers through
 $\vartheta$), $\varepsilon_I$ is the largest difference, over $(\hat x, a)$,
 between the two levels' expected normalised priority-weighted interference
 charges over a transition (each part with its weight, D §1), and
-$\varepsilon_{hd}$ the same for the hidden-step charges, at the same
-normalised state. Neither is zero in general:
+$\varepsilon_{hd}$ the same for the hidden-step charges before their weight
+$\beta_R$, which the bound applies, at the same normalised state. Neither is zero in general:
 
 - $\varepsilon_I$. By Proposition G.6, a level's charge per merged byte is set
   by the read cost per operation in its jobs' windows, weighted by bytes in
@@ -5008,7 +5008,7 @@ normalised state. Neither is zero in general:
   each job within L0's fill cycle, and two levels with the same mean
   $\tilde I$ can split it differently between the busy and byte parts
   and so respond differently to the read intensity. *Approximate size:*
-  a transition merges about $C/k$ bytes on average, so if a level's merged
+  a transition merges about $C_j/k$ bytes on average, so if a level's merged
   bytes and its charge per merged byte are uncorrelated given $(\hat x, a)$,
   $\varepsilon_I$ is about $(1/k)$ times the largest difference in expected
   charge per merged byte, in units of $c_w$. Between L0 and the levels below
@@ -5367,9 +5367,9 @@ it is the same input.
    included, since interference slows them wherever they are charged. The
    split assumes L0's read cost is linear in $k_0$: it is for seeks and
    reopens per file and for the probes of Gets that pass every L0 file; it
-   is approximately linear for the probes of Gets that stop at a hit in an
-   L0 file (concave, or even decreasing for hot keys, Proposition D.11(iii)), and an approximation for L0's heap increment
-   (Lemma H.5) and its hidden steps. Both $\varrho^{(0)}$ and $\varrho^{(\ge1)}$
+   is an approximation for the probes of Gets that stop at a hit in an L0
+   file (concave in $k_0$, or decreasing for hot keys, Proposition
+   D.11(iii)), for L0's heap increment (Lemma H.5) and for its hidden steps. Both $\varrho^{(0)}$ and $\varrho^{(\ge1)}$
    are multiplied by $\bar q/(c_w\bar\lambda_1)$, which makes them dimensionless like G.2's price
    ratios, and both are kept by read-step type, which the interference model
    needs. The Put inserts' cost per operation, which sets the write part of a
@@ -6227,8 +6227,9 @@ G §3's $Q_j$ is an expected normalised *reward* (rewards are negative costs),
 so the law enters $b$ with a minus sign, $Q_j = -b + f_\theta + \delta_j$
 (G §3, H §4). The 2026-09-29 text wrote $+b$, which disagreed in sign; the
 2026-10-03 amendment corrected it, matching `controller/prior.h`, which
-computes the cost and notes that a learner must negate it. Which convention
-the paper keeps is the owner's (§0.7, item 9); the terms above are stated as
+computes the cost and notes that a learner must negate it. Decided
+2026-10-04 (D-24, §0.7 item 9): the paper keeps the code's convention, $b$ a
+cost and $Q_j = -b + f_\theta + \delta_j$; the terms above are stated as
 costs.
 
 It is clipped to $\pm b_{\max}$ in normalised units. It is code, not trained
@@ -6960,7 +6961,8 @@ configuration with the lowest *mean* $J_\beta$ over a cell's repeats.
   profile that holds the level just above the deepest populated level at 2
   times from load, every other level at 1 (audit §3; D-13 §4 fixed this
   form, which the 2026-09-29 text gave as "upper levels at 1.5–2 times");
-  uniform 0.75;
+  uniform 0.75; and, for the balanced mode only, the priced profile of
+  Theorem A.2(iv), from the formal Gate N2 (D-24, below);
 - `compaction_pri = kMinOverlappingRatio`, pinned;
 - $T \in \{2, 6, 10\}$, with each mode's $\theta^\star_\beta$ at $T = 10$
   re-run at 14 and 20 for the cross-$T$ check (D-13 §4).
@@ -7014,7 +7016,12 @@ at fixed prices), Proposition D.13 (interior profile, depth) and Theorem A.2
 (survival-weighted profile), each in its amended form, and the steady-state
 part of the garbage trade-off (Corollary B.6: the depth and fanouts that set
 how many hidden versions a key keeps, B.5(e)) are static settings. Any gain
-they explain belongs to $\Theta_s$, not to the controller.
+they explain belongs to the static class, not to the controller. $\Theta_s$
+holds Theorem A.2(ii)'s byte-optimal profile and, for the balanced mode only,
+A.2(iv)'s priced profile (§1). In the other modes, where the $c_i\psi_i$
+differ, the priced profile is a static point outside $\Theta_s$, so a
+controller that held it would show a gain against $\theta^\star_\beta$ with
+no dynamic mechanism (Theorem A.2, *Corrections*).
 
 *Conditions, made explicit.* Each of these optima minimises a steady-state
 cost whose inputs are the configuration, the workload's stationary rates and
