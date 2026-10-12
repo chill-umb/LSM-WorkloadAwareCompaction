@@ -354,6 +354,14 @@ its three costs gain terms (D §1, D §2):
     The superseded Corollaries A.3 and A.4 are not re-checked.
   - *Assumptions:* A9–A11 new (A10 extended the same day to every foreground
     step); A3′ (which L0 files the score counts), A5, A7 and A8 amended.
+  - *Re-scoped 2026-10-11* (D-26; `docs/OPEN_DECISIONS.md` OD-3, option (b);
+    the 2026-10-08 theory checks): Proposition D.11's closed form, its
+    $K_0^\star$ and its floor are no longer used to choose, predict or bound
+    the L0 trigger, which $\Theta_s$ measures; its L0 mechanics stay.
+    Proposition A.8 (ii)–(iv) rest on D.11's (a) and (e) and are not used; (i)
+    stands. Corollary D.12's premise is decided from measured best triggers,
+    and Corollary B.4's advance prediction narrows to match. Each carries a
+    "Scope, 2026-10-11" note.
   - *Criteria:* new OBJ-7, OBJ-8, OBJ-9, PROP-6, ARCH-7, ARCH-8, WL-3 and
     CMP-9; amended OBJ-1, OBJ-2, OBJ-4, OBJ-6, ACT-4, ARCH-3 and ARCH-5.
     OBJ-1, OBJ-2, OBJ-6, OBJ-8, OBJ-9 and ARCH-7 also cover the Put insert
@@ -2422,6 +2430,28 @@ quarter of a block load.
   hidden steps, the blocks they load, and the heap size $r$ at every step:
   through $k_0$, depth, and whether each level has a file in range.
 
+*Scope, 2026-10-11 (D-26).* The 2026-10-08 theory checks measured this
+proposition on `Assoc`, over 52 native runs at bases 8, 16 and 32 MiB and
+$K_0$ = 2, 4 and 8.
+- (b2) and the cycle's mean L0 count hold, to $\pm$0.01 file.
+- (a) and (e) fail. L0 merges drop 1–2% of their input at $K = 2$ and 6–8%
+  at $K = 8$, against none assumed. The deeper work per operation moves
+  25–33% with $K$.
+- The closed form picks the measured best trigger in 6 of 9 (base, mode)
+  cases, with cost differences 2–5$\times$ off.
+
+So (i)–(iii), $K_0^\star$ and the floor are not used to choose, predict or
+bound the L0 trigger. The best trigger is measured from $\Theta_s$
+(Pathway C).
+
+What stays in use for L0's own terms are the L0 mechanics: (b1), (b2), the
+cycle's mean count and (c)'s per-file read costs. OBJ-8(d)'s checks of (b2)
+and (d2) also stay.
+
+Statements elsewhere that cite this proposition for the trigger's direction
+stay as recorded, but carry no weight from it. These are §5's predictions,
+Proposition A.8 and Corollary B.4.
+
 **Proposition D.11 (static optimum of the L0 trigger; amended 2026-10-03,
 D-23; (i), (b), (c), (d2), (ii) and (iii) amended again the same day).** Hold the trigger fixed at $K$. Costs are per operation
 (§3 conventions). The symbols $Q_F$, $N_a$, $N_b$, $N^{(0)}$, $\theta_B$, $Y^F$,
@@ -2860,6 +2890,11 @@ This has the same shape as the draft's $K^\star = \sqrt{wT/r}$, with the
 L1-to-flush fanout $m_1C_1/F$ in place of $T$. The 2026-09-29 statement
 "$K_0^\star \propto \sqrt{\beta_W/\beta_R}$" holds only without interference.
 (ii) replaces it.
+
+*Scope, 2026-10-11 (D-26).* The proof needs only a finite set of admissible
+triggers, and holds for any per-phase cost. Whether its premise holds
+(disjoint best admissible triggers) is decided from each phase's measured
+best trigger, not from Proposition D.11's computation (D.11, Scope).
 
 **Corollary D.12 (a provable adaptivity gap for the L0 trigger; amended
 2026-10-03, D-23).** Suppose the workload alternates between phases $p$, each
@@ -4160,6 +4195,11 @@ shadowed versions can sit for scans to step over (Lemma D.19), and its
 removal changes how many bytes are compacted, and so the interference. Each
 of these is a property of the static configuration too, so the conclusion
 stands.
+
+*Scope, 2026-10-11 (D-26).* (i) uses only the L0 cycle and stands. (ii)–(iv)
+take Proposition D.11's (a)–(e). Of these, (a) and (e) fail on `Assoc` (D.11,
+Scope). So (ii)–(iv) are not used to price lever (e) or to set its
+threshold.
 
 **Proposition A.8 (an early L0 merge, priced; lever (e)) (added 2026-10-03,
 D-23; (ii)–(iv) restated by the integration of the same day as consequences
@@ -6864,7 +6904,10 @@ function of the operation-indexed record, Lemma D.17.)
 adaptivity has value on that workload. $\mathcal G = 0$ is not evidence that it
 has none, because $\mathcal G$ sees only the phase component of adaptivity.
 Corollary D.12 now predicts $\mathcal G > 0$ in advance for the L0 trigger
-whenever phases' best triggers differ.
+whenever phases' best triggers differ. (2026-10-11, D-26: the best triggers are
+measured, not computed from Proposition D.11. So the prediction is made only
+where the measured per-phase best triggers differ. The interference source
+below is a hypothesis.)
 
 *Interference adds a source of phase adaptivity* (added 2026-10-03, D-23;
 it depends on the amended Proposition D.11 and Corollary D.12). A job's

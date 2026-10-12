@@ -2948,6 +2948,278 @@ runs, or cited as a gate verdict or a claim, breaks §2.
 
 ---
 
+### D-26, 2026-10-11 — the open cost-model items OD-1 to OD-3: one calibration session tests additivity, a slowdown per job kind and the Put slowdown; the L0 trigger becomes an empirical static choice
+
+**Recorded before any run it governs.** None of the runs in §2 has started.
+Three short pilots of the script ran first, to check that each arm runs the
+job kinds it claims:
+- `~/node_ops/calib_v2/2026-10-11-od12-pilot` (10 s readers);
+- `-od12-pilot2` (the revised deep and two-compaction arms);
+- `-od12-pilot3` (the page-cache fix).
+
+They led to the changes noted in §2, and they are not data for any rule
+here. D-25 is kept free for the same-config comparator rule
+(owner, 2026-10-10), which is not drafted yet.
+
+**1. The decision** (owner, 2026-10-11). The owner resolves the cost model's
+open items before propagation route D (`docs/PROPAGATION_DESIGN.md`)
+continues: "make whatever changes are necessary for OD-1, OD-2, OD-3 b".
+- (a) OD-1 and OD-2 (`docs/OPEN_DECISIONS.md`) are settled by one calibration
+  session on node B, before Gate N2 starts on the same node (2026-10-11,
+  16:00 UTC). It uses Gate N2's binary, whose identity is recorded in the
+  session's `setup.env`. The owner's go covers the design in §2; the owner
+  sees the grid with the command that starts it.
+- (b) OD-3 is settled by its option (b). The L0 trigger $K_0$ is an empirical
+  static choice, which $\Theta_s$ already measures: L0 trigger $\in \{2, 4, 8\}$
+  at every (workload, $T$) point, as admissible (Pathway C,
+  `25_gate_n2_chain.sh`). Proposition D.11 is kept for L0's own mechanics
+  only. §4 lists the claims re-scoped in `docs/PATHWAYS.md` on this date.
+
+**2. The calibration design** (`~/node_ops/diag/od12/calib_od12.sh`, analysis
+`~/node_ops/diag/od12/od12_fit.py`, both outside the repository). It amends
+D-23 §4(a)'s additivity and job-kind items. The rest of D-23 §4 stands, and
+so do the 2026-10-06 session's other prices.
+- **Reader.** As `calib_v2.sh`: one thread, every table open, perf level 1,
+  each run on a fresh copy of the uniform-key b4k price tree (`calib_v2.sh`'s
+  master, built 2026-10-05). The reader kinds are hit and miss Gets (block
+  and probe), `seekrandom` with 0 and 64 nexts (seek and step), and Puts into
+  an empty database. Each run lasts 20 s, after a 10 s lead in which the
+  neighbours start. There are 3 repeats, with the order of the loaded arms
+  rotated by repeat.
+- **Slowdown.** $s$ = the run's in-store time per operation (Get or Put
+  histogram, or wall time per seek) over the mean of its quiet twins, minus 1.
+  The twins have the same reader kind and the same reader cores: arm `quiet`
+  for readers on cores 0–3, `quiet01` for readers on cores 0–1. Neighbour load
+  is each db_bench neighbour's host-log jobs over the reader's window: busy
+  time by kind (flush, L0 merge, deeper merge, trivial move) and bytes per
+  second, summed over the neighbours.
+- **Arms** (reader cores / neighbours; neighbours write their own copies of
+  the tree):
+  - `nb32`: 0–3 / overwrite at 32 MB/s on 4–7. It is the 2026-10-06 session's
+    `nb32`, and ties this session to that one. `nb8` is the same at 8 MB/s,
+    whose compaction traffic (about 100 MB/s) is near the experiments'
+    20–90 MB/s.
+  - `c1a`, `c1b`, `c2`: 0–1 / one deeper-merge neighbour (as `kdeep` below,
+    capped at 32 MB/s) on cores 2–4 (`c1a`), one on 5–7 (`c1b`), or both at
+    once (`c2`). Each keeps its one compaction slot busy, so `c2` runs two
+    compactions at once, with about 64 MB/s of compaction writes in all.
+    That is within the experiments' 20–90 MB/s. The first pilot's two
+    full-speed overwrite writers made about 750 MB/s.
+- **Page cache** (found by the pilots). With three 3.6 GB tree copies made
+  just before a run, part of the reader's copy left the page cache before it
+  ran. Its SST reads then went to the device: P95/P99 of 57–195 µs instead of
+  about 2 µs, which made $s$(`c2`) 1.6–2.2.
+  - So the reader's copy is now made last, and read once on the reader's
+    cores before the neighbours start. With that, the third pilot's `c2` gave
+    $s$ = 0.109 against 0.056 + 0.054.
+  - Every run logs `MemAvailable` and `Cached`.
+  - A reader run whose SST read P99 exceeds 20 µs is left out of every fit
+    and listed.
+  - `kflush16`, `kflush32`: 0–3 / overwrite at 16 or 32 MB/s with compactions
+    off and the L0 stall triggers lifted, so only flushes run.
+  - `kl04`, `kl016`: 0–3 / overwrite at 4 or 16 MB/s with a 1 TiB L1 target,
+    so only flushes and L0→L1 merges run.
+  - `kdeep24`, `kdeep64`: 0–3 / writes at 20 kB/s (no flush in the run) with a
+    1 MiB L1 target, so L1 to L3 are far over target.
+    - `num_levels` is 5, so L4 (1.6 GB in the master) is the last level, and
+      L3's files merge into it rather than move past it. In the pilot, with
+      13 levels, the 96 MB/s arm ran out of merges into trivial moves.
+    - RocksDB's rate limiter caps compaction writes at 24 or 64 MB/s, so
+      deeper merges run through the whole window.
+  - `kdeepu`: the same with no cap, so about 3 GB of full-speed deeper merges
+    run. The reader's lead is 2 s, so its window meets them.
+  - `idle`: 0–3 / a db_bench neighbour writing 20 kB/s, so no jobs run (Put
+    and hit readers only).
+  - `disk32`, `disk128`: 0–3 / a plain buffered file writer at 32 or 128 MB/s,
+    with an fdatasync every 32 MiB and no RocksDB.
+  - `cpu`: 0–3 / one busy loop on each of cores 4–7, with no I/O.
+
+**3. Decision rules, fixed before the first run.** All use means over
+repeats. Step types are probe, block, seek, step and Put; "read types" are
+the first four.
+- **OD-1(i), two compactions at once.** For each type,
+  $\Delta = s(c2) - [s(c1a) + s(c1b)]$. Additivity holds for the type if
+  $|\Delta| \le \max(0.15\,[s(c1a) + s(c1b)],\ 0.02)$. The test counts only if
+  `c2`'s mean number of running jobs is at least 1.8 and within 15% of the
+  sum of `c1a`'s and `c1b`'s. Otherwise it is recorded as having no power,
+  not as a pass.
+- **OD-1(ii), a flush during a compaction** (the experiments' case: at most
+  one compaction and one flush per database, D-23 §4(a)). $\kappa$ per kind is
+  fitted on the full-speed one-kind arms only (`kflush*`, `kl0*`, `kdeepu`;
+  `kl0`'s flushes are counted under additivity). They predict $s$(`nb32`) and
+  $s$(`nb8`) from their busy time by kind, and each prediction is held to the
+  same margin as (i). The share of each window in which a flush and a
+  compaction overlap is reported beside it, since non-additivity shows only
+  in proportion to it.
+- **OD-2(a), one $\kappa$ per job kind.** For each type, fit
+  $s = \sum_k \kappa_k\,\mathrm{busy}_k$ (no intercept) over the runs of `nb32`,
+  `nb8`, `kflush*`, `kl0*` and `kdeepu`. These are full-speed jobs, as in the
+  experiments, which have no rate limiter. The capped `kdeep` arms are
+  reported apart: a capped job counts as busy while it waits on the limiter. Moves are folded into deeper merges, and a
+  kind with mean busy under 0.01 is dropped. Compare it with one shared
+  $\kappa$ by an F test. That type gets a $\kappa$ per kind if $p < 0.01$ and
+  the identified $\kappa_k$ (each positive and at least 2 standard errors)
+  differ by more than 25% of the largest. Otherwise it keeps the shared
+  $\kappa$.
+- **OD-2(b), the Put slowdown.** Three forms are fitted over the Put runs of
+  every arm with readers on cores 0–3:
+  - P0: $s = k \cdot \mathrm{busy}$ (A10 as now);
+  - P1: $s = a$ whenever the neighbour writes to the device at all (any
+    compaction or flush bytes, or the plain writer), and 0 otherwise;
+  - P2: $s = k \times$ device write rate.
+
+  Each is scored by its leave-one-arm-out RMSE. A form other than P0 is
+  adopted for the Put insert only if its RMSE is at most 70% of P0's; its
+  coefficient is then fitted on all those runs. The disk-writer arms' Put
+  slowdown is reported against `nb32`'s. If it is at least half of `nb32`'s,
+  the Put slowdown is a page-cache or writeback effect, not a compaction's.
+- **Consequences.**
+  - The outcome sets the $\kappa$ of the price file that Gate N2's evaluation
+    uses (per kind where (a) adopts it; the format already carries
+    $\kappa^J$ per kind, `calibration_v2.py`).
+  - A failed OD-1 test, or an adopted Put form, changes A10's form in
+    PATHWAYS §1.2 and D §1's charge only by a later dated entry with the
+    owner's go. Until then the failure is recorded beside the prices, as
+    OBJ-8(c) requires.
+  - Gate N2's runs need no change: prices are applied to their logs
+    afterwards, so they can start before the analysis ends.
+
+**4. OD-3(b): what changes and what does not.** The 2026-10-08 theory checks
+(`~/node_ops/reports/2026-10-08-theory-checks/README.md`, screen
+`db/explore-n2-assoc`, bases 8/16/32 MiB, $K_0$ 2/4/8, five seeds) found:
+- (b2) holds in all 52 native runs, and the L0 cycle's mean file count is
+  reproduced to $\pm$0.01 file;
+- (a) and (e) fail on `Assoc`: L0 merges drop 1–2% of their input at
+  $K = 2$ and 6–8% at $K = 8$, and deeper work per operation moves 25–33%
+  with $K$;
+- D.11 picks the measured best $K$ in 6 of 9 (base, mode) cases, with cost
+  differences 2–5$\times$ off and the wrong sign twice.
+
+So:
+- Proposition D.11's closed form ((i)–(iii)), its $K_0^\star$ and its floor
+  $\sqrt{A_I/B_R}$ are not used to choose, predict or bound the L0 trigger.
+  The best trigger is measured from $\Theta_s$. D.11's L0 mechanics ((b1),
+  (b2), the cycle's mean file count, (c)'s per-file read costs) stay in use
+  for L0's own terms. OBJ-8(d)'s checks of (b2) and (d2) stay.
+- Proposition A.8: (i) (one early merge is a phase shift) stands. (ii)–(iv)
+  rest on D.11's (a) and (e) and are not used to price lever (e).
+- Corollary D.12: the proof stands for any per-phase cost. Whether its premise
+  holds (disjoint best triggers) is decided from the measured per-phase best
+  triggers, not from D.11.
+- Corollary B.4: $\mathcal G > 0$ for the L0 trigger is predicted only where
+  the measured best triggers differ by phase. The interference channel of
+  phase adaptivity stays a hypothesis.
+- **Code, unchanged now.** The rules arm's `k0_tracking` (`controller/rules.h`)
+  and the prior's L0 term (`controller/prior.h`) use D.11's closed form.
+  Gate N2 runs no controller arm. Whether to change them before Gate N3 is an
+  open owner's decision (`docs/OPEN_DECISIONS.md`).
+
+**Falsification.** This entry fails as a record if any part of it is changed
+after the first run it governs has started. A change is a new dated entry.
+The pilots' runs are never pooled with the session's.
+
+---
+
+### D-27, 2026-10-11 — one preloaded tree per setting, shared by every repeat, workload and arm
+
+**Recorded before any run it governs.** None of the runs it governs has
+started. The rest of the workload-suite redesign waits for the owner's
+supervisor. That redesign covers:
+- a 20M-key preload (about 20 GB), then 40M operations per workload;
+- T = 2 to 10, the scaled geometry and the memory cap;
+- draft: `~/node_ops/drafts/2026-10-11-workload-suite-proposal.md`.
+
+This entry records the part already decided. Gate N2 on the old design was
+held the same day and has not started. (This text replaces a same-day draft
+of D-27 that gave each repeat its own preload; the owner amended it before
+it was committed and before any run.)
+
+**1. The decision** (owner, 2026-10-11): "We will build the tree once
+(i.e. preload once), and then run workloads on copies of that same tree.
+Because as you know, during preloading, even for the same preload size,
+trees may appear different, which might skew one workload over the other."
+- **One preload per setting.** For each setting (T, L1 base size, L0
+  trigger) the preload runs once, under native compaction, to its settle
+  point, and the settled tree is archived.
+- **One seed for every setting.** Every setting's preload uses the same seed,
+  so every tree holds the same keys, loaded in the same order. Only the
+  setting differs.
+- **Everything at that setting uses a copy.** Every repeat of every workload
+  at that setting runs on a file-for-file copy of its tree. The owner's
+  example: T = 4, L1 128 MiB, L0 trigger 4 is preloaded once, and all repeats
+  of all workloads at that setting start from that one tree.
+- **Arms share it too, wherever an arm can start from it** (owner: "as much
+  sharing as possible").
+  - The `native` arm can, and so can every controller arm and its
+    same-config static twin. A controller's plugin is suspended during the
+    preload (`rlsuspend`) and starts at the first measured operation $n_w$,
+    so its preload is the native one.
+  - Static multiplier profiles are not planned (owner, 2026-10-11: "we are
+    running native RocksDB most likely"; the suite's dated entry fixes the
+    arms). If one is ever run, it starts from the shared tree and applies its
+    multipliers from $n_w$, as a controller does, not "from load" (D-13 §4).
+- **What the repeats measure.** Repeats differ in their operation seeds and
+  in the timing of background jobs during the run. They do not sample
+  different starting trees; §3's check measures that separately.
+
+**2. Why.** The data is fixed by the seed, but the tree a load leaves is
+not. Three loads of one tree gave 4.52, 4.73 and 4.58 filter probes per
+missing Get, because flushes and compactions run on background threads
+(PATHWAYS C §2, Proposition C.6). With one tree per setting, a difference
+between workloads or arms at a setting carries no difference between
+starting trees.
+- **Fairness.** A controller and its same-config static twin start from the
+  same tree, so the tree's luck cancels in their paired difference.
+- **Storage.** One tree per setting is 81 trees for the 9 × 9 grid, about
+  1.6 TB uncompressed. One tree per repeat would be 243.
+- **The cost.** When settings are compared with each other, each has one
+  tree, so the repeats cannot see how much of a difference is that tree's
+  luck. Intervals between settings then leave out the variation between
+  trees. §3 measures it.
+
+**3. The tree-variation check, before the first sweep.**
+- **The setup:**
+  - settings: T = 2 and T = 10, each at (L1 128 MiB, L0 trigger 4) and
+    (L1 256 MiB, L0 trigger 8);
+  - two more trees per setting, each from its own preload seed, so three
+    trees per setting with the main one;
+  - workload: `Assoc` (D-1), 3 repeats on each tree.
+- **The measure:** at each setting, the largest difference between the
+  three trees' mean $J_\beta$, in every mode.
+- **The pass bar:**
+  - The design stands if that difference is at most a quarter of the effect
+    size the comparisons use (the owner proposed about 2% on 2026-10-10; the
+    comparator rule's dated entry fixes it). It also has to be no larger than
+    3 times the run-to-run standard deviation within a tree.
+  - If it fails at any setting, the result is reported. One tree per repeat
+    then comes back by a later dated entry with the owner's go.
+
+**4. How it is run** (operator requirements, fixed with the decision):
+- **What is copied.** A tree is taken from the closed database after the
+  settle step has finished all compaction: every SST, the MANIFEST, CURRENT
+  and OPTIONS.
+- **Identity.** Each tree gets an identity: a hash of its file list with
+  sizes, and of its MANIFEST. Every run records it, and each copy is checked
+  against it before the run starts, on whatever node runs it.
+- **Where trees are kept.** Off the node, since leases end and disks are
+  wiped (Chameleon object storage or equivalent), compressed in transit and
+  at rest. Each node fetches the trees it needs.
+- **Same cache state.** Every run starts from the same page-cache state:
+  either the copy is made inside the run's memory cgroup, or the cache is
+  dropped before the run. The memory cap is still undecided.
+- **Load statistics.** Stalls, job counts and time are recorded once per
+  tree, beside its identity.
+- **Pipeline change.** Today `03` loads and runs the workload in one
+  `db_bench` process (`rlsuspend,filluniquerandom,…,mixgraph,…`). It splits
+  into a preload-and-archive step and a workload step that opens a checked
+  copy (`--use_existing_db`). That change ships with tests and passes the
+  preflight before any run it governs.
+
+**Falsification.** This entry fails as a record if any part of it is changed
+after the first run it governs has started. A change is a new dated entry.
+
+---
+
 ## 2. Gate verdicts as measured
 
 ### q̄ recorded, 2026-10-02 (D-13 §1, D-14 §2)

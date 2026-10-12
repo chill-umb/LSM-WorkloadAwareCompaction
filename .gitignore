@@ -78,12 +78,12 @@ baseline_slo*
 baseline_selection*
 gate1
 *.tex
-# The LaTeX reading copies of PATHWAYS.md and its review condensation are kept,
-# with the preamble lines docs/latex/build.sh adds; their PDFs are rebuilt locally.
+# The LaTeX reading copies of PATHWAYS.md and its review condensation are kept;
+# their build script (latex/) and the figures stay outside the repo, in ~/latex and
+# ~/figures on node B (owner, 2026-10-10); their PDFs are rebuilt locally.
 !/docs/PATHWAYS.tex
 !/docs/PATHWAYS_FOR_REVIEW.tex
 !/docs/PROGRAMME1_HISTORY.tex
-!/docs/latex/header.tex
 /docs/PATHWAYS.pdf
 /docs/PATHWAYS_FOR_REVIEW.pdf
 /docs/PROGRAMME1_HISTORY.pdf
