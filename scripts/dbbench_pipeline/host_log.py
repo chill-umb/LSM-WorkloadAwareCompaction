@@ -10,7 +10,8 @@ fourth, the hidden steps that live at the level; the header names the
 foreground-step counters "fg" and the snapshot stride; job_begin and job_end
 carry fg; flush_begin and flush_end records (flush_end with the flush's bytes
 "x" and file count) carry fg; and snap records (op and fg) follow every
-stride operations.
+stride operations. A phased workload (PREREGISTRATION D-29 §2, W5) adds a
+phase_start stamp, with the phase that starts, at every switch.
 """
 
 from __future__ import annotations
@@ -53,16 +54,45 @@ def load(path: Path) -> list[dict]:
             if line.strip()]
 
 
+PHASE_START = "phase_start"
+
+
+def stamp_key(record: dict) -> str:
+    """A stamp's name, or for a phased workload's switch (PREREGISTRATION
+    D-29 §2, W5) "phase_start:<phase>": db_bench stamps phase_start, with the
+    phase that starts, at every switch."""
+    if record["name"] == PHASE_START:
+        return f"{PHASE_START}:{record.get('phase')}"
+    return record["name"]
+
+
 def stamp_index(records: list[dict]) -> dict[str, int]:
-    """Position of each stamp by name. A repeated name is an error: the
+    """Position of each stamp by stamp_key. A repeated key is an error: the
     phase it marks would be ambiguous."""
     found: dict[str, int] = {}
     for index, record in enumerate(records):
         if record.get("type") == "stamp":
-            if record["name"] in found:
-                raise ValueError(f"stamp {record['name']} appears twice")
-            found[record["name"]] = index
+            key = stamp_key(record)
+            if key in found:
+                raise ValueError(f"stamp {key} appears twice")
+            found[key] = index
     return found
+
+
+def phase_bounds(records: list[dict], at: dict[str, int]
+                 ) -> list[tuple[int, int, int]]:
+    """W5's phases as (phase, first record, last record) indices: phase 1
+    from measure_start, each later one from its phase_start, each to the next
+    phase's start and the last to drain_end, as the whole run is measured.
+    Empty for a run with one phase."""
+    starts = sorted((int(key.split(":", 1)[1]), index)
+                    for key, index in at.items()
+                    if key.startswith(PHASE_START + ":"))
+    if not starts:
+        return []
+    marks = [(1, at["measure_start"])] + starts
+    ends = [index for _, index in starts] + [at["drain_end"]]
+    return [(phase, first, last) for (phase, first), last in zip(marks, ends)]
 
 
 def check(records: list[dict]) -> list[str]:
@@ -82,6 +112,7 @@ def check(records: list[dict]) -> list[str]:
         return problems + [str(error)]
     problems += [f"no {name} stamp" for name in ("measure_start", "drain_end")
                  if name not in stamps]
+    problems += _check_phases(records)
     end = stamps.get("drain_end")
     width = ROW_WIDTH.get(records[0].get("schema")) if records else None
     if records and width is None:
@@ -136,6 +167,27 @@ def check(records: list[dict]) -> list[str]:
     if any(later < earlier for earlier, later in zip(ops, ops[1:])):
         problems.append("operation count decreased")
     return problems
+
+
+def _check_phases(records: list[dict]) -> list[str]:
+    """W5's phase_start stamps (D-29 §2): phases 2, 3, ... in that order,
+    each after measure_start and before drain_start (mixgraph switches
+    phase only while it runs)."""
+    at = stamp_index(records)
+    phases = [(int(key.split(":", 1)[1]) if key.split(":", 1)[1].isdigit()
+               else -1, index) for key, index in at.items()
+              if key.startswith(PHASE_START + ":")]
+    if not phases:
+        return []
+    phases.sort(key=lambda item: item[1])
+    if [p for p, _ in phases] != list(range(2, len(phases) + 2)):
+        return [f"phase_start stamps for phases {[p for p, _ in phases]}, "
+                f"not 2..{len(phases) + 1} in order"]
+    if not ("measure_start" in at and "drain_start" in at and
+            at["measure_start"] < phases[0][1] and
+            phases[-1][1] < at["drain_start"]):
+        return ["phase_start stamps outside measure_start..drain_start"]
+    return []
 
 
 def _check_schema3(records: list[dict]) -> list[str]:

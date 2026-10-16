@@ -32,15 +32,19 @@ from pathlib import Path
 SCHEMA = 1
 CODE_DIRS = ("rl_agent", "controller", "scripts/dbbench_pipeline")
 # Preflight steps (plan §6.4): 1 build, 2 tiers 1-2, 3 ACT-1, 4 parity,
-# 5 rules-mode smoke, 6 learner smoke.
+# 5 rules-mode smoke, 6 learner smoke, 7 the workload suite (PREREGISTRATION
+# D-29: the generator check and a preloaded tree's runs, every workload).
 STATIC_STEPS = {1, 2, 3, 4}
 STATIC_ARMS = {"regular", "native"}
+SUITE_STEP = 7
 
 
-def required_steps(arms):
+def required_steps(arms, suite=False):
     """Steps a run needs: static arms 1-4, the plugin's hold and rules arms
-    add 5, anything else 5-6."""
+    add 5, anything else 5-6; a suite workload, or a tree, adds 7."""
     need = set(STATIC_STEPS)
+    if suite:
+        need.add(SUITE_STEP)
     for arm in arms:
         if arm in STATIC_ARMS or arm.startswith("static:"):
             continue
@@ -244,6 +248,9 @@ def main(argv=None):
                         help="STEP=REASON pairs")
     parser.add_argument("--arms", default="",
                         help="space-separated arms of the run being checked")
+    parser.add_argument("--suite", action="store_true",
+                        help="check: the run is a suite workload's (D-29), "
+                             "or a tree's preload")
     args = parser.parse_args(argv)
     if args.action != "identity" and not args.marker:
         parser.error(f"{args.action} needs --marker")
@@ -271,7 +278,7 @@ def main(argv=None):
         print(f"preflight marker written: {args.marker}")
         return 0
     found = problems(read_marker(args.marker), hashes,
-                     required_steps(args.arms.split()))
+                     required_steps(args.arms.split(), suite=args.suite))
     for problem in found:
         print(f"preflight marker {args.marker}: {problem}", file=sys.stderr)
     return 1 if found else 0

@@ -7,6 +7,7 @@
 #   2 tier 1 and tier 2 suites                          and the evaluator smoke
 #   3 ACT-1 on the real binary                        5 rules-mode smoke
 #                                                     6 learner smoke
+#                                                     7 the workload suite (D-29)
 #
 # A step whose component does not exist yet is skipped and recorded as skipped;
 # a run whose arms need that step is then refused by 03. A step whose component
@@ -256,8 +257,79 @@ PY
   pass 6
 fi
 
-echo "=== step 7: write the marker ==="
-# The plugin built in step 1 is bound into the marker (plan §6.4 step 7);
+echo "=== step 7: the workload suite (PREREGISTRATION D-29) ==="
+# (a) 32: the suite options of the db_bench step 1 built, end to end on small
+# trees, against stock RocksDB (step 4's 01c) where they are off: unchanged
+# draws when off, the key-sign fix, decoupling, W1-W5, refusals.
+# (b) the runs' path: a small tree from 31 at the suite's geometry and memory
+# cap, and every workload, W1-W5, run on checked copies of it by 03 (a native
+# arm each, and on W1 the plugin's hold arm too), scored by 04: settled,
+# W4's inserts counted, W5's three phases in phases.csv adding up to the run.
+SUITE_WORK="$PREFLIGHT_WORK_DIR/suite"
+rm -rf "$SUITE_WORK" "$DB_ROOT/preflight-suite"
+"$PIPELINE_DIR/32_check_suite_generator.sh" "$DB_BENCH" \
+  "$STOCK_BUILD_DIR/db_bench" "$SUITE_WORK/generator"
+suite_env=(WRITE_BUFFER_SIZE="$SUITE_WRITE_BUFFER_SIZE"
+           TARGET_FILE_SIZE="$SUITE_TARGET_FILE_SIZE"
+           BLOCK_CACHE_SIZE="$SUITE_BLOCK_CACHE_SIZE"
+           OPEN_FILES="$SUITE_OPEN_FILES" RUN_MEMORY_MAX="$SUITE_MEMORY_MAX"
+           SIZE_RATIOS=4 MAX_BYTES_FOR_LEVEL_BASE=67108864
+           L0_COMPACTION_TRIGGER=4)
+tree_line="$(env "${suite_env[@]}" CONFIRM_PRELOAD=YES PRELOAD_KEYS=500000 \
+  TREE_ROOT="$SUITE_WORK/trees" "$PIPELINE_DIR/31_preload_tree.sh" | tail -n 1)"
+[[ "$tree_line" == TREE_DIR=* ]] || {
+  echo "[step 7] FAIL: 31 built no tree" >&2
+  exit 1
+}
+for workload in W1 W2 W3 W4 W5; do
+  arms=native
+  [[ "$workload" != W1 || ! -d controller ]] || arms="native hold"
+  env "${suite_env[@]}" CONFIRM_EXPERIMENTS=YES SUITE_WORKLOAD="$workload" \
+    TREE_DIR="${tree_line#TREE_DIR=}" EXPERIMENT_ARMS="$arms" \
+    PLUGIN_PLACEHOLDERS=1 WORKLOAD_SIZES_M=1 REPEATS=1 RESUME=0 \
+    RESULTS_ROOT="$SUITE_WORK/$workload" \
+    DB_ROOT="$DB_ROOT/preflight-suite/$workload" \
+    "$PIPELINE_DIR/03_run_experiments.sh"
+  "$PYTHON" "$PIPELINE_DIR/04_generate_graphs.py" \
+    --results "$SUITE_WORK/$workload" --summary-only
+done
+"$PYTHON" - "$SUITE_WORK" "$([[ -d controller ]] && echo 1 || echo 0)" <<'PY'
+import csv, sys
+from pathlib import Path
+work, plugin = Path(sys.argv[1]), sys.argv[2] == "1"
+def rows(workload, name):
+    with (work / workload / "graphs" / name).open() as handle:
+        return list(csv.DictReader(handle))
+for workload in ("W1", "W2", "W3", "W4", "W5"):
+    summary = rows(workload, "summary.csv")
+    arms = sorted(r["arm"] for r in summary)
+    wanted = ["hold", "native"] if workload == "W1" and plugin else ["native"]
+    if arms != wanted or any(r["settle_ok"] != "1" or
+                             r["suite_workload"] != workload for r in summary):
+        raise SystemExit(f"[step 7] FAIL: {workload}: arms {arms}, not a "
+                         "settled suite run of each of {wanted}")
+    native = next(r for r in summary if r["arm"] == "native")
+    inserts = float(native["insert_operations"])
+    if (workload == "W4") != (inserts > 0):
+        raise SystemExit(f"[step 7] FAIL: {workload} served {inserts} inserts")
+    note = ""
+    if workload == "W5":
+        phases = [p for p in rows(workload, "phases.csv") if p["arm"] == "native"]
+        served = [float(p["phase_operations"]) for p in phases]
+        if [p["phase"] for p in phases] != ["1", "2", "3"] or \
+                sum(served) != float(native["measured_operations"]):
+            raise SystemExit(f"[step 7] FAIL: W5's phases {served} do not "
+                             "split its run")
+        note = f", phases {served}"
+    print(f"[step 7] {workload}: {native['measured_operations']} operations, "
+          f"throughput {float(native['throughput_ops_per_second']):.0f} ops/s, "
+          f"inserts {inserts:.0f}{note}")
+PY
+rm -rf "$DB_ROOT/preflight-suite" "$SUITE_WORK/trees"
+pass 7
+
+echo "=== step 8: write the marker ==="
+# The plugin built in step 1 is bound into the marker (plan §6.4's last step);
 # without controller/ the marker records it as absent, as before.
 plugin_args=()
 if [[ -d controller ]]; then plugin_args=(--plugin "$CONTROLLER_PLUGIN"); fi
@@ -267,4 +339,5 @@ if [[ -d controller ]]; then plugin_args=(--plugin "$CONTROLLER_PLUGIN"); fi
 echo "passed: ${passed[*]}"
 echo "skipped: ${skipped[*]:-none}"
 echo "03 accepts a long run only when every step its arms need passed:"
-echo "static arms need 1-4, rules also 5, learned arms 1-6."
+echo "static arms need 1-4, rules also 5, learned arms 1-6; a suite workload"
+echo "(SUITE_WORKLOAD) or a tree's preload (31) also needs 7."

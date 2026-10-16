@@ -148,6 +148,14 @@ def parse_mix_counts(text: str) -> tuple[float, float, float, float, float]:
     return gets, puts, scans, returned, average_scan_length
 
 
+def parse_inserts(text: str) -> float:
+    """W4's inserts of new keys (PREREGISTRATION D-29 §2): mixgraph's
+    summary line ends ", Inserts:N" only in insert mode, and an insert is
+    neither a Get, a Put nor a Seek in its counts. 0 without them."""
+    matches = re.findall(r"Gets:\d+ Puts:\d+ Seek:\d+.*?, Inserts:(\d+)\)", text)
+    return float(matches[-1]) if matches else 0.0
+
+
 EVENT_LOG = re.compile(r"EVENT_LOG_v1 (\{.*\})")
 
 
@@ -395,7 +403,90 @@ PROGRAMME1_FIELDS = (
     "run_seeks", "table_reopens", "reopen_seconds", "reopen_time_ratio",
     "table_opens_less_created", "sst_files_created", "drain_read_ticks",
     "held_byte_operations",
+    "largest_flush_bytes", "largest_flush_buffer_fraction", "full_buffer_flush",
     "C_W", "C_R", "C_S")
+# W5's per-phase rows (PREREGISTRATION D-29 §2), written to phases.csv.
+PHASE_FIELDS = (
+    "phase", "phase_operations", "phase_gets", "phase_puts", "phase_seeks",
+    "phase_mixgraph_seconds", "phase_throughput_ops_per_second",
+    "phase_stall_fraction", "phase_flush_bytes", "phase_compaction_bytes",
+    "phase_user_bytes", "phase_write_amplification", "phase_filter_probes",
+    "phase_block_reading_probes", "phase_run_seeks", "phase_table_reopens",
+    "phase_held_byte_operations", "C_W", "C_R", "C_S")
+
+
+def flush_flag(window: list[dict], write_buffer_size: float) -> dict:
+    """D-29 §3: the measured phase's largest flush (flush_end's bytes,
+    host log schema 3), its share of the write buffer, and 1 where it filled
+    the buffer: A-Impl-6's admissible L0 triggers assume a flush stays below
+    it (the direct tree test's largest was 94%). NaN before schema 3."""
+    sizes = [float(r["x"]) for r in window if r.get("type") == "flush_end"]
+    if not sizes:
+        return {"largest_flush_bytes": math.nan,
+                "largest_flush_buffer_fraction": math.nan,
+                "full_buffer_flush": math.nan}
+    largest = max(sizes)
+    return {"largest_flush_bytes": largest,
+            "largest_flush_buffer_fraction": divide(largest, write_buffer_size),
+            "full_buffer_flush": (float(largest >= write_buffer_size)
+                                  if write_buffer_size > 0 else math.nan)}
+
+
+def phase_metrics(records: list[dict], at: dict[str, int]) -> list[dict]:
+    """W5's phases, each measured on its own (D-29 §2) as the whole run is:
+    from its start stamp (measure_start, then each phase_start) to the next
+    phase's start, the last to drain_end, so the drain's work falls in the
+    last phase as it falls in the run. Throughput and the stall fraction are
+    over the phase's mixgraph time (the last to drain_start). Bytes come from
+    the host log alone (flush_end and job_end inside the window), so a job
+    finishing at a switch is counted once, where the host log puts it. The
+    phases' operations and held byte-operations sum to the run's. Needs
+    host log schema 3 (flush_end)."""
+    phases = []
+    for phase, first, last in host_log.phase_bounds(records, at):
+        start, end = records[first], records[last]
+        mix_end = records[at["drain_start"]] if last == at["drain_end"] else end
+        window = records[first + 1:last]
+        samples = [(start["op"], start["h"])] + [
+            (r["op"], r["h"]) for r in window if r.get("type") == "h"]
+        ends = [op for op, _ in samples[1:]] + [end["op"]]
+        held = sum(h * (later - op) for (op, h), later in zip(samples, ends))
+
+        def delta(ticker: str) -> float:
+            return float(end["tickers"].get(ticker, math.nan)
+                         - start["tickers"].get(ticker, math.nan))
+
+        seconds = (mix_end["t_us"] - start["t_us"]) / 1e6
+        operations = float(mix_end["op"] - start["op"])
+        flush = sum(float(r["x"]) for r in window if r.get("type") == "flush_end")
+        compaction = sum(float(r["x"]) for r in window
+                         if r.get("type") == "job_end" and r["ok"] == 1
+                         and not r["trivial"])
+        user = delta("rocksdb.bytes.written")
+        phases.append({
+            "phase": phase, "_first": first, "_last": last,
+            "phase_operations": operations,
+            "phase_gets": float(mix_end["tickers"]["rocksdb.number.keys.read"]
+                                - start["tickers"]["rocksdb.number.keys.read"]),
+            "phase_puts": float(mix_end["tickers"]["rocksdb.number.keys.written"]
+                                - start["tickers"]["rocksdb.number.keys.written"]),
+            "phase_seeks": float(mix_end["tickers"]["rocksdb.number.db.seek"]
+                                 - start["tickers"]["rocksdb.number.db.seek"]),
+            "phase_mixgraph_seconds": seconds,
+            "phase_throughput_ops_per_second": divide(operations, seconds),
+            "phase_stall_fraction": divide(
+                (mix_end["stall_micros"] - start["stall_micros"]) / 1e6, seconds),
+            "phase_flush_bytes": flush, "phase_compaction_bytes": compaction,
+            "phase_user_bytes": user,
+            "phase_write_amplification": divide(flush + compaction, user),
+            "phase_filter_probes": delta("rocksdb.point.sst.probe"),
+            "phase_block_reading_probes": delta("rocksdb.bloom.filter.full.positive"),
+            "phase_run_seeks": delta("rocksdb.sorted.run.seek"),
+            "phase_table_reopens": delta(research_objective.READ_REOPENS),
+            "phase_held_byte_operations": float(held),
+            "C_W": math.nan, "C_R": math.nan, "C_S": math.nan,
+        })
+    return phases
 # Cost model 2's parts and report-only diagnostics (PATHWAYS D §1 as amended
 # 2026-10-03, D-23; D-24 §4), filled when the prices are schema 6.
 V2_FIELDS = (
@@ -722,6 +813,18 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
             "rocksdb.sorted.run.seek")),
         held_byte_operations=float(held),
     )
+    buffer = re.search(r":wb(\d+):", metadata.get("experiment_fingerprint", ""))
+    row.update(flush_flag(window, float(buffer.group(1)) if buffer else math.nan))
+    # W5 (D-29 §2): every phase is scored on its own as well; the phases
+    # must add up to the run they split.
+    phases = phase_metrics(records, at)
+    if phases:
+        if (sum(p["phase_operations"] for p in phases) !=
+                float(mix_end["op"] - start["op"]) or
+                sum(p["phase_held_byte_operations"] for p in phases) != held):
+            raise InvalidArm("the phases' operations or held byte-operations "
+                             "do not add up to the run's")
+        row["_phases"] = phases
 
     # Priced costs need the run's own prices (OBJ-2) and q-bar, under the
     # contract the run recorded.
@@ -805,6 +908,28 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     row.update(research_objective.objective_columns(contract, costs))
     row.update(objective_status="priced", reference_rate=rate,
                prices_sha256=prices_sha256)
+    # W5's phases, priced as the run is, each over its own window.
+    for phase in row.get("_phases", []):
+        if v2 is not None:
+            try:
+                part = cost_model_v2_costs(
+                    record, prices, rate, records,
+                    {"measure_start": phase["_first"], "drain_end": phase["_last"]},
+                    events, phase["phase_flush_bytes"],
+                    phase["phase_held_byte_operations"])
+            except (ValueError, KeyError) as error:
+                raise InvalidArm(f"cost model 2, phase {phase['phase']}: "
+                                 f"{error}") from error
+            phase_costs = (part["C_W"], part["C_R"], part["C_S"])
+        else:
+            phase_costs = research_objective.priced_costs(
+                prices, rate,
+                phase["phase_flush_bytes"] + phase["phase_compaction_bytes"],
+                phase["phase_filter_probes"], phase["phase_block_reading_probes"],
+                phase["phase_run_seeks"], phase["phase_table_reopens"],
+                phase["phase_held_byte_operations"])
+        phase.update(zip(("C_W", "C_R", "C_S"), phase_costs))
+        phase.update(research_objective.objective_columns(contract, phase_costs))
     return row
 
 
@@ -821,10 +946,14 @@ def collect_arm(run_dir: Path,
     properties = parse_properties(text)
     histograms = parse_histograms(text)
     gets, puts, scans, scan_returned, average_scan_length = parse_mix_counts(text)
+    inserts = parse_inserts(text)
     events = read_events(run_dir / "rocksdb_LOG.txt")
     drain = parse_drain(text, events)
+    # Every operation mixgraph served, W4's inserts among them (the host
+    # log's operation count includes them as keys written).
     programme1 = programme1_metrics(run_dir, text, metadata, events,
-                                    gets + puts + scans, reprice=reprice)
+                                    gets + puts + scans + inserts,
+                                    reprice=reprice)
 
     # Whole-run tickers (cumulative since open; they include the bulk load).
     flush_bytes = tickers.get("rocksdb.flush.write.bytes", 0.0)
@@ -967,6 +1096,9 @@ def collect_arm(run_dir: Path,
         "get_operations": gets,
         "put_operations": puts,
         "scan_operations": scans,
+        "insert_operations": inserts,
+        "suite_workload": metadata.get("suite_workload", "none"),
+        "tree_sha256": metadata.get("tree_sha256", "none"),
         "average_scan_length": average_scan_length,
         "flush_write_bytes": flush_bytes,
         "compaction_write_bytes": compact_bytes,
@@ -1121,6 +1253,25 @@ def main() -> int:
               file=sys.stderr)
     if not rows:
         raise SystemExit(f"no scorable arms found below {results}")
+
+    # W5's phases (D-29 §2): one row per arm and phase, beside the summary.
+    phase_rows = []
+    for row in rows:
+        for phase in row.pop("_phases", []):
+            del phase["_first"], phase["_last"]
+            phase_rows.append({**{key: row[key] for key in (
+                "workload_profile", "suite_workload", "size_ratio", "arm",
+                "repeat", "experiment_fingerprint", "objective_status",
+                "result_directory")}, **phase})
+    if phase_rows:
+        phase_fields = list(dict.fromkeys(
+            key for phase in phase_rows for key in phase))
+        with (output / "phases.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=phase_fields,
+                                    restval=math.nan)
+            writer.writeheader()
+            writer.writerows(phase_rows)
+        print(f"phases: {len(phase_rows)} rows; csv: {output / 'phases.csv'}")
 
     fields = list(rows[0].keys())
     with (output / "summary.csv").open("w", newline="") as handle:

@@ -215,6 +215,15 @@ def reference_rate(contract: dict, family: str):
     return contract["reference_rate"]["ops_per_second"].get(family)
 
 
+def suite_workload_listed(contract: dict, family: str) -> bool:
+    """Whether the contract lists a family as a suite workload
+    (PREREGISTRATION D-29 §6): an entry that records both decouplings. A
+    long suite run that is not diagnostic needs it (03, 33)."""
+    entry = contract["workloads"].get(family)
+    return (isinstance(entry, dict) and entry.get("decouple_query") is True
+            and entry.get("decouple_sizes") is True)
+
+
 def relative_difference(candidate: float, baseline: float) -> float:
     if not all(math.isfinite(v) and v >= 0 for v in (candidate, baseline)):
         raise ValueError("measurements must be finite and nonnegative")

@@ -26,7 +26,8 @@ SAMPLE = {
     "BLOCK_CACHE_SIZE": "8388608", "BLOOM_BITS": "10",
     "MAX_BACKGROUND_JOBS": "2", "THREADS": "1", "DISABLE_WAL": "0",
     "USE_DIRECT_IO": "0", "MULTIPLIER_FINGERPRINT": "",
-    "POWER_FINGERPRINT": "", "SETTLE_FINGERPRINT": "", "QBAR_FINGERPRINT": "",
+    "POWER_FINGERPRINT": "", "SUITE_FINGERPRINT": "", "TREE_FINGERPRINT": "",
+    "SETTLE_FINGERPRINT": "", "QBAR_FINGERPRINT": "",
     "PRICES_FINGERPRINT": "", "PLUGIN_FINGERPRINT": "",
     "SOFT_PENDING_BYTES": "68719476736", "HARD_PENDING_BYTES": "274877906944",
     "DBBENCH_SHA256": "a" * 64, "RESEARCH_OBJECTIVE_SHA256": "b" * 64,
@@ -66,8 +67,37 @@ class FingerprintTest(unittest.TestCase):
         options = select.parse_fingerprint_options(fingerprint_from_03())
         for name in ("key_dist_a", "key_dist_b", "settle_hold_seconds",
                      "reference_rate", "prices_sha256", "plugin_sha256",
-                     "plugin_config_sha256"):
+                     "plugin_config_sha256", "mix_phases", "tree_keys",
+                     "tree_seed", "tree_sha256"):
             self.assertIsNone(options[name], name)
+        # D-29's generator options: absent is db_bench as released.
+        self.assertEqual((options["decouple_query"], options["decouple_sizes"],
+                          options["mix_insert_ratio"]), (0, 0, 0.0))
+
+    def test_suite_segments_reach_the_fingerprint_and_parse(self):
+        # PREREGISTRATION D-29 §1 and D-27 §4: decoupling, W4's inserts,
+        # W5's phases (":" and ";" written "_" and "~") and the tree.
+        phases = "13333333:0.1:0.9:0;13333333:0.5:0.5:0;13333334:0.9:0.1:0"
+        encoded = phases.replace(":", "_").replace(";", "~")
+        fingerprint = fingerprint_from_03(
+            SKEW_FINGERPRINT="",
+            SUITE_FINGERPRINT=":dec11:ins0.9:ph" + encoded,
+            TREE_FINGERPRINT=":tree20000000-1000-" + "f" * 64,
+            LOAD_PERCENT="0", size_label="40M")
+        options = select.parse_fingerprint_options(fingerprint)
+        self.assertEqual((options["decouple_query"], options["decouple_sizes"]),
+                         (1, 1))
+        self.assertEqual(options["mix_insert_ratio"], 0.9)
+        self.assertEqual(options["mix_phases"], phases)
+        self.assertEqual((options["tree_keys"], options["tree_seed"],
+                          options["tree_sha256"]), (20000000, 1000, "f" * 64))
+        self.assertEqual((options["size_millions"], options["load_percent"]),
+                         (40, 0))
+        # Query decoupling alone, as an exploratory run might use it.
+        options = select.parse_fingerprint_options(
+            fingerprint_from_03(SUITE_FINGERPRINT=":dec10"))
+        self.assertEqual((options["decouple_query"], options["decouple_sizes"],
+                          options["mix_phases"]), (1, 0, None))
 
     def test_a_controller_arm_carries_its_plugin_and_config(self):
         fingerprint = fingerprint_from_03(

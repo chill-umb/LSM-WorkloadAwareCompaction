@@ -2,6 +2,17 @@
 # One configuration file for the complete db_bench experiment pipeline.
 # All sizes are bytes unless the variable name says otherwise.
 
+# A suite workload (SUITE_WORKLOAD, below) sets these itself. Any of them
+# given from the environment beside it would be overridden, so 03 refuses
+# them; this records which were given, before the defaults below fill them.
+SUITE_OWNED_VARIABLES="WORKLOAD_PROFILE WORKLOAD_SKEW MIX_GET_RATIO MIX_PUT_RATIO MIX_SEEK_RATIO MIX_INSERT_RATIO MIX_PHASE_MIXES MIXGRAPH_DECOUPLE_QUERY MIXGRAPH_DECOUPLE_SIZES"
+SUITE_ENVIRONMENT_SET=""
+for _suite_variable in $SUITE_OWNED_VARIABLES; do
+  [[ -z "${!_suite_variable+x}" ]] ||
+    SUITE_ENVIRONMENT_SET+="${SUITE_ENVIRONMENT_SET:+ }$_suite_variable"
+done
+unset _suite_variable
+
 # Workload matrix.
 WORKLOAD_PROFILE="${WORKLOAD_PROFILE:-assoc-v1}"
 WORKLOAD_SIZES_M="${WORKLOAD_SIZES_M:-10 20 30 40 50}"
@@ -77,6 +88,110 @@ VALUE_THETA="${VALUE_THETA:-925.5}"
 VALUE_K="${VALUE_K:-0.2615}"
 VALUE_SIGMA="${VALUE_SIGMA:-25.45}"
 MIX_MAX_VALUE_SIZE="${MIX_MAX_VALUE_SIZE:-65536}"
+
+# The Programme 1 workload suite (PREREGISTRATION D-29). SUITE_WORKLOAD is one
+# of W1-W5 (D-29 §2); 03 then calls apply_suite_workload, which sets the
+# profile, family, keys, mix and decoupling from suite_workload_recipe. Empty:
+# the runs before D-29, set by the variables above.
+SUITE_WORKLOAD="${SUITE_WORKLOAD:-}"
+# db_bench's suite options (fork 5eff2f075; D-29 §1). 0 and empty are the
+# released behaviour, and add no flag, so stock db_bench (ACT-4) still runs.
+#   MIXGRAPH_DECOUPLE_QUERY  the query type from its own random stream
+#   MIXGRAPH_DECOUPLE_SIZES  value size and scan length from their own stream
+#   MIX_INSERT_RATIO         inserts of new keys (W4): uniform keys, 1 thread
+#   MIX_PHASE_MIXES          phases (W5): "get:put:seek[:insert]" per phase,
+#                            joined by ";". The run's operations are split
+#                            equally, the remainder going to the last phase;
+#                            the MIX_*_RATIO values are then 0.
+MIXGRAPH_DECOUPLE_QUERY="${MIXGRAPH_DECOUPLE_QUERY:-0}"
+MIXGRAPH_DECOUPLE_SIZES="${MIXGRAPH_DECOUPLE_SIZES:-0}"
+MIX_INSERT_RATIO="${MIX_INSERT_RATIO:-0}"
+MIX_PHASE_MIXES="${MIX_PHASE_MIXES:-}"
+# D-29 §1 and §3: the suite's run shape, geometry and grid. 31 and 33 pass
+# them to every preload and run; for a long suite run (more than
+# PREFLIGHT_SHORT_RUN_MAX_M million operations, or preloaded keys) 03 and 31
+# refuse any other value. The memory cap applies as systemd-run's MemoryMax.
+SUITE_PRELOAD_KEYS="${SUITE_PRELOAD_KEYS:-20000000}"
+SUITE_RUN_OPERATIONS_M="${SUITE_RUN_OPERATIONS_M:-40}"
+SUITE_WRITE_BUFFER_SIZE="${SUITE_WRITE_BUFFER_SIZE:-16777216}"   # 16 MiB
+SUITE_TARGET_FILE_SIZE="${SUITE_TARGET_FILE_SIZE:-4194304}"      # 4 MiB
+SUITE_BLOCK_CACHE_SIZE="${SUITE_BLOCK_CACHE_SIZE:-8388608}"      # 8 MiB
+SUITE_OPEN_FILES="${SUITE_OPEN_FILES:--1}"
+SUITE_MEMORY_MAX="${SUITE_MEMORY_MAX:-32G}"
+# (L1 base in MiB : L0 trigger) pairs, and T. D-29 §3: 81 settings.
+SUITE_SETTINGS="${SUITE_SETTINGS:-64:2 64:4 128:2 128:4 128:8 256:2 256:4 256:8 256:16}"
+SUITE_T="${SUITE_T:-2 3 4 5 6 7 8 9 10}"
+# The owner's plan of 2026-10-16: W1 and W2 run now; W3-W5 are built and
+# tested, and run when SUITE_WORKLOADS names them.
+SUITE_WORKLOADS="${SUITE_WORKLOADS:-W1 W2}"
+# Every setting's preload uses this one seed (D-27 §1). It lies outside the
+# run seeds DBBENCH_SEED + repeat - 1, so no run replays its tree's load draws.
+PRELOAD_SEED="${PRELOAD_SEED:-1000}"
+# Where 31 archives the trees (ignored by git, as DB_ROOT; 33 uses
+# $NVME/suite-trees), and the tree a run of 03 starts from (empty:
+# 03 loads in the run's own process, as before D-27). RUN_MEMORY_MAX is the
+# cap a preload or a run on a tree runs under (empty: none; long suite runs
+# need SUITE_MEMORY_MAX).
+TREE_ROOT="${TREE_ROOT:-.dbbench_pipeline_trees}"
+TREE_DIR="${TREE_DIR:-}"
+RUN_MEMORY_MAX="${RUN_MEMORY_MAX:-}"
+
+# D-29 §2: "<profile> <family> <WORKLOAD_SKEW> <get> <put> <seek> <insert>
+# <phase mixes or ->". The family names the contract's workloads entry and
+# q-bar; W3-W5's await the contract edit of D-29 §6.
+suite_workload_recipe() {  # $1=W1..W5
+  case "$1" in
+    W1) echo "w1-assoc assoc 1 0.806 0.159 0.035 0 -" ;;
+    W2) echo "w2-read-heavy powerlaw_get95 2 0.95 0.05 0 0 -" ;;
+    W3) echo "w3-update-heavy powerlaw_put90 2 0.1 0.9 0 0 -" ;;
+    W4) echo "w4-growth growth_insert90 0 0.1 0 0 0.9 -" ;;
+    W5) echo "w5-phased phased_uniform 0 0 0 0 0 0.1:0.9:0;0.5:0.5:0;0.9:0.1:0" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Sets the suite workload's variables (and SUITE_FAMILY); nothing without
+# SUITE_WORKLOAD. Every suite workload runs both decouplings (D-29 §1).
+apply_suite_workload() {
+  local recipe
+  SUITE_FAMILY=""
+  [[ -n "$SUITE_WORKLOAD" ]] || return 0
+  recipe="$(suite_workload_recipe "$SUITE_WORKLOAD")" || {
+    echo "SUITE_WORKLOAD must be one of W1-W5 (PREREGISTRATION D-29 §2);" \
+         "got: $SUITE_WORKLOAD" >&2
+    return 1
+  }
+  [[ -z "$SUITE_ENVIRONMENT_SET" ]] || {
+    echo "SUITE_WORKLOAD=$SUITE_WORKLOAD sets $SUITE_ENVIRONMENT_SET itself;" \
+         "unset them." >&2
+    return 1
+  }
+  read -r WORKLOAD_PROFILE SUITE_FAMILY WORKLOAD_SKEW MIX_GET_RATIO \
+    MIX_PUT_RATIO MIX_SEEK_RATIO MIX_INSERT_RATIO MIX_PHASE_MIXES <<< "$recipe"
+  [[ "$MIX_PHASE_MIXES" != - ]] || MIX_PHASE_MIXES=""
+  MIXGRAPH_DECOUPLE_QUERY=1
+  MIXGRAPH_DECOUPLE_SIZES=1
+}
+
+# W5's --mix_phases for a run of $1 operations: MIX_PHASE_MIXES' phases with
+# equal shares, the remainder in the last (40M: 13,333,333 twice, then
+# 13,333,334, as D-29 §2 gives them). Empty without phases.
+mix_phases_for() {  # $1=operations
+  local -a mixes
+  local count share index out=""
+  [[ -n "$MIX_PHASE_MIXES" ]] || return 0
+  IFS=';' read -r -a mixes <<< "$MIX_PHASE_MIXES"
+  count="${#mixes[@]}"
+  share=$(( $1 / count ))
+  for (( index = 0; index < count; index++ )); do
+    if (( index == count - 1 )); then
+      out+="$(( $1 - share * (count - 1) )):${mixes[index]}"
+    else
+      out+="$share:${mixes[index]};"
+    fi
+  done
+  printf '%s' "$out"
+}
 
 # Record and LSM geometry, matching the parameters historically used by
 # run_vanilla_sweep.sh.
@@ -384,4 +499,12 @@ dbbench_shared_flags() {
   else
     DBBENCH_WORKLOAD+=(--keyrange_num=1)
   fi
+  # The fork's suite options (D-29 §1), only when on: stock db_bench has
+  # none of them. 03 adds --mix_phases itself, sized to each run.
+  [[ "$MIXGRAPH_DECOUPLE_QUERY" != 1 ]] ||
+    DBBENCH_WORKLOAD+=(--mixgraph_decouple_query=true)
+  [[ "$MIXGRAPH_DECOUPLE_SIZES" != 1 ]] ||
+    DBBENCH_WORKLOAD+=(--mixgraph_decouple_sizes=true)
+  [[ "$MIX_INSERT_RATIO" == 0 ]] ||
+    DBBENCH_WORKLOAD+=(--mix_insert_ratio="$MIX_INSERT_RATIO")
 }

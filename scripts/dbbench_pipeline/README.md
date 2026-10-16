@@ -24,7 +24,8 @@ fresh guard manifest.
 `03_run_experiments.sh` checks the marker `PREFLIGHT_PASSED` and exits 7 when
 the `db_bench` binary or the code in `rl_agent/`, `controller/` or this
 directory has changed since, or when a step the run's arms need was skipped
-(static arms need steps 1–4, `hold` and `rules` also 5, learned arms 1–6).
+(static arms need steps 1–4, `hold` and `rules` also 5, learned arms 1–6;
+a suite workload's run, and a tree's preload, also step 7).
 
 **The binary's identity.** `db_bench` is a small executable that loads the
 fork's code from `librocksdb.so.<N>` in its build directory, so a hash of the
@@ -65,7 +66,8 @@ CONFIRM_PREFLIGHT_VERIFICATION=YES \
 ```
 
 `13` rebuilds `db_bench` (step 1), runs tiers 1 and 2 (step 2), then ACT-1,
-parity, rules-mode and learner smoke (steps 3–6). A step whose component does
+parity, rules-mode and learner smoke (steps 3–6), and the workload suite
+(step 7, below). A step whose component does
 not exist yet is skipped and recorded; one whose component exists but is not
 wired into `13` fails. Wire each step in the change that builds its component.
 
@@ -602,3 +604,68 @@ LEARNER_WEIGHTS_FILE=<a training arm's weights.bin>`; no trainer runs, and
 the plugin falls back unless the file is valid. Every learned arm is
 reported by `21_check_learner.py` (`learner_check.json`; report-only on the
 exploratory track).
+
+### The workload suite (PREREGISTRATION D-29; D-27's preloaded trees)
+
+Five workloads, set by `SUITE_WORKLOAD` (`config.sh`'s
+`suite_workload_recipe`), each with the query type, value size and scan
+length drawn apart from the key (`--mixgraph_decouple_query`,
+`--mixgraph_decouple_sizes`; fork `5eff2f075`):
+
+| | Profile | Family (contract, q-bar) | Keys | Mix |
+| --- | --- | --- | --- | --- |
+| W1 | `w1-assoc` | `assoc` | D-1's Assoc fit | 0.806 / 0.159 / 0.035 |
+| W2 | `w2-read-heavy` | `powerlaw_get95` | power law | 0.95 Get / 0.05 Put |
+| W3 | `w3-update-heavy` | `powerlaw_put90` | W2's power law | 0.1 Get / 0.9 Put |
+| W4 | `w4-growth` | `growth_insert90` | uniform; inserts of new keys | 0.1 Get / 0.9 insert |
+| W5 | `w5-phased` | `phased_uniform` | uniform | thirds: Put/Get 0.9/0.1, 0.5/0.5, 0.1/0.9 |
+
+A suite workload refuses any of the variables it sets when they come from
+the environment beside it. The fingerprint gains `dec<query><sizes>`,
+`ins<ratio>`, `ph<phases>` (":" and ";" written "_" and "~") and
+`tree<keys>-<seed>-<identity>` only when used. W4's inserts are counted as
+operations served (and priced as Puts, from the keys-written ticker); W5's
+`phase_start` stamps split the measured phase, and `04` writes one row per
+phase to `graphs/phases.csv` (each phase to the next one's start, the last
+to the drain's end, so the phases add up to the run). Every run reports its
+largest flush, flagged (`full_buffer_flush`) when it filled the buffer.
+
+**Trees (D-27 §4).** `31_preload_tree.sh` loads one tree per setting (T, L1
+base, L0 trigger) with `filluniquerandom` at `PRELOAD_SEED`, settles it,
+archives the closed database under `TREE_ROOT` with `tree.json` (identity:
+the file list with sizes and the MANIFEST's hash; options; binary; load
+statistics) and prints `TREE_DIR=<folder>`. `03` with `TREE_DIR` runs a suite
+workload on a copy, made inside the memory cap (`RUN_MEMORY_MAX`, systemd-run's
+`MemoryMax`) and checked against the identity before `db_bench` opens it; the
+copy settles again and loads nothing (`load0` in the fingerprint). The tree
+fixes T, the geometry and the L0 triggers; `03` refuses a run that differs, a
+tree another `db_bench` built, or an archive whose identity changed.
+
+**Long suite runs** (more than `PREFLIGHT_SHORT_RUN_MAX_M`) need D-29 §1's
+shape and geometry (`SUITE_*` in `config.sh`: 20M keys, 40M operations,
+16 MiB buffer, 4 MiB files, 8 MiB cache, open files -1 with a soft limit of
+at least 100,000, 32 GiB cap), a tree, preflight step 7, and the contract
+edit that lists the family as a suite workload (D-29 §6), unless
+`DIAGNOSTIC_RUN=1`.
+
+**The sweep.** `33_suite_chain.sh` runs D-29 §3's grid, per T and setting:
+the tree, then each of `SUITE_WORKLOADS` (default W1 W2, the owner's plan of
+2026-10-16) with `SUITE_REPEATS` repeats of `SUITE_ARMS`. One node per T:
+
+```bash
+SUITE_T=4 NVME=/mnt/nvme scripts/dbbench_pipeline/33_suite_chain.sh plan
+SUITE_T=4 NVME=/mnt/nvme scripts/dbbench_pipeline/33_suite_chain.sh
+```
+
+Results go to `$NVME/suite-<W>/T<T>-l1<MiB>-k<K>/` (session `suite-<W>`),
+trees to `$NVME/suite-trees/`. A failed tree or workload is logged and the
+chain goes on; a missing preflight stops it. After a setting's runs, its
+tree's database is removed unless the setting is in `SUITE_KEEP_TREES`
+(default `128:4`, the step runs' anchor) or one of its workloads failed.
+Trees are not yet archived off the node (D-27 §4 asks for it).
+
+**Preflight step 7.** `32_check_suite_generator.sh` checks the suite options
+on small trees against stock RocksDB (unchanged draws when off, the key-sign
+fix, decoupling, W1–W5, refusals); then `31` builds a 500,000-key tree at the
+suite geometry and memory cap, and `03` runs W1–W5 on it (W1 also the
+`hold` arm), scored by `04`.

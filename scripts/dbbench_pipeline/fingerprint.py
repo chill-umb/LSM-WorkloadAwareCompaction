@@ -4,7 +4,9 @@
 03 writes the fingerprint and this parser reads it back, so the two must stay
 in lockstep: a new segment needs both sides changed, and
 tests/test_fingerprint.py checks the pair (CLAUDE.md gotcha). Moved here from
-the retired 06_select_baseline_slo.py on 2026-10-02, unchanged.
+the retired 06_select_baseline_slo.py on 2026-10-02, unchanged; PREREGISTRATION
+D-29's generator options and D-27's preloaded tree added on 2026-10-16, each
+segment present only when used.
 """
 
 from __future__ import annotations
@@ -19,7 +21,9 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"sst(\d+):block(\d+):l1(\d+):levels(\d+):"
         r"l0-(\d+)-(\d+)-(\d+):pri(\d+):load(\d+):"
         r"mix([0-9.]+)-([0-9.]+)-([0-9.]+):scan(\d+)-(\d+)"
-        r"(?::skew(\d+)-([0-9.]+))?(?::pow([0-9.]+)-([0-9.]+))?:"
+        r"(?::skew(\d+)-([0-9.]+))?(?::pow([0-9.]+)-([0-9.]+))?"
+        r"(?::dec([01])([01]))?(?::ins([0-9.]+))?(?::ph([0-9._~]+))?"
+        r"(?::tree(\d+)-(\d+)-([0-9a-f]{64}))?:"
         r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
         r"dio([01])(?::cap([0-9.x]+))?(?::ltm([0-9.x]+))?"
         r"(?::settle(\d+))?(?::qbar([0-9.]+))?(?::prices([0-9a-f]{64}))?"
@@ -40,6 +44,8 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "mix_put_ratio", "mix_seek_ratio", "scan_length",
         "mix_max_scan_length", "keyrange_num", "value_theta",
         "key_dist_a", "key_dist_b",
+        "decouple_query", "decouple_sizes", "mix_insert_ratio", "mix_phases",
+        "tree_keys", "tree_seed", "tree_sha256",
         "block_cache_size", "bloom_bits",
         "max_background_jobs", "threads", "disable_wal", "use_direct_io",
         "static_capacity_scales", "level_target_multipliers",
@@ -56,11 +62,18 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
               "plugin_config_sha256")
     # Programme 1 segments (D-13); absent on runs that predate them or do
     # not use them: the power-law family's key fit, the settle hold, q-bar,
-    # the prices file, and a controller arm's plugin and its config.
+    # the prices file, and a controller arm's plugin and its config; and
+    # D-27 §4's preloaded tree (its keys, seed and identity).
     OPTIONAL = {"key_dist_a": float, "key_dist_b": float,
                 "settle_hold_seconds": int, "reference_rate": float,
                 "prices_sha256": str, "plugin_sha256": str,
-                "plugin_config_sha256": str}
+                "plugin_config_sha256": str, "tree_keys": int,
+                "tree_seed": int, "tree_sha256": str}
+    # D-29 §1's generator options; absent is db_bench's released behaviour:
+    # coupled draws, no inserts, no phases. W5's phases are written with "_"
+    # for ":" and "~" for ";", and read back as db_bench's --mix_phases.
+    SUITE_DEFAULTS = {"decouple_query": ("0", int), "decouple_sizes": ("0", int),
+                      "mix_insert_ratio": ("0", float)}
     # Absent means the run predates the B1 skew knob, which is the uniform
     # family at keyrange_num 1 and a fixed value size.
     SKEW_DEFAULTS = {"keyrange_num": "1", "value_theta": None}
@@ -74,6 +87,14 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
             raw = values[index] or SKEW_DEFAULTS[name]
             values[index] = None if raw is None else (
                 int(raw) if name == "keyrange_num" else float(raw))
+            continue
+        if name in SUITE_DEFAULTS:
+            absent, kind = SUITE_DEFAULTS[name]
+            values[index] = kind(values[index] or absent)
+            continue
+        if name == "mix_phases":
+            values[index] = (None if values[index] is None else
+                             values[index].replace("_", ":").replace("~", ";"))
             continue
         if name in OPTIONAL:
             values[index] = (None if values[index] is None

@@ -63,6 +63,9 @@ if [[ "${CONFIRM_EXPERIMENTS:-}" != "YES" ]]; then
   echo "Review config.sh, then set CONFIRM_EXPERIMENTS=YES." >&2
   exit 2
 fi
+# PREREGISTRATION D-29 §2: a suite workload sets its own profile, family,
+# keys, mix and decoupling (config.sh), before anything below reads them.
+apply_suite_workload || exit 1
 
 if [[ "$DBBENCH_BUILD_DIR" = /* ]]; then
   DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
@@ -412,6 +415,8 @@ case "$WORKLOAD_SKEW" in
       echo "KEY_DIST_A and KEY_DIST_B must be plain numbers." >&2
       exit 1
     }
+    # A suite workload is checked against its own family's entry below.
+    if [[ -z "$SUITE_WORKLOAD" ]]; then
     "$PYTHON" - "$MIX_GET_RATIO" "$MIX_PUT_RATIO" "$MIX_SEEK_RATIO" \
       config/research_objective_contract.json <<'PY' || exit 1
 import json, sys
@@ -421,8 +426,12 @@ if [float(v) for v in sys.argv[1:4]] != wanted:
     raise SystemExit(f"WORKLOAD_SKEW=2 is the contract's power-law workload: "
                      f"set MIX_GET/PUT/SEEK_RATIO to {wanted}")
 PY
+    fi
     ;;
 esac
+# A suite workload names its family (D-29 §2): W3-W5 are their own families
+# although W3 shares W2's keys and W4 and W5 have uniform keys.
+[[ -z "$SUITE_FAMILY" ]] || WORKLOAD_FAMILY="$SUITE_FAMILY"
 # q-bar for the family and h_w, from the contract (PREREGISTRATION D-13 §1
 # and §6); q-bar is null until the dated amendment records it. q-bar and the
 # prices file enter a Programme 1 arm's fingerprint only when set (OBJ-2,
@@ -660,27 +669,232 @@ fi
   echo "DISABLE_WAL must be 0 or 1; got: $DISABLE_WAL" >&2
   exit 1
 }
+LONG_MATRIX=0
+for size_m in $WORKLOAD_SIZES_M; do
+  (( size_m <= PREFLIGHT_SHORT_RUN_MAX_M )) || LONG_MATRIX=1
+done
+# PREREGISTRATION D-27 §4: a run on a preloaded tree opens a checked copy of
+# the tree 31 archived, and loads nothing itself (LOAD_PERCENT 0; the tree's
+# keys are --num). The tree fixes T, the geometry and the L0 triggers, so the
+# run must name the same; it was built by this db_bench, and its archive
+# still has its identity. Programme 1 arms only: the old stack's arms load in
+# their own run, under the RL picker's suspension.
+TREE_MODE=0
+TREE_FINGERPRINT=""
+TREE_KEYS="" TREE_SEED="" TREE_SHA256=""
+if [[ -n "$TREE_DIR" ]]; then
+  TREE_MODE=1
+  [[ "$TREE_DIR" = /* ]] || TREE_DIR="$PROJECT_ROOT/$TREE_DIR"
+  [[ -n "$SUITE_WORKLOAD" ]] || {
+    echo "TREE_DIR runs a suite workload (D-29 §2): set SUITE_WORKLOAD." >&2
+    exit 1
+  }
+  for arm in $EXPERIMENT_ARMS; do
+    is_programme1_arm "$arm" || {
+      echo "Arm $arm cannot start from a preloaded tree; the old stack's" \
+           "arms load in their own run." >&2
+      exit 1
+    }
+  done
+  [[ "$(wc -w <<< "$SIZE_RATIOS")" == 1 ]] || {
+    echo "A tree has one T; give SIZE_RATIOS one value." >&2
+    exit 1
+  }
+  mapfile -t tree_values < <("$PYTHON" "$PIPELINE_DIR/tree_identity.py" match \
+    "$TREE_DIR" --dbbench-sha256 "$DBBENCH_SHA256" \
+    --option size_ratio="$SIZE_RATIOS" \
+    --option write_buffer_size="$WRITE_BUFFER_SIZE" \
+    --option target_file_size_base="$TARGET_FILE_SIZE" \
+    --option max_bytes_for_level_base="$MAX_BYTES_FOR_LEVEL_BASE" \
+    --option num_levels="$NUM_LEVELS" \
+    --option level0_file_num_compaction_trigger="$L0_COMPACTION_TRIGGER" \
+    --option level0_slowdown_writes_trigger="$L0_SLOWDOWN_TRIGGER" \
+    --option level0_stop_writes_trigger="$L0_STOP_TRIGGER" \
+    --option compaction_pri="$COMPACTION_PRIORITY" \
+    --option key_size="$KEY_SIZE" --option value_size="$VALUE_SIZE" \
+    --option block_size="$BLOCK_SIZE" --option bloom_bits="$BLOOM_BITS")
+  [[ "${#tree_values[@]}" == 3 ]] || exit 1
+  TREE_KEYS="${tree_values[0]}" TREE_SEED="${tree_values[1]}"
+  TREE_SHA256="${tree_values[2]}"
+  TREE_FINGERPRINT=":tree${TREE_KEYS}-${TREE_SEED}-${TREE_SHA256}"
+  LOAD_PERCENT=0
+elif [[ -n "$SUITE_WORKLOAD" ]] && (( LONG_MATRIX )); then
+  echo "A long suite run starts from its setting's preloaded tree (D-27):" \
+       "set TREE_DIR (31_preload_tree.sh builds it)." >&2
+  exit 1
+fi
+if (( ! TREE_MODE )); then
 (( LOAD_PERCENT > 0 && LOAD_PERCENT < 100 )) || {
   echo "LOAD_PERCENT must be between 1 and 99." >&2
   exit 1
 }
+fi
 if (( L0_SLOWDOWN_TRIGGER < L0_COMPACTION_TRIGGER ||
       L0_STOP_TRIGGER < L0_SLOWDOWN_TRIGGER )); then
   echo "Require compaction trigger <= slowdown trigger <= stop trigger." >&2
   exit 1
 fi
-"$PYTHON" - "$MIX_GET_RATIO" "$MIX_PUT_RATIO" "$MIX_SEEK_RATIO" <<'PY'
+[[ "$MIXGRAPH_DECOUPLE_QUERY" =~ ^[01]$ && "$MIXGRAPH_DECOUPLE_SIZES" =~ ^[01]$ ]] || {
+  echo "MIXGRAPH_DECOUPLE_QUERY and MIXGRAPH_DECOUPLE_SIZES must be 0 or 1." >&2
+  exit 1
+}
+# Plain decimals: both reach the fingerprint as written.
+[[ "$MIX_INSERT_RATIO" =~ ^[0-9]+(\.[0-9]+)?$ && "$MIX_PHASE_MIXES" =~ ^[0-9.:\;]*$ ]] || {
+  echo "MIX_INSERT_RATIO must be a plain decimal and MIX_PHASE_MIXES" \
+       "get:put:seek[:insert] phases joined by \";\"." >&2
+  exit 1
+}
+# The mix sums to one, with inserts; phases (W5) give the mix themselves.
+# Inserts and phases need what db_bench requires of them (fork 5eff2f075),
+# refused here rather than when the run starts.
+"$PYTHON" - "$MIX_GET_RATIO" "$MIX_PUT_RATIO" "$MIX_SEEK_RATIO" \
+  "$MIX_INSERT_RATIO" "$MIX_PHASE_MIXES" "$WORKLOAD_SKEW" "$THREADS" \
+  "$KEY_SIZE" <<'PY' || exit 1
 import sys
-total = sum(map(float, sys.argv[1:]))
-if abs(total - 1.0) > 1e-6:
-    raise SystemExit(f"mix ratios must sum to one; got {total}")
+get, put, seek, insert = (float(v) for v in sys.argv[1:5])
+phases, skew, threads, key_size = sys.argv[5], *map(int, sys.argv[6:9])
+inserts = insert > 0
+if phases:
+    if any((get, put, seek, insert)):
+        raise SystemExit("with MIX_PHASE_MIXES the phases give the mix: the "
+                         "MIX_*_RATIO values and MIX_INSERT_RATIO must be 0")
+    if threads != 1:
+        raise SystemExit("MIX_PHASE_MIXES needs THREADS=1")
+    for number, phase in enumerate(phases.split(";"), 1):
+        try:
+            values = [float(v) for v in phase.split(":")]
+        except ValueError:
+            values = []
+        if len(values) not in (3, 4) or any(v < 0 for v in values):
+            raise SystemExit(f"MIX_PHASE_MIXES phase {number}: want "
+                             f"get:put:seek[:insert], got {phase!r}")
+        if abs(sum(values) - 1.0) > 1e-6:
+            raise SystemExit(f"MIX_PHASE_MIXES phase {number}: the ratios "
+                             f"sum to {sum(values)}, not one")
+        inserts |= len(values) == 4 and values[3] > 0
+else:
+    total = get + put + seek + insert
+    if abs(total - 1.0) > 1e-6:
+        raise SystemExit(f"mix ratios must sum to one; got {total}")
+if inserts and (skew != 0 or threads != 1 or key_size < 17):
+    raise SystemExit("inserts of new keys need uniform keys (WORKLOAD_SKEW=0), "
+                     "THREADS=1 and KEY_SIZE >= 17")
 PY
+# One spelling of no inserts, for the fingerprint and db_bench's flags.
+[[ ! "$MIX_INSERT_RATIO" =~ ^0+(\.0+)?$ ]] || MIX_INSERT_RATIO=0
+
+# PREREGISTRATION D-29 §1: a long suite run has the suite's run shape and
+# geometry, runs under the memory cap, and starts from a tree of the suite's
+# preload. Short runs (the preflight's) may differ.
+if [[ -n "$SUITE_WORKLOAD" ]] && (( LONG_MATRIX )); then
+  for pair in WORKLOAD_SIZES_M:SUITE_RUN_OPERATIONS_M \
+      WRITE_BUFFER_SIZE:SUITE_WRITE_BUFFER_SIZE \
+      TARGET_FILE_SIZE:SUITE_TARGET_FILE_SIZE \
+      BLOCK_CACHE_SIZE:SUITE_BLOCK_CACHE_SIZE OPEN_FILES:SUITE_OPEN_FILES \
+      RUN_MEMORY_MAX:SUITE_MEMORY_MAX TREE_KEYS:SUITE_PRELOAD_KEYS; do
+    name="${pair%%:*}" wanted="${pair##*:}"
+    [[ "${!name}" == "${!wanted}" ]] || {
+      echo "A long suite run has $name ${!wanted} (D-29 §1, config.sh's" \
+           "$wanted); got '${!name}'." >&2
+      exit 1
+    }
+  done
+fi
+# The family's contract entry, where it lists values, must match the run;
+# and D-29 §6: a long suite run needs the contract edit that lists its
+# family as a suite workload (decoupled query and sizes), unless diagnostic.
+if [[ -n "$SUITE_WORKLOAD" ]]; then
+  PYTHONPATH="$PIPELINE_DIR" "$PYTHON" - config/research_objective_contract.json "$WORKLOAD_FAMILY" \
+    "$LONG_MATRIX" "$DIAGNOSTIC_RUN" "$MIX_GET_RATIO" "$MIX_PUT_RATIO" \
+    "$MIX_SEEK_RATIO" "$MIX_INSERT_RATIO" "$MIX_PHASE_MIXES" "$WORKLOAD_SKEW" \
+    "$KEYRANGE_NUM" "$KEYRANGE_DIST_A" "$KEYRANGE_DIST_B" "$KEYRANGE_DIST_C" \
+    "$KEYRANGE_DIST_D" "$KEY_DIST_A" "$KEY_DIST_B" \
+    "$MIXGRAPH_DECOUPLE_QUERY" "$MIXGRAPH_DECOUPLE_SIZES" <<'PY' || exit 1
+import json, sys
+import research_objective
+(path, family, long_matrix, diagnostic, get, put, seek, insert, phases, skew,
+ range_num, range_a, range_b, range_c, range_d, key_a, key_b, query,
+ sizes) = sys.argv[1:]
+skew = int(skew)
+run = {
+    "mix_get_ratio": float(get), "mix_put_ratio": float(put),
+    "mix_seek_ratio": float(seek), "mix_insert_ratio": float(insert),
+    "phase_mixes": [[float(v) for v in p.split(":")]
+                    for p in phases.split(";")] if phases else [],
+    "keyrange_num": int(range_num) if skew == 1 else 1,
+    "keyrange_dist": ([float(v) for v in (range_a, range_b, range_c, range_d)]
+                      if skew == 1 else [0.0] * 4),
+    "key_dist_a": float(key_a) if skew else 0.0,
+    "key_dist_b": float(key_b) if skew else 0.0,
+    "decouple_query": query == "1", "decouple_sizes": sizes == "1",
+}
+
+
+def same(a, b):
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, list) or isinstance(b, list):
+        return (isinstance(a, list) and isinstance(b, list) and
+                len(a) == len(b) and all(map(same, a, b)))
+    return abs(float(a) - float(b)) <= 1e-12
+
+
+contract = json.load(open(path))
+entry = contract["workloads"].get(family)
+if isinstance(entry, dict):
+    wrong = [f"{k} {run[k]} (contract: {entry[k]})" for k in run
+             if k in entry and not same(run[k], entry[k])]
+    if wrong:
+        raise SystemExit(f"Workload {family} differs from its contract entry: "
+                         + "; ".join(wrong))
+if (not research_objective.suite_workload_listed(contract, family) and
+        long_matrix == "1" and diagnostic != "1"):
+    raise SystemExit(
+        f"PREREGISTRATION D-29 §6: the contract does not list {family} as a "
+        "suite workload yet (decouple_query and decouple_sizes true); that "
+        "edit needs the owner's go. Until then a suite run is short, or "
+        "diagnostic (DIAGNOSTIC_RUN=1).")
+PY
+fi
+# The memory cap (D-29 §1), as systemd-run's MemoryMax on a scope around the
+# copy and db_bench; tried once now, so a node without a user manager fails
+# here rather than at the first run.
+MEMORY_SCOPE=()
+if [[ -n "$RUN_MEMORY_MAX" ]]; then
+  [[ "$RUN_MEMORY_MAX" =~ ^[0-9]+[KMGT]?$ ]] || {
+    echo "RUN_MEMORY_MAX must be a size such as 32G; got: $RUN_MEMORY_MAX" >&2
+    exit 1
+  }
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  MEMORY_SCOPE=(systemd-run --user --scope -q -p MemoryMax="$RUN_MEMORY_MAX" --)
+  "${MEMORY_SCOPE[@]}" true || {
+    echo "systemd-run could not start a scope with MemoryMax=$RUN_MEMORY_MAX;" \
+         "is there a user manager (loginctl enable-linger $(id -un))?" >&2
+    exit 1
+  }
+fi
+# D-29 §1: open files -1 keeps every table open, so the soft open-file limit
+# goes to the hard one, and a run refuses to start below 100,000 (tmux on
+# node C gave 1,024, and db_bench died with "Too many open files").
+OPEN_FILE_LIMIT_SET=0
+if [[ -n "$SUITE_WORKLOAD" || "$OPEN_FILES" == -1 ]]; then
+  ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+  open_file_limit="$(ulimit -n)"
+  [[ "$open_file_limit" == unlimited ]] || (( open_file_limit >= 100000 )) || {
+    echo "The open-file limit is $open_file_limit; open files -1 needs at" \
+         "least 100,000 (ulimit -Hn is $(ulimit -Hn))." >&2
+    exit 1
+  }
+  OPEN_FILE_LIMIT_SET=1
+fi
 
 # PREREGISTRATION D-16 §2: a long Programme 1 run loads D-16's keys, so
 # every such arm settles the tree the admission test and the prices measured;
-# only mixgraph grows. Short runs are exempt, as above.
+# only mixgraph grows. Short runs are exempt, as above. A run on a preloaded
+# tree loads nothing; D-29 §1 sets its tree's keys (checked above).
 programme1_load=""
 for arm in $EXPERIMENT_ARMS; do
+  (( ! TREE_MODE )) || break
   is_programme1_arm "$arm" || continue
   for size_m in $WORKLOAD_SIZES_M; do
     (( size_m > PREFLIGHT_SHORT_RUN_MAX_M )) || continue
@@ -706,10 +920,13 @@ done
 # the library it built), so a rebuilt or deleted plugin is refused too.
 plugin_args=()
 if [[ -d controller ]]; then plugin_args=(--plugin "$CONTROLLER_PLUGIN"); fi
+# A suite workload's run needs the preflight's suite step too (D-29).
+[[ -z "$SUITE_WORKLOAD" ]] || plugin_args+=(--suite)
 for size_m in $WORKLOAD_SIZES_M; do
   if (( size_m > PREFLIGHT_SHORT_RUN_MAX_M )); then
     "$PYTHON" "$PIPELINE_DIR/preflight_marker.py" check \
-      --marker "$PREFLIGHT_MARKER" --db-bench "$DB_BENCH" "${plugin_args[@]}" \
+      --marker "$PREFLIGHT_MARKER" --db-bench "$DB_BENCH" \
+      ${plugin_args[@]+"${plugin_args[@]}"} \
       --arms "$EXPERIMENT_ARMS" || {
       echo "Refusing a ${size_m}M run without a matching preflight;" \
            "run 13_run_preflight_verification.sh first." >&2
@@ -792,6 +1009,16 @@ if [[ -f "$RESULTS_ROOT/effective_config.env" && "$recorded_prices" != "$PRICES_
        "${PRICES_SHA256:-none}; resume under the same prices file." >&2
   exit 1
 fi
+# One results folder is one workload on one tree (D-27 §1, D-29 §2).
+for name in SUITE_WORKLOAD TREE_SHA256; do
+  if [[ -f "$RESULTS_ROOT/effective_config.env" ]] &&
+     grep -q "^$name=" "$RESULTS_ROOT/effective_config.env" &&
+     [[ "$(recorded "$name")" != "${!name}" ]]; then
+    echo "$RESULTS_ROOT ran with $name=$(recorded "$name"), now" \
+         "${!name:-none}; resume it the same way." >&2
+    exit 1
+  fi
+done
 
 cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
 {
@@ -839,16 +1066,27 @@ cp "$PIPELINE_DIR/config.sh" "$RESULTS_ROOT/config.sh"
   printf 'DIAGNOSTIC_RUN=%q\n' "$DIAGNOSTIC_RUN"
   printf 'RESEARCH_OBJECTIVE_SHA256=%q\n' "$RESEARCH_OBJECTIVE_SHA256"
   printf 'PRICES_FILE=%q\n' "$PRICES_FILE"
+  printf 'SUITE_WORKLOAD=%q\n' "$SUITE_WORKLOAD"
+  printf 'MIX_INSERT_RATIO=%q\n' "$MIX_INSERT_RATIO"
+  printf 'MIX_PHASE_MIXES=%q\n' "$MIX_PHASE_MIXES"
+  printf 'MIXGRAPH_DECOUPLE_QUERY=%q\n' "$MIXGRAPH_DECOUPLE_QUERY"
+  printf 'MIXGRAPH_DECOUPLE_SIZES=%q\n' "$MIXGRAPH_DECOUPLE_SIZES"
+  printf 'TREE_DIR=%q\n' "$TREE_DIR"
+  printf 'TREE_SHA256=%q\n' "$TREE_SHA256"
+  printf 'RUN_MEMORY_MAX=%q\n' "$RUN_MEMORY_MAX"
+  printf 'OPEN_FILES=%q\n' "$OPEN_FILES"
 } > "$RESULTS_ROOT/effective_config.env"
 INDEX="$RESULTS_ROOT/arms.tsv"
 if [[ ! -f "$INDEX" ]]; then
   printf 'size\tT\trepeat\tarm\tstatus\tresult_directory\n' > "$INDEX"
 fi
 
-fd_hard="$(ulimit -Hn 2>/dev/null || echo 1024)"
-[[ "$fd_hard" == "unlimited" ]] && fd_hard=65536
-(( fd_hard > 65536 )) && fd_hard=65536
-ulimit -n "$fd_hard" 2>/dev/null || true
+if (( ! OPEN_FILE_LIMIT_SET )); then
+  fd_hard="$(ulimit -Hn 2>/dev/null || echo 1024)"
+  [[ "$fd_hard" == "unlimited" ]] && fd_hard=65536
+  (( fd_hard > 65536 )) && fd_hard=65536
+  ulimit -n "$fd_hard" 2>/dev/null || true
+fi
 
 dbbench_shared_flags
 COMMON=("${DBBENCH_COMMON[@]}")
@@ -1042,7 +1280,8 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     echo "Database path already exists: $db_dir" >&2
     exit 1
   fi
-  mkdir -p "$db_dir"
+  # On a tree, the copy creates the database folder (below).
+  (( TREE_MODE )) || mkdir -p "$db_dir"
 
   local total_ops=$(( size_m * 1000000 ))
   local load_ops=$(( total_ops * LOAD_PERCENT / 100 ))
@@ -1074,6 +1313,17 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     QBAR_FINGERPRINT="$QBAR_SEGMENT"
     PRICES_FINGERPRINT="$PRICES_SEGMENT"
   fi
+  # D-29's generator options, in the fingerprint only when used, so the runs
+  # before them keep their identity: decoupling as dec<query><sizes>, the
+  # insert ratio, and W5's phases as passed to db_bench, with ":" and ";"
+  # written "_" and "~".
+  local mix_phases SUITE_FINGERPRINT=""
+  mix_phases="$(mix_phases_for "$mixed_ops")"
+  [[ "$MIXGRAPH_DECOUPLE_QUERY$MIXGRAPH_DECOUPLE_SIZES" == 00 ]] ||
+    SUITE_FINGERPRINT=":dec${MIXGRAPH_DECOUPLE_QUERY}${MIXGRAPH_DECOUPLE_SIZES}"
+  [[ "$MIX_INSERT_RATIO" == 0 ]] || SUITE_FINGERPRINT+=":ins${MIX_INSERT_RATIO}"
+  [[ -z "$mix_phases" ]] ||
+    SUITE_FINGERPRINT+=":ph$(tr ':;' '_~' <<< "$mix_phases")"
   local learner_seed=""
   if is_learner_arm "$arm"; then
     learner_seed=$(( POLICY_SEED_BASE + repeat * 100000 + size_m * 100 + ratio ))
@@ -1199,7 +1449,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}${PLUGIN_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}${SUITE_FINGERPRINT}${TREE_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}${PLUGIN_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -1217,30 +1467,47 @@ PY
       "$manifest_env_path" "$fingerprint" "$anneal_seconds"
   fi
 
+  # rlsuspend/rlresume: the RL picker hands the bulk load to native leveled
+  # compaction, so every arm reaches mixgraph on the same tree and the
+  # controller's first frame is the first measured operation. resetstats:
+  # counters and histograms cover the measured phase (mixgraph + drain)
+  # only, so W, stalls and latency exclude the load (P1c, 2026-09-20).
+  # settle (Programme 1 arms): WaitForCompact, then the h_w hold; the host
+  # log's stamps then carry the measured phase, whatever resetstats clears.
+  local benchmarks="rlsuspend,filluniquerandom,${settle_step}resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats"
+  local keys="$load_ops" existing_db=0 copy_and_check=() phases_flag=()
+  if (( TREE_MODE )); then
+    # D-27 §4: the tree's copy is made inside the run's memory cap and checked
+    # against the tree's identity before db_bench opens it. It settles again
+    # (a settled tree passes at once, then holds h_w), so the measured phase
+    # is the one every Programme 1 arm has; no key is loaded.
+    benchmarks="rlsuspend,settle,resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats"
+    keys="$TREE_KEYS" existing_db=1
+    local script='cp -a -- "$1" "$2" && "$3" "$4" check "$2" "$5" && shift 5 && exec "$@"'
+    copy_and_check=(bash -c "$script" copy-and-check "$TREE_DIR/db" "$db_dir"
+                    "$PYTHON" "$PIPELINE_DIR/tree_identity.py" "$TREE_SHA256")
+  fi
+  [[ -z "$mix_phases" ]] || phases_flag=(--mix_phases="$mix_phases")
   command=(
+    ${MEMORY_SCOPE[@]+"${MEMORY_SCOPE[@]}"}
+    ${copy_and_check[@]+"${copy_and_check[@]}"}
     ${DBBENCH_LAUNCHER[@]+"${DBBENCH_LAUNCHER[@]}"}
     "$DB_BENCH"
-    # rlsuspend/rlresume: the RL picker hands the bulk load to native leveled
-    # compaction, so every arm reaches mixgraph on the same tree and the
-    # controller's first frame is the first measured operation. resetstats:
-    # counters and histograms cover the measured phase (mixgraph + drain)
-    # only, so W, stalls and latency exclude the load (P1c, 2026-09-20).
-    # settle (Programme 1 arms): WaitForCompact, then the h_w hold; the host
-    # log's stamps then carry the measured phase, whatever resetstats clears.
-    --benchmarks="rlsuspend,filluniquerandom,${settle_step}resetstats,rlresume,mixgraph,waitforcompaction,levelstats,stats"
+    --benchmarks="$benchmarks"
     --rl_host_log="$result_dir/host_log.jsonl"
     --rl_settle_hold_seconds="$SETTLE_HOLD_SECONDS"
     ${host_log_stride[@]+"${host_log_stride[@]}"}
-    --num="$load_ops"
+    --num="$keys"
     --reads="$mixed_ops"
     "${DBBENCH_WORKLOAD[@]}"
+    ${phases_flag[@]+"${phases_flag[@]}"}
     --max_bytes_for_level_multiplier="$ratio"
     --level0_file_num_compaction_trigger="$effective_l0_compaction"
     --level0_slowdown_writes_trigger="$effective_l0_slowdown"
     --level0_stop_writes_trigger="$effective_l0_stop"
     --compaction_pri="$effective_priority"
     --compaction_style="$style"
-    --use_existing_db=0
+    --use_existing_db="$existing_db"
     --stats_interval_seconds=10
     --db="$db_dir"
     --seed="$run_seed"
@@ -1322,6 +1589,19 @@ PY
     printf 'iter_pareto=%s,%s,%s\n' "$SCAN_LENGTH" "$ITER_K" "$ITER_SIGMA"
     printf 'level_target_multipliers=%s\n' "${multipliers:-none}"
     printf 'workload_family=%s\n' "$WORKLOAD_FAMILY"
+    # D-29: the suite workload and its generator options.
+    printf 'suite_workload=%s\n' "${SUITE_WORKLOAD:-none}"
+    printf 'mixgraph_decouple_query=%s\n' "$MIXGRAPH_DECOUPLE_QUERY"
+    printf 'mixgraph_decouple_sizes=%s\n' "$MIXGRAPH_DECOUPLE_SIZES"
+    printf 'mix_insert_ratio=%s\n' "$MIX_INSERT_RATIO"
+    printf 'mix_phases=%s\n' "${mix_phases:-none}"
+    # D-27 §4: the tree the run started from (none: it loaded its own).
+    printf 'tree_dir=%s\n' "${TREE_DIR:-none}"
+    printf 'tree_sha256=%s\n' "${TREE_SHA256:-none}"
+    printf 'preload_keys=%s\n' "${TREE_KEYS:-$load_ops}"
+    printf 'preload_seed=%s\n' "${TREE_SEED:-$run_seed}"
+    printf 'run_memory_max=%s\n' "${RUN_MEMORY_MAX:-none}"
+    printf 'open_files=%s\n' "$OPEN_FILES"
     printf 'session_id=%s\n' "$SESSION_ID"
     printf 'reference_rate=%s\n' "$REFERENCE_RATE"
     printf 'prices_sha256=%s\n' "${PRICES_SHA256:-none}"
@@ -1524,8 +1804,9 @@ PY
   # This process is outside the measured phase. It supplies the physical size
   # of the same data after garbage removal; its I/O is not included in WAF.
   set +e
-  ${DBBENCH_LAUNCHER[@]+"${DBBENCH_LAUNCHER[@]}"} \
-    "$DB_BENCH" --benchmarks=compact --num="$load_ops" \
+  ${MEMORY_SCOPE[@]+"${MEMORY_SCOPE[@]}"} \
+    ${DBBENCH_LAUNCHER[@]+"${DBBENCH_LAUNCHER[@]}"} \
+    "$DB_BENCH" --benchmarks=compact --num="$keys" \
     --max_bytes_for_level_multiplier="$ratio" --compaction_style=0 \
     --level0_file_num_compaction_trigger="$effective_l0_compaction" \
     --level0_slowdown_writes_trigger="$effective_l0_slowdown" \
