@@ -3218,9 +3218,472 @@ starting trees.
 **Falsification.** This entry fails as a record if any part of it is changed
 after the first run it governs has started. A change is a new dated entry.
 
+### D-28, 2026-10-15 — propagation route D: the owner's decisions of 2026-10-10 to 2026-10-15 (recorded after the fact)
+
+**Recorded after the fact, at the owner's request** ("Record what has been
+done so far and what decisions have been taken in the PREREGISTRATION doc and
+PROPAGATION_DESIGN doc"). Every decision below was taken, and every test it
+governed was run, before this entry was written. **Its date proves nothing
+about their timing.** The timing evidence is outside the repository: each
+test's rules file, written before its scoring, with its own timestamp and
+sha256 (§2, "Propagation route D: exploratory record").
+
+None of these tests is a gate. Nothing here changes `docs/PATHWAYS.md`:
+- PROP-1 stays at D-19's outcome, and PROP-2 to PROP-6 are not claimed;
+- step 1b of `docs/PROPAGATION_DESIGN.md` stays failed.
+
+The design's state is that note's §9 (version of 2026-10-15).
+
+**1. Decisions that govern what comes next.**
+- **(a) The controller runs a formula, never a simulator** (2026-10-11): "not
+  inclined to go with a simulator because that would create huge latencies
+  for a decision".
+  - Offline models, the file model included, serve only as test benches.
+- **(b) The controller's snapshot carries per-file data** (2026-10-15): "The
+  RocksDB snapshot that is sent to the controller over the UNIX socket,
+  should have everything it needs to properly implement the propagation law
+  formula. So, go with b, but do the offline check".
+  - **Option (b)** adds, per file: key range, bytes, entries and RocksDB's
+    sampled read count (`num_reads_sampled`, `db/version_set.cc`), read
+    without the DB mutex.
+  - **Not built.** The exact fields wait until the formula's inputs settle. The
+    fork change ships with tests and passes the preflight before any run that
+    uses it.
+  - **Transport.** In the current build the plugin reads the snapshot
+    in-process (`RLControllerHost::Snapshot()`). The UNIX socket was the
+    retired DQN's; a remote mode, if built (plan step 10), would carry the
+    same fields.
+- **(c) Step 1b's margins are not widened for noisy cells** (2026-10-14
+  21:34 UTC): "I don't think widening the noise for only T=2 would be
+  beneficial. If needed, we can add T=2 as an edge case, and explain what's
+  going on with T=2".
+  - **2026-10-15:** "let's just keep T=2 as it is. We will come back to it if
+    there are any issues with the propagation law".
+  - **Not adopted** (kept for a return to T=2): a model averaged over seeds;
+    truth = the mean of 3 same-seed copies; a bytes-written cell that needs ≥ 20
+    real merges.
+- **(d) Measured data before any formula change** (2026-10-15): "Do the test
+  first. No speculation, I want measured data".
+- **(e) Every model version gets its scoring rules fixed before it is scored,**
+  and a failure is recorded as found (the design note's §6 rule, applied to
+  every test below).
+
+**2. Decisions that set up the tests in §2's record.**
+
+| Date (UTC) | Owner's words | What it started |
+| --- | --- | --- |
+| 2026-10-10 | "From now on, we don't amend the PATHWAYS doc unless we prove a theory with data" | Propagation stays in Programme 1 under route D, `docs/PROPAGATION_DESIGN.md` (committed `dc82584`) |
+| 2026-10-10 ~22:00 | go on step 1b, margins confirmed | M1 test |
+| 2026-10-11 | rebuilding the tree from RocksDB's LOG files rejected ("reverse engineering… huge risk"); direct snapshot runs instead | the snapshot study (12 runs, dumps) |
+| 2026-10-12 | fit placement models on T=10, predict T=2 and the L2 steps with no refit; "Continue with the test"; "Yes, go with the 4 T-2 step runs" | chain model; split test; T=2 step runs |
+| 2026-10-14 | "build the slice model with old versions, and yes go with (a)"; "Full set, 16 runs" after "Preflight first" | the slice model scored against chunk-average truth, with the margins' numbers unchanged; Test B runs on node C |
+| 2026-10-14 | "fix the merge size"; "Criterias 1-3 looks good"; "Go with the weighted balanced pass rate" | protocol Addendum 1 |
+| 2026-10-14 | "Yes, go forward with it"; "Yes, replace the L0 check"; "Yes, just drop the L1 old-version cell" | Addenda 2-4: the file model, the L0 probe cell, no L1 old-version cell |
+| 2026-10-14 | "Yes to power law repeats"; "Yes on all three" | Addenda 5-6: noise at every T; chunk ends as the run did; Test C (L0 trigger); change thresholds per workload and T |
+| 2026-10-15 07:24 | freeze run started by the owner | file model scored once on Tests A, B, C |
+| 2026-10-15 | "Do the diagnosis on systematic misses"; "Diagnose the 16 unexplained misses at T>=6" | the diagnosis |
+| 2026-10-15 | "Start the fast formula"; option (b) as in 1(b) | the per-file direction; the one-shot ranking check |
+| 2026-10-15 | "Yes, go for it. Fix the formula" | the balance formula check |
+| 2026-10-15 | "Do the test first. No speculation, I want measured data" | the mechanism tests (MANIFEST replay) |
+
+**3. A point for the owner's ruling.**
+- **What happened.** The mechanism tests rebuilt the tree before every merge
+  from each run's MANIFEST, decoded with `ldb manifest_dump`.
+- **Why it may be different from what was rejected.** The MANIFEST is RocksDB's
+  own record of every file it adds or deletes, with key ranges. It is not the
+  info LOG that the 2026-10-11 decision rejected.
+- **The check.** Every compaction edit was matched to its host-log job record
+  on s and o, with 0 mismatches in 9,604 jobs.
+- **Open.** Whether MANIFEST replay is acceptable as evidence is the owner's
+  call.
+
+**Falsification.** Section 1's rules govern later work. Changing any of them
+needs a new dated entry.
+
+### D-29, 2026-10-16 — the Programme 1 workload suite: five workloads, the 81-setting grid, the step runs and the propagation law's held-out split
+
+**Recorded before any run it governs.** No suite run, suite preload or step
+run has started. Gate N2 stays held (2026-10-11). The owner approved this
+text on 2026-10-16 ("Yes, move D-29 into the PREREGISTRATION doc"),
+including the operator's five proposals in it: the memory cap, the option's
+name, the unconditional key-sign fix, W4's key mechanism and the flush flag.
+§1's decoupled sizes were added the same day, before any run, at the
+owner's ruling.
+
+**What it amends:**
+- **D-1:** `Assoc`'s query type, value size and scan length are drawn
+  independently of its key.
+- **D-13 §3:** the Gate N2 workloads become §2's five.
+- **D-27:** this entry fills in the settings it left open: the geometry, the
+  grid and the open-file setting.
+
+**What it leaves to other entries:**
+- the comparator (D-25, reserved);
+- D-27's effect-size threshold;
+- arms other than `native`;
+- the step point X (§4);
+- the MANIFEST ruling (D-28 §3).
+
+The working record of the rulings is
+`~/node_ops/drafts/2026-10-15-suite-outline.md`.
+
+**1. Common to every run.**
+- **Run shape** (owner, 2026-10-11):
+  - a 20,000,000-key preload (`filluniquerandom`, D-27's single seed);
+  - the settle step of D-13 §6;
+  - exactly 40,000,000 measured operations, from $n_w$ to the end of
+    `mixgraph`.
+
+  One preloaded tree per setting is shared by every workload, repeat and arm
+  (D-27).
+- **Geometry, the old one scaled ×8:**
+  - write buffer 16 MiB;
+  - target file size 4 MiB;
+  - L0 slowdown 20 and stop 36;
+  - block cache 8 MiB (2026-10-15).
+- **Open files `-1`** (owner, 2026-10-15). Every driver raises the soft
+  open-file limit to the hard one and refuses to start below 100,000.
+  - Under tmux on node C the soft limit was 1,024, and db_bench died with "Too
+    many open files" (tree test, Addendum 2).
+- **Unchanged from the current pipeline:**
+  - buffered I/O (`dio0`);
+  - key and value sizes as D-1;
+  - every option not named here (`config.sh`).
+- **Memory cap:** 32 GiB per run (`systemd-run --user --scope -p
+  MemoryMax=32G`). The direct tree test ran its full-size arms under it.
+- **db_bench generator changes:**
+  - **Decoupling** (owner, 2026-10-16: "Yes, decouple"; "decoupling is switched
+    on using a new db_bench option"). A new `mixgraph` option
+    (`--mixgraph_decouple_query`, default off) draws the
+    query type from its own random stream, independent of the draw that picks
+    the key. Every suite workload runs with it on. The fingerprint gains a
+    segment only when it is on.
+  - **Decoupled sizes** (owner, 2026-10-16: "Yes, decouple value size and
+    scan length. Record it in D-29").
+    - A second option, `--mixgraph_decouple_sizes` (default off), draws each
+      operation's value size and scan length from their own random stream.
+      Released db_bench computes both from the key's draw.
+    - The overall value-size and scan-length distributions are unchanged.
+      Only their pairing with keys goes.
+    - Every suite workload runs with it on. The fingerprint gains a segment
+      only when it is on.
+    - **Why.** Cao et al. §7.2 determine the value size "by the probability
+      function from the fitted models". Their conclusion lists "the
+      correlation between KV-pair hotness and KV-pair sizes" as future work
+      they did not model.
+    - **Measured on db_bench's own per-key counts** at 2.9M keys, with D-1's
+      value settings:
+      - power law's hottest 0.01% and 1% of written keys averaged 1,257 B and
+        1,084 B per value, against about 950 B for the rest;
+      - `Assoc`'s values barely depend on hotness (974 B at the hottest 0.1%
+        against 960 B);
+      - `Assoc`'s scans starting at its busiest 0.1% of start keys averaged
+        813 entries, against 554 for the rest.
+  - **The power-law key-sign fix:** `rand.Next() % (uint64_t)FLAGS_num` in
+    place of `static_cast<int64_t>(rand.Next()) % FLAGS_num`.
+    - Without it, about half the power-law keys fall outside the loaded key
+      space: the 2026-10-15 smoke control found 51% of power-law Gets
+      unpatched against 100% patched (node C, `~/node_ops/keysign-build/`).
+    - The fix is unconditional, not an option. The old
+      behaviour serves no suite workload, and the binary's identity separates
+      old runs from new ones.
+
+**2. The five workloads** (owner's outline, 2026-10-15; recipes, 2026-10-16:
+"Yep, go for it").
+
+| | Workload | Mix (Get / Put / Seek) | Keys | Writes are |
+| --- | --- | --- | --- | --- |
+| W1 | `Assoc` | 0.806 / 0.159 / 0.035 | as D-1: Cao et al.'s ZippyDB key-range and key fit, `keyrange_num` 30 | updates of loaded keys |
+| W2 | Read-heavy | 0.95 / 0.05 / 0 | power law, `key_dist_a`/`b` 0.002312 / 0.3467, `keyrange_num` 1 (D-13 §3) | updates of loaded keys |
+| W3 | Update-heavy, skewed | 0.10 / 0.90 / 0 | W2's power law, same constants | updates of loaded keys |
+| W4 | Write-heavy growth | 0.10 Get / 0.90 insert / 0 | inserts: new keys, scattered at random between existing keys; Gets: uniform over the keys present at that moment | inserts of new keys |
+| W5 | Phased | three phases (below) | uniform over the loaded keys | updates of loaded keys |
+
+Query types, value sizes and scan lengths are decoupled in every workload
+(§1).
+
+- **W1 `Assoc`.** Label: *"the `Assoc` operation mix on Cao et al.'s ZippyDB
+  parameter fit, with the query type, value size and scan length drawn
+  independently of the key"*.
+  - Cao et al. §7.2 describe their generator as separate steps: the query type
+    from the mix, then a key range, then a key. db_bench's released code draws
+    both from one random number (`QueryDecider::GetType` on `ini_rand`). The
+    paper does not describe that.
+  - The paper's UDB finding (§6): "the keys with the most Get queries are the
+    ones with the most Put queries".
+  - Measured on db_bench's own per-key counts at 2.9M keys, the coupled code
+    sends 43% of `Assoc`'s Gets to keys that are never written. Its hottest
+    0.1% of Get keys and hottest 0.1% of Put keys overlap by only 21%.
+  - D-1's value-size deviations stand.
+- **W2 read-heavy:** as D-13 §3, plus decoupling and the key-sign fix. Its
+  label is unchanged.
+- **W3 update-heavy** (owner: "skewed updates, because I don't think the assoc
+  and power law catch the skewed update heavy scenario").
+  - It uses W2's hot keys with the mix reversed, so W2 and W3 differ in their
+    mix alone.
+  - Many of its writes overwrite a key already in the write buffer, so fewer
+    bytes are flushed per write than in any other workload.
+- **W4 write-heavy growth** (owner: "new KV pair inserts, not just updates").
+  - 36M new keys take the tree from 20M to 56M keys, about 56 GB.
+  - Each new key differs from every existing key and lands at a uniformly
+    random place between existing keys in key order. Appending new keys after
+    the existing ones would make almost every compaction a trivial move.
+  - **The mechanism.** A key is an 8-byte ID padded with `'0'` bytes. A new
+    key keeps a loaded key's ID and replaces part of its padding with a
+    higher marker byte and a unique insert number, so it sorts directly after
+    that key. D-27's shared preload is then unchanged.
+  - The tree passes the 32 GiB memory cap a little under halfway through, and
+    can gain a level at low T.
+- **W5 phased** (owner: "I want to check how different phases affect the
+  learning. So, three phases mainly: write heavy, mixed, read heavy, all
+  uniform distribution").
+  - The phases run in this order, by operation count:
+
+    | Phase | Operations | Put / Get |
+    | --- | --- | --- |
+    | 1 | 13,333,333 | 0.90 / 0.10 |
+    | 2 | 13,333,333 | 0.50 / 0.50 |
+    | 3 | 13,333,334 | 0.10 / 0.90 |
+
+  - There are no scans and no pause between phases.
+  - db_bench stamps `phase_start` in the host log at each switch. Every phase
+    is scored on its own as well as the whole run.
+  - A reversed order (read → mixed → write) is not run now. It is added by a
+    later entry only if the results raise the question.
+
+**3. The grid** (owner, 2026-10-11 and 2026-10-15).
+- **Size ratios:** T = 2, 3, …, 10.
+- **(L1 base, L0 trigger):** (64 MiB; 2, 4), (128 MiB; 2, 4, 8),
+  (256 MiB; 2, 4, 8, 16). That gives 9 settings per T and 81 settings.
+- **The admissibility rule.** PATHWAYS A-Impl-6:
+  $K \le \min(\lfloor C_1/F \rfloor, K_{slow}-1)$ with $F$ = 16 MiB.
+  - It drops (64 MiB, 8): the eight files would hold 128 MiB, so the byte part
+    of the L0 score would fire first.
+  - (256 MiB, 16) is added (owner, 2026-10-15).
+- **The flush size, measured.** At the three settings where $K \cdot 16$ MiB
+  $= C_1$, the file count fires first only if a flushed file stays below the
+  buffer.
+  - The direct tree test's 18 full-size runs used the 16 MiB buffer. Their
+    4,806 flushes averaged 93.4% of 16 MiB, and the largest was 94.0%.
+  - So the count fires at most at 94% of $C_1$. The separate preload pilot is
+    dropped.
+  - The evaluator reports each run's largest flush (host log
+    `flush_end`) and flags any run where it reaches 16 MiB.
+- **Native sweep:** 5 workloads × 81 settings × 3 repeats = **1,215 runs** on
+  81 preloads.
+  - Repeats differ in their operation seeds only (D-27 §1).
+  - How D-13 §5's five-repeat top-up rule applies to the controller
+    comparisons is left to the comparator entry (D-25).
+- **Node time is not a constraint** (owner, 2026-10-15: up to 15 nodes).
+  - Each lease's work fits one lease, including setup and copy-off.
+
+**4. The step runs for the propagation law** (owner's go to the
+recommendations, 2026-10-15).
+- **Single-level steps** (about 680 runs):
+  - at (128 MiB, K = 4) for every T and all five workloads, 1 repeat;
+  - a multiplier step of ×0.5, ×0.75, ×1.5 or ×2 at every non-deepest level;
+  - applied by the `hold` arm's scheduled change at operation X (`d09a4f5`).
+- **Two-level steps** (about 150 runs): neighbouring pairs, both up, both down
+  and opposite, at the same anchor, on W1 and W2.
+- **Measurement:**
+  - The change is measured at fixed points every 5M operations after the step.
+  - A "settled" result counts only where the level actually reaches its new
+    size.
+  - Noise comes from the 3 native repeats at the anchor. A step shares its
+    native twin's tree and seed.
+- **Not fixed here:** the step point X. The step protocol fixes it before
+  any step run.
+
+**5. How the propagation law is developed and tested** (owner, 2026-10-15
+and 2026-10-16).
+- **One law** (owner, 2026-10-15): "The propagation law must be generalized,
+  because it wouldn't be a research if we just forcefully fit a workload
+  characteristic and call it a law".
+  - One formula and one set of constants hold for every workload and T.
+  - Workloads differ only through inputs the controller measures at run time.
+- **Practice:** {W1, W3} × T {3, 6, 9}, developed on full-scale runs (owner,
+  2026-10-16: "develop on full workload").
+- **Exam:** the other 39 (workload, T) combinations, full scale only.
+  - The formula is frozen with a hash before the exam's scoring.
+  - A miss is explained by a measured mechanism test, never by a per-workload
+    change.
+- **The 1/8 copy** (2.5M + 5M operations at the suite geometry ÷ 8) is a fast
+  bug-catching harness only, never evidence (owner, 2026-10-16: "keep small as
+  a fast bug catching harness"). Why:
+  - **The key-popularity check** (`~/node_ops/reports/2026-10-15-keyscale/`,
+    results accepted by the owner on 2026-10-16) found the power law about 2×
+    more concentrated at full scale (8^0.3467).
+  - **The direct tree test** (`~/node_ops/reports/2026-10-15-tree-scale/`) found
+    3 of 36 small/full pairs faithful.
+    - The tree's shape scales at every T.
+    - Merge work per flush is ×1.1–1.5 higher at small scale, because merges
+      drop fewer old versions of rewritten keys.
+    - The `key_dist_a` × 8^b correction fixes this for W2 only.
+- **Two-stage exam dropped.** The two-stage exam of 2026-10-15 (small scale,
+  then full) is replaced by the full-scale exam.
+
+**6. What must exist before the first governed run** (operator requirements).
+- **db_bench:** decoupling and decoupled sizes (§1), the key-sign fix, W4's
+  insert mode, W5's phases with `phase_start` stamps, and tests for each.
+- **Pipeline:**
+  - `03` split into preload-and-archive and workload-on-copy (D-27 §4);
+  - the open-file limit raised in every driver;
+  - the fingerprint in `03` and `fingerprint.py` in lockstep, with
+    `tests/test_fingerprint.py`.
+- **Recalibration at the new geometry** (CMP-9):
+  - prices (stage 18, D-22 protocol), with the suite's block cache and
+    open-file setting (4 MiB files carry about 8× larger index and filter
+    blocks, so D-20/D-21's $c_{open}$ is not reused);
+  - κ, q̄ per workload, and Gate N1.
+- **The preflight passes** on the new binary.
+- **A contract edit, with the owner's go:**
+  - `workloads` gains W3–W5;
+  - `assoc` records both decouplings;
+  - `reference_rate` (q̄) is re-measured on the new binary.
+
+**Falsification.** This entry fails as a record if any part of it is changed
+after the first run it governs has started. A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured
+
+### Propagation route D: exploratory record, 2026-10-10 to 2026-10-15 (not gates; recorded after the fact, D-28)
+
+Every test below is an offline or node diagnostic on fresh or existing runs,
+with no gate and nothing in PATHWAYS.
+- **Rules.** Each test's rules were fixed before its scoring, in the file named.
+  These files are outside the repository; timestamps are UTC.
+- **Reports.** The folders under `~/node_ops/reports/` hold the full tables.
+
+**1. Step 1b, M1 "levels as age bands"** (2026-10-10, node B; rules: design
+note §6.1; report `2026-10-10-prop-step1b/README.md`).
+- **Fails.** 237/614 cells fall inside the margins, with db_bench's exact key
+  popularity.
+- **By workload:**
+  - `Assoc` fails at almost every level and T: the hot range's L1 files are
+    pushed first, so ages inside a level are mixed.
+  - The power law passes "where Gets end" 38/38, but fails survival, probes
+    and reopens.
+- **Early stop:** 1b(ii)-(v) were not run.
+- **Workload facts found:**
+  - mixgraph writes only 119,855 distinct keys;
+  - Gets read keys never Put in the run: 43% (`Assoc`) and 97% (power law);
+  - half the power law's draws give negative keys, so only 51.3% of its Gets
+    find a key.
+
+**2. Snapshot study** (runs 2026-10-11 18:48-20:52 UTC, node B; 12 runs, 60
+dumps checked; report `2026-10-12-snapshot-study/README.md`).
+- Get endings computed from one dump match chunk 4's measured counts within
+  0.01 at L3 and deeper, and 0.011 at L2.
+- M1's assumption A1 (each level holds one band of key ages) is false
+  everywhere, from the preload on.
+- Uniform mixgraph Gets never read keys written in the run.
+
+**3. Placement models on the dumps** (2026-10-12; `chain_model.md`).
+- **One push speed per level fails:** T=2 108/161, L2 steps 10/39.
+- **Per key slice, with each slice's sizes given:** 291/291.
+- **The open problem became** predicting each level's split over key slices.
+
+**4. Split test** (2026-10-12; rules `split_test_protocol.md` 17:37:35 UTC).
+- **The declared overlap-order rule fails:** 172/291 chained, 203/291 one chunk
+  ahead.
+- **E1, designed after the declared run:** 204/291 and 235/291.
+- **Hybrid check** (after the fact; upper levels measured, deeper levels by E1):
+  T=10 L3/L4 38/40 and steps 16/16; T=2 fails at every boundary.
+
+**5. T=2 step runs** (2026-10-12; rules `t2_steps_protocol.md` ~19:40 UTC,
+written before the runs; 4 runs, L4/L6 ×2 and ×0.5).
+- Signs right 15-16/16; sizes best 10/16; L6 ×2 moves nothing above noise.
+- Snapshot noise between same-seed runs is 0.026-0.067 per level, about the
+  absolute margin. This led to chunk-average truth.
+
+**6. Slice model, then file model** (node C; rules
+`2026-10-14-slice-model/protocol.md`, written 2026-10-14 07:48:54 UTC before
+any model output, Addenda 1-6 dated inside).
+- **Development set:** the 12 runs of 2026-10-11.
+- **Test sets:**
+  - Test A: the 4 T=2 step runs;
+  - Test B: 14 fresh runs, T = 2/6/10 natives plus steps;
+  - Test C: 4 L0-trigger steps.
+
+  B and C were sealed until the freeze.
+- **The model chosen:** the file model (`slicev/filev.py`), a key-by-key
+  simulation over RocksDB's real files. Development weighted balanced pass rate
+  0.9891.
+- **Freeze:** 2026-10-15 07:24:28 UTC, started by the owner; sha256 of every file
+  in `freeze.txt`, unchanged after scoring. Results in `results.md`.
+
+| Set | Weighted balanced pass rate | Absolute cells | Change cells | Right sign |
+| --- | --- | --- | --- | --- |
+| A (T=2 steps) | 0.9906 | 622/642 | 54/104 | 87/104 |
+| B (fresh, T = 2/6/10) | 0.9933 | 2056/2098 | 170/234 | 220/234 |
+| C (L0 trigger) | 0.9813 | 660/674 | 75/101 | 98/101 |
+
+- **Verdict: FAIL on A, B and C** under the every-cell rule, as measured and
+  without the T=2 edge case.
+- **Absolute cells by T:**
+  - T=2: 2238/2312 (52 of the 74 misses are the edge case);
+  - T=6: 442/442;
+  - T=10: 658/660.
+- **Change cells by T:** T=2 163/281; T=6 35/40; T=10 101/118.
+
+**7. Diagnosis of the misses** (2026-10-15; `diagnosis_l0.md` §1-§6; after the
+freeze, no model change).
+- **L0 probes are low because of merge duration.** RocksDB runs one compaction at
+  a time; L0 merges take 32-47 ms and their inputs stay in L0 until they end.
+  Model probes × (real files / instant-merge files) match within 0.7% in 76/76
+  chunks.
+- **The L0 change after a deep step** follows the change in foreground speed
+  (flush interval).
+- **Test A's L0 change cells** measure an offset in the twin, not the steps.
+- **Of the 16 change misses at T ≥ 6 outside L0:** 10 are within noise, and 6
+  are real.
+
+**8. Fast formula, option (b)** (2026-10-15; draft
+`2026-10-15-fast-formula/spec_draft.md`, not adopted). Three checks on the
+development runs only (twin `assoc30-T10`, L2 ×0.5 and ×2):
+- **Per-level counters cannot predict the response to a step** (`hit_dev.json`).
+  At T=10, L2 ×2: +19% bytes, +72% L2 hits.
+- **One-shot ranking** of the current files in RocksDB's pick order: **3/7, FAIL**
+  (rules `onestep_check_rules.md` 08:59:30 UTC).
+  - The first files RocksDB pushes are the hot ones.
+  - The overlap fails because the level below refills over time.
+- **Balance formula:** each key range of a level cycles between empty and a cap,
+  with one threshold per level, solved by bisection.
+  - Rules v1 could not run: never-written loaded keys are 45% of L2.
+  - v2 was fixed at 09:36 UTC, before any prediction.
+  - **Result: 5/8, FAIL** (`balance_check_results.md`).
+  - All four L2/L3 hit cells fall within 2-6%; the predicted layout is close
+    (distance 0.02-0.09).
+  - Fails: L1 overlap under ×2 (-45%), L2 overlap under ×0.5 (+45%), L1 hits
+    under ×2 (-35%); L1's hold level is 3.4× too high.
+
+**9. Mechanism tests** (2026-10-15; definitions `mechanism_tests.md`, fixed before
+computing; MANIFEST replay, 0 mismatches in 9,604 jobs; D-28 §3).
+- **"Overlap = threshold + about one whole file": refuted.** The whole-file excess
+  is 0.00-0.05 files per merge, and overlap equals the next level's density
+  inside the merge's own range.
+- **The measured density change against the model's threshold:**
+
+  | Cell | Measured | Model |
+  | --- | --- | --- |
+  | L2, ×0.5 | ×2.36 | ×3.01 |
+  | L1, ×0.5 | ×0.32 | ×0.52 |
+  | L1, ×2 | ×1.29 | ×1.16 |
+
+- **"L1 pushes into L2's fresh gaps": real under ×0.5 only.**
+  - Under ×0.5, 29% of L1 jobs land on less than half L2 coverage, with overlap
+    0.50 against 1.46. That is 0.26 of L1's 2.53 drop.
+  - The twin has 1.5% such jobs, and ×2 has none, so the gaps are not the ×2 miss.
+- **"L0 → L1 merges rewrite all of L1": confirmed.** All 135 per run took 100% of
+  L1.
+- **The L1 hit error sits in the hottest key range** (3 of 100 buckets, 72.5% of
+  Gets; analysis added after the first results).
+  - RocksDB pushes L1 data down there every 10.7k operations; the model assumes
+    every 40.4k.
+  - The model puts 0.030 of Gets' newest versions in L1 there; the real dumps
+    show 0.000.
 
 ### q̄ recorded, 2026-10-02 (D-13 §1, D-14 §2)
 

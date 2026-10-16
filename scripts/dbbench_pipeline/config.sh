@@ -151,7 +151,7 @@ BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 # own gtest files, listed here relative to lib/rocksdb, in a separate Debug
 # tree so RocksDB's asserts fire; upstream test files are never listed. A
 # listed file that does not exist yet is skipped.
-FORK_TEST_SOURCES="${FORK_TEST_SOURCES:-db/level_target_multipliers_test.cc db/per_level_read_counters_test.cc db/rl_controller_host_test.cc}"
+FORK_TEST_SOURCES="${FORK_TEST_SOURCES:-db/level_target_multipliers_test.cc db/per_level_read_counters_test.cc db/rl_controller_host_test.cc tools/mixgraph_suite_test.cc}"
 DBBENCH_TEST_BUILD_DIR="${DBBENCH_TEST_BUILD_DIR:-build-dbbench-debug}"
 # The controller plugin (controller/, plan §3): its Release library, built by
 # 13's step 1, and the Debug tree 01b builds its unit tests in.

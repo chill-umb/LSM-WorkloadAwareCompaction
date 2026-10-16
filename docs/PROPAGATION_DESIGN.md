@@ -1,5 +1,8 @@
 # Propagation law: model-based design under test (option D)
 
+*Versions: §0-§8, 2026-10-10. §9, 2026-10-15: what step 1b and its follow-ups found, the owner's later decisions,
+and the fast formula (record in `docs/PREREGISTRATION.md` D-28).*
+
 **Status: design under test, not adopted.** Nothing here is in `docs/PATHWAYS.md`. Owner, 2026-10-10:
 "we don't amend the PATHWAYS doc unless we prove a theory with data", and nothing about the propagation law
 changes there "until we can reliably claim the law works for all workload sizes, not just some cherry picked
@@ -147,3 +150,106 @@ is a new dated version of this note, never a quiet edit.
   the measured phase's start; the x2 static's empty-looking L3).
 - Interference and additivity (OD-1 to OD-3) are unproven; any error there reaches every level.
 - The plugin sees no keys: p must be fitted from aggregate per-level counters (1b(ii)).
+
+---
+
+## 9. Version of 2026-10-15: what step 1b and its follow-ups found, and the fast formula
+
+**Status: design under test, not adopted.** §1-§8 above are the 2026-10-10 version, unchanged.
+- **Record.** The owner's decisions and every test's result are in `docs/PREREGISTRATION.md`: D-28, and §2,
+  "Propagation route D: exploratory record". Both were recorded after the fact, at the owner's request.
+- **Status of the proof.** Nothing here is proven. PATHWAYS is unchanged, step 1b stays failed, PROP-1 stays at
+  D-19.
+
+### 9.1 What the tests showed about RocksDB (measured; T=10 unless stated)
+
+- **The age-band picture (A1) is false** at every T and workload, from the preload on. M1 failed step 1b(i),
+  237/614 (2026-10-10).
+- **RocksDB pushes the hot files first.** A level's files go in order of (bytes below / file bytes). Where a level
+  is dense (the hot ranges), a file covers a narrow key span with little below it. So the bytes a level gains or
+  loses are mostly hot data:
+  - the first 19-50% of L2's bytes in pick order hold 1.8-2.7× L2's average hits per byte;
+  - L2 ×2: +19% bytes, +72% L2 hits; L2 ×0.5: -50% bytes, -70% hits.
+- **Per-level totals cannot carry this.** At the same 17 MB above, L1 serves 7.0% of Gets at T=2 and 1.1% at T=10.
+- **Overlap per source byte equals the next level's density inside the merge's own key range.**
+  - The whole-file excess at the edges is 0.00-0.05 files per merge, measured by MANIFEST replay.
+  - Under a step, the change is all in that density: L2 ×0.5 ×2.36; L1 ×0.5 ×0.32; L1 ×2 ×1.29.
+- **L1 responds to L2's layout.**
+  - Under L2 ×0.5, 29% of L1's jobs land where L2 covers less than half the range: spots L2 has just emptied. They
+    carry overlap 0.50 against 1.46, and some are trivial moves.
+  - In the twin such landings are 1.5%; under ×2, none.
+- **Every L0 → L1 merge takes all of L1.** In the hottest key range (72.5% of Gets), RocksDB pushes L1's data down
+  every 10.7k operations.
+- **Loaded data persists in the levels.**
+  - mixgraph writes only 119,855 distinct keys.
+  - At T=10, 45% of L2 (71.7k entries) is keys loaded before the run and never written. They stay until their spot
+    is pushed. Under ×0.5, 28.4k were left in L2 at chunk 4's end.
+- **L0.** L0 files while Gets run ≈ (K−1)/2 + L0 merge duration / flush interval (76/76 chunks within 0.7%). A
+  deep step moves L0 through foreground speed: T=10 L2 ×0.5 cut the flush interval from 180 to 167 ms.
+- **A file-level model reproduces most of this offline, but fails the every-cell rule.** The file model
+  (`~/node_ops/diag/slicev/filev.py`) is a key-by-key simulation over RocksDB's real files, frozen 2026-10-15.
+  - Weighted pass rate 0.98-0.99 on three test sets.
+  - Change cells 299/439.
+  - T=2 is noisier than its allowances, and is handled as an edge case (D-28 1(c)).
+
+### 9.2 What the design now requires (owner's decisions, D-28 §1)
+
+- **R4.** The controller runs a fast formula, never a simulator (2026-10-11). Offline models are test benches only.
+- **R5. The controller's snapshot carries per-file data (option (b), 2026-10-15).**
+  - **Fields:** per file, key range, bytes, entries and RocksDB's sampled read count, read without the DB mutex.
+  - **Why.** The step response lives in individual key ranges and files, which per-level counters cannot show
+    (§9.1).
+  - **Not built.** The exact fields wait for the formula's inputs; then a fork change with tests and the
+    preflight.
+- **R6.** Measured tests come before any formula change (2026-10-15).
+- **R1-R3 (§0) still hold.** Every T, both workloads, two sizes, no testbed chosen to pass.
+
+### 9.3 The fast formula
+
+**What it must predict.** For each candidate setting at level j: the priced cost per operation over the next W
+operations, at j and every level below, including the path to the new size. Its parts:
+- bytes written and read, and jobs by kind;
+- probes, block reads, seeks, reopens, hidden steps and heap children per level;
+- interference;
+- space;
+- the operations until the level reaches its new size.
+
+**Inputs.** The controller's per-level counters and job records (today), plus the per-file list (R5). In the
+offline checks:
+- **Per-file data** comes from the dumps and MANIFESTs.
+- **Per-key Put and Get rates** come from db_bench's exact probabilities (`keypop2`). The controller cannot see
+  them, and how it would estimate them from per-file data is not yet tested.
+
+**Candidates tried** (development runs of 2026-10-11 only: T=10 `assoc30` twin, L2 ×0.5 and ×2):
+1. **One-shot ranking** of the current files by RocksDB's pick order: **3/7, failed.**
+   - It finds the right files, the hot ones.
+   - It cannot see the level below refilling over time.
+2. **Balance formula: 5/8, failed.**
+   - **How it works.** Each key range of a level cycles: emptied by a push, refilled by the keys written since,
+     pushed again when its entries reach the next level's entries there over one threshold r_j per level. r_j is
+     solved by bisection so the average contents equal the level's size. Loaded data stays until its range is
+     pushed. Growth is modelled as no pushes until the new size is reached.
+   - **What it gets right.** It needs no time stepping, and it gets the L2/L3 hits right: four cells within 2-6%.
+   - **What it gets wrong:**
+     - the threshold's change: ×3.01 against the measured density ×2.36 at L2 ×0.5;
+     - L1: its cycles in the hottest range are 40.4k operations against the measured 10.7k, which puts 0.030 of
+       Gets in L1 there against 0.000;
+     - the L1 overlap pull toward L2's gaps under ×0.5.
+
+### 9.4 Test data and open risks
+
+- **Development data is small.** Three runs at T=10, steps at L2 only. Tests A/B/C have been used by the file model
+  and are unfitted for the formula, but their summary numbers have been seen. A clean test of the formula needs
+  fresh step runs at other T, levels and both workloads (node C's lease ends about 2026-10-19).
+- **MANIFEST replay as evidence awaits the owner's ruling** (D-28 §3).
+- **Per-key rates are not observable** by the controller. This is the largest open input question.
+- **L0 needs measured inputs.** The L0 merge duration and the foreground speed must enter the formula (§9.1, L0).
+- **Interference and additivity** (D-26) are unchanged from §8.
+
+### 9.5 Next steps (each needs the owner's go)
+
+1. Compare the balance formula's per-range cycle with the measured per-range push cycle (MANIFEST replay) at L1 and
+   L2, for the twin, ×0.5 and ×2.
+2. Then a revised formula, with its rules fixed before scoring, on the development runs.
+3. Fresh step runs for the formula's clean test, planned for approval.
+4. The snapshot export (R5), once the formula's inputs are settled.
