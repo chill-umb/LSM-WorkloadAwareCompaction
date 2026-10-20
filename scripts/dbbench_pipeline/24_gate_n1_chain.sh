@@ -106,9 +106,14 @@ if sys.argv[3] == "1":
     family = {"assoc": "assoc", "powerlaw": "powerlaw_get95"}[sys.argv[2]]
     recorded = research_objective.reference_rate(
         research_objective.load_contract()[0], family)
-    print(f"=== {sys.argv[2]}: these q-bar arms' mean {mean:.1f} ops/s "
-          f"({len(rates)} runs); q-bar stays as recorded, {recorded:.1f} "
-          f"({(mean / recorded - 1) * 100:+.2f}%; D-21)")
+    if recorded is None:
+        print(f"=== {sys.argv[2]}: these q-bar arms' mean {mean:.1f} ops/s "
+              f"({len(rates)} runs); the contract records no q-bar for "
+              f"{family}, so QBAR_ONLY=1 compares nothing (D-21)")
+    else:
+        print(f"=== {sys.argv[2]}: these q-bar arms' mean {mean:.1f} ops/s "
+              f"({len(rates)} runs); q-bar stays as recorded, {recorded:.1f} "
+              f"({(mean / recorded - 1) * 100:+.2f}%; D-21)")
 else:
     print(f"=== {sys.argv[2]}: q-bar candidate {mean:.1f} ops/s "
           f"(mean of {len(rates)} runs; record it by a dated amendment, D-14 §2)")

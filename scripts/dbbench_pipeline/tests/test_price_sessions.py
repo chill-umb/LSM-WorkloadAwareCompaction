@@ -573,10 +573,14 @@ class Schema5Test(unittest.TestCase):
                                                   CONTRACT, provisional_ok=True)
 
     def test_the_plugin_config_takes_provisional_prices_only_when_diagnostic(self):
+        # A recorded q-bar, which the live contract has nulled since D-29 §6.
+        contract = copy.deepcopy(CONTRACT)
+        contract["reference_rate"]["ops_per_second"]["assoc"] = 62500.0
+
         def compose(prices, **flags):
             return plugin_config.compose(
                 "hold", "read", "assoc", bounds=plugin_config.PLACEHOLDERS,
-                settings=plugin_config.PLACEHOLDERS, contract=CONTRACT,
+                settings=plugin_config.PLACEHOLDERS, contract=contract,
                 prices=prices, admission={"k": 3}, decision_log="d",
                 transition_log="t", **flags)
         config, _ = compose(self.final)

@@ -75,13 +75,13 @@ MARKER_BINDING = ("prices_sha256", "db_bench_identity")
 
 
 def family(contract: dict, workload: str) -> str:
-    """The contract workload of one of 24's workload names, which are the
-    first word of the contract's (assoc, powerlaw_get95)."""
-    found = [f for f in contract["workloads"] if f.split("_")[0] == workload]
-    if len(found) != 1:
+    """The contract workload of one of 24's workload names, mapped as 24 maps
+    them. A first-word match is ambiguous since D-29 §6 added powerlaw_put90."""
+    found = {"assoc": "assoc", "powerlaw": "powerlaw_get95"}.get(workload)
+    if found not in contract["workloads"]:
         raise ValueError(f"workload {workload} is none of the contract's "
                          f"{list(contract['workloads'])}")
-    return found[0]
+    return found
 
 
 def arm(profile: str) -> str:

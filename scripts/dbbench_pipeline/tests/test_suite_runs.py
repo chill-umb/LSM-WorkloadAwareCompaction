@@ -5,6 +5,7 @@ segments; a run on a tree opens a checked copy, loads nothing and is scored by
 04; and 03 refuses, before any run, what D-27 and D-29 refuse."""
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -36,6 +37,22 @@ exec "$@"
 def metadata(arm_dir: Path) -> dict:
     return dict(line.split("=", 1) for line in
                 (arm_dir / "metadata.env").read_text().splitlines())
+
+
+def unlisted_pipeline(root: Path) -> Path:
+    """A copy of the pipeline whose contract lists no suite workload: assoc
+    as before the D-29 §6 edit, and none of W2-W5's families."""
+    pipeline = Path(__file__).resolve().parents[1]
+    repo = root / "repo"
+    shutil.copytree(pipeline, repo / "scripts" / "dbbench_pipeline",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(pipeline.parents[1] / "config", repo / "config")
+    path = repo / "config" / "research_objective_contract.json"
+    contract = json.loads(path.read_text())
+    contract["workloads"] = {
+        "assoc": "PREREGISTRATION D-1 unchanged: keyrange_num 30, delete rate 0"}
+    path.write_text(json.dumps(contract, indent=2) + "\n")
+    return repo / "scripts" / "dbbench_pipeline"
 
 
 def make_tree(root: Path, keys: int = 290000, **options) -> Path:
@@ -268,8 +285,7 @@ class RefusalTest(unittest.TestCase):
                     self.assertFalse((Path(tmp) / "db").exists())
                     self.assertFalse((Path(tmp) / "results").exists())
         # Runs on a tree that does not fit it, or a long suite run that does
-        # not have D-29 §1's shape, or whose family the contract does not
-        # list yet (D-29 §6).
+        # not have D-29 §1's shape.
         tree_cases = (
             ({}, {"SIZE_RATIOS": "3"}, "size_ratio 3"),
             ({}, {"MAX_BYTES_FOR_LEVEL_BASE": "33554432"},
@@ -281,8 +297,6 @@ class RefusalTest(unittest.TestCase):
              {**long_suite, "RUN_MEMORY_MAX": ""}, "RUN_MEMORY_MAX"),
             ({"keys": 290000, "write_buffer_size": "16777216",
               "target_file_size_base": "4194304"}, long_suite, "TREE_KEYS"),
-            ({"keys": 20000000, "write_buffer_size": "16777216",
-              "target_file_size_base": "4194304"}, long_suite, "D-29 §6"),
         )
         for tree_options, overrides, message in tree_cases:
             with self.subTest(overrides=overrides):
@@ -322,6 +336,34 @@ class RefusalTest(unittest.TestCase):
                         PATH=f"{bin_dir}:{os.environ['PATH']}")
             self.assertEqual(ran.returncode, 7, ran.stderr)
             self.assertIn("without a matching preflight", ran.stderr)
+
+    def test_a_long_suite_run_needs_its_family_listed(self):
+        # D-29 §6: the contract lists W1 since 2026-10-16, so a long run that
+        # is not diagnostic passes on to the preflight check. On a copy whose
+        # contract does not list it, 03 refuses it first.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tree = make_tree(root, keys=20000000, write_buffer_size="16777216",
+                             target_file_size_base="4194304")
+            bin_dir = root / "fakebin"
+            bin_dir.mkdir()
+            (bin_dir / "systemd-run").write_text(SYSTEMD_RUN)
+            (bin_dir / "systemd-run").chmod(0o755)
+            long_run = {
+                "SUITE_WORKLOAD": "W1", "TREE_DIR": str(tree),
+                "WORKLOAD_SIZES_M": "40", "WRITE_BUFFER_SIZE": "16777216",
+                "TARGET_FILE_SIZE": "4194304", "OPEN_FILES": "-1",
+                "RUN_MEMORY_MAX": "32G", "STUB_SCOPE_LOG": str(root / "scope.log"),
+                "PREFLIGHT_MARKER": str(root / "none"),
+                "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+            ran = run03(root, **long_run)
+            self.assertEqual(ran.returncode, 7, ran.stderr)
+            self.assertNotIn("D-29 §6", ran.stderr)
+            self.assertIn("without a matching preflight", ran.stderr)
+            ran = run03(root, pipeline=unlisted_pipeline(root), **long_run)
+            self.assertEqual(ran.returncode, 1, ran.stderr)
+            self.assertIn("D-29 §6", ran.stderr)
+            self.assertFalse((root / "db").exists())
 
 
 if __name__ == "__main__":

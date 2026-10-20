@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_suite_runs import unlisted_pipeline
+
 PIPELINE = Path(__file__).resolve().parents[1]
 FIXTURE = PIPELINE / "tests" / "fixtures" / "evaluator" / "1M" / "T2" / "native"
 
@@ -148,8 +150,13 @@ class SuiteChainTest(unittest.TestCase):
             self.assertTrue((self.tree(setting) / "db").exists())
 
     def test_refusals_before_any_tree(self):
-        # D-29 §6: the contract does not list the suite workloads yet.
-        ran = self.chain(SUITE_RUN_OPERATIONS_M="40")
+        # D-29 §6: on a copy whose contract does not list the suite
+        # workloads, a long chain is refused before its first tree.
+        copy = unlisted_pipeline(self.root)
+        ran = subprocess.run(
+            ["bash", str(copy / "33_suite_chain.sh")],
+            env={**self.env, "SUITE_RUN_OPERATIONS_M": "40"},
+            capture_output=True, text=True)
         self.assertNotEqual(ran.returncode, 0)
         self.assertIn("D-29 §6", ran.stderr)
         self.assertFalse(self.calls.exists())
@@ -163,6 +170,15 @@ class SuiteChainTest(unittest.TestCase):
                          PREFLIGHT_MARKER=str(self.root / "none"))
         self.assertNotEqual(ran.returncode, 0)
         self.assertNotEqual(ran.returncode, 5)
+        self.assertIn("no matching preflight", ran.stderr)
+        # The contract lists W1 and W2 (D-29 §6, 2026-10-16), so a chain that
+        # is not diagnostic gets as far, and no further.
+        ran = self.chain(SUITE_RUN_OPERATIONS_M="40", SUITE_T="2",
+                         SUITE_SETTINGS="16:2", RESUME="1",
+                         PREFLIGHT_MARKER=str(self.root / "none"))
+        self.assertNotEqual(ran.returncode, 0)
+        self.assertNotEqual(ran.returncode, 5)
+        self.assertNotIn("D-29 §6", ran.stderr)
         self.assertIn("no matching preflight", ran.stderr)
 
 

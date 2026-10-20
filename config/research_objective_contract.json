@@ -2,9 +2,9 @@
   "schema_version": 1,
   "programme": "Programme 1 (research fork of 2026-09-29)",
   "contract_status": "frozen",
-  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the fork revision when the Programme 1 binary is built. Edit in place with a written reason, never after an arm it governs has run.",
+  "status_note": "frozen with PREREGISTRATION D-13. The remaining nulls are filled by rule, never by choice: the fork revision when the Programme 1 binary is built; the assoc and powerlaw_get95 reference rates, re-measured on the D-29 binary by D-14 §2's rule (D-29 §6), once a dated entry fixes which of D-29 §3's nine T=10 settings their native arms run at. Edit in place with a written reason, never after an arm it governs has run.",
   "authority": {
-    "decisions": "docs/PREREGISTRATION.md D-13, as amended by D-14 and D-15",
+    "decisions": "docs/PREREGISTRATION.md D-13, as amended by D-14, D-15, D-20, D-21, D-22 and D-29 (see amendments)",
     "theory": "docs/PATHWAYS.md, 2026-09-29 revision"
   },
   "replaces": {
@@ -79,18 +79,41 @@
   "reference_rate": {
     "rule": "mean measured-phase throughput (n_w to the end of mixgraph) of five native arms at T=10 per workload, run through 03 with the settle step at the Gate N2 run length on the Programme 1 binary, frozen before any static-class run (D-14 §2, superseding D-13 §1's ACT-4 repeats)",
     "ops_per_second": {
-      "assoc": 69021.50770676274,
-      "powerlaw_get95": 120609.31341295298
+      "assoc": null,
+      "powerlaw_get95": null
     }
   },
   "write_accounting": "Lemma D.7's exact identity with the overlap constant measured per level; replaces P0-7's M3 convention",
   "workloads": {
-    "assoc": "PREREGISTRATION D-1 unchanged: keyrange_num 30, delete rate 0",
+    "assoc": {
+      "suite_workload": "W1",
+      "label": "the `Assoc` operation mix on Cao et al.'s ZippyDB parameter fit, with the query type, value size and scan length drawn independently of the key",
+      "definition": "PREREGISTRATION D-1 as amended by D-29 §1-§2: keyrange_num 30, delete rate 0, D-1's value sizes and scan lengths; the query type, value size and scan length drawn from their own random streams (--mixgraph_decouple_query, --mixgraph_decouple_sizes)",
+      "mix_get_ratio": 0.806,
+      "mix_put_ratio": 0.159,
+      "mix_seek_ratio": 0.035,
+      "mix_insert_ratio": 0.0,
+      "phase_mixes": [],
+      "keyrange_num": 30,
+      "keyrange_dist": [
+        14.18,
+        -2.917,
+        0.0164,
+        -0.08082
+      ],
+      "key_dist_a": 0.002312,
+      "key_dist_b": 0.3467,
+      "decouple_query": true,
+      "decouple_sizes": true
+    },
     "powerlaw_get95": {
+      "suite_workload": "W2",
       "label": "YCSB-B operation mix with power-law key popularity; never Zipfian or YCSB-B",
       "mix_get_ratio": 0.95,
       "mix_put_ratio": 0.05,
       "mix_seek_ratio": 0.0,
+      "mix_insert_ratio": 0.0,
+      "phase_mixes": [],
       "keyrange_num": 1,
       "keyrange_dist": [
         0,
@@ -100,6 +123,89 @@
       ],
       "key_dist_a": 0.002312,
       "key_dist_b": 0.3467,
+      "decouple_query": true,
+      "decouple_sizes": true,
+      "value_size_record_size_and_load": "as assoc"
+    },
+    "powerlaw_put90": {
+      "suite_workload": "W3",
+      "label": "update-heavy operation mix with power-law key popularity (W2's keys, the mix reversed); never Zipfian",
+      "mix_get_ratio": 0.1,
+      "mix_put_ratio": 0.9,
+      "mix_seek_ratio": 0.0,
+      "mix_insert_ratio": 0.0,
+      "phase_mixes": [],
+      "keyrange_num": 1,
+      "keyrange_dist": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "key_dist_a": 0.002312,
+      "key_dist_b": 0.3467,
+      "decouple_query": true,
+      "decouple_sizes": true,
+      "value_size_record_size_and_load": "as assoc"
+    },
+    "growth_insert90": {
+      "suite_workload": "W4",
+      "label": "write-heavy growth: inserts of new keys scattered at random between existing keys, Gets uniform over the keys present",
+      "definition": "D-29 §2: 36M inserts take the 20M-key tree to 56M keys; a new key keeps a loaded key's ID and sorts directly after it (--mix_insert_ratio)",
+      "mix_get_ratio": 0.1,
+      "mix_put_ratio": 0.0,
+      "mix_seek_ratio": 0.0,
+      "mix_insert_ratio": 0.9,
+      "phase_mixes": [],
+      "keyrange_num": 1,
+      "keyrange_dist": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "key_dist_a": 0.0,
+      "key_dist_b": 0.0,
+      "decouple_query": true,
+      "decouple_sizes": true,
+      "value_size_record_size_and_load": "as assoc"
+    },
+    "phased_uniform": {
+      "suite_workload": "W5",
+      "label": "phased: write-heavy, mixed, then read-heavy, uniform keys",
+      "definition": "D-29 §2: three phases of 13,333,333, 13,333,333 and 13,333,334 operations, no scans, no pause; phase_mixes lists each phase's Get, Put and Seek ratios in run order (Put/Get 0.90/0.10, 0.50/0.50, 0.10/0.90); db_bench stamps phase_start in the host log",
+      "mix_get_ratio": 0.0,
+      "mix_put_ratio": 0.0,
+      "mix_seek_ratio": 0.0,
+      "mix_insert_ratio": 0.0,
+      "phase_mixes": [
+        [
+          0.1,
+          0.9,
+          0.0
+        ],
+        [
+          0.5,
+          0.5,
+          0.0
+        ],
+        [
+          0.9,
+          0.1,
+          0.0
+        ]
+      ],
+      "keyrange_num": 1,
+      "keyrange_dist": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "key_dist_a": 0.0,
+      "key_dist_b": 0.0,
+      "decouple_query": true,
+      "decouple_sizes": true,
       "value_size_record_size_and_load": "as assoc"
     }
   },
@@ -260,6 +366,11 @@
       "date": "2026-10-03",
       "entry": "PREREGISTRATION D-22",
       "reason": "after the d21id chain's prices, before any Theta_s run and before any arm was priced under the prices it governs: c_f and c_sk moved about 9% between sessions on rebuilt trees, so the read prices are measured on 18 archived trees (T = 2, 3, 4, 6, 8 and 10, three builds each) and are final only when a second session, after a reboot, reproduces c_f, c_blk, c_sk, c_open and the reopen-timer reference within reproducibility_tolerance (0.03); every earlier price is provisional"
+    },
+    {
+      "date": "2026-10-16",
+      "entry": "PREREGISTRATION D-29 §6",
+      "reason": "before any run D-29 governs (no suite preload, suite run or step run has started), on the owner's go (2026-10-16, \"Edit the contract\"): workloads lists D-29 §2's five suite workloads with every value 03 checks against a run (mix, inserts, phases, key ranges, key popularity, both decouplings), so 03 and 33 accept long suite runs of them; assoc's entry, formerly the string \"PREREGISTRATION D-1 unchanged: keyrange_num 30, delete rate 0\", records D-29 §1's decouplings; W3-W5 are added as powerlaw_put90, growth_insert90 and phased_uniform; reference_rate is nulled for assoc and powerlaw_get95, to be re-measured on the D-29 binary at D-29's geometry (the 2026-10-02 values, assoc 69021.5 and powerlaw_get95 120609.3 ops/s on db_bench a8e9329d with the old geometry and coupled draws, stay in that amendment); W3-W5 gain reference_rate entries with the dated entry that schedules their runs, because stage 18 takes c_w from the q-bar arms of every family listed there and only W1 and W2 run now (owner, 2026-10-16)"
     }
   ],
   "suite_robustness": {

@@ -162,6 +162,13 @@ class ChainTest(unittest.TestCase):
         pilots = self.nvme / "n1-assoc" / "graphs" / "summary.csv"
         before = pilots.stat().st_mtime_ns
         archive, identity = self.build_price_trees()
+        # The q-bar the first chain left, which the live contract has nulled
+        # since D-29 §6.
+        contract_path = self.root / "config" / "research_objective_contract.json"
+        contract = json.loads(contract_path.read_text())
+        contract["reference_rate"]["ops_per_second"] = {
+            "assoc": 62500.0, "powerlaw_get95": 62500.0}
+        contract_path.write_text(json.dumps(contract, indent=2) + "\n")
         ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d21", PRICE_TREES=str(archive),
                          PRICE_TREES_SHA256=identity)
         self.assertEqual(ran.returncode, 0, ran.stdout[-3000:] + ran.stderr[-3000:])
@@ -198,6 +205,15 @@ class ChainTest(unittest.TestCase):
             self.root / "build-dbbench" / "db_bench"))
         self.assertEqual(len(prices["write_summaries_sha256"]), 2)
         self.assertTrue(all("-d21" in path for path in prices["write_summaries_sha256"]))
+        # With q-bar nulled again (D-29 §6), the rerun says so instead of
+        # failing on the missing value after its arms have run.
+        contract["reference_rate"]["ops_per_second"] = {
+            "assoc": None, "powerlaw_get95": None}
+        contract_path.write_text(json.dumps(contract, indent=2) + "\n")
+        ran = self.run24(QBAR_ONLY="1", QBAR_TAG="d29", PRICE_TREES=str(archive),
+                         PRICE_TREES_SHA256=identity)
+        self.assertEqual(ran.returncode, 0, ran.stdout[-3000:] + ran.stderr[-3000:])
+        self.assertEqual(ran.stdout.count("the contract records no q-bar"), 2)
         self.assertIn("reopen check, assoc q-bar arms", ran.stdout)
 
     def test_qbar_only_refusals(self):
