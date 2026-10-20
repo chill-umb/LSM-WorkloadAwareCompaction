@@ -253,3 +253,163 @@ offline checks:
 2. Then a revised formula, with its rules fixed before scoring, on the development runs.
 3. Fresh step runs for the formula's clean test, planned for approval.
 4. The snapshot export (R5), once the formula's inputs are settled.
+
+## 10. Version of 2026-10-20: distinct keys (fix 1), every cell cycles (fix 2), and the test plan
+
+*Entered 2026-10-20 at the owner's go ("Yes, go for all three"), unchanged from the draft sealed at 11:22:24 UTC
+(`~/node_ops/drafts/2026-10-20-design-note-v10-draft.md`, sha256 bba9cd66c2daa1ac7a2083b97aa2b35d276a6c709e70c5a80a6fd74c24c614ff).*
+
+**Status: design under test, not adopted.**
+- §1-§9 are unchanged.
+- PATHWAYS is unchanged. Step 1b stays failed. PROP-1 stays at D-19.
+- Evidence: `~/node_ops/reports/2026-10-20-fullscale-recheck/` and `~/node_ops/reports/2026-10-20-why-5-13/`
+  (18 replayed full-scale runs, W1/W2 × T 3, 6, 9, 128 MiB / K=4).
+
+### 10.1 What went wrong
+
+- **#5, the file model.** Its merge rules were right; its input was wrong.
+  - At development it drew Puts from db_bench's exact per-key probabilities ("keypop", from enumerating the
+    generator; `balance_check_rules.md` v2).
+  - In the full-scale re-check it drew them from the run's own Put counts, treated as probabilities. That loses the
+    keys a run writes once or twice: distinct keys fell to ×0.87 (W1) and ×0.67 (W2).
+  - So too many copies dropped at the memtable, L0 and L1 (W2: ×2.4-2.6).
+  - Fed the run's real Put order instead, with nothing else changed, it scores 1.000 (572/573 cells).
+- **#13, balance formula v2.** It has the same input bias, plus one wrong rule.
+  - The rule: a cell holding loaded, never-written data does not cycle unless full.
+  - At full scale nearly every L2 cell holds some. So v2 freezes most cells (W2 T6: 4-6% cycle), while RocksDB
+    empties 50-90% of the frozen ones.
+  - A frozen cell keeps its written keys at L2. That is 97-101% of W2's extra L2 hits.
+
+### 10.2 Fix 1: count distinct keys correctly from measured counts
+
+**Rule.** A level, or a cell of it, holds one entry per distinct key. A merge drops one copy per extra version.
+- So every formula and every test bench must get the number of distinct keys written in a stretch of operations
+  right.
+- A per-key count c_k measured over a window of M operations is a measurement, not a rate: Poisson draws at rate
+  c_k / M double the noise.
+
+**Estimator** (exact in expectation for any stretch of t <= M operations inside a window whose operation order is
+random, as in W1 and W2):
+- q(t; c) = (1 - t/M)^c: the chance that a key with c Puts in the window gets none in a given stretch of t
+  operations.
+- Q(t; c) = (1/t) ∫_0^t q(u; c) du = M / ((c + 1) t) · [1 - (1 - t/M)^(c+1)]: the same, averaged over a stretch
+  whose length is uniform on [0, t].
+- **D_x(t) = Σ_{k in x} [1 - q(t; c_k)]:** the distinct keys written into cell x in a stretch of t operations.
+
+**Where it replaces the old forms:**
+- In balance formula v2, every e^(-w_k t) becomes q(t; c_k), and every (1 - e^(-w_k t)) / (w_k t) becomes Q(t; c_k).
+- For the file model, the rule is: drive it with the exact Put stream (`suitegen`) or exact generator
+  probabilities, never with counts used as probabilities.
+
+**Limits:**
+- It assumes the Put pattern does not change inside the window. W3-W5's phases are outside this version.
+- It needs per-key counts, which the controller does not have (§9.4). In the offline tests below, the counts come
+  from the run's own stream, a stand-in.
+- How the controller would estimate D_x(t) is open; it needs its own check after this version passes. Candidates are
+  flush entries against Puts, merge entries in and out per key range, and per-file entries (R5).
+
+### 10.3 Fix 2: every cell cycles, starting from the state it is in
+
+Balance formula v3 = v2 with fix 1, and this rule in place of v2's change 2 ("which cells cycle"). The same rule
+holds at L1 and L2.
+
+**Inputs:**
+- **The window and the state.** W = the measured phase (40M operations, M = W). The state s0 is the run's start of
+  measurement: the replayed state at measured-phase operation 0. The controller would read it from the per-file
+  snapshot.
+- **The cells x of level j:** level j's files at s0, with v2's spans.
+- **E_x:** the cell's entries at s0. **n_x:** level j+1's entries in x at s0, spread evenly as in v2.
+  - At L1, n_x is L2's predicted mean entries, spread evenly over each L2 cell, as in v2.
+- **cap_x = n_x / r_j,** one threshold r_j per level.
+
+**Equations:**
+- **First stretch** (from s0 until the cell is first pushed): content C_x(t) = E_x + Σ_{k in x, k has no entry at
+  level j at s0} [1 - q(t; c_k)].
+  - A rewritten key already at level j adds nothing; a key arriving from above adds one entry.
+- **First push:** t1_x = the least t with C_x(t) >= cap_x.
+  - t1_x = 0 if E_x >= cap_x.
+  - t1_x = W if the cap is not reached within W.
+  - The cell's loaded data goes down with that push. Nothing is frozen by rule.
+- **After the first push,** the cell cycles from empty. τ_x solves D_x(τ) = cap_x, with τ_x = ∞ if D_x(M) < cap_x.
+  The stretch it averages over is τ̃_x = min(τ_x, W - t1_x).
+- **Mean entries of x over the window:**
+  m_x = (1/W) · [∫_0^{t1_x} C_x(t) dt + (W - t1_x) · Σ_{k in x} (1 - Q(τ̃_x; c_k))].
+  - The integral is closed form: ∫_0^a q(t; c) dt = M/(c+1) · [1 - (1 - a/M)^(c+1)].
+- **r_j** is solved by log-bisection, on [1e-2, 1e4] as in v2, so that Σ_x m_x × 1040.52 equals level j's measured
+  mean bytes over the window. L2 is solved first, then L1, as in v2.
+- **Time shares.** φ_x = t1_x / W is the share of the window before cell x's first push.
+
+**Hits** (time-averaged over the window; levels independent, as in v2):
+- **Above L1:** E0_k = Q(A0; c_k). A0 is solved, as in v2, so the predicted share of Gets above L1 equals the run's
+  measured memtable + L0 share.
+- **Key k in L1 cell y.** It is "not at L1":
+  - before the push, with probability 0 if k has an L1 entry at s0, else Q(t1_y; c_k);
+  - after the push, with probability Q(τ̃_y; c_k).
+  - E1_k mixes the two with φ_y. P(newest at L1) = E0_k (1 - E1_k).
+- **Key k in L2 cell x:** P(newest at L2) = E0_k E1_k · [φ_x a_k + (1 - φ_x)(1 - Q(τ̃_x; c_k))].
+  - a_k = 1 if k has an L2 entry at s0, else 1 - Q(t1_x; c_k).
+  - A loaded, never-written key (c = 0) counts at L2 only until its cell's first push.
+- **Hit share at level j** = Σ_k g_k P(newest at j) / Σ_k g_k, with g_k the key's Gets in the window (stand-in).
+- **L3 and below** = 1 - (measured memtable + L0) - L1 - L2.
+
+**Kept from v2 and named as limits:**
+- n_x held at its s0 value;
+- no delay for a key to pass the levels above;
+- levels independent;
+- overlap changes by v2's r-ratio form (reported, not scored).
+
+### 10.4 Test plan
+
+**Step 0: seal.** This text is sealed before any number is computed with either fix.
+
+**Step 1: development, on the 18 replayed runs (practice set; already seen, so not a test).**
+- **Code self-check:** with both fixes switched off (Poisson rates c_k / 40M, v2's cycle rule, the state at
+  operation 20M), the new code must reproduce `balance_fs.py`'s hold numbers exactly.
+- **Reported only:**
+  - the hold L1 and L2 hit shares;
+  - the share of L2 cells pushed at least once, against the replay (`rules.md` §3's emptying, cells at s0);
+  - L2's mean never-written loaded share, against the replay's mean over the 9 checkpoints.
+- **Allowed:** code bug fixes only. Any change to an equation, constant or rule is a new dated version, before Step 2.
+
+**Step 2: held-out runs, scored (needs the owner's go for the node time and a preflight).**
+- **Runs:** W1 and W2 × T ∈ {4, 8} × settings {64:4, 128:4, 256:4} × 3 repeats = 36 runs on 6 trees, 40M operations
+  each, at the suite geometry, every tree kept (`SUITE_KEEP_TREES=all`).
+  - About 1 hour per setting at the T3-T9 sweep's pace, so about 6 hours on the prime.
+  - T 4 and 8 have never been seen. T 2, 5, 7 and 10 stay unseen for later versions.
+- **Instruments:** each tree's snapdump and each run's exact replay, with the same checks as `replay.py` (all must
+  pass); `truth.py` counters.
+
+**Scored rules** (fixed now; noise thresholds as the re-check's §5, from the held-out repeats):
+- **F1(a), test bench:** the file model driven by the run's exact Put stream, on all 36 runs, with L1 base from the
+  setting and the other constants of the re-check's §4. It passes if the weighted balanced pass rate is >= 0.98
+  (frozen scorer, rules a4). The every-cell rule is reported.
+- **F1(b), estimator:** in every run, D(L) from the run's counts against the exact mean distinct keys over the
+  stream's disjoint windows of L operations, for L = one memtable (the run's mean Puts per flush, in operations), 1M,
+  5M and 20M. It passes if every value is within ±2%.
+- **F2(c), hold:** in every run, from its own s0, the L1 and L2 hit shares against the counters, within the frozen
+  share allowance max(0.01, 0.15 × measured). It passes if every cell passes.
+- **F2(d), mechanism:** in every run, two checks; it passes if both pass in every run.
+  - The predicted share of L2 cells with t1_x < W is within ±0.10 of the measured share emptied at least once.
+  - The predicted L2 never-written loaded share, Σ_x P_x φ_x / Σ_x m_x, is within ±0.05 of the replay's mean.
+- **F2(e), static change:** for (64:4, 128:4) and (256:4, 128:4) per workload, T and repeat, each setting predicted
+  from its own tree, on the L2 and the L3-and-below hit-share changes.
+  - A cell passes with the right sign and |pred - meas| <= 0.30 |meas|.
+  - A cell counts only if |meas| reaches its noise threshold (at least 0.02) and the deepest level is the same in
+    both runs (Addendum 1's rule).
+  - It passes if every counted cell passes.
+
+**Verdicts:**
+- **Fix 1 is verified** if F1(a) and F1(b) pass.
+- **Fix 2 is verified** if F2(c), (d) and (e) pass.
+- A pass makes v3 a candidate for the mid-run step test (D-29 §4) and for the controller's own inputs: the
+  distinct-key estimator without per-key counts, and R5. It does not touch PATHWAYS.
+- A failure is reported as found.
+
+**Reported, not scored:** the L1 change and overlap cells; r_j and any bound hit; prediction time per run (R4).
+
+**Not covered by this plan:**
+- the second run size (R2);
+- T 2 and 10 (R1);
+- W3-W5;
+- a mid-run step;
+- inputs the controller can actually observe (per-key counts are a stand-in throughout).
