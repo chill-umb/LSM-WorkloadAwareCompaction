@@ -33,9 +33,11 @@ paired within a lease.
 **These settings are established and recorded, not assumed.** On a fresh lease
 `00_install_dependencies.sh` switches SMT off through
 `/sys/devices/system/cpu/smt/control`, sets every CPU's frequency governor to
-`performance`, and sets transparent huge pages to `madvise`. The last two are
-runtime settings that do not survive a reboot, so `03_run_experiments.sh`
-records them per arm in `metadata.env` as `cpu_governor` and `thp_enabled`: an
+`performance`, and sets transparent huge pages to `madvise`. All three are
+runtime settings that a reboot clears; since 2026-10-20 `00` also installs
+`lsm-node-tuning.service`, which applies them again at every boot, and
+`00_install_dependencies.sh check` reports them. `03_run_experiments.sh`
+records the last two per arm in `metadata.env` as `cpu_governor` and `thp_enabled`: an
 arm that ran under a drifted setting is identifiable afterwards rather than
 silently pooled with one that did not. SMT off is what the `DBBENCH_CPUS=0-7`
 and `CONTROLLER_CPUS=8` pinning assumes -- with SMT on, those names would

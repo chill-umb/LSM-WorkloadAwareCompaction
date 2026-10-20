@@ -57,7 +57,7 @@ The numbered pipeline is the supported build path when you are on the node (Ubun
 
 ```bash
 git submodule update --init --recursive
-scripts/dbbench_pipeline/00_install_dependencies.sh  # apt deps + venv with rl_agent/requirements.txt (torch, numpy) + matplotlib
+scripts/dbbench_pipeline/00_install_dependencies.sh  # node setup: apt deps, GCC 14, CPU settings (kept across reboots), linger, venv; `check` changes nothing
 scripts/dbbench_pipeline/01_build_rocksdb.sh         # CMake-configure lib/rocksdb (Release, tests off), build librocksdb
 scripts/dbbench_pipeline/02_build_db_bench.sh        # build db_bench in the same build dir
 ```

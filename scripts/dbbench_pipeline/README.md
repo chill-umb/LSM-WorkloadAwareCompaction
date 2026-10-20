@@ -10,6 +10,20 @@ scripts/dbbench_pipeline/01_build_rocksdb.sh
 scripts/dbbench_pipeline/02_build_db_bench.sh
 ```
 
+**Node setup** (`00`, reworked 2026-10-20). `00` sets a node up: the
+packages (the build's, and tmux, pigz, rsync, zstd, jq), GCC 14, SMT off,
+the `performance` governor and THP `madvise`, re-applied at every boot by
+`lsm-node-tuning.service` (which runs `node_tuning.sh`), each shell's soft
+open-file limit raised to the hard one in `~/.bashrc`, `loginctl
+enable-linger` (03's memory cap needs the user's systemd manager after the
+SSH session closes), the venv and `~/node_ops`. Every item is checked first
+and changed only when not ready, so a re-run changes nothing; it refuses
+while a run is going. `00_install_dependencies.sh check` changes nothing and
+exits 1 naming each item that is not ready: run it after a reboot and before
+a long run. A set-up node gets a record in `~/node_ops/node-setup/` (kernel,
+libraries, compiler, Python packages, code and binary identity); `diff` two
+nodes' records before pooling their runs.
+
 The order of node work is the runbook below: preflight (13), Gate N1 (24),
 then Gate N2 (25). The retired DQN programme's stages (05, 06's guard
 protocol, 08, 10–12, 14, 15, 17) were removed on 2026-10-01, and
@@ -168,7 +182,8 @@ a. Publish and fetch the code. On the machine that holds the commits, push
    git pull --ff-only
    git submodule update --init --recursive
    git -C lib/rocksdb log -1 --format=%H   # must equal: git ls-tree HEAD lib/rocksdb
-   scripts/dbbench_pipeline/00_install_dependencies.sh   # fresh node only
+   scripts/dbbench_pipeline/00_install_dependencies.sh   # sets the node up; a re-run changes nothing
+   scripts/dbbench_pipeline/00_install_dependencies.sh check   # must end SETUP_EXIT=0
    ```
 
 b. Tier 2, the fork's gtests in a Debug tree:
