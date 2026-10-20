@@ -333,15 +333,18 @@ class ControllerArmsTest(unittest.TestCase):
     def test_refusals_before_any_run(self):
         cases = [
             ({}, "lacks: m_min (D-18 action bounds)"),
-            ({"PLUGIN_PLACEHOLDERS": "1", "WORKLOAD_SIZES_M": "29",
-              "LOAD_PERCENT": "10"}, "preflight's smoke runs only"),
+            # A hold-only matrix may take placeholders at full length (D-31's
+            # step runs; tests/test_step_chain.py); another arm may not.
+            ({"EXPERIMENT_ARMS": "rules", "PLUGIN_PLACEHOLDERS": "1",
+              "WORKLOAD_SIZES_M": "29", "LOAD_PERCENT": "10"},
+             "preflight's smoke runs only"),
             ({"PLUGIN_PLACEHOLDERS": "yes"}, "must be 0 or 1"),
         ]
         for overrides, message in cases:
             with self.subTest(overrides=overrides):
                 with tempfile.TemporaryDirectory() as tmp:
-                    ran = run03_plugin(Path(tmp), EXPERIMENT_ARMS="hold",
-                                       **overrides)
+                    ran = run03_plugin(Path(tmp), **{"EXPERIMENT_ARMS": "hold",
+                                                     **overrides})
                     self.assertEqual(ran.returncode, 1, ran.stdout)
                     self.assertIn(message, ran.stderr)
                     self.assertFalse((Path(tmp) / "db").exists())

@@ -682,6 +682,35 @@ MANIFEST; about 20 GB per tree, 180 GB per T at nine settings). Once the law
 is frozen, `SUITE_KEEP_TREES=128:4` (the step runs' anchor) is enough.
 Trees are not yet archived off the node (D-27 §4 asks for it).
 
+**The step runs.** `34_step_chain.sh` runs PREREGISTRATION D-31's list
+(`step_plan.py`): each run is its twin, native repeat 1 at (128 MiB, K = 4)
+on the same kept tree with the same seed and binary, plus one change made by
+the `hold` arm at measured operation 10M (`HOLD_APPLY_AT_OP`, diagnostic).
+Order: one presence control (no change) per workload and T, then ×0.5 and ×2
+at every non-deepest level, then ×0.75 and ×1.5, then the two-level steps
+(W1 and W2). A node takes its share with `STEP_T` and `STEP_WORKLOADS`:
+
+```bash
+STEP_T=3 STEP_WORKLOADS="W1 W2" NVME=/mnt/nvme scripts/dbbench_pipeline/34_step_chain.sh plan
+STEP_T=3 STEP_WORKLOADS="W1 W2" NVME=/mnt/nvme scripts/dbbench_pipeline/34_step_chain.sh
+```
+
+- **Trees** are never built here: `$NVME/suite-trees/T<T>-l1128-k4-…` must
+  hold the twin's tree (on another node, a verified copy).
+- **Twins:** a twin that ran on this node is read from `suite-<W>/`; one that
+  ran elsewhere is its `metadata.env`, copied to
+  `$NVME/step-twins/<W>/T<T>/metadata.env`. A (workload, T) without a fitting
+  twin (tree, seed, binary, workload) is skipped and logged; `RESUME=1` picks
+  it up later. Each finished run is checked against its twin and its planned
+  change.
+- **Plugin config:** the hold arm takes the preflight's placeholders. `03`
+  allows them at full length for a hold-only matrix only: hold-only never
+  acts, so they reach only its logs, and the change is checked against the
+  placeholder bounds [0.5, 2]. D-18's bounds and q̄ are not fixed yet.
+- **Results:** `$NVME/step-<W>/T<T>-l1128-k4/<step id>/` (session
+  `step-<W>`), scored by `04` at the end; the last line is
+  `STEP_CHAIN_EXIT=<0|5>`.
+
 **Preflight step 7.** `32_check_suite_generator.sh` checks the suite options
 on small trees against stock RocksDB (unchanged draws when off, the key-sign
 fix, decoupling, W1–W5, refusals); then `31` builds a 500,000-key tree at the

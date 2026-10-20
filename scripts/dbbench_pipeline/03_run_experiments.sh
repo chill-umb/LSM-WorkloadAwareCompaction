@@ -468,7 +468,8 @@ fi
   echo "DIAGNOSTIC_RUN must be 0 or 1." >&2
   exit 1
 }
-# Only where placeholders are allowed: controller arms of a short smoke run.
+# Only where placeholders are allowed: controller arms of a short smoke run,
+# or a hold-only matrix (below).
 if (( CONTROLLER_MATRIX )) && [[ "$PLUGIN_PLACEHOLDERS" == 1 ]]; then
   DIAGNOSTIC_RUN=1
 fi
@@ -514,7 +515,12 @@ if (( CONTROLLER_MATRIX )); then
     echo "PLUGIN_PLACEHOLDERS must be 0 or 1." >&2
     exit 1
   }
-  if (( PLUGIN_PLACEHOLDERS )); then
+  # A hold-only matrix may take them at any length (D-31's step runs): the
+  # hold-only plugin never acts (controller/policy.cc), so the placeholders
+  # reach only its logs; its one change is the scheduled one, checked
+  # against the placeholder bounds [0.5, 2]. Placeholders make the run
+  # diagnostic (above).
+  if (( PLUGIN_PLACEHOLDERS )) && [[ "$(echo $EXPERIMENT_ARMS)" != hold ]]; then
     for size_m in $WORKLOAD_SIZES_M; do
       (( size_m <= PREFLIGHT_SHORT_RUN_MAX_M )) || {
         echo "PLUGIN_PLACEHOLDERS=1 is for the preflight's smoke runs only" \
