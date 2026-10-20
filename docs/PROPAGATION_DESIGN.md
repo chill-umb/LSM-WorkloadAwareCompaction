@@ -413,3 +413,147 @@ holds at L1 and L2.
 - W3-W5;
 - a mid-run step;
 - inputs the controller can actually observe (per-key counts are a stand-in throughout).
+
+## 11. Version of 2026-10-20 (v3.1): an L2 cell fills to its cap, then holds it while entries leave in pieces
+
+*Entered 2026-10-20 at the owner's go ("go ahead, draft v3.1. Then apply the fix, run it and test it"), unchanged from the draft
+sealed at 18:49:22 UTC (`~/node_ops/drafts/2026-10-20-design-note-v3.1-draft.md`, sha256
+f20c99fef1696d9b9d2db9cadf3ae5c572b9e2e8df622c5024f546e0154f1af9).*
+
+**Status: design under test, not adopted.**
+- §1-§10 are unchanged. PATHWAYS is unchanged. Step 1b stays failed. PROP-1 stays at D-19.
+- Evidence: `~/node_ops/reports/2026-10-20-v3-step1/`, `2026-10-20-v3-diag/`, `2026-10-20-v3-piece/` and the
+  measurement in §11.1 (`~/node_ops/fullscale/v3/cellrate/`); all on the 18 practice runs.
+
+### 11.1 What v3's Step 1 and its follow-ups showed (practice set; report only)
+
+- **v3, Step 1.** W2's L2 hit share is within ±0.002 in all 9 runs. W1's is low by 0.05 at T6 and 0.07-0.08 at T9.
+  L2 is within the share allowance in 13/18 runs.
+- **Why only W1 shows it.** W1 sends 96% of its Gets to written keys, W2 70% to never-written keys. The defect is in
+  both workloads; W2's fit is small errors that cancel.
+- **The piece test (rules sealed 17:07:47 UTC).**
+  - RocksDB pushes L2 in pieces: in the busiest cells, 60-98% of the entries pushed leave in jobs that take less
+    than half of the cell. v3 pushes the whole cell at once.
+  - It does not spare hot keys. In those cells, keys Put at least 4 times leave L2 at the same rate per operation
+    as the rest (ratio 0.96-1.11 at W1 T6/T9 and W2 T9). The exceptions are W1 T3 (2.2) and W2 T6 (0.77-0.80).
+  - An entry's mean stay at L2 per visit is 1.3-1.9 times v3's (W1 2.0-2.6M operations against 1.1-1.8M).
+  - With the measured time at L2 in place of v3's L2 presence, the L2 hit share is within the allowance in 18/18
+    runs.
+- **How the level shares its entries among cells** (`cellrate.py`, measured only, before this text). Over the s0 L2
+  cells of a run, two candidate rules were set against the replay:
+  - **(A) One push rate per entry for the whole level: ruled out.** The rate per entry varies 8-18 times between
+    the busiest cells and the rest in W1 (spread of its log, entries-weighted, 1.3-2.2).
+  - **(B) Each cell's fill is set by the entries below it** (mean entries / L3 entries in the cell): spread of its
+    log 0.40-0.62 in W1 and 0.38-0.57 in W2. That is smaller than (A)'s in 17/18 runs, weighted either by entries
+    or by Gets.
+  - Busy cells still hold more per L3 entry than quiet ones (W1 T9 median 0.26 against 0.14). The first stretch
+    below allows that: a quiet cell spends much of the window filling.
+
+### 11.2 Balance formula v3.1: an L2 cell fills to its cap, then holds it while entries leave in pieces
+
+v3.1 = v3 (§10.2 and §10.3) with one change: at L2, "after the first push the cell cycles from empty" becomes the
+held stretch below. L1 keeps §10.3's rule unchanged, because no per-key measurement of L1 exists yet (R6).
+
+**Inputs:** as §10.3 (W = M = 40M operations, the state s0, the cells x = L2's files at s0, E_x, n_x,
+cap_x = n_x / r_2).
+
+**First stretch, unchanged:** C_x(t) and t1_x as in §10.3.
+- t1_x = 0 if E_x >= cap_x.
+- t1_x = W if the cap is not reached within the window.
+
+**The held stretch** [t1_x, W), of length D_x = W - t1_x:
+- **The cell holds its cap.** Its mean entries over the held stretch equal cap_x. RocksDB pushes the most over-full
+  pieces first, which keeps a cell near its cap instead of emptying it.
+- **One rate per cell.** Every entry in the cell, written or loaded, leaves at the same rate μ_x per operation,
+  whatever its age and however often its key is written (the piece test's second finding). The mean stay per
+  visit is 1/μ_x.
+- A key written while it has no L2 entry gets one at once (as in §10.3: no delay through the levels above).
+
+**Presence of key k in cell x.**
+- **Notation.** c_k is the key's number of Puts in the window; by §10.2, they fall at uniformly random operations.
+  a0_k = 1 if k has an L2 entry at s0, else 0.
+- **First stretch** (t <= t1_x): p_k(t) = 1 - (1 - a0_k) q(t; c_k).
+- **Held stretch** (t = t1_x + d, 0 <= d <= D_x):
+  p_k(t) = e^(-μ_x d) [1 - (1 - a0_k) q(t; c_k)] + μ_x ∫_0^d e^(-μ_x s) [1 - q(s; c_k)] ds.
+  - Derivation: k has an L2 entry at t exactly when no push has come since its last source. That source is its
+    last Put before t, or the start of the held stretch if it had an entry then.
+  - A loaded, never-written key (c = 0, a0 = 1) gives e^(-μ_x d): it leaves at rate μ_x and does not return.
+  - With μ_x = 0, this is the first-stretch form continued.
+- **μ_x** solves Σ_{k in x} ∫_0^{D_x} p_k(t1_x + d) dd = D_x cap_x.
+  - It is found by log bisection on [1e-12, 1] per operation. The left side falls as μ_x rises, and at μ_x = 0 it
+    is at least D_x cap_x.
+  - If D_x = 0, the cell is never pushed and μ_x = 0.
+  - If cap_x = 0 (nothing below at s0; 19 cells at T3 and T6), μ_x takes the bound 1, and the cell holds almost
+    nothing after operation 0.
+- **The integrals** use closed forms where they exist (c = 0, and §10.3's first stretch). Otherwise they are
+  numerical: Gauss-Legendre on geometric pieces of [0, D_x]. Keys in one cell with the same (c, a0) share one value.
+
+**Mean entries of x:** m_x = (1/W) [∫_0^{t1_x} C_x(t) dt + D_x cap_x].
+- This does not depend on μ_x. So r_2 is solved as in §10.3: log bisection on [1e-2, 1e4], with
+  Σ_x m_x × 1040.52 equal to L2's measured mean bytes.
+- μ_x is then solved once per cell. L1 follows as in §10.3, with L2's new m_x spread evenly over each L2 cell.
+
+**Hits:** as in §10.3, with key k's L2 presence bracket replaced by its time average over the window:
+- P̄_k = φ_x a_k + (1/W) ∫_0^{D_x} p_k(t1_x + d) dd, with a_k as in §10.3 (1 if k had an L2 entry at s0, else
+  1 - Q(t1_x; c_k)).
+- For a loaded, never-written key in x: φ_x + (1 - e^(-μ_x D_x)) / (μ_x W).
+- E0, E1, the L1 term and "L3 and below" are unchanged.
+
+**Pushes** (for the mechanism check): key k's predicted pushes are μ_x ∫_0^{D_x} p_k(t1_x + d) dd. The mean stay per
+visit over a set of cells is its predicted time at L2 (W Σ P̄_k) divided by its predicted pushes.
+
+**Kept, and named as limits:**
+- L1 keeps v3's whole-cell cycle.
+- The cells are L2's files at s0, with n_x held at its s0 value; a cell with n_x = 0 holds nothing.
+- There is one rate per cell. Differences inside a cell are not modelled (W1 T3's 2.2).
+- The held stretch's mean is exactly cap_x. Piece sizes (a median of 7-45% of a cell per job) are not modelled; r_2
+  absorbs any common factor.
+- As in v3: levels are independent; keys need no time to pass the levels above; overlap uses v2's r-ratio form
+  (reported only); per-key counts are a stand-in (§10.2's limits).
+
+### 11.3 Test plan
+
+**Step 0: seal.** This text is sealed before any number is computed with v3.1. The §11.1 measurement used measured
+quantities only.
+
+**Step 1: development, on the 18 practice runs (already seen, so not a test).**
+- **Code checks.** All must pass; a failure is fixed in the code.
+  - With the new rule off, the code reproduces `balance_v3.py`'s v3 numbers exactly (L1 and L2 hit shares, r1,
+    r2, A0; 18 runs).
+  - The numerical integrals match a fine trapezoid reference within 1e-6 relative, on a sample of groups.
+  - The presence equation matches a Monte Carlo simulation of the rule, within 4 standard errors, over a grid of
+    (c, a0, t1, μ). The simulation uses uniform Put positions and Poisson push times while the entry is present.
+  - The balance holds: Σ m_x × 1040.52 is within 1e-6 of the measured bytes, and each held stretch's mean is
+    cap_x within 1e-6.
+- **Reported only,** with v3's numbers beside them:
+  - the hold L1 and L2 hit shares (the share allowance shown);
+  - the share of L2 cells with t1_x < W, against the replay's share of cells from which an L2 job removed at least
+    one entry;
+  - the L2 never-written loaded share, against the replay's mean over the 9 checkpoints;
+  - the mean stay per visit at L2 in the hot cells, against `replay_piece.py`'s;
+  - prediction time per run.
+- **Allowed:** code bug fixes only. Any change to an equation, constant or rule is a new dated version (v3.2), and
+  Step 2 waits for it.
+
+**Step 2: held-out runs, scored.**
+- **Runs:** as §10.4 Step 2: W1 and W2 × T 4, 8 × settings 64:4, 128:4, 256:4 × 3 repeats = 36 runs. They are run
+  on worker 10, with its version identity matched to the prime's.
+- **Instruments:** as §10.4, plus `replay_piece.py` on every run. All their checks must pass.
+- **Scored rules:** as §10.4, with these changes:
+  - **F1(a) and F1(b):** unchanged (fix 1 is unchanged).
+  - **F2(c) and F2(e):** unchanged, with v3.1 in place of v3.
+  - **F2(d), mechanism:** three checks; it passes if all three pass in every run.
+    - The predicted share of L2 cells with t1_x < W is within ±0.10 of the measured share from which an L2 job
+      removed at least one entry. This replaces "emptied at least once", which the diagnostic showed undercounts
+      piece pushes.
+    - The predicted L2 never-written loaded share, from this section's presence, is within ±0.05 of the replay's
+      mean.
+    - New: the mean stay per visit at L2 in the hot cells is within ±25% of `replay_piece.py`'s. The hot cells are
+      the fewest cells holding half of the written-key Gets.
+- **Verdicts:**
+  - Fix 1 is verified if F1(a) and F1(b) pass.
+  - v3.1's L2 rule is verified if F2(c), (d) and (e) pass.
+  - A pass makes v3.1 a candidate for the mid-run step test (D-29 §4). It does not touch PATHWAYS.
+  - A failure is reported as found.
+- **Reported, not scored:** as §10.4, plus v3's numbers on the same runs.
+- **Not covered:** as §10.4.
