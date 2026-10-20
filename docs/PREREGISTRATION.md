@@ -3544,6 +3544,229 @@ and 2026-10-16).
 **Falsification.** This entry fails as a record if any part of it is changed
 after the first run it governs has started. A change is a new dated entry.
 
+### D-30, 2026-10-16 — the propagation law's practice set for the six-day plan, and the rules for the formula's inputs
+
+**Entered 2026-10-20** (owner: "Yes, go for all three"). The owner approved this text on 2026-10-16. Only the
+timing paragraph's last sentences, §1's resolution and the note in §4 were added at entry.
+
+**Timing.** The native runs this entry's practice set uses (W1 and W2 at T = 3, 6, 9 on node C, `33_suite_chain.sh`)
+started at 2026-10-16 17:30:49 UTC, before this entry. Their settings are D-29's and are unchanged. When the owner approved
+this text, no result from them had been read or scored. By its entry on 2026-10-20, practice-set results had been
+read: throughput and W means (operator), the full-scale re-check of the 13 fixed propagation items, and the diagnosis
+of #5 and #13 (`~/node_ops/reports/2026-10-20-fullscale-recheck/`, `2026-10-20-why-5-13/`), on the 18 runs at
+(128 MiB, K = 4). That is development on the practice set, which this entry allows. No suite run of an exam
+combination had been made or read. This entry governs how the runs are used in developing and scoring the law, not
+how they run.
+
+**What it amends:** D-29 §5 (the practice set). Everything else in D-29 §5 is unchanged: one law, one set of
+constants; the formula frozen with a hash before the exam is scored; a miss explained by a measured mechanism test,
+never by a per-workload change; the 1/8 copy is a bug-catching harness only.
+
+**1. The practice set** (owner, 2026-10-16, approving the operator's proposal).
+- **Practice:** {W1, W2} × T {3, 6, 9}, full scale, in place of D-29's {W1, W3} × T {3, 6, 9}.
+- **Why:** the owner's six-day plan runs only W1 and W2 for now (2026-10-16: "for now, we will be running only 2
+  workloads (assoc and power law)"). Developing on W1 alone would fit one workload, which the owner's rule of
+  2026-10-15 forbids.
+- **Exam:** the other 39 (workload, T) combinations: W1 and W2 at T 2, 4, 5, 7, 8, 10, and W3, W4, W5 at every T.
+- **What this costs:** both practice workloads are read-heavy (Gets 80.6% and 95%). The formula first meets a
+  write-heavy workload (W3; W4; W5's first phase) in the exam. D-29 had chosen W3 for the practice set for this
+  reason.
+- **Open (owner's):** whether W3 × T {3, 6, 9} joins the practice set if it runs before the freeze. The exam would
+  then be 36 combinations.
+  - **Resolved 2026-10-20** (D-31 §5): W3 stays in the exam. W3-W5 results at T 3, 6, 9 are not read for
+    development before the freeze.
+
+**2. Rules for the formula's inputs** (owner, 2026-10-16: "the rest of the proposals look fine").
+- **(a) No input from the workload's recipe.** The per-key Put and Get rates and the entries loaded and never
+  rewritten are estimated from what the controller can measure at run time: per-file data (including RocksDB's
+  sampled read counts), flush contents and job records. The estimator is tested on the practice runs. The offline
+  stand-ins of 2026-10-15 (db_bench's exact key probabilities, `keypop2`; never-written counts from dumps) are not
+  allowed in the frozen formula.
+- **(b) No constant or shortcut from one workload or one run.**
+  - Bytes per entry are measured per level at run time (no fixed 1,043 bytes).
+  - No cap tied to a run's chunking (the balance check's H4).
+  - No "the last level keeps its hit share" closure.
+- **(c) Rates come from a recent window of operations,** not assumed fixed for the whole run. Phase changes (W5) and
+  growth (W4) then enter through measurements. The window's length is one number for every level, T and workload,
+  fixed before the freeze.
+
+**3. No 1/8-scale check of W4 and W5 before the freeze** (owner, 2026-10-16: "No need for 1/8 size check on W4 and
+W5").
+
+**4. Every run keeps its MANIFEST** (owner, 2026-10-16: "Yes, keep each run's manifest").
+- `03` copies the run's live MANIFEST into its result folder after the measured run, before the space measurement
+  reopens the database. The preflight passed with this change at 16:11:56 UTC.
+- The MANIFEST holds the tree's files at open and every file added and removed during the run, so the file list at
+  any point can be rebuilt afterwards. Whether that replay counts as evidence stays D-28 §3's open ruling.
+  *At entry: the owner ruled on 2026-10-20 that it does (D-31, "What it records").*
+
+**Falsification.** This entry fails as a record if any part of it is changed after its entry. A change is a new
+dated entry.
+
+### D-31, 2026-10-20 — the step protocol: step point X = 10M, the first step batch (T 3, 6, 9), twins, measurements
+
+**Recorded before any run it governs.** No step run has started. The owner approved the operator's draft on
+2026-10-20 ("The choices on the four decisions are sound"; entry: "Yes, go for all three").
+- The W1/W2 natives at T 3, 6, 9 (162 runs, 2026-10-16/17, `33`) exist, with every tree kept. Their
+  (128 MiB, K = 4) runs become the twins below.
+- No W3-W5 run exists at full scale.
+
+**What it records** (owner's rulings of 2026-10-20, not recorded before):
+- **D-28 §3, the MANIFEST ruling:** the exact key-by-key MANIFEST replay counts as evidence ("use manifest replay as
+  evidence").
+- **D-27, rebuilt trees:** see §7.
+
+**What it amends:**
+- **D-29 §4:**
+  - it fixes the step point X;
+  - it orders the first batch (T 3, 6, 9);
+  - it adds a presence control;
+  - it defines the measurements, the twin match and "settled".
+- Nothing else. D-29 §1 (run shape), §3 (grid) and §5 (development and exam) are unchanged.
+
+**What it leaves to other entries:**
+- **Steps at T 2, 4, 5, 7, 8, 10.** They follow this entry's rules. A later entry only lists them.
+- **How the propagation law is scored on step data.** That belongs to the law's own sealed test plan (the successor
+  of `PROPAGATION_DESIGN.md` §10.4).
+- **L0-trigger steps.** D-29 §4 has none.
+
+**1. Run shape.** A step run is its twin with one change, made once at operation X.
+- **The twin.** The native run of repeat 1 at (128 MiB, K = 4), same workload, same T.
+  - Same tree: `db/suite-trees/T<T>-l1128-k4-n20000000-s1000`, with the identity hash in its `tree.json`. A worker
+    uses a copy of the prime's tree, checked by that hash and by `manifest_sha256`.
+  - Same operation seed: `--seed=1` (03: `DBBENCH_SEED + repeat - 1`, repeat 1).
+  - Same binary: `dbbench_sha256`
+    `4dd266bd814b52b14ed6dace79f9b27b9ae514173b653e4dc6c52b7692de19ac`, the binary that built the trees and ran
+    the W1/W2 natives.
+  - Same D-29 §1 shape: 40,000,000 measured operations, settle step, suite geometry.
+- **The arm.** `hold`, with the plugin attached (`DIAGNOSTIC_RUN=1`; `plugin_config.py` refuses a scheduled change
+  otherwise):
+  - `HOLD_APPLY_AT_OP=10000000`;
+  - `HOLD_APPLY_M`: 13 values, L0's 1, every level 1 except the stepped level(s);
+  - `HOLD_APPLY_K0` empty: the L0 trigger stays at 4.
+- **X = 10,000,000 measured operations.**
+  - The plugin's operation counter is 0 at the `measure_start` stamp and 40,000,000 at `drain_start`.
+  - The change is made at the first poll at or after X. The run's actual X is the `op` of its `apply_scheduled`
+    decision-log record, and the windows below start there.
+- **Why 10M:**
+  - **30M operations after the step.** From the 18 replays' L1→L2 inflow, L2 at ×2 reaches its new size in about
+    3.5M / 9.4M / 14M operations (W1, T 3/6/9) and 9M / 19M / 28M (W2). So every shrink, and every L2 growth, has
+    room to settle; W2 at T 9 is borderline.
+  - **Growth at L3 and below cannot settle in any practical run** (L3 ×2 at T 6: about 70M operations for W1,
+    115M for W2). It is measured as a path.
+  - **10M before the step** gives a pre-step window. There, the step run must match its twin (§4).
+  - **One X for every T and workload,** so the law sees a single shape.
+
+**2. The runs of the first batch.**
+- **Non-deepest levels:** levels 1 to d−1, where d is the deepest non-empty level of the tree.
+  - At (128 MiB, K = 4): d = 6 at T 3 (L1-L5), d = 4 at T 6 and T 9 (L1-L3).
+  - Taking d from the tree fixes the list before any run, for every workload.
+- **Single-level steps:** W1-W5 × T {3, 6, 9} × each non-deepest level × m ∈ {0.5, 0.75, 1.5, 2}.
+  - That is 44 per workload, **220 runs**.
+  - Every m lies in the plugin's bounds [0.5, 2].
+- **Two-level steps:** W1 and W2 × each neighbouring pair (j, j+1) of non-deepest levels × (m_j, m_j+1) ∈
+  {(2, 2), (0.5, 0.5), (2, 0.5), (0.5, 2)}.
+  - Pairs: 4 at T 3, 2 each at T 6 and T 9. That is 32 per workload, **64 runs**.
+- **Presence control:** per workload and T, one `hold` run with no scheduled change, seed 1. **15 runs.**
+  - It measures what attaching the plugin alone does at the suite geometry.
+- **Total: 299 step-protocol runs.**
+- **Twins and noise:**
+  - W1/W2: the 18 existing natives at 128:4.
+  - W3-W5: 27 natives at 128:4 (3 repeats × T 3, 6, 9), part of D-29 §3's native sweep, run under it.
+- **Order on each node:**
+  1. the presence controls;
+  2. the ×0.5 and ×2 steps;
+  3. the ×0.75 and ×1.5 steps;
+  4. the two-level steps.
+  - A failed run is logged and the chain goes on (`RESUME=1` skips only `COMPLETED` runs).
+
+**3. Measurements.**
+- **Checkpoints:** measured operations 0, X, X+5M, …, X+30M (= 40M). That gives a pre-step window [0, X] and six
+  post-step windows of 5M.
+- **Per window, the step run and its twin get the same treatment:**
+  - **(a) Level bytes per level.**
+    - Source: the run's MANIFEST (file sizes after each edit). Edits are placed in operations by the host log's
+      `flush_end` and `job_end` records, matched in order (replay.py's check).
+    - Reported: the mean over the window, weighted by operations, and the value at the window's end.
+  - **(b) Merge work per source level.**
+    - Source: the host log's `job_end` records in the window.
+    - Reported: merges, trivial moves, and the bytes s, o and x.
+  - **(c) Get hit share per level** (memtable, L0, L1, …).
+    - Source: the exact MANIFEST replay (owner's ruling, 2026-10-20: evidence). Each Get counts against the replayed
+      state at its own operation.
+    - **Instrument check:** over the whole measured phase, the replay's per-level shares must lie within 0.02 of the
+      run's own counters (host log stamps). A run that fails has no (c).
+    - **W4 and W5:** (c) only after `suitegen` covers inserts and phases, and its stream matches the run's summary
+      line as in `streams.py`. Until then, "not measured".
+  - **(d) Foreground.**
+    - Throughput: operations per second, from the `snap` records' `t_us`.
+    - The `snap` foreground counters, differenced over the window.
+- **Whole run:** `04`'s evaluation, as for any run, reported beside the twin's.
+- **The change:** Δ = step run − twin, per quantity, level and window.
+- **Kept per run:** MANIFEST, host log, decision log, `04` output. The run's database is deleted after the run.
+  Every tree is kept.
+
+**4. Noise, twin match, presence and "settled".**
+- **Noise threshold** per (workload, T, quantity, level, window): the largest difference between any two of the 3
+  native repeats at 128:4 in that window. For shares it is at least 0.02 (the re-check's §5 rule, applied per
+  window). A Δ counts as a change only at or above its threshold.
+- **Twin match:** in the pre-step window, every |Δ| is within its threshold.
+  - A run that fails is flagged and kept. Its post-step results are reported apart.
+- **Presence:** the control's Δ against the native lies within threshold in every window.
+  - If it does not, for that (workload, T) the control replaces the native as the twin, and that is reported.
+- **Settled:** the stepped level's mean bytes in a window, divided by the twin's, lies within ±10% of m.
+  - The first window from which this holds in every later window is the run's settle point.
+  - For a two-level step, both levels must meet it.
+  - Results from windows before the settle point are path results. Only those from the settle point on are
+    "settled" (D-29 §4: a settled result counts only where the level reaches its new size).
+  - If the 3 native repeats' mean bytes at that level, in that window, differ from each other by more than 10%,
+    settledness there is "undecided".
+- **Deepest level:** a step run whose deepest level at 40M differs from its twin's is reported apart (Addendum 1's
+  rule).
+
+**5. Who may read what, before the law is frozen** (D-29 §5; D-30's practice set {W1, W2} × T {3, 6, 9}).
+- **W1 and W2 at T 3, 6, 9:** practice. Every quantity may be used to develop the law.
+- **W3-W5 at T 3, 6, 9:** exam. Until the law's frozen hash exists, only these may be computed and read, for
+  natives and steps alike:
+  - run completion;
+  - the instrument checks;
+  - the twin match;
+  - presence;
+  - settledness: the stepped level's bytes only;
+  - whole-run throughput.
+- **For W3-W5, everything else stays unread until the law is frozen:** per-level hit shares, merge work, and every
+  quantity the law predicts.
+
+**6. What must exist before the first step run.**
+- This entry, committed.
+- **`34_step_chain.sh`,** with tests. It:
+  - builds §2's list;
+  - runs `03` once per step, with §1's settings;
+  - refuses a run whose tree identity or seed differs from its twin's;
+  - resumes with `RESUME=1`;
+  - keeps §3's files;
+  - goes on past a failed run.
+- **On every node:**
+  - the same code commit and binary as the prime;
+  - `00` and `00 check`, with the node record diffed against the prime's;
+  - its own preflight (`PARITY_PAIRS=20`).
+- **The measurement tools** for §3 (a)-(d), with self-checks. They are operator diagnostics outside the repository,
+  like `replay.py`. For W4 and W5, `suitegen` must cover inserts and phases.
+
+**7. Trees rebuilt for W3-W5 at the other settings** (D-27; owner, 2026-10-20: "we do not skip a setting. We
+accept, and report which trees differ").
+- Of the 27 trees at T 3, 6, 9, only the three at (128 MiB, K = 4) still hold their databases. The other 24 were
+  emptied after their W1/W2 runs (node C, 2026-10-17), under `33`'s keep rule before 2026-10-20.
+- So W3-W5's natives at those settings run on trees rebuilt by the same binary, with the same preload seed and
+  keys, on the worker that runs them.
+  - Every workload of W3-W5 at a setting shares that tree, as D-27 asks.
+  - W1/W2 ran on the original tree.
+- Each rebuilt tree's identity hash (`tree.json`) is compared with the original's record, which the prime keeps. Which
+  trees differ is reported with the runs.
+
+**Falsification.** This entry fails as a record if any part of it is changed after the first step run has started.
+A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured
