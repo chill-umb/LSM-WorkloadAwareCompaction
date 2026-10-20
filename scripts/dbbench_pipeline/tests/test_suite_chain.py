@@ -107,6 +107,18 @@ class SuiteChainTest(unittest.TestCase):
         self.assertIn("tree T2-l116-k4", planned.stdout)
         self.assertFalse(self.calls.exists())
 
+    def test_default_keeps_every_tree(self):
+        # Owner, 2026-10-20: every tree is kept while the law is developed.
+        env = {k: v for k, v in self.env.items() if k != "SUITE_KEEP_TREES"}
+        planned = subprocess.run(
+            ["bash", str(PIPELINE / "33_suite_chain.sh"), "plan"],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        trees = [line for line in planned.stdout.splitlines() if line.startswith("tree ")]
+        self.assertEqual(len(trees), 4)
+        for line in trees:
+            self.assertTrue(line.endswith("; tree kept"), line)
+
     def test_the_sweep(self):
         ran = self.chain()
         self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

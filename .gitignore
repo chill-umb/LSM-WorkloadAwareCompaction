@@ -147,3 +147,6 @@ graphify-out/
 
 ## Claude
 .claude
+
+## Worker private IP
+worker_private_ip.txt

@@ -675,8 +675,11 @@ SUITE_T=4 NVME=/mnt/nvme scripts/dbbench_pipeline/33_suite_chain.sh
 Results go to `$NVME/suite-<W>/T<T>-l1<MiB>-k<K>/` (session `suite-<W>`),
 trees to `$NVME/suite-trees/`. A failed tree or workload is logged and the
 chain goes on; a missing preflight stops it. After a setting's runs, its
-tree's database is removed unless the setting is in `SUITE_KEEP_TREES`
-(default `128:4`, the step runs' anchor) or one of its workloads failed.
+tree's database is removed unless the setting is in `SUITE_KEEP_TREES` or
+one of its workloads failed. The default is `all` while the propagation law
+is developed (owner, 2026-10-20: every run stays exactly replayable from its
+MANIFEST; about 20 GB per tree, 180 GB per T at nine settings). Once the law
+is frozen, `SUITE_KEEP_TREES=128:4` (the step runs' anchor) is enough.
 Trees are not yet archived off the node (D-27 §4 asks for it).
 
 **Preflight step 7.** `32_check_suite_generator.sh` checks the suite options

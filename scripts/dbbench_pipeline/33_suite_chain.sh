@@ -14,11 +14,15 @@
 # Also:
 #   SUITE_REPEATS=3          repeats per workload and setting (D-29 §3)
 #   SUITE_ARMS=native        the arms 03 runs on each tree
-#   SUITE_KEEP_TREES=128:4   settings ("<L1 MiB>:<K>", or "all") whose trees
-#                            keep their database after their runs: D-29 §4's
-#                            step runs start from the (128 MiB, 4) trees. A
-#                            tree is kept whenever one of its workloads
-#                            failed, so a rerun resumes on the same tree.
+#   SUITE_KEEP_TREES=all     settings ("<L1 MiB>:<K>", or "all") whose trees
+#                            keep their database after their runs. Every tree
+#                            is kept while the propagation law is developed
+#                            (owner, 2026-10-20), so any run can be replayed
+#                            exactly from its MANIFEST; about 20 GB per tree.
+#                            Once the law is frozen, 128:4 is enough (D-29
+#                            §4's step runs start from those trees). A tree is
+#                            kept whenever one of its workloads failed, so a
+#                            rerun resumes on the same tree.
 #   SUITE_MIN_FREE_GB=100    free space needed before each setting (a tree
 #                            and W4's grown copy)
 #   NVME, RESUME, ALLOW_ROOT_DISK as 24 and 25; DIAGNOSTIC_RUN as 03.
@@ -41,7 +45,7 @@ source "$PIPELINE_DIR/chain_common.sh"
 NVME="$(realpath -m -- "$NVME")"
 REPEATS_EACH="${SUITE_REPEATS:-3}"
 ARMS="${SUITE_ARMS:-native}"
-KEEP="${SUITE_KEEP_TREES:-128:4}"
+KEEP="${SUITE_KEEP_TREES:-all}"
 MIN_FREE_GB="${SUITE_MIN_FREE_GB:-100}"
 export MIN_FREE_GB
 
