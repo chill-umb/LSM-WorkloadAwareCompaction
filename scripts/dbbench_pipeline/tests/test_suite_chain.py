@@ -127,6 +127,10 @@ class SuiteChainTest(unittest.TestCase):
                 metadata = (done[0].parent / "metadata.env").read_text()
                 self.assertIn(f"session_id=suite-{w}", metadata)
                 self.assertIn(f"tree_dir={self.tree(setting)}", metadata)
+                # The run's MANIFEST, here the tree's copy (owner, 2026-10-16).
+                self.assertEqual(
+                    (done[0].parent / "MANIFEST-000003").read_text(),
+                    "manifest-1000")
             self.assertTrue((self.nvme / f"suite-{w}" / "graphs" / "summary.csv").exists())
         # Only the kept setting's trees keep their database.
         for setting, kept in (("T2-l116-k2", False), ("T2-l116-k4", True)):

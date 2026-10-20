@@ -33,10 +33,21 @@ for a in "$@"; do
     --benchmarks=*) bench="${{a#*=}}" ;;
   esac
 done
-[[ "$bench" == compact ]] && exit 0
+if [[ "$bench" == compact ]]; then
+  # The reopen starts a new MANIFEST and deletes the run's, as RocksDB does.
+  [[ ! -f "$db/CURRENT" ]] || rm -f "$db/$(head -n 1 "$db/CURRENT")"
+  printf 'reopen' > "$db/MANIFEST-000009"
+  echo MANIFEST-000009 > "$db/CURRENT"
+  exit 0
+fi
 mkdir -p "$db"
 cp {shlex.quote(str(FIXTURE / "rocksdb_LOG.txt"))} "$db/LOG"
 cp {shlex.quote(str(FIXTURE / "host_log.jsonl"))} "$log"
+# STUB_NO_MANIFEST=1: a database with no live MANIFEST.
+if [[ "${{STUB_NO_MANIFEST:-0}}" != 1 ]]; then
+  printf 'run' > "$db/MANIFEST-000005"
+  echo MANIFEST-000005 > "$db/CURRENT"
+fi
 if [[ "${{STUB_UNSETTLED:-0}}" == 1 ]]; then
   echo "RL_SETTLED ok=0 wait_micros=1 hold_micros=0 reason=${{STUB_REASON:-compaction pending}}"
   exit 1
@@ -45,7 +56,8 @@ cat {shlex.quote(str(FIXTURE / "run.log"))}
 """
 
 
-def run03(root: Path, **overrides) -> subprocess.CompletedProcess:
+def run03(root: Path, pipeline: Path = PIPELINE,
+          **overrides) -> subprocess.CompletedProcess:
     build = root / "build"
     if not build.exists():
         build.mkdir(parents=True)
@@ -60,7 +72,7 @@ def run03(root: Path, **overrides) -> subprocess.CompletedProcess:
            "PRICES_FILE": str(FIXTURE / "prices.json"),
            "SESSION_ID": "test-session", "ALLOW_CONCURRENT_RUNS": "1",
            **overrides}
-    return subprocess.run(["bash", str(PIPELINE / "03_run_experiments.sh")],
+    return subprocess.run(["bash", str(pipeline / "03_run_experiments.sh")],
                           env=env, capture_output=True, text=True)
 
 
@@ -134,6 +146,22 @@ class RunExperimentsTest(unittest.TestCase):
                              (arm / "command.txt").read_text())
             self.assertIn("instrument_subset=d21",
                           (arm / "metadata.env").read_text())
+
+    def test_each_run_keeps_its_manifest(self):
+        # Owner, 2026-10-16: each run keeps its MANIFEST, copied before the
+        # space measurement's reopen replaces it.
+        for arm in ("native", "static:uniform_0_75", "static:held"):
+            self.assertEqual((self.cell / arm / "MANIFEST-000005").read_text(),
+                             "run")
+            self.assertFalse((self.cell / arm / "MANIFEST-000009").exists())
+        # A database with no live MANIFEST is reported, and the run counts.
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = run03(Path(tmp), STUB_NO_MANIFEST="1")
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertIn("[manifest] no live MANIFEST", ran.stderr)
+            arm = Path(tmp) / "results" / "1M" / "T2" / "native"
+            self.assertTrue((arm / "COMPLETED").exists())
+            self.assertEqual(list(arm.glob("MANIFEST-*")), [])
 
     def test_each_arm_gets_its_own_multipliers(self):
         self.assertNotIn("level_target_multipliers", self.command("native"))
@@ -212,6 +240,7 @@ class UnsettledTest(unittest.TestCase):
             cell = root / "results" / "1M" / "T2"
             for arm in ("native", "static:uniform_0_75"):
                 self.assertTrue((cell / arm / "UNSETTLED").exists(), arm)
+                self.assertTrue((cell / arm / "MANIFEST-000005").exists(), arm)
             self.assertIn("unsettled", (root / "results" / "arms.tsv").read_text())
             scored = run04(root / "results")
             self.assertNotEqual(scored.returncode, 0)

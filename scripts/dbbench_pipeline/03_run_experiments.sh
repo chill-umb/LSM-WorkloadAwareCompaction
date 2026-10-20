@@ -1096,6 +1096,22 @@ sst_bytes() {  # $1=database directory
     awk '{total += $1} END {printf "%.0f\n", total + 0}'
 }
 
+# The run's MANIFEST (owner, 2026-10-16: "keep each run's manifest"):
+# RocksDB's record of every file added and removed, from the version written
+# at open (the tree's files, in tree mode) to the run's end, so the file list
+# at any point of the run can be rebuilt afterwards. Copied before the space
+# measurement, whose reopen starts a new MANIFEST and deletes this one. One
+# file covers the run while it stays under max_manifest_file_size (1 GiB).
+keep_run_manifest() {  # $1=database directory, $2=result directory
+  local manifest
+  manifest="$(head -n 1 "$1/CURRENT" 2>/dev/null || true)"
+  if [[ "$manifest" == MANIFEST-* && -f "$1/$manifest" ]]; then
+    cp "$1/$manifest" "$2/$manifest"
+  else
+    echo "[manifest] no live MANIFEST in $1; none kept for $2" >&2
+  fi
+}
+
 check_log() {  # $1=exit status, $2=log
   local status="$1" log="$2"
   if [[ "$status" -eq 0 ]] &&
@@ -1738,6 +1754,7 @@ PY
     echo "[unsettled] $size_label T=$ratio $arm:" \
          "$(grep '^RL_SETTLED' "$result_dir/run.log")" >&2
     cp "$db_dir/LOG" "$result_dir/rocksdb_LOG.txt" 2>/dev/null || true
+    keep_run_manifest "$db_dir" "$result_dir"
     touch "$result_dir/UNSETTLED"
     printf '%s\t%s\t%s\t%s\tunsettled\t%s\n' \
       "$size_label" "$ratio" "$repeat" "$arm" "$result_dir" >> "$INDEX"
@@ -1790,6 +1807,7 @@ PY
   printf 'elapsed_seconds=%.6f\n' "$(( end_ns - start_ns ))e-9" \
     >> "$result_dir/metadata.env"
   cp "$db_dir/LOG" "$result_dir/rocksdb_LOG.txt" 2>/dev/null || true
+  keep_run_manifest "$db_dir" "$result_dir"
   # The prices the run is recorded under (OBJ-2); 04 prices it with these.
   [[ -z "$PRICES_SHA256" ]] || cp "$PRICES_FILE" "$result_dir/prices.json"
   "$PYTHON" "$PIPELINE_DIR/compaction_measurements.py" \
