@@ -4243,6 +4243,31 @@ A change is a new dated entry.
 **Falsification.** This entry fails as a record if any part of it is changed after the first post-step window of a
 D-31 step run has been read under it. A change is a new dated entry.
 
+### D-34, 2026-10-21 — the propagation law's inputs
+
+**The owner's ruling** (about 21:45 UTC): "Yes" to the operator's proposal below.
+- It confirms D-28 §1(b) (2026-10-15) and D-30's input rules (2026-10-16).
+- It adds one field.
+
+**The law uses only what the controller observes at run time, as recent-window values:**
+- the merge and flush records: sizes, flows, overlaps, bytes dropped, merge length;
+- RocksDB's per-level read counters;
+- the per-file snapshot of D-28 §1(b): key range, bytes, entries, sampled reads (`num_reads_sampled`);
+- **added:** each file's smallest and largest sequence number.
+
+**Never:**
+- workload names or the workload generator's settings;
+- constants tuned per workload;
+- a simulator in the decision loop (D-28 §1(a)).
+
+**When:**
+- The snapshot fields are built after the K batch (D-32) ends: a fork change with tests, then the preflight on every
+  node.
+- No run that uses them starts before that.
+
+**Falsification.** This entry fails as a record if it is changed after the first run that uses the snapshot fields.
+A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured
