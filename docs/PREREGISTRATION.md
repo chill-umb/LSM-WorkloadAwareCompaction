@@ -4044,6 +4044,205 @@ apply, because K changes no level's target.
 **Falsification.** This entry fails as a record if any part of it is changed after the first K-step run has started.
 A change is a new dated entry.
 
+### D-33, 2026-10-21 — "settled" for every step run, one noise rule and one change measure for every comparison, the propagation law's structure and purpose, and the level-layer test on D-31's level steps
+
+**The owner's rulings this entry records** (UTC):
+- **About 13:20, the structure:**
+  - Part 1 is a settled function G, Part 2 the transition from the current state, and Part 3 the per-range layer;
+  - work goes part by part, discussing each before the next.
+- **About 19:20, "Yes to 1, 2, 3a":**
+  - the meaning of "settled" (§1);
+  - the split into a level layer and a range layer (§3);
+  - testing the level layer on D-31's level steps before Part 2 (§4).
+- **About 19:40, the classroom picture of what the law is for (§3).**
+- **About 20:00:**
+  - the notes are "(b) built on (a)" (§3);
+  - w4 stays out of the K batch.
+- **About 21:00:** "Yes on pass rule, the noise rule and the twin fix (a). Then commit" (§2, §4).
+
+**What it does to earlier entries:**
+- It decides D-32 §6. D-32 §7 stays open.
+- It replaces D-31 §4's "Settled" bullet. D-31's size rule stays, as §1 (a).
+- It replaces D-31 §4's noise threshold, and the change measure of D-31 §3 and D-32 §5, for every comparison scored
+  from now on (§2). D-32 §8's prediction is scored under §2.
+
+**What had been read before this entry:**
+- **From D-31's step runs:** only completion and exit status.
+- **From D-32's runs:** only the dispatcher's completion and exit records.
+- **No settle point** of any run had been computed.
+- **D-31's two presence controls for W1 and W2 at T 3 were scored on 2026-10-21 under D-31 §4** (§4.1). That result
+  led to §2. §2 does not change its consequence.
+
+**1. "Settled", for D-31's level steps and D-32's K steps.**
+- **Terms:**
+  - **Windows** are D-31 §3's: the pre-step window [0, X), then 5M windows to 40M. A multi run uses D-32 §5's.
+  - **Δ** is §2's change measure, and noise thresholds are §2's.
+  - **Merge work of level i** is D-31 §3 (b) for jobs sourced at level i: s, o and x per operation, and merges per
+    operation. For L0 it also includes the mean L0 file count (D-32 §5 (a)).
+- **(a) Resize point** (level steps only), D-31 §4's rule unchanged:
+  - the stepped level's mean bytes in a window, over the twin's, lie within ±10% of m in that window and in every
+    later one;
+  - the first such window is the resize point;
+  - a two-level step needs both levels;
+  - a K step has none.
+- **(b) Turnover point** of level i (the law's expected time to settle, Part 1 §5):
+  - **Level i ≥ 1:** the first operation after X at which the bytes pushed out of level i since X reach its new
+    target S_i' = B · T^(i−1) · m_i'. The bytes pushed out are the sum of s over `job_end` records sourced at
+    level i, trivial moves included.
+  - **L0:** the end of the first L0 → L1 job that begins after X.
+  - **Expected settle point:** the later of the level's own turnover point and the level above's expected settle
+    point.
+  - **The deepest level** takes the expected settle point of the level above.
+- **(c) Settle point of level i,** the measured test:
+  - it is the first post-step window w such that, in w and every later window, each merge-work quantity of level i
+    has a Δ within its noise threshold of that quantity's Δ in the last window;
+  - it is never earlier than the level above's settle point;
+  - for a level step it is never earlier than the resize point;
+  - the deepest level takes the level above's settle point.
+- **(d) Special outcomes:**
+  - **Not settled:** a level whose settle point would be the last window.
+  - **Unmoved:** a level whose merge-work Δ lies within its noise threshold in every post-step window, reported as
+    such.
+  - **No settle point:** a multi run. Every one of its results is a path result.
+- **(e) Use:**
+  - a level's results from its settle point on are settled; earlier ones are path results;
+  - reports give each run and level's turnover-point window beside its settle-point window, as a check of the
+    definition, not a gate.
+- **(f) Get hit shares** (D-31 §3 (c)) are reported per window, with the level's settle point.
+  - A second settle point, by the same rule on the shares, is reported beside it.
+  - The reason: one turnover pushes out a level's bytes but does not replace every entry. In the 2026-10-20 piece
+    test, L2 entries stayed 1.3-1.9× longer per visit than a whole-level push assumes.
+- **Why not a size rule alone:**
+  - a K step moves no level's size, so D-32 §6's proposal would have called every K step settled at once;
+  - a shrink reaches its new size long before the merge work below it settles.
+
+**2. One noise rule and one change measure for every comparison.**
+- **The change measure (twin fix (a)):**
+  - **Δ in window w = (run in w − run in the pre-step window) − (twin in w − twin in the pre-step window).**
+  - A fixed offset between two runs cancels: for example, two machines that merge at different speeds.
+  - The twin match (D-31 §4) is still computed and reported. A failed twin match no longer sets a run's results
+    apart.
+  - Every tree identity and seed check of `34` stays.
+- **The twin:**
+  - native repeat 1, as D-31 and D-32 have it;
+  - for a D-31 cell whose presence fails, that cell's control, as D-31 §4 has it.
+- **The noise rule.** For each quantity and level, take each of the 3 native repeats' values of the same change
+  form: repeat in w − repeat in the pre-step window.
+  - Pool their variance across the 3 repeats over the post-step windows.
+  - **The threshold is 3 · √2 · √(pooled variance).**
+  - A Δ counts as a change only at or above it. A Δ of exactly 0 never does.
+- **Where it applies:**
+  - presence;
+  - the twin match;
+  - §1's settle test;
+  - §4's pass rule;
+  - D-32 §8's prediction (two runs of one group compared with this Δ form);
+  - every other "within noise" in D-31 and D-32.
+- **Why:**
+  - D-31 §4's threshold was the largest gap among 3 repeats in each window. Even a run with the same distribution
+    exceeds that with probability 0.294 per cell (simulated, four independent normal draws).
+  - So a rule needing every cell within it cannot pass, and §1's settle test would place settle points late by
+    chance.
+  - On the T 3 presence controls, D-31's rule flagged 21-22% of cells, signs mixed below L0. This rule flags only
+    L0 in W1, and L0 plus 4 cells in W2 (§4.1).
+
+**3. The law's structure, generality and purpose.**
+- **Part 1, G(θ):** each level's long-run state at the setting θ = (K, m_1, …, m_(n−1)).
+  - The settled answer to any change θ → θ' is G(θ') − G(θ).
+  - That covers K up and down, Lj up and down, the four K + Lj combinations, and several levels at once.
+  - Draft: `~/node_ops/drafts/2026-10-21-propagation-law-part1-settled-G.md`.
+- **Part 2:** the transition from the current state, which includes a small change before the last one has
+  settled.
+- **Part 3:** the range layer.
+- **The level layer** is closed forms from the code:
+  - sizes and depth;
+  - the L0 cycle and its cap K_e = min(K, ⌈B / F_0⌉);
+  - the L0 → L1 merge;
+  - the single compaction slot;
+  - stalls;
+  - the form of each overlap, ω_i = φ_i · S_(i+1) / S̃_i.
+- **The range layer** covers which key ranges each level holds:
+  - the surviving outflow f_i (i ≥ 1);
+  - the pick factor φ_i;
+  - where Gets end;
+  - hidden steps;
+  - old copies.
+- **Generality** (the owner's rule R7):
+  - one formula holds for every workload, and workloads differ only through inputs measured at run time;
+  - there is no rule for one workload only, no constant tuned to a workload, and no generator setting as an input;
+  - so two W2 observations from Part 1 are not part of the law: φ_1 constant across K, and the deeper flows unchanged
+    by K.
+- **The boundary of the measured inputs is open** (owner: "not yet sure").
+- **Purpose, the classroom picture:**
+  - upper levels learn fast and deep levels slowly, and every level is judged on the same priced cost;
+  - upper levels share their notes;
+  - each lower level uses them as context and derives its own answer, because its situation differs;
+  - it neither copies an upper level's choice (RusKey) nor shares one model with it (pooling).
+- **The notes, "(b) built on (a)":**
+  - **(a):** the upper levels' actions (K, the upper multipliers), with the law's forecast of their effect on each
+    lower level;
+  - **(b):** the upper agents' learned cost estimates, as a starting guess each lower agent corrects with its own
+    data.
+- **Pooling stays as D-19 left it:** no pool in any cell, verdict undecided.
+- **PATHWAYS:** nothing changes until data proves the law (owner, 2026-10-10).
+
+**4. The level-layer test on D-31's level steps (cases 3 and 4).**
+- **Data:**
+  - D-31's single- and two-level steps, W1 and W2, T 3 / 6 / 9, at 128 MiB and K = 4;
+  - the dropped (2, 0.5) pairs (D-32 §9) excluded;
+  - their twins and presence controls.
+- **When each cell is read:**
+  - T 3 is read from w4, which is idle.
+  - T 6 and T 9 are read when the K batch frees w5-w9, and they are predicted before they are read.
+  - No worker's disk is read while it runs a group.
+- **4.1 Presence, W1 and W2 at T 3** (scored before this entry; report
+  `~/node_ops/reports/2026-10-21-d31-presence-T3/README.md`):
+  - **Result:** FAIL in both cells under D-31 §4's rule (92 and 97 of 448 cells) and under §2's rule (L0 in every
+    window).
+  - **Consequence:** the controls are the twins for these two cells.
+  - **Cause, at L0:** w4 runs L0 → L1 merges in about 0.22 s, against 0.30-0.36 s on node C, at equal throughput.
+    L0 holds 0.04-0.09 fewer files.
+  - **Check:** Part 1's N_0 = (K_e − 1)/2 + τ_0/t_F, with each run's own τ_0, comes within +0.006 (W1) and +0.002
+    (W2) of the control's measured mean, and within +0.007 to +0.011 for node C's natives.
+- **4.2 Predictions:** made by `predict.py` from the twin's and the native repeats' windows only. The script's
+  docstring defines every row. Per run and post-step window, the predicted Δ of each [L] row:
+  - **size_i (1 ≤ i < d):** μ_i × the twin's bytes.
+  - **omega_0:** μ_1 × the twin's L0 → L1 o/s.
+  - **omega_i (1 ≤ i < d):** the twin's value × μ_(i+1)/μ_i.
+    - Into the deepest level d, the deepest level's new bytes take the place of μ_d, with the tree's total bytes
+      held.
+    - omega_1 also carries the burst factor (1 + Δ_1/(2 S_1)) / (1 + Δ_1/(2 μ_1 S_1)), with Δ_1 = f_1 K_e t_F.
+  - **written:** merge bytes written per operation, the twin's value plus Σ (ratio_i − 1) · o_i.
+  - **l0_files:** the twin's value plus (τ_0' − τ_0)/t_F, where a merge's length is proportional to its bytes.
+  - **deepest:** by Part 1 §2.2, never shallower than the twin's.
+  - **Inputs:** every input is the twin's in that window. The level layer holds f and φ at the twin's values.
+  - **[R] rows** get a direction only:
+    - outflow s at the stepped level and below;
+    - the deepest level's bytes;
+    - the Get share at each stepped level and at the deepest.
+- **4.3 Pass rule:**
+  - **In one run,** an [L] row passes if |measured Δ − predicted Δ| ≤ threshold + 10% of |predicted Δ|. Both Δs are
+    their means over the run's settled windows.
+  - **In a (W, T) cell,** it passes if it passes in every run where it settled.
+  - **Overall,** it passes only if it passes in all six cells: W1 and W2 at T 3, 6 and 9.
+  - **An [R] row** reports how often its direction was right.
+  - **No verdict where nothing settled:** a row in a run whose level is not settled has no verdict; its path is
+    reported.
+  - **A miss** measures how much of the change belongs to the range layer. It is not a reason to retune a
+    level-layer row.
+- **4.4 Seal**, in `~/node_ops/diag/steps/sealed/` (files read-only, `SHA256SUMS` beside them):
+  - `predict.py` `c95c2989d4dd5ca1e3ac35410c32789eaf7e7d1797d35e673d90d4ccd29d4fc4`
+  - `windows.py` `9b1e3c454e82bbc3b566cf90bde1d1eb0dfe47874a84fe9b86260679c33ae561`
+  - `presence.py` `f2f04468ecdd097703a510b4f7207e7cd728f148883f00d01456c43b949935f2`
+  - `predictions_W1_T3.json` `f36861c77c7127b589970ddcaef1ccf260f7d495d83e44180800f2ff971f9c4c`
+  - `predictions_W2_T3.json` `f0a1f2f63c52b5c30cc2016d4ee4499d693a2ebf15d4ec92cb5f72983207a21c`
+  - The predictions record their input windows' sha256.
+  - The T 6 and T 9 predictions are made later by this same `predict.py`, from those cells' twins, before their step
+    runs are read.
+
+**Falsification.** This entry fails as a record if any part of it is changed after the first post-step window of a
+D-31 step run has been read under it. A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured
