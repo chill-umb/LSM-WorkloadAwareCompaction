@@ -174,6 +174,58 @@ class ComposeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hold only"):
             compose("rules", diagnostic=True, apply_at_op=5, apply_m="1:2")
 
+    def test_the_hold_arms_schedule(self):
+        """The K-step batch's multi-change runs (owner, 2026-10-21): hold
+        only, diagnostic only, ';'-separated op|m|k0 entries with rising ops,
+        in place of the single change."""
+        common = dict(contract=with_qbar(61234.5))
+        text = "10000000|1:1:1|8;12500000|1:1:1|0;20000000|1:1:2|3"
+        hold, _ = compose("hold", diagnostic=True, apply_schedule=text, **common)
+        self.assertEqual(hold["apply_schedule"], text)
+        for key in ("apply_at_op", "apply_m", "apply_k0"):
+            self.assertNotIn(key, hold)
+        refusals = [
+            (dict(apply_schedule=text), "diagnostic run only"),
+            (dict(diagnostic=True, apply_schedule=text, apply_at_op=5),
+             "replaces apply_at_op"),
+            (dict(diagnostic=True, apply_schedule="5|1:1"), "is not op|m|k0"),
+            (dict(diagnostic=True, apply_schedule="0|1:1|4"), "above 0"),
+            (dict(diagnostic=True, apply_schedule="5|1:1|4;5|1:1|6"), "above 5"),
+            (dict(diagnostic=True, apply_schedule="5|1:1|4;3|1:1|6"), "above 5"),
+            (dict(diagnostic=True, apply_schedule="5|2:1|4"), "L0's 1"),
+            (dict(diagnostic=True, apply_schedule="5|1:1|-1"), "k0 '-1'"),
+        ]
+        for changes, message in refusals:
+            with self.subTest(changes=changes), \
+                    self.assertRaisesRegex(ValueError, message):
+                compose("hold", **common, **changes)
+        with self.assertRaisesRegex(ValueError, "hold only"):
+            compose("rules", diagnostic=True, apply_schedule=text)
+
+    def test_the_hold_arms_k0_cap(self):
+        """hold_k0_cap stands in for D-18's k0_cap on the hold arm of a
+        diagnostic run (the scheduled triggers' bound), placeholders or not."""
+        common = dict(contract=with_qbar(61234.5))
+        bounds = {k: v for k, v in BOUNDS.items() if k != "k0_cap"}
+        hold, filled = compose("hold", diagnostic=True, hold_k0_cap=19,
+                               bounds=bounds, **common)
+        self.assertEqual(hold["k0_cap"], 19)
+        self.assertNotIn("k0_cap", filled)
+        hold, filled = compose("hold", diagnostic=True, hold_k0_cap=19,
+                               bounds={}, placeholders=True, **common)
+        self.assertEqual(hold["k0_cap"], 19)
+        self.assertNotIn("k0_cap", filled)
+        self.assertIn("k0_min", filled)
+        for changes, message in [
+                (dict(hold_k0_cap=19), "diagnostic run only"),
+                (dict(diagnostic=True, hold_k0_cap=1), ">= 2"),
+                (dict(diagnostic=True, hold_k0_cap=True), ">= 2")]:
+            with self.subTest(changes=changes), \
+                    self.assertRaisesRegex(ValueError, message):
+                compose("hold", **common, **changes)
+        with self.assertRaisesRegex(ValueError, "diagnostic run only"):
+            compose("rules", diagnostic=True, hold_k0_cap=19, **common)
+
     def test_a_learner_arm_refuses_cost_model_1_prices_and_missing_keys(self):
         with self.assertRaisesRegex(ValueError, "schema 6"):
             compose("learned", contract=with_qbar(61234.5), learner=LEARNER,

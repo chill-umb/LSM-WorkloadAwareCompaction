@@ -18,8 +18,9 @@
 //               the snapshot read next already carried those values (seen)
 //               and its generation (ACT-3)
 //   apply_held  a new change held back by the SetOptions cap
-//   apply_scheduled  hold-only with apply_at_op: the scheduled change, once
-//               at the start; its call is an apply line with "scheduled": 1
+//   apply_scheduled  hold-only with apply_at_op or apply_schedule: each
+//               scheduled change, at the start ("index" when there are
+//               several); its call is an apply line with "scheduled": 1
 //   repair      a level raised so targets do not shrink going down
 //   drain, fallback, stop
 //

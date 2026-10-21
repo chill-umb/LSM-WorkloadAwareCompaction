@@ -102,6 +102,28 @@ class FlushFlagTest(unittest.TestCase):
         self.assertTrue(math.isnan(row["largest_flush_bytes"]))
 
 
+class PhaseSumTest(unittest.TestCase):
+    """phases_add_up at full-size W5 magnitudes: the held byte-operations of
+    w1's W5 T3 128:4 repeat 1 (2026-10-20), which a float sum refused."""
+    HELD = (349354407845734646, 414365927816094267, 415997999404466463)
+
+    def phases(self, held):
+        return [{"phase_operations": float(ops), "_held": h,
+                 "phase_held_byte_operations": float(h)}
+                for ops, h in zip((13333333, 13333333, 13333334), held)]
+
+    def test_exact_totals_above_2_53_add_up(self):
+        self.assertNotEqual(sum(float(h) for h in self.HELD), sum(self.HELD))
+        self.assertTrue(graphs.phases_add_up(self.phases(self.HELD), 40000000,
+                                             sum(self.HELD)))
+
+    def test_a_missing_operation_or_byte_is_still_caught(self):
+        self.assertFalse(graphs.phases_add_up(self.phases(self.HELD), 40000001,
+                                              sum(self.HELD)))
+        self.assertFalse(graphs.phases_add_up(self.phases(self.HELD), 40000000,
+                                              sum(self.HELD) + 1))
+
+
 class PhaseTest(unittest.TestCase):
     SWITCHES = ((2, 500), (3, 800))
 

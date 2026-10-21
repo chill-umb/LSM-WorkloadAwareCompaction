@@ -550,6 +550,12 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
     learner_flag+=(--apply-at-op "$HOLD_APPLY_AT_OP" --apply-m "$HOLD_APPLY_M")
     [[ -z "$HOLD_APPLY_K0" ]] || learner_flag+=(--apply-k0 "$HOLD_APPLY_K0")
   fi
+  if [[ "$1" == hold && -n "$HOLD_APPLY_SCHEDULE" ]]; then
+    learner_flag+=(--apply-schedule "$HOLD_APPLY_SCHEDULE")
+  fi
+  if [[ "$1" == hold && -n "$HOLD_K0_CAP" ]]; then
+    learner_flag+=(--hold-k0-cap "$HOLD_K0_CAP")
+  fi
   "$PYTHON" "$PIPELINE_DIR/plugin_config.py" --arm "$1" \
     --objective-mode "$CONTROLLER_OBJECTIVE_MODE" --family "$WORKLOAD_FAMILY" \
     --bounds "$ACTION_BOUNDS_FILE" --settings "$CONTROLLER_RULES_FILE" \
@@ -1585,7 +1591,8 @@ PY
     fi
     if [[ "$arm" == hold ]]; then
       # The scheduled change the composed config carries (none: empty).
-      printf 'hold_apply=%s\n' "$("$PYTHON" -c 'import json, sys; c = json.load(open(sys.argv[1])); print("" if "apply_at_op" not in c else "|".join(str(c.get(k, "")) for k in ("apply_at_op", "apply_m", "apply_k0")))' "$result_dir/plugin_config.json")"
+      printf 'hold_apply=%s\n' "$("$PYTHON" -c 'import json, sys; c = json.load(open(sys.argv[1])); print(c["apply_schedule"] if "apply_schedule" in c else "" if "apply_at_op" not in c else "|".join(str(c.get(k, "")) for k in ("apply_at_op", "apply_m", "apply_k0")))' "$result_dir/plugin_config.json")"
+      printf 'hold_k0_cap=%s\n' "$HOLD_K0_CAP"
       printf 'hold_start_m=%s\n' "$HOLD_START_M"
     fi
     printf 'space_relative_margin=%s\n' "$SPACE_RELATIVE_MARGIN"

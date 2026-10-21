@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# The step runs of PREREGISTRATION D-31 (D-29 §4), unattended. Each run is
-# its twin -- native repeat 1 at (128 MiB, K = 4), same workload and T, on the
-# same kept tree, with the same seed and binary -- plus one scheduled change:
-# the hold arm applies HOLD_APPLY_M at measured operation STEP_AT_OP (D-31 §1,
-# X = 10M). The run list and its order are step_plan.py's (D-31 §2). A failed
-# or skipped run is logged and the chain goes on; a missing preflight stops it.
+# The step runs of PREREGISTRATION D-31 (D-29 §4) and of the K-step batch
+# (owner, 2026-10-21), unattended. Each run is its twin -- native repeat 1 at
+# (L1, K = 4), same workload and T, on the same kept tree, with the same seed
+# and binary -- plus scheduled changes: D-31's kinds apply HOLD_APPLY_M at
+# measured operation STEP_AT_OP (D-31 §1, X = 10M); "k0" applies a new L0
+# trigger at X; "multi" applies a seeded schedule of triggers from X on. The
+# run list and its order are step_plan.py's. A failed or skipped run is logged
+# and the chain goes on; a missing preflight stops it.
 #
 #   NVME=/mnt/nvme scripts/dbbench_pipeline/34_step_chain.sh
 #   34_step_chain.sh plan        the runs, in order; runs nothing
@@ -12,11 +14,19 @@
 # Defaults are D-31's; a node takes its share with STEP_T and STEP_WORKLOADS:
 #   STEP_T="3 6 9"                    size ratios
 #   STEP_WORKLOADS="W1 W2 W3 W4 W5"   workloads (two-level steps: W1, W2 only)
-#   STEP_KINDS="control single two"   which of D-31 §2's kinds run
+#   STEP_KINDS="control single two"   which kinds run: D-31 §2's, or the
+#                                     K-step batch's "k0" and "multi"
+#   STEP_L1=128                       L1 bases in MiB (D-31's kinds: 128;
+#                                     the K-step batch: "64 128 256")
 #   STEP_AT_OP=10000000               X, in measured operations
+#   STEP_K0_CAP=19                    the hold arm's k0_cap for k0 and multi
+#                                     runs (HOLD_K0_CAP; below the slowdown
+#                                     trigger 20), so every target is taken
 #   STEP_TWIN_ROOT=$NVME/step-twins   the metadata.env of twins that ran on
-#                                     another node, as <W>/T<T>/metadata.env;
-#                                     a twin that ran here is read from
+#                                     another node, as
+#                                     <W>/T<T>/l1<L1>/metadata.env (at 128 MiB
+#                                     also D-31's <W>/T<T>/metadata.env); a
+#                                     twin that ran here is read from
 #                                     suite-<W>/ first
 #   STEP_MIN_FREE_GB=100              free space needed before each run
 #   NVME, RESUME, ALLOW_ROOT_DISK as 33. The suite's geometry, run size and
@@ -31,8 +41,8 @@
 # against the placeholder bounds [0.5, 2]); D-18's bounds and q-bar are not
 # fixed yet.
 # Folders under NVME:
-#   suite-trees/T<T>-l1128-k4-n<keys>-s<seed>/   the twins' trees (kept)
-#   step-<W>/T<T>-l1128-k4/<step id>/            03's results, session step-<W>
+#   suite-trees/T<T>-l1<L1>-k4-n<keys>-s<seed>/  the twins' trees (kept)
+#   step-<W>/T<T>-l1<L1>-k4/<step id>/           03's results, session step-<W>
 #   step-dbs/                                    the runs' copies (removed by 03)
 # Each workload's results are scored by 04 at the end. The last line is
 # STEP_CHAIN_EXIT=<0 everything ran, 5 something failed or was skipped>.
@@ -50,14 +60,16 @@ NVME="$(realpath -m -- "$NVME")"
 STEP_T="${STEP_T:-3 6 9}"
 STEP_WORKLOADS="${STEP_WORKLOADS:-W1 W2 W3 W4 W5}"
 STEP_KINDS="${STEP_KINDS:-control single two}"
+STEP_L1="${STEP_L1:-128}"
 STEP_AT_OP="${STEP_AT_OP:-10000000}"
+STEP_K0_CAP="${STEP_K0_CAP:-19}"
 STEP_TWIN_ROOT="${STEP_TWIN_ROOT:-$NVME/step-twins}"
 MIN_FREE_GB="${STEP_MIN_FREE_GB:-100}"
 export MIN_FREE_GB
 # Tests point these at a stand-in 03 and skip 04.
 RUN_EXPERIMENTS="${STEP_RUN_EXPERIMENTS:-$PIPELINE_DIR/03_run_experiments.sh}"
 EVALUATE="${STEP_EVALUATE:-1}"
-L1_MIB=128 K=4
+K=4
 if [[ "$DBBENCH_BUILD_DIR" = /* ]]; then
   DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
 else
@@ -73,19 +85,23 @@ GEOMETRY=(WRITE_BUFFER_SIZE="$SUITE_WRITE_BUFFER_SIZE"
 plan_rows() {
   "$PY" "$PIPELINE_DIR/step_plan.py" plan --trees "$NVME/suite-trees" \
     --keys "$SUITE_PRELOAD_KEYS" --seed "$PRELOAD_SEED" --t "$STEP_T" \
-    --workloads "$STEP_WORKLOADS" --kinds "$STEP_KINDS" --num-levels "$NUM_LEVELS"
+    --workloads "$STEP_WORKLOADS" --kinds "$STEP_KINDS" --num-levels "$NUM_LEVELS" \
+    --l1 "$STEP_L1" --at-op "$STEP_AT_OP" --operations "$(( SUITE_RUN_OPERATIONS_M * 1000000 ))"
 }
-tree_of() { echo "$NVME/suite-trees/T$1-l1${L1_MIB}-k${K}-n${SUITE_PRELOAD_KEYS}-s${PRELOAD_SEED}"; }
+tree_of() { echo "$NVME/suite-trees/T$1-l1$2-k${K}-n${SUITE_PRELOAD_KEYS}-s${PRELOAD_SEED}"; }  # T, L1
 # The twin's metadata.env: here (33's layout) first, then STEP_TWIN_ROOT.
-twin_of() {  # $1=W $2=T
-  local here="$NVME/suite-$1/T$2-l1${L1_MIB}-k${K}/${SUITE_RUN_OPERATIONS_M}M/T$2/repeat-01/native/metadata.env"
+twin_of() {  # $1=W $2=T $3=L1
+  local here="$NVME/suite-$1/T$2-l1$3-k${K}/${SUITE_RUN_OPERATIONS_M}M/T$2/repeat-01/native/metadata.env"
   if [[ -f "$here" ]]; then echo "$here"
-  elif [[ -f "$STEP_TWIN_ROOT/$1/T$2/metadata.env" ]]; then echo "$STEP_TWIN_ROOT/$1/T$2/metadata.env"
+  elif [[ -f "$STEP_TWIN_ROOT/$1/T$2/l1$3/metadata.env" ]]; then echo "$STEP_TWIN_ROOT/$1/T$2/l1$3/metadata.env"
+  elif [[ "$3" == 128 && -f "$STEP_TWIN_ROOT/$1/T$2/metadata.env" ]]; then
+    echo "$STEP_TWIN_ROOT/$1/T$2/metadata.env"
   fi
   return 0
 }
 
 [[ "$STEP_AT_OP" =~ ^[1-9][0-9]*$ ]] || fail "STEP_AT_OP must be a positive whole number"
+[[ "$STEP_K0_CAP" =~ ^[1-9][0-9]*$ ]] || fail "STEP_K0_CAP must be a positive whole number"
 (( STEP_AT_OP < SUITE_RUN_OPERATIONS_M * 1000000 )) ||
   fail "STEP_AT_OP ($STEP_AT_OP) must fall inside the ${SUITE_RUN_OPERATIONS_M}M measured operations"
 declare -A PROFILE
@@ -101,14 +117,19 @@ ROWS=()
 case "${1:-}" in
   plan)
     for row in "${ROWS[@]}"; do
-      IFS=$'\t' read -r phase w T sid vector <<< "$row"
+      IFS=$'\t' read -r phase w T l1 sid vector k0 schedule <<< "$row"
       if [[ "$phase" == missing ]]; then
-        echo "T$w: no tree to plan from ($T)"
+        echo "T$w l1$T: no tree to plan from ($l1${sid:+ $sid})"
         continue
       fi
-      echo "$phase $w T$T $sid${vector:+ $vector}"
+      case "$phase" in
+        k0) echo "$phase $w T$T l1$l1 $sid" ;;
+        multi) echo "$phase $w T$T l1$l1 $sid $(tr ';' '\n' <<< "$schedule" | wc -l) changes" ;;
+        *) echo "$phase $w T$T $sid $vector" ;;
+      esac
     done
-    echo "# $(grep -vc '^missing' <<< "$rows" || true) runs at ${L1_MIB}:${K}, change at operation $STEP_AT_OP"
+    settings="" && for l1 in $STEP_L1; do settings+="${settings:+ }$l1:$K"; done
+    echo "# $(grep -vc '^missing' <<< "$rows" || true) runs at $settings, change at operation $STEP_AT_OP"
     exit 0
     ;;
   "") ;;
@@ -126,21 +147,22 @@ declare -A TWIN_STATE
 stamp "steps: T $STEP_T; workloads $STEP_WORKLOADS; kinds $STEP_KINDS; change at operation $STEP_AT_OP;" \
       "binary $binary"
 for row in "${ROWS[@]}"; do
-  IFS=$'\t' read -r phase w T sid vector <<< "$row"
+  IFS=$'\t' read -r phase w T l1 sid vector k0 schedule <<< "$row"
   if [[ "$phase" == missing ]]; then
-    stamp "T$w: no tree to plan from; its steps are skipped"
-    failed+=("T$w: tree")
+    stamp "T$w l1$T: no tree to plan from; its steps are skipped"
+    failed+=("T$w l1$T: tree")
     continue
   fi
-  results="$NVME/step-$w/T$T-l1${L1_MIB}-k${K}/$sid"
+  results="$NVME/step-$w/T$T-l1$l1-k${K}/$sid"
   run_dir="$results/${SUITE_RUN_OPERATIONS_M}M/T$T/hold"
   if [[ -f "$run_dir/COMPLETED" ]]; then
     continue
   fi
-  tree="$(tree_of "$T")"
+  tree="$(tree_of "$T" "$l1")"
   key="$w/T$T"
+  [[ "$l1" == 128 ]] || key+="/l1$l1"
   if [[ -z "${TWIN_STATE[$key]:-}" ]]; then
-    twin="$(twin_of "$w" "$T")"
+    twin="$(twin_of "$w" "$T" "$l1")"
     if [[ -z "$twin" ]]; then
       TWIN_STATE[$key]="missing"
     elif [[ ! -f "$tree/COMPLETED" || ! -f "$tree/db/CURRENT" ]]; then
@@ -164,19 +186,25 @@ for row in "${ROWS[@]}"; do
     failed+=("disk")
     break
   fi
-  if [[ "$vector" == - ]]; then
-    change=(HOLD_APPLY_AT_OP= HOLD_APPLY_M=) apply=""
-  else
-    change=(HOLD_APPLY_AT_OP="$STEP_AT_OP" HOLD_APPLY_M="$vector") apply="$STEP_AT_OP|$vector|"
+  # The change: none (a control), D-31's vector at X, a trigger at X (k0),
+  # or a schedule (multi); 03 records it as hold_apply.
+  change=(HOLD_APPLY_AT_OP= HOLD_APPLY_M= HOLD_APPLY_K0= HOLD_APPLY_SCHEDULE= HOLD_K0_CAP=) apply=""
+  if [[ "$schedule" != - ]]; then
+    change=(HOLD_APPLY_AT_OP= HOLD_APPLY_M= HOLD_APPLY_K0= HOLD_APPLY_SCHEDULE="$schedule"
+            HOLD_K0_CAP="$STEP_K0_CAP") apply="$schedule"
+  elif [[ "$vector" != - ]]; then
+    [[ "$k0" != - ]] || k0=""
+    change=(HOLD_APPLY_AT_OP="$STEP_AT_OP" HOLD_APPLY_M="$vector" HOLD_APPLY_K0="$k0"
+            HOLD_APPLY_SCHEDULE= HOLD_K0_CAP="${k0:+$STEP_K0_CAP}") apply="$STEP_AT_OP|$vector|$k0"
   fi
   stamp "$key $sid ($phase)"
   status=0
-  env "${GEOMETRY[@]}" "${change[@]}" HOLD_APPLY_K0= HOLD_START_M= \
+  env "${GEOMETRY[@]}" "${change[@]}" HOLD_START_M= \
     CONFIRM_EXPERIMENTS=YES DIAGNOSTIC_RUN=1 PLUGIN_PLACEHOLDERS=1 EXPERIMENT_ARMS=hold \
     SUITE_WORKLOAD="$w" TREE_DIR="$tree" SIZE_RATIOS="$T" \
-    MAX_BYTES_FOR_LEVEL_BASE="$(( L1_MIB * 1048576 ))" L0_COMPACTION_TRIGGER="$K" \
+    MAX_BYTES_FOR_LEVEL_BASE="$(( l1 * 1048576 ))" L0_COMPACTION_TRIGGER="$K" \
     WORKLOAD_SIZES_M="$SUITE_RUN_OPERATIONS_M" REPEATS=1 RESUME=1 \
-    SESSION_ID="step-$w" RESULTS_ROOT="$results" DB_ROOT="$NVME/step-dbs/$w/T$T/$sid" \
+    SESSION_ID="step-$w" RESULTS_ROOT="$results" DB_ROOT="$NVME/step-dbs/$w/T$T-l1$l1/$sid" \
     "$RUN_EXPERIMENTS" < /dev/null || status=$?
   (( status != 7 )) || fail "03 found no matching preflight; run 13 first"
   if (( status != 0 )); then

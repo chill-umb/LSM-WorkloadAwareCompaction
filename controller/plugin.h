@@ -120,7 +120,7 @@ class Controller {
   // and the cap allows. Returns false, with the reason, if the host refused
   // them.
   bool Flush(uint64_t op, uint64_t now, bool new_changes, std::string* error);
-  // Hold-only's scheduled change (Config::apply_at_op), once.
+  // Hold-only's next scheduled change (Config::schedule), once each.
   void ApplyScheduled(uint64_t op, uint64_t now);
   // Writes the level's transition and opens its next interval.
   void CloseInterval(int level, const View& v, const Opening& next,
@@ -149,7 +149,7 @@ class Controller {
   // The SetOptions cap: the last Apply's time, and the decisions whose
   // changes have not reached the host yet.
   bool applied_once_ = false;
-  bool scheduled_done_ = false;  // apply_at_op's change made (or tried)
+  size_t next_scheduled_ = 0;  // Config::schedule's changes made (or tried)
   uint64_t last_apply_us_ = 0;
   uint64_t pending_first_id_ = 0;  // 0: nothing pending
   uint64_t last_id_ = 0;

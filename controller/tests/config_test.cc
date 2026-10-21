@@ -432,5 +432,72 @@ TEST(Config, AScheduledChangeIsCheckedAndForHoldOnlyOnly) {
                        "k0_min <= apply_k0 <= k0_cap"));
 }
 
+// The K-step batch's multi-change runs (owner, 2026-10-21): hold-only may
+// carry a schedule of several changes; the single form is a schedule of one.
+TEST(Config, HoldOnlyMayScheduleSeveralChanges) {
+  auto values = BaseConfig("/tmp/x");
+  values["apply_at_op"] = "1000";
+  values["apply_m"] = "\"1:1:2:1:1\"";
+  Config one;
+  std::string error;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &one, &error)) << error;
+  ASSERT_EQ(one.schedule.size(), 1u);
+  EXPECT_EQ(one.schedule[0].at_op, 1000u);
+  EXPECT_EQ(one.schedule[0].m, (std::vector<double>{1, 1, 2, 1, 1}));
+  EXPECT_EQ(one.schedule[0].k0, 0);
+
+  values = BaseConfig("/tmp/x");
+  values["apply_schedule"] = "\"1000|1:1:1:1:1|6;2500|1:1:1:1:1|0;9000|1:2:1:1:1|3\"";
+  Config c;
+  ASSERT_TRUE(ParseConfig(ToJson(values), &c, &error)) << error;
+  ASSERT_EQ(c.schedule.size(), 3u);
+  EXPECT_EQ(c.schedule[0].at_op, 1000u);
+  EXPECT_EQ(c.schedule[0].k0, 6);
+  EXPECT_EQ(c.schedule[1].at_op, 2500u);
+  EXPECT_EQ(c.schedule[1].k0, 0);  // keep the L0 trigger in effect
+  EXPECT_EQ(c.schedule[2].m, (std::vector<double>{1, 2, 1, 1, 1}));
+  EXPECT_EQ(c.schedule[2].k0, 3);
+  EXPECT_EQ(c.apply_at_op, 0u);  // the single form's fields stay unset
+
+  Config plain;
+  ASSERT_TRUE(ParseConfig(ToJson(BaseConfig("/tmp/x")), &plain, &error)) << error;
+  EXPECT_TRUE(plain.schedule.empty());
+}
+
+TEST(Config, AScheduleIsCheckedAndForHoldOnlyOnly) {
+  const auto with = [](const std::string& schedule,
+                       std::map<std::string, std::string> extra = {}) {
+    auto values = BaseConfig("/tmp/x");
+    values["apply_schedule"] = schedule;
+    for (const auto& item : extra) values[item.first] = item.second;
+    return values;
+  };
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|4\"", {{"mode", "\"rules\""},
+                                                       {"rules", "\"yield_slot\""}})),
+                       "the apply keys are for hold-only"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|4\"", {{"apply_at_op", "5"}})),
+                       "apply_schedule replaces apply_at_op"));
+  EXPECT_TRUE(Contains(Error(with("4")), "\"apply_schedule\" must be a string"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1\"")), "is not op|m|k0"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|4|5\"")), "is not op|m|k0"));
+  EXPECT_TRUE(Contains(Error(with("\"\"")), "entry 1: \"\" is not op|m|k0"));
+  EXPECT_TRUE(Contains(Error(with("\"0|1:1:1|4\"")),
+                       "entry 1: need op a positive integer"));
+  EXPECT_TRUE(Contains(Error(with("\"-5|1:1:1|4\"")),
+                       "entry 1: need op a positive integer"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|4;1000|1:1:1|5\"")),
+                       "entry 2: need op a positive integer above the one before"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|4;900|1:1:1|5\"")),
+                       "entry 2: need op a positive integer above the one before"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|1\"")),
+                       "need k0 0 or k0_min <= k0 <= k0_cap"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|9\"")),
+                       "need k0 0 or k0_min <= k0 <= k0_cap"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:1:1|x\"")),
+                       "need k0 0 or k0_min <= k0 <= k0_cap"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|2:1:1|4\"")), "L0's value must be 1"));
+  EXPECT_TRUE(Contains(Error(with("\"1000|1:3:1|4\"")), "[m_min, m_max]"));
+}
+
 }  // namespace
 }  // namespace rlc

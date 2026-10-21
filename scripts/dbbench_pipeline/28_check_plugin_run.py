@@ -185,17 +185,26 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
         problems = ([f"{len(calls)} apply, apply_held or repair lines"]
                     if calls else [])
         if plan:
-            at = plan[0].get("apply_at_op")
-            if len(scheduled) != 1:
-                problems.append(f"{len(scheduled)} scheduled applies, not one "
-                                f"(apply_at_op {at})")
-            elif scheduled[0].get("ok") != 1:
-                problems.append("the scheduled apply was refused: "
-                                f"{scheduled[0].get('error')}")
-            elif not isinstance(at, (int, float)) or scheduled[0].get("op", -1) < at:
-                problems.append(f"the scheduled apply at op "
-                                f"{scheduled[0].get('op')} came before "
-                                f"apply_at_op {at}")
+            # One apply per planned change, in order (several: the K-step
+            # batch's multi-change runs, owner 2026-10-21), each accepted and
+            # none before its apply_at_op.
+            if len(scheduled) != len(plan):
+                problems.append(f"{len(scheduled)} scheduled applies, not "
+                                f"{len(plan)} (apply_at_op "
+                                f"{[p.get('apply_at_op') for p in plan]})")
+            for i, (want, made) in enumerate(zip(plan, scheduled)):
+                at = want.get("apply_at_op")
+                if made.get("ok") != 1:
+                    problems.append(f"scheduled apply {i} was refused: "
+                                    f"{made.get('error')}")
+                elif not isinstance(at, (int, float)) or made.get("op", -1) < at:
+                    problems.append(f"scheduled apply {i} at op "
+                                    f"{made.get('op')} came before "
+                                    f"apply_at_op {at}")
+                elif made.get("index") != want.get("index"):
+                    problems.append(f"scheduled apply {i} has index "
+                                    f"{made.get('index')}, its plan "
+                                    f"{want.get('index')}")
         elif scheduled:
             problems.append("a scheduled apply without an apply_scheduled line")
         record("hold_only", problems, scheduled_applies=len(scheduled))

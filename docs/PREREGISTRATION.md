@@ -3767,6 +3767,283 @@ accept, and report which trees differ").
 **Falsification.** This entry fails as a record if any part of it is changed after the first step run has started.
 A change is a new dated entry.
 
+### D-32, 2026-10-21 — the K-step batch: one or several changes of the L0 trigger at every (workload, T, L1), twins at every setting, the practice/exam split dropped, and the propagation law's case list
+
+**Recorded before any run it governs.** No K-step run has started.
+- **Approval.** The owner approved the operator's draft on 2026-10-21: "Yes, commit. STart the K-step batch quick".
+  This took the operator's recommendations on §4 and §9; §6 and §7 stay open.
+- **The twins started before this entry.** They are D-29 §3 natives at K = 4 (§3), started by `kn_v1.sh` on the ten
+  workers at 10:05-10:11 UTC. Their settings are D-29's and are unchanged.
+- **What had been read at entry (11:50 UTC).** The twins were still running. Only their completion and the identity
+  fields of their records had been read: tree, binary, seed and settings.
+- This entry governs how the twins are used, not how they run.
+
+**What it records** (the owner's rulings of 2026-10-21, not recorded before):
+- **The practice/exam split is dropped.** "I don't think this practice and exam set is applicable anymore."
+- **The question the batch answers:** "I need to understand how changing K (increase or decrease) affects every
+  level at every setting. That means, for different L1 sizes, for different T, for different workloads, how in one
+  setting (L1 size, T, Workload), changing K affects the tree downwards."
+- **Several changes in one run:** "In an actual run, K might change multiple times, at different stages of
+  operation, and could face different operation (i.e could be a read heavy op, could be a write heavy portion, could
+  be a hot key portion etc.). That should also affect the lower levels differently." Then: "Add multi-change runs."
+- **The operator's proposals, approved** ("Yes to earlier choices (i.e change K at 10M, base K = 4, the K lists, 3
+  twin repeats)"; "The preparation plan looks fine").
+  - On X = 10M, the owner asked: "why are you suggesting changing K at 10M op? That's the preloading phase". The
+    answer: X counts measured operations on the settled, preloaded tree, as D-31 §1 has it. It is not part of the
+    preload. The owner then approved 10M.
+- **The propagation law's case list.** The owner: "I wanted a closed form function". The function covers:
+  1. K increased: the effect on L1 to Ln−1.
+  2. K decreased: the same.
+  3. Level j's target increased (1 ≤ j ≤ n−1): the effect on L1 to Lj−1 and Lj+1 to Ln−1.
+  4. Level j's target decreased: the same.
+  5. K and Lj together: (a) K up, Lj up; (b) K down, Lj up; (c) K up, Lj down; (d) K down, Lj down.
+  - **Additions.** The owner accepted the operator's additions ("Accept the other proposed additions"):
+    - level j's own response;
+    - L0 and the deepest level;
+    - "just after" and "settled" for every case;
+    - K above L0's byte cap.
+  - **Two more cases.** The owner: "Add "small change before the last one settled", but don't drop the case where
+    several levels at once have their target size changed."
+    - **A small change before the last one has settled:** a change made while the tree is still filling or draining
+      from an earlier one.
+    - **Several levels changed at once:** stays a case.
+  - **The derivation waits** for the owner's go ("Wait on the derivation").
+  - **Runs that bear on each case:**
+    - cases 1 and 2: this batch;
+    - cases 3 and 4: D-31's single-level steps (128 MiB, T 3, 6, 9);
+    - several levels at once: D-31's two-level steps (neighbouring pairs; W1 and W2);
+    - a small change before the last one has settled: this batch's multi runs, for K only;
+    - case 5: no runs.
+
+**What it supersedes.** Earlier entries are not edited. What was read under them stands as recorded.
+- **D-29 §5's practice and exam.** That covers "Practice", "Exam" and "the formula is frozen with a hash before the
+  exam's scoring".
+- **D-30 §1** (the practice set {W1, W2} × T {3, 6, 9}).
+- **D-31 §5** (who may read what before the freeze).
+- **From this entry on,** every run of every workload and T, natives and steps alike, may be read to develop the
+  propagation law. That includes the W3-W5 results D-31 §5 kept unread. §7 is the exception, while it is open.
+
+**What stays in force:**
+- **D-29 §5:**
+  - one law, one formula and one set of constants for every workload and T;
+  - workloads differ only through inputs measured at run time;
+  - a miss is explained by a measured mechanism test, never by a per-workload change;
+  - the 1/8 copy is a bug-catching harness only.
+- **D-30 §2,** the rules for the formula's inputs; **D-30 §3, §4.**
+- **D-31 §1-§4 and §6-§7,** for D-31's own runs, and as extended below.
+- **The owner's rule of 2026-10-15** and hard constraint R7 of 2026-10-20 (one general RocksDB law, no workload
+  traits; derive from RocksDB's code, then check).
+
+**What it amends:**
+- **D-29 §4:** it adds steps of the L0 trigger K. D-31 recorded "L0-trigger steps. D-29 §4 has none."
+- **D-31 §1-§4:** it extends them to the two new kinds, "k0" and "multi", at all three L1 sizes.
+
+**What it leaves open** (the owner's; each needs a dated entry before the results it governs are read):
+- **What replaces the held-out check.** D-29 §5 relied on it to guard against fitting the law to the data it was built
+  from. The guards left are:
+  - R7's "code first" rule;
+  - D-30 §2's input rules;
+  - §7's sealed test, if the owner approves it.
+- **D-29 §4's level steps at T 2, 4, 5, 7, 8, 10** (and at L1 64 and 256 MiB). These are the multiplier steps D-31
+  left to "a later entry". They are not in this batch.
+- **§6** ("settled" for a K step) and **§7** (the multi runs as a sealed test).
+- **How the law is scored on this batch's data.** That belongs to the law's own test plan.
+
+**1. Run shape: a "k0" step.** Each step run is its twin with one change, made once at operation X.
+- **The twin:** native repeat 1 at (L1, K = 4), same workload, T and L1 (§3).
+  - **Same tree:** `db/suite-trees/T<T>-l1<L1>-k4-n20000000-s1000`, with the identity hash in its `tree.json`. A
+    copy on another node is checked by that hash.
+  - **Same operation seed:** `--seed=1`.
+  - **Same binary:** `dbbench_sha256` `4dd266bd814b52b14ed6dace79f9b27b9ae514173b653e4dc6c52b7692de19ac`, the
+    binary that built every suite tree and ran every native.
+  - **Same D-29 §1 shape:** 40,000,000 measured operations, settle step, suite geometry.
+- **The arm:** `hold` with the plugin attached (`DIAGNOSTIC_RUN=1`, `PLUGIN_PLACEHOLDERS=1`), as in D-31.
+  - `HOLD_APPLY_AT_OP=10000000`;
+  - `HOLD_APPLY_M`: every multiplier 1;
+  - `HOLD_APPLY_K0`: the new trigger.
+- **The hold arm's `k0_cap` is 19** (`HOLD_K0_CAP`, `34`'s `STEP_K0_CAP`).
+  - The plugin refuses a scheduled trigger above `k0_cap` (`controller/config.cc:600`).
+  - D-31's placeholder cap of 8 would refuse 9, 12, 16 and 19.
+  - The plugin also requires `k0_cap` ≤ slowdown trigger − 1 = 19.
+  - Hold-only never acts on its own, so the cap only bounds the scheduled values.
+  - D-18's final bound for K stays open.
+- **X = 10,000,000 measured operations, as in D-31 §1.**
+  - The plugin's operation counter is 0 at `measure_start`.
+  - A change is made at the first poll at or after its operation. In D-31's 284 scheduled applies, the lag after
+    10M was a median of 147 operations, 749 at the 95th percentile, and at most 6,988.
+  - The actual X is the `op` of the run's `apply` record with `scheduled: 1`. The windows start there.
+- **Base K = 4,** RocksDB's default and the twins' trigger.
+- **The new triggers K per L1** (`step_plan.K_TARGETS`):
+
+  | L1 base | New K | L0's byte cap |
+  |---|---|---|
+  | 64 MiB | 2, 3, 5, 8 | 5 files |
+  | 128 MiB | 2, 3, 6, 9, 12 | 9 files |
+  | 256 MiB | 2, 3, 8, 12, 16, 19 | about 17 files |
+
+  - **The byte cap.** With fixed level sizes, L0's score is at least its bytes ÷ the L1 base, whatever K is
+    (`version_set.cc:3953`). With flushed files of about 15.2 MiB, L0 is due at 5, 9 or about 17 files.
+  - **What each list covers:**
+    - decreases (2, 3);
+    - increases up to the cap;
+    - one value above the cap (8, 12, 19), which should act as the cap (§8).
+
+**2. Run shape: a "multi" run.** It is the same as §1, except that the trigger changes several times, on a schedule
+fixed in advance (`HOLD_APPLY_SCHEDULE`). Every multiplier stays 1.
+- **Why** (owner, above): a real run changes K many times, at different stages and under different traffic. The
+  response may depend on what came before. Single steps cannot show that.
+- **The schedule** (`step_plan.multi_schedule`):
+  - **Seed.** Python's `random.Random("kmulti/<W>/T<T>/l1<L1>")`, so every node plans the same schedule.
+  - **Times.**
+    - The first change is at X = 10M.
+    - Each next change comes after a gap drawn uniformly from {1.0, 1.5, …, 5.0}M operations.
+    - No change falls in the last 2M operations: the latest is at 38M.
+  - **W5.** Changes are also forced 0.5M operations before and after each phase switch (D-29 §2: 13,333,333 and
+    26,666,666), at 12,833,333, 13,833,333, 26,166,666 and 27,166,666. Drawn times within 0.5M of a forced time are
+    dropped.
+  - **Values.** Each is drawn uniformly from that L1's list plus 4. It is never the value already in effect.
+- **One multi run per (workload, T, L1).** The operator chose one; the owner did not say one or two.
+  - W1-W4 have 7 to 14 changes per run.
+  - W5 has 10 to 16.
+  - Gaps are at least 1M operations, except around W5's forced changes, where the smallest is 666,666.
+  - The schedules are fixed by the code and its seed. `34 plan` prints the count of changes for each run.
+- **Only W5 changes its mix within a run.** W1-W4 keep one mix for all 40M operations. So in W1-W4, "different
+  stages" means a different tree state and an unsettled earlier change, not different traffic.
+- **K's direct effect settles within about one L0 cycle** (about 0.4M operations in W1). Gaps of 1M or more are longer
+  than that, so for L0 these runs mostly test changes made from different states and under W5's mix changes. Overlap
+  matters only where a deeper effect is slower.
+- **Logging.** Each change is logged as an `apply` record with `scheduled: 1` and its `index`. `28_check_plugin_run.py`
+  checks:
+  - N applies for N planned;
+  - in order;
+  - all ok;
+  - none early;
+  - indexes matching.
+
+**3. The grid and the twins.**
+- **k0 steps:** W1-W5 × T 2..10 × (4 + 5 + 6) new triggers = **675 runs**.
+- **Multi runs:** W1-W5 × T 2..10 × 3 L1 = **135 runs**.
+- **Total: 810 runs**, about 161 machine-hours.
+- **Twins:** one per (W, T, L1), 135 in all. Each is native repeat 1 at (L1, K = 4) on that setting's tree. Its 3
+  repeats give the noise thresholds (§5).
+
+  | Settings | Natives | Tree |
+  |---|---|---|
+  | W1, W2 × T 3, 6, 9 × 128 MiB | node C, 2026-10-16/17 (D-31's twins) | the original |
+  | W3-W5 × T 3, 6, 9 × 64, 128, 256 MiB | w1-w3, 2026-10-20 (D-31 §7) | 128: copies of the original; 64, 256: rebuilt |
+  | W1, W2 × T 4, 8 × 64, 128, 256 MiB | w10, 2026-10-20 | w10's |
+  | **A:** W1-W5 × T 2, 5, 7, 10 × 64, 128, 256 MiB | new, 180 runs | 12 new trees, built on the node that runs them |
+  | **B:** W3-W5 × T 4, 8 × 64, 128, 256 MiB | new, 54 runs | copies of w10's, checked by identity |
+  | **C:** W1, W2 × T 3, 6, 9 × 64, 256 MiB | new, 36 runs | w1-w3's rebuilt trees |
+
+- **Why C reruns W1 and W2.** Node C's original trees at 64 and 256 MiB (T 3, 6, 9) were emptied on 2026-10-17. The
+  six rebuilt trees all differ from the originals by identity hash. A step must share its twin's tree. So W1 and W2
+  are rerun on the rebuilt trees, and the five workloads at each of these settings share one tree, as D-27 asks.
+  Node C's W1/W2 natives at those settings stay on record but are not twins.
+
+**4. Presence controls** (owner's ruling: the operator's recommendation).
+- **No new controls.**
+  - D-31's 15 controls (W1-W5 × T 3, 6, 9 at 128 MiB; hold with no change) have run. They measure what attaching
+    the plugin alone does.
+  - Every K step's pre-step window [0, X] is checked against its twin (§5).
+- **D-31's controls are scored before this batch's results are read.** If any fails D-31 §4's presence test, controls
+  are added at that T for all three L1 sizes, recorded in a new dated entry.
+
+**5. Measurements, noise and twin match.** These are D-31 §3 and §4, with these additions:
+- **(a) gains L0's file count**, from the MANIFEST replay. It is reported as the window's mean, weighted by
+  operations, and as the count at the window's end.
+- **(b) gains the L0→L1 merges**: input files per merge, and bytes per merge.
+- **Windows of a multi run:**
+  - D-31's 5M grid from X;
+  - the intervals between consecutive applied changes, each from one `apply` record's `op` to the next (the last
+    ends at 40M).
+- **Noise thresholds** come from the 3 native repeats at (W, T, L1, K = 4), per D-31 §4.
+- **The twin match is in [0, X]** for both kinds.
+- **(c) for W4 and W5:** as D-31 §3, only after `suitegen` covers inserts and phases.
+
+**6. "Settled" for a k0 step: open** (the owner's). D-31's rule, the stepped level's bytes within ±10% of m, does not
+apply, because K changes no level's target.
+- **The operator's proposal:** a k0 step's settle point is the first post-step window from which, at every level and
+  in every later window, the mean bytes' Δ lies within its noise threshold of the last window's Δ.
+  - A run whose settle point is the last window is "not settled".
+  - Results before the settle point are path results.
+  - A multi run has no settle point: all its results are path results.
+- **Until a dated entry decides,** no K step's settle point is computed or read.
+
+**7. The multi runs as a sealed test of chaining: open** (the owner's).
+- **Chaining:** predict a multi run by applying the single-step responses at each change and carrying the state
+  forward. The multi runs test whether the response depends only on the state and mix now, not on the history behind
+  them.
+- **The operator's recommendation:** read them only after a chained prediction, made from k0 steps and natives only,
+  is sealed with a hash. That is the one check left of the law on data it was not built from.
+- **The alternative:** read them freely, like every other run under this entry.
+- **Until a dated entry decides,** only these are read from the multi runs:
+  - completion;
+  - the instrument checks;
+  - the twin match;
+  - the applied changes.
+
+**8. Prediction recorded in advance** (operator, from the code, before any K step).
+- **The prediction:** at 64 MiB, K = 8 and K = 5 give runs that match within noise: every quantity, level and
+  window of §5, for every workload and T. At 128 MiB, so do K = 12 and K = 9.
+- **Why:** above the cap, the byte score `total_size / max_bytes_for_level_base` decides L0's score at every file
+  count. That holds while flushed files are at least base ÷ K (12.8 or 14.2 MiB). The other uses of K in the fork
+  leave the two runs the same at the suite geometry:
+  - the pending-bytes estimate (`version_set.cc:3683`) triggers on the same bytes;
+  - the compaction speed-up threshold differs (8 against 11 files), but `max_background_jobs=2` gives one compaction
+    slot either way (`GetBGJobLimits`);
+  - the L0→L0 merges need either files being merged at pick time, or L1 above 20× L0's bytes. Neither occurs.
+- **At 256 MiB, K = 16 is below the cap,** due at 16 files. K = 19 should act as a trigger of about 17. No K = 17
+  run exists, so the 256 MiB list has no exact pair to compare.
+- **A failure** means the code reading is wrong. That is reported as a finding, not fixed by a per-setting change.
+
+**9. D-31's 8 refused runs** (owner's ruling: the operator's recommendation).
+- **Which runs:** every (m_j, m_j+1) = (2, 0.5) two-level step at T 3, on W1 and W2.
+- **Why they were refused:** the fork's `ValidateOptions` refuses a level made smaller than the one above
+  (`column_family.cc:1737`). The plugin fell back, and `03` exited 8.
+- **The controller cannot reach them either:** its Repair step (`masks.cc:51`) raises the lower level first.
+- **They are dropped** from D-31's batch and reported as unreachable.
+
+**10. The W5 evaluator fix.**
+- **The fault:** `04`'s phase check compared a float sum of each phase's held bytes, about 1.2·10^18 (above 2^53),
+  with the run's exact integer total. It refused every W5 run.
+- **The fix:** the check compares exact integer totals. No reported number changes.
+- **After the code is synced,** every W5 native and step run is scored again with the fixed `04`.
+
+**11. What must exist before the first K-step run.**
+- This entry, committed, with the code below.
+- **The code,** committed:
+  - `34`'s "k0" and "multi" kinds and `STEP_L1`;
+  - `step_plan.py`'s K lists and schedule;
+  - the plugin's `apply_schedule`;
+  - `plugin_config.py`'s `--apply-schedule` and `--hold-k0-cap`;
+  - `03`'s `HOLD_APPLY_SCHEDULE` and `HOLD_K0_CAP`;
+  - `28`'s check;
+  - `04`'s fix;
+  - all with tests.
+- **On every worker, after its natives end:**
+  - this code;
+  - the same binary;
+  - `00 check`;
+  - its own preflight (`PARITY_PAIRS=20`).
+  - The plugin is rebuilt by the preflight. The binary is unchanged.
+- **The dispatcher** (`~/node_ops/workers/ksteps_v1.py`, an operator tool outside the repository, stub-tested):
+  - It gives each idle worker a (W, T, L1) group: its k0 steps, then its multi run.
+  - Groups are ordered longest first, W4 first.
+  - A group starts only once its twin has COMPLETED and fits: tree identity, binary, seed, workload, T, L1 and K. A
+    twin that does not fit blocks its group.
+  - It starts nothing before this entry is in the prime's HEAD and the code is committed.
+  - A failed run is logged and the chain goes on (`RESUME=1`).
+- **The prime runs no K step.** It dispatches, and it keeps a copy of every tree.
+  - A tree moves only between two nodes that run nothing measured: prime ↔ worker, while the worker is between
+    runs.
+  - A copy is checked by identity at its destination.
+  - So no measured run shares its disk with a 20 GB copy.
+- **Kept per run:** as D-31 §3. Every tree is kept.
+
+**Falsification.** This entry fails as a record if any part of it is changed after the first K-step run has started.
+A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured

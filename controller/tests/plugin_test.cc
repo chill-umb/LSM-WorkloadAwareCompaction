@@ -576,6 +576,57 @@ TEST_F(PluginTest, AScheduledChangeOfTheWrongLengthFallsBackAtTheStart) {
   EXPECT_TRUE(said);
 }
 
+// The K-step batch's multi-change runs (owner, 2026-10-21): a schedule of
+// several changes, each made once, in order, at the first poll at or after
+// its op, one per poll; hold-only holds the values in between.
+TEST_F(PluginTest, HoldOnlyAppliesAScheduleInOrderThenHolds) {
+  FakeHost host;
+  {
+    Controller controller(
+        &host, Config({{"apply_schedule",
+                        "\"150000|1:1:1:1:1|6;200000|1:1:1:1:1|2;"
+                        "210000|1:1:2:1:1|0\""}}));
+    EXPECT_FALSE(controller.fallback());
+    Serve(&host);  // 100k operations: before the first change
+    controller.Step();
+    EXPECT_TRUE(host.applied.empty());
+    host.AddOps(60000, 0);  // 160k: the first change only
+    controller.Step();
+    ASSERT_EQ(host.applied.size(), 1u);
+    EXPECT_EQ(host.applied[0].second, 6);
+    host.AddOps(60000, 0);  // 220k: the second and third are both due
+    controller.Step();
+    ASSERT_EQ(host.applied.size(), 2u);  // one per poll
+    EXPECT_EQ(host.applied[1].second, 2);
+    controller.Step();
+    ASSERT_EQ(host.applied.size(), 3u);
+    // k0 0 keeps the trigger in effect (the second change's 2).
+    EXPECT_EQ(host.applied[2].first, (std::vector<double>{1, 1, 2, 1, 1}));
+    EXPECT_EQ(host.applied[2].second, 2);
+    host.AddOps(60000, 0);
+    Turnover(&host);
+    controller.Step();
+    EXPECT_EQ(host.applied.size(), 3u);  // then it holds
+    EXPECT_FALSE(controller.fallback());
+  }
+  EXPECT_EQ(host.snapshot->l0_trigger, 2);
+  const auto decisions = Decisions();
+  EXPECT_EQ(CountType(decisions, "apply_scheduled"), 3);
+  ASSERT_EQ(CountType(decisions, "apply"), 3);
+  int index = 0;
+  for (const std::string& line : decisions) {
+    if (line.find("\"type\":\"apply_scheduled\"") != std::string::npos ||
+        line.find("\"type\":\"apply\"") != std::string::npos) {
+      EXPECT_NE(line.find("\"index\":" + std::to_string(index % 3)),
+                std::string::npos)
+          << line;
+      ++index;
+    }
+  }
+  EXPECT_EQ(index, 6);
+  EXPECT_EQ(CountType(decisions, "fallback"), 0);
+}
+
 TEST_F(PluginTest, AFailedScheduledChangeFallsBack) {
   FakeHost host;
   Controller controller(&host, Config({{"apply_at_op", "50000"},

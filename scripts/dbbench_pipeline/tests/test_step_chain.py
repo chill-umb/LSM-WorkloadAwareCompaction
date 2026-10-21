@@ -1,12 +1,15 @@
-"""PREREGISTRATION D-31's step runs: step_plan.py's list, vectors and twin
-checks, and 34_step_chain.sh with a stand-in 03 that records what it was
-asked to run and writes the run's metadata.env as 03 does. Checks the order
-(controls, x0.5/x2, x0.75/x1.5, two-level on W1/W2 only), what each run gets
-(hold arm, diagnostic, placeholders, the change at X, the twin's tree), that
-a missing or unfit twin skips its (workload, T) while the chain goes on, that
-a resumed chain runs only what is left, a failed run and a failed check are
-logged, and that a run without a preflight stops the chain. Also that the
-real 03 and plugin_config take a step run's settings."""
+"""PREREGISTRATION D-31's step runs and the K-step batch's (owner,
+2026-10-21): step_plan.py's list, vectors, schedules and twin checks, and
+34_step_chain.sh with a stand-in 03 that records what it was asked to run and
+writes the run's metadata.env as 03 does. Checks the order (controls,
+x0.5/x2, x0.75/x1.5, two-level on W1/W2 only), what each run gets (hold arm,
+diagnostic, placeholders, the change at X, the twin's tree), that a missing
+or unfit twin skips its (workload, T) while the chain goes on, that a resumed
+chain runs only what is left, a failed run and a failed check are logged, and
+that a run without a preflight stops the chain; for the K kinds, every L1's
+tree, twin, trigger targets, k0 bound and seeded schedule. Also that the real
+03 and plugin_config take a step run's settings."""
+import random
 import json
 import os
 import shlex
@@ -27,14 +30,15 @@ X = "10000000"
 # repeat level) with the metadata.env keys the chain checks.
 STUB_03 = """#!/usr/bin/env bash
 set -eu
-echo "$SUITE_WORKLOAD|$SIZE_RATIOS|$EXPERIMENT_ARMS|$DIAGNOSTIC_RUN|$PLUGIN_PLACEHOLDERS|$REPEATS|$SESSION_ID|$TREE_DIR|${HOLD_APPLY_AT_OP:-}|${HOLD_APPLY_M:-}|${HOLD_START_M:-}|$L0_COMPACTION_TRIGGER|$MAX_BYTES_FOR_LEVEL_BASE|$WORKLOAD_SIZES_M" >> "$STUB_CALLS"
+echo "$SUITE_WORKLOAD|$SIZE_RATIOS|$EXPERIMENT_ARMS|$DIAGNOSTIC_RUN|$PLUGIN_PLACEHOLDERS|$REPEATS|$SESSION_ID|$TREE_DIR|${HOLD_APPLY_AT_OP:-}|${HOLD_APPLY_M:-}|${HOLD_START_M:-}|$L0_COMPACTION_TRIGGER|$MAX_BYTES_FOR_LEVEL_BASE|$WORKLOAD_SIZES_M|${HOLD_APPLY_K0:-}|${HOLD_APPLY_SCHEDULE//|//}|${HOLD_K0_CAP:-}|$RESULTS_ROOT" >> "$STUB_CALLS"
 [[ "${HOLD_APPLY_M:-}" != "${STUB_FAIL_M:-none}" ]] || exit 1
 [[ "${STUB_EXIT:-0}" == 0 ]] || exit "$STUB_EXIT"
 d="$RESULTS_ROOT/${WORKLOAD_SIZES_M}M/T$SIZE_RATIOS/hold"
 mkdir -p "$d"
 identity="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identity"])' "$TREE_DIR/tree.json")"
 apply=""
-[[ -z "${HOLD_APPLY_AT_OP:-}" ]] || apply="$HOLD_APPLY_AT_OP|$HOLD_APPLY_M|"
+[[ -z "${HOLD_APPLY_AT_OP:-}" ]] || apply="$HOLD_APPLY_AT_OP|$HOLD_APPLY_M|${HOLD_APPLY_K0:-}"
+[[ -z "${HOLD_APPLY_SCHEDULE:-}" ]] || apply="$HOLD_APPLY_SCHEDULE"
 [[ "${HOLD_APPLY_M:-}" != "${STUB_WRONG_M:-none}" ]] || apply="1|wrong|"
 {
   echo "dbbench_seed=1"
@@ -91,6 +95,66 @@ class StepPlanTest(unittest.TestCase):
         for _, _, _, sid, vector in step_plan.steps({3: 6}, ["W1"], {"single", "two"}, 13):
             change = plugin_config.scheduled_change("hold", True, int(X), vector, None)
             self.assertEqual(change, {"apply_at_op": int(X), "apply_m": vector}, sid)
+
+    def test_k_batch_counts_and_order(self):
+        # The owner's grid: W1-W5 x T 2..10 x L1 64/128/256; 4/5/6 targets.
+        rows = step_plan.k_steps(list(range(2, 11)), [64, 128, 256],
+                                 ["W1", "W2", "W3", "W4", "W5"], {"k0", "multi"},
+                                 int(X), 40_000_000, 13)
+        kinds = [r[0] for r in rows]
+        self.assertEqual((kinds.count("k0"), kinds.count("multi")), (675, 135))
+        self.assertEqual(len({r[1:5] for r in rows}), 810)
+        first = rows[:6]
+        self.assertEqual([r[1:5] for r in first],
+                         [("W1", 2, 64, "K2"), ("W1", 2, 64, "K3"), ("W1", 2, 64, "K5"),
+                          ("W1", 2, 64, "K8"), ("W1", 2, 64, "Kmulti"), ("W2", 2, 64, "K2")])
+        ones = ":".join(["1"] * 13)
+        self.assertEqual(first[0][5:], (ones, "2", "-"))
+        self.assertEqual(first[4][5:7], ("-", "-"))
+        self.assertEqual(step_plan.K_TARGETS,
+                         {64: (2, 3, 5, 8), 128: (2, 3, 6, 9, 12), 256: (2, 3, 8, 12, 16, 19)})
+        only = step_plan.k_steps([3], [128], ["W1"], {"k0"}, int(X), 40_000_000, 13)
+        self.assertEqual([r[4] for r in only], ["K2", "K3", "K6", "K9", "K12"])
+
+    def test_multi_schedules(self):
+        ops = 40_000_000
+        for w in ("W1", "W2", "W3", "W4", "W5"):
+            for t in range(2, 11):
+                for l1, targets in step_plan.K_TARGETS.items():
+                    with self.subTest(w=w, t=t, l1=l1):
+                        text = step_plan.multi_schedule(w, t, l1, int(X), ops, 13)
+                        # The same on every node and every call.
+                        self.assertEqual(text, step_plan.multi_schedule(w, t, l1, int(X), ops, 13))
+                        plugin_config.check_schedule(text)
+                        entries = [e.split("|") for e in text.split(";")]
+                        at = [int(e[0]) for e in entries]
+                        ks = [int(e[2]) for e in entries]
+                        self.assertEqual(at[0], int(X))
+                        self.assertLessEqual(at[-1], ops - 2_000_000)
+                        self.assertTrue({e[1] for e in entries} == {":".join(["1"] * 13)})
+                        self.assertTrue(set(ks) <= set(targets) | {4})
+                        self.assertTrue(all(a != b for a, b in zip([4] + ks, ks)))
+                        if w == "W5":
+                            forced = {12_833_333, 13_833_333, 26_166_666, 27_166_666}
+                            self.assertTrue(forced <= set(at))
+                            self.assertTrue(all(b - a >= 500_000 for a, b in zip(at, at[1:])))
+                        else:
+                            gaps = {b - a for a, b in zip(at, at[1:])}
+                            self.assertTrue(gaps <= set(step_plan.MULTI_GAPS), gaps)
+        # Different settings draw different schedules.
+        self.assertNotEqual(step_plan.multi_schedule("W1", 3, 128, int(X), ops, 13),
+                            step_plan.multi_schedule("W1", 3, 64, int(X), ops, 13))
+
+    def test_k_rows_pass_plugin_config(self):
+        for row in step_plan.k_steps([3], [64, 256], ["W1", "W5"], {"k0", "multi"},
+                                     int(X), 40_000_000, 13):
+            _, _, _, _, sid, vector, k0, schedule = row
+            if schedule != "-":
+                change = plugin_config.scheduled_change("hold", True, None, None, None, schedule)
+                self.assertEqual(change, {"apply_schedule": schedule}, sid)
+            else:
+                change = plugin_config.scheduled_change("hold", True, int(X), vector, int(k0))
+                self.assertEqual(change["apply_k0"], int(k0), sid)
 
     def test_deepest_level(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,19 +243,23 @@ class StepChainTest(unittest.TestCase):
             "STEP_T": "3 6", "STEP_WORKLOADS": "W1 W3",
             "STEP_RUN_EXPERIMENTS": str(stub), "STEP_EVALUATE": "0"}
 
-    def tree(self, t: int) -> Path:
-        return self.nvme / "suite-trees" / f"T{t}-l1128-k4-n1000-s1000"
+    def tree(self, t: int, l1: int = 128) -> Path:
+        return self.nvme / "suite-trees" / f"T{t}-l1{l1}-k4-n1000-s1000"
 
-    def twin(self, w: str, t: int, here: bool = False, seed: str = "1") -> Path:
+    def twin(self, w: str, t: int, here: bool = False, seed: str = "1",
+             l1: int = 128) -> Path:
         profile = {"W1": "w1-assoc", "W3": "w3-update-heavy"}[w]
         if here:
-            d = (self.nvme / f"suite-{w}" / f"T{t}-l1128-k4" / "40M" / f"T{t}" /
+            d = (self.nvme / f"suite-{w}" / f"T{t}-l1{l1}-k4" / "40M" / f"T{t}" /
                  "repeat-01" / "native")
-        else:
+        elif l1 == 128:
             d = self.nvme / "step-twins" / w / f"T{t}"
+        else:
+            d = self.nvme / "step-twins" / w / f"T{t}" / f"l1{l1}"
+        identity = str(t) * 64 if l1 == 128 else f"{t}{l1}" * 16
         d.mkdir(parents=True, exist_ok=True)
         (d / "metadata.env").write_text(
-            f"dbbench_seed={seed}\ntree_sha256={str(t) * 64}\n"
+            f"dbbench_seed={seed}\ntree_sha256={identity}\n"
             f"experiment_fingerprint={profile}:40M:T{t}:binary{self.binary}:objective1\n")
         return d / "metadata.env"
 
@@ -201,6 +269,21 @@ class StepChainTest(unittest.TestCase):
 
     def called(self):
         return [c.split("|") for c in self.calls.read_text().splitlines()]
+
+    def k_setup(self, l1s=(64, 128)):
+        """Trees and twins at every L1 of the K kinds' test: W1's twins here,
+        W3's on another node (at 128 MiB in D-31's layout, else per L1)."""
+        for t in (3, 6):
+            for l1 in l1s:
+                if l1 == 128:
+                    continue
+                tree = self.tree(t, l1)
+                (tree / "db").mkdir(parents=True)
+                (tree / "db" / "CURRENT").write_text("MANIFEST-000003\n")
+                (tree / "COMPLETED").touch()
+                (tree / "tree.json").write_text(json.dumps(tree_json(f"{t}{l1}" * 16, 3)))
+                self.twin("W1", t, here=True, l1=l1)
+                self.twin("W3", t, l1=l1)
 
     def test_plan(self):
         planned = self.chain("plan")
@@ -267,6 +350,51 @@ class StepChainTest(unittest.TestCase):
         self.assertEqual(ran.returncode, 1)
         self.assertIn("no matching preflight", ran.stderr)
         self.assertEqual(len(self.called()), 1)
+
+    def test_the_k_kinds(self):
+        self.k_setup()
+        env = dict(STEP_KINDS="k0 multi", STEP_L1="64 128")
+        planned = self.chain("plan", **env)
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        # 2 T x 2 workloads x (4 targets at 64, 5 at 128, + 1 multi each).
+        self.assertIn("# 44 runs at 64:4 128:4, change at operation 10000000", planned.stdout)
+        self.assertEqual(planned.stdout.splitlines()[0], "k0 W1 T3 l164 K2")
+        ran = self.chain(**env)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        calls = self.called()
+        self.assertEqual(len(calls), 44)
+        ones = ":".join(["1"] * 6)
+        for c in calls:
+            w, t = c[0], int(c[1])
+            l1 = int(c[12]) // 1048576
+            self.assertEqual(c[7], str(self.tree(t, l1)))
+            self.assertEqual(c[11], "4")
+            self.assertEqual(c[16], "19")  # every K target is taken
+            self.assertEqual(Path(c[17]).parent.name, f"T{t}-l1{l1}-k4")
+            if c[15]:  # multi: the schedule alone (its "|" logged as "/")
+                self.assertEqual((c[8], c[9], c[14]), ("", "", ""))
+                self.assertEqual(c[15], step_plan.multi_schedule(
+                    w, t, l1, int(X), 40_000_000, 6).replace("|", "/"))
+            else:      # k0: every multiplier 1, the trigger at X
+                self.assertEqual((c[8], c[9]), (X, ones))
+                self.assertIn(int(c[14]), step_plan.K_TARGETS[l1])
+        self.assertEqual(sorted(c[14] for c in calls if c[0] == "W3" and c[1] == "6"
+                                and c[12] == str(64 * 1048576)), ["", "2", "3", "5", "8"])
+        done = list((self.nvme / "step-W3" / "T6-l164-k4").glob("*/40M/T6/hold/COMPLETED"))
+        self.assertEqual(sorted(p.parts[-5] for p in done), ["K2", "K3", "K5", "K8", "Kmulti"])
+
+    def test_a_k_twin_is_per_l1(self):
+        self.k_setup()
+        (self.nvme / "step-twins" / "W3" / "T6" / "l164" / "metadata.env").unlink()
+        ran = self.chain(STEP_KINDS="k0", STEP_L1="64 128", STEP_WORKLOADS="W3", STEP_T="6")
+        self.assertEqual(ran.returncode, 5, ran.stdout + ran.stderr)
+        self.assertIn("W3/T6/l164: twin missing", ran.stdout)
+        self.assertEqual({c[12] for c in self.called()}, {str(128 * 1048576)})
+
+    def test_d31_kinds_stay_at_128(self):
+        planned = self.chain("plan", STEP_L1="64 128")
+        self.assertNotEqual(planned.returncode, 0)
+        self.assertIn("D-31's kinds run at 128 MiB only", planned.stderr)
 
     def test_a_fresh_chain_refuses_old_results(self):
         (self.nvme / "step-W1").mkdir()

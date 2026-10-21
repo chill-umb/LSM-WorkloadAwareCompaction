@@ -304,7 +304,8 @@ const std::set<std::string>& KnownKeys() {
                                                "weights_required",
                                                "apply_at_op",
                                                "apply_m",
-                                               "apply_k0"};
+                                               "apply_k0",
+                                               "apply_schedule"};
   static const std::set<std::string> kWithKappa = [] {
     std::set<std::string> keys = kKnown;
     for (const char* x : kStepTypeNames) {
@@ -476,6 +477,52 @@ static bool ParseApplyVector(const std::string& text, const Bounds& b,
   return true;
 }
 
+// apply_schedule: ";"-separated "op|m|k0" entries. Each op a positive
+// integer above the one before; m as apply_m; k0 0 (keep) or within
+// [k0_min, k0_cap].
+static bool ParseSchedule(const std::string& text, const Bounds& b,
+                          std::vector<ScheduledChange>* out, Reader* r) {
+  out->clear();
+  size_t start = 0;
+  for (;;) {
+    const size_t semi = text.find(';', start);
+    const std::string entry = text.substr(
+        start, semi == std::string::npos ? std::string::npos : semi - start);
+    const std::string where =
+        "apply_schedule entry " + std::to_string(out->size() + 1);
+    const size_t bar1 = entry.find('|');
+    const size_t bar2 =
+        bar1 == std::string::npos ? std::string::npos : entry.find('|', bar1 + 1);
+    if (bar2 == std::string::npos || entry.find('|', bar2 + 1) != std::string::npos) {
+      return r->Fail(where + ": \"" + entry + "\" is not op|m|k0");
+    }
+    const std::string op = entry.substr(0, bar1);
+    const std::string k0 = entry.substr(bar2 + 1);
+    char* end = nullptr;
+    const unsigned long long at = std::strtoull(op.c_str(), &end, 10);
+    if (op.empty() || op[0] == '-' || end != op.c_str() + op.size() || at == 0 ||
+        (!out->empty() && at <= out->back().at_op)) {
+      return r->Fail(where + ": need op a positive integer above the one before");
+    }
+    const long k = std::strtol(k0.c_str(), &end, 10);
+    if (k0.empty() || end != k0.c_str() + k0.size() ||
+        (k != 0 && (k < b.k0_min || k > b.k0_cap))) {
+      return r->Fail(where + ": need k0 0 or k0_min <= k0 <= k0_cap");
+    }
+    ScheduledChange change;
+    change.at_op = at;
+    change.k0 = static_cast<int>(k);
+    if (!ParseApplyVector(entry.substr(bar1 + 1, bar2 - bar1 - 1), b, &change.m,
+                          r)) {
+      return false;
+    }
+    out->push_back(std::move(change));
+    if (semi == std::string::npos) break;
+    start = semi + 1;
+  }
+  return true;
+}
+
 bool ParseConfig(const std::string& text, Config* c, std::string* error) {
   std::map<std::string, JsonValue> values;
   if (!ParseFlatJson(text, &values, error)) return false;
@@ -583,7 +630,19 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
   } else if (r.Has("explore") || r.Has("seed")) {
     return r.Fail("\"explore\" and \"seed\" are for prior-only and learned");
   }
-  if (r.Has("apply_at_op") || r.Has("apply_m") || r.Has("apply_k0")) {
+  if (r.Has("apply_schedule")) {
+    std::string schedule;
+    if (c->mode != Mode::kHoldOnly) {
+      return r.Fail("the apply keys are for hold-only");
+    }
+    if (r.Has("apply_at_op") || r.Has("apply_m") || r.Has("apply_k0")) {
+      return r.Fail("apply_schedule replaces apply_at_op, apply_m and apply_k0");
+    }
+    if (!r.String("apply_schedule", &schedule) ||
+        !ParseSchedule(schedule, c->bounds, &c->schedule, &r)) {
+      return false;
+    }
+  } else if (r.Has("apply_at_op") || r.Has("apply_m") || r.Has("apply_k0")) {
     if (c->mode != Mode::kHoldOnly) {
       return r.Fail("the apply keys are for hold-only");
     }
@@ -604,6 +663,7 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
                   "need k0_min <= apply_k0 <= k0_cap"))) {
       return false;
     }
+    c->schedule = {{c->apply_at_op, c->apply_m, c->apply_k0}};
   }
   if (c->mode == Mode::kLearned) {
     int required = 0;

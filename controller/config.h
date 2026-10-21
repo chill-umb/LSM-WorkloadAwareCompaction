@@ -68,6 +68,15 @@ extern const char* const kRuleNames[5];
 extern const double kForkMultiplierMin;
 extern const double kForkMultiplierMax;
 
+// One scheduled change of hold-only: at the first poll at or after at_op,
+// apply m (one value per level, L0's 1) and k0 (0: keep the L0 trigger in
+// effect).
+struct ScheduledChange {
+  uint64_t at_op = 0;
+  std::vector<double> m;
+  int k0 = 0;
+};
+
 struct Config {
   Bounds bounds;
   Mode mode = Mode::kHoldOnly;
@@ -110,6 +119,11 @@ struct Config {
   uint64_t apply_at_op = 0;
   std::vector<double> apply_m;
   int apply_k0 = 0;
+  // Hold-only only (owner, 2026-10-21: the K-step batch's multi-change
+  // runs): apply_schedule, ";"-separated "op|m|k0" entries with increasing
+  // ops, each applied once at the first poll at or after its op. The
+  // apply_at_op form above is a schedule of one; the two are exclusive.
+  std::vector<ScheduledChange> schedule;
   std::string decision_log;
   std::string transition_log;
 

@@ -120,7 +120,8 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             seed: int | None = None,
             beta_star: float | None = None,
             apply_at_op: int | None = None, apply_m: str | None = None,
-            apply_k0: int | None = None) -> tuple[dict, list[str]]:
+            apply_k0: int | None = None, apply_schedule: str | None = None,
+            hold_k0_cap: int | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
@@ -129,12 +130,15 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     than the headline only for a diagnostic run, and only one the contract
     reports (so that 04 scores the run at the beta* it ran under). A
     scheduled change (apply_at_op with apply_m, optionally apply_k0: the
-    step-response arm, owner 2026-10-07) is for the hold arm in a diagnostic
-    run only."""
+    step-response arm, owner 2026-10-07), or a schedule of several
+    (apply_schedule, owner 2026-10-21), is for the hold arm in a diagnostic
+    run only, and so is hold_k0_cap: the K bound the hold arm's scheduled
+    triggers are checked against, in place of D-18's (hold-only never acts,
+    so the bound reaches nothing else)."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
     schedule = scheduled_change(arm, diagnostic, apply_at_op, apply_m,
-                                apply_k0)
+                                apply_k0, apply_schedule)
     missing: list[str] = []
     config: dict = {"mode": PLUGIN_MODES[arm],
                     "decision_log": decision_log,
@@ -142,6 +146,16 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
                     "cost_model": 2 if arm in LEARNER_ARMS else 1}
     for key in BOUND_KEYS:
         config[key] = _value(bounds, key, "D-18 action bounds", missing)
+    if hold_k0_cap is not None:
+        if arm != "hold" or not diagnostic:
+            raise ValueError("hold_k0_cap is for the hold arm in a diagnostic "
+                             "run only")
+        if (isinstance(hold_k0_cap, bool) or not isinstance(hold_k0_cap, int)
+                or hold_k0_cap < 2):
+            raise ValueError(f"hold_k0_cap must be a whole number >= 2; got "
+                             f"{hold_k0_cap!r}")
+        config["k0_cap"] = hold_k0_cap
+        missing = [m for m in missing if not m.startswith("k0_cap ")]
     config["b_max"] = _value(settings, "b_max", "Gate N3 settings", missing)
     if arm == "rules":
         rules = _value(settings, "rules", "Gate N3 settings", missing)
@@ -223,7 +237,7 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     config.update(schedule)
     for key, value in config.items():
         if key.endswith("_log") or key in ("mode", "rules", "weights_path",
-                                           "apply_m"):
+                                           "apply_m", "apply_schedule"):
             continue
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or
                 not math.isfinite(value)):
@@ -231,29 +245,64 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     return config, sorted(filled)
 
 
+def check_vector(apply_m: str, where: str = "apply_m") -> None:
+    """A scheduled multiplier vector: ":"-separated, finite and positive,
+    L0's 1 (the plugin checks the bounds and the length)."""
+    try:
+        values = [float(x) for x in apply_m.split(":")]
+    except ValueError:
+        raise ValueError(f"{where} must be ':'-separated numbers; got {apply_m!r}") from None
+    if not all(math.isfinite(v) and v > 0 for v in values) or values[0] != 1:
+        raise ValueError(f"{where} needs finite positive values and L0's 1; got {apply_m!r}")
+
+
+def check_schedule(schedule: str) -> None:
+    """apply_schedule: ";"-separated "op|m|k0" entries, each op a positive
+    whole number above the one before, m as apply_m, k0 0 (keep the
+    trigger) or a positive whole number (controller/config.cc
+    ParseSchedule; the plugin checks k0 against its bounds)."""
+    last = 0
+    for number, entry in enumerate(schedule.split(";"), 1):
+        parts = entry.split("|")
+        if len(parts) != 3:
+            raise ValueError(f"apply_schedule entry {number}: {entry!r} is not op|m|k0")
+        op, m, k0 = parts
+        if not op.isdigit() or int(op) <= last:
+            raise ValueError(f"apply_schedule entry {number}: op {op!r} must be a "
+                             f"positive whole number above {last}")
+        last = int(op)
+        check_vector(m, f"apply_schedule entry {number}'s m")
+        if not k0.isdigit():
+            raise ValueError(f"apply_schedule entry {number}: k0 {k0!r} must be 0 "
+                             "or a positive whole number")
+
+
 def scheduled_change(arm: str, diagnostic: bool, apply_at_op: int | None,
-                     apply_m: str | None, apply_k0: int | None) -> dict:
+                     apply_m: str | None, apply_k0: int | None,
+                     apply_schedule: str | None = None) -> dict:
     """The hold arm's scheduled change as config keys ({} when none): at the
     first poll at or after operation apply_at_op the plugin applies apply_m
     (":"-separated, one value per level, L0's 1) and apply_k0, once, then
-    holds (controller/config.h). The plugin checks the bounds and the length
-    against the host."""
-    if apply_at_op is None and apply_m is None and apply_k0 is None:
+    holds (controller/config.h); or apply_schedule, several such changes in
+    order. The plugin checks the bounds and the length against the host."""
+    if (apply_at_op is None and apply_m is None and apply_k0 is None
+            and apply_schedule is None):
         return {}
     if arm != "hold":
         raise ValueError(f"the {arm} arm takes no scheduled change: hold only")
     if not diagnostic:
         raise ValueError("a scheduled change is for a diagnostic run only")
+    if apply_schedule is not None:
+        if apply_at_op is not None or apply_m is not None or apply_k0 is not None:
+            raise ValueError("apply_schedule replaces apply_at_op, apply_m and "
+                             "apply_k0")
+        check_schedule(apply_schedule)
+        return {"apply_schedule": apply_schedule}
     if apply_at_op is None or apply_m is None:
         raise ValueError("a scheduled change needs apply_at_op and apply_m")
     if isinstance(apply_at_op, bool) or not isinstance(apply_at_op, int) or apply_at_op < 1:
         raise ValueError(f"apply_at_op must be a positive integer; got {apply_at_op!r}")
-    try:
-        values = [float(x) for x in apply_m.split(":")]
-    except ValueError:
-        raise ValueError(f"apply_m must be ':'-separated numbers; got {apply_m!r}") from None
-    if not all(math.isfinite(v) and v > 0 for v in values) or values[0] != 1:
-        raise ValueError(f"apply_m needs finite positive values and L0's 1; got {apply_m!r}")
+    check_vector(apply_m)
     out = {"apply_at_op": apply_at_op, "apply_m": apply_m}
     if apply_k0 is not None:
         if isinstance(apply_k0, bool) or not isinstance(apply_k0, int) or apply_k0 < 1:
@@ -317,6 +366,13 @@ def main() -> int:
                              "per level (L0's 1)")
     parser.add_argument("--apply-k0", type=int,
                         help="the scheduled L0 trigger (default: keep it)")
+    parser.add_argument("--apply-schedule",
+                        help="hold arm, diagnostic only, in place of the three "
+                             "above: several changes, ';'-separated "
+                             "'op|m|k0' entries (k0 0: keep the trigger)")
+    parser.add_argument("--hold-k0-cap", type=int,
+                        help="hold arm, diagnostic only: k0_cap in place of "
+                             "D-18's (the scheduled triggers' bound)")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
@@ -341,7 +397,8 @@ def main() -> int:
             weights_path=args.weights_path, seed=args.seed,
             beta_star=args.beta_star,
             apply_at_op=args.apply_at_op, apply_m=args.apply_m,
-            apply_k0=args.apply_k0)
+            apply_k0=args.apply_k0, apply_schedule=args.apply_schedule,
+            hold_k0_cap=args.hold_k0_cap)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

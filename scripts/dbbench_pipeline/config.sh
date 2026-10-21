@@ -310,6 +310,13 @@ LEARNER_WEIGHTS_FILE="${LEARNER_WEIGHTS_FILE:-}"
 HOLD_APPLY_AT_OP="${HOLD_APPLY_AT_OP:-}"
 HOLD_APPLY_M="${HOLD_APPLY_M:-}"
 HOLD_APPLY_K0="${HOLD_APPLY_K0:-}"
+# Several scheduled changes in place of the one above (owner, 2026-10-21; the
+# K-step batch's multi-change runs; diagnostic runs only): ";"-separated
+# "op|m|k0" entries, rising ops, k0 0 keeps the trigger. HOLD_K0_CAP: the
+# hold arm's k0_cap in place of D-18's, the bound its scheduled triggers are
+# checked against (hold-only never acts; below the slowdown trigger).
+HOLD_APPLY_SCHEDULE="${HOLD_APPLY_SCHEDULE:-}"
+HOLD_K0_CAP="${HOLD_K0_CAP:-}"
 # The hold arm's start multipliers (owner, 2026-10-08; the reverse step test:
 # load under a profile, change it at n_w with HOLD_APPLY_*; diagnostic runs
 # only, 03 refuses it otherwise): ":"-separated, one value per level, L0's 1,

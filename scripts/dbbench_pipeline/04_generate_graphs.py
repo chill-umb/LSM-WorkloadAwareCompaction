@@ -464,7 +464,7 @@ def phase_metrics(records: list[dict], at: dict[str, int]) -> list[dict]:
                          and not r["trivial"])
         user = delta("rocksdb.bytes.written")
         phases.append({
-            "phase": phase, "_first": first, "_last": last,
+            "phase": phase, "_first": first, "_last": last, "_held": held,
             "phase_operations": operations,
             "phase_gets": float(mix_end["tickers"]["rocksdb.number.keys.read"]
                                 - start["tickers"]["rocksdb.number.keys.read"]),
@@ -487,6 +487,15 @@ def phase_metrics(records: list[dict], at: dict[str, int]) -> list[dict]:
             "C_W": math.nan, "C_R": math.nan, "C_S": math.nan,
         })
     return phases
+
+
+def phases_add_up(phases: list[dict], operations: int, held: int) -> bool:
+    """The phases' operations and held byte-operations sum exactly to the
+    run's. Both are whole numbers, so the check adds the exact values: a
+    full-size W5 run holds about 1.2e18 byte-operations, above 2**53, where
+    the phases' float copies round apart from the run's total."""
+    return (sum(p["phase_operations"] for p in phases) == float(operations)
+            and sum(p["_held"] for p in phases) == held)
 # Cost model 2's parts and report-only diagnostics (PATHWAYS D §1 as amended
 # 2026-10-03, D-23; D-24 §4), filled when the prices are schema 6.
 V2_FIELDS = (
@@ -819,9 +828,7 @@ def programme1_metrics(run_dir: Path, text: str, metadata: dict[str, str],
     # must add up to the run they split.
     phases = phase_metrics(records, at)
     if phases:
-        if (sum(p["phase_operations"] for p in phases) !=
-                float(mix_end["op"] - start["op"]) or
-                sum(p["phase_held_byte_operations"] for p in phases) != held):
+        if not phases_add_up(phases, mix_end["op"] - start["op"], held):
             raise InvalidArm("the phases' operations or held byte-operations "
                              "do not add up to the run's")
         row["_phases"] = phases
@@ -1258,7 +1265,7 @@ def main() -> int:
     phase_rows = []
     for row in rows:
         for phase in row.pop("_phases", []):
-            del phase["_first"], phase["_last"]
+            del phase["_first"], phase["_last"], phase["_held"]
             phase_rows.append({**{key: row[key] for key in (
                 "workload_profile", "suite_workload", "size_ratio", "arm",
                 "repeat", "experiment_fingerprint", "objective_status",

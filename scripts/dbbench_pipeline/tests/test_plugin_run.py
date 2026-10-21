@@ -184,6 +184,30 @@ class CheckPluginRunTest(unittest.TestCase):
         self.assertEqual(failed(plan, sched(600), apply(800, 0, 0)), ["hold_only"])
         self.assertEqual(failed(sched(600)), ["hold_only"])         # no plan line
 
+    def test_hold_only_with_a_schedule_calls_once_per_change_in_order(self):
+        """The K-step batch's multi-change runs (owner, 2026-10-21): one
+        accepted apply per planned change, in order, none before its op."""
+        plans = [{"type": "apply_scheduled", "op": 0, "apply_at_op": at,
+                  "m": [1, 1, 1, 1], "k0": k0, "index": i}
+                 for i, (at, k0) in enumerate(((500, 8), (900, 2), (1300, 0)))]
+        def sched(op, index, ok=1):
+            return {**apply(op, 0, 0, m=(1, 1, 1, 1), ok=ok), "scheduled": 1,
+                    "index": index}
+        def failed(*body):
+            return verdict(mode="hold-only", body=[*plans, *body])["failed_checks"]
+        made = [sched(510, 0), sched(905, 1), sched(1300, 2)]
+        report = verdict(mode="hold-only", body=[*plans, *made])
+        self.assertEqual(report["verdict"], "passed", report["checks"]["hold_only"])
+        self.assertEqual(report["checks"]["hold_only"]["scheduled_applies"], 3)
+        self.assertEqual(failed(*made[:2]), ["hold_only"])           # one missing
+        self.assertEqual(failed(made[0], sched(850, 1), made[2]),
+                         ["hold_only"])                              # too early
+        self.assertEqual(failed(made[0], sched(905, 1, ok=0), made[2]),
+                         ["hold_only"])
+        self.assertEqual(failed(made[0], sched(905, 2), sched(1300, 1)),
+                         ["hold_only"])                              # out of order
+        self.assertEqual(failed(*made, sched(1400, 3)), ["hold_only"])
+
     def test_an_expected_fallback_passes(self):
         report = verdict(fallback=True, expect_fallback=True)
         self.assertEqual(report["verdict"], "passed", report["failed_checks"])
