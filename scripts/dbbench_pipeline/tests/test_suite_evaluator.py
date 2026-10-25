@@ -165,6 +165,21 @@ class PhaseTest(unittest.TestCase):
         self.assertEqual(sum(p["phase_filter_probes"] for p in phases),
                          row["filter_probes"])
 
+    def test_a_stamp_ahead_of_its_h_sample_still_adds_up(self):
+        # A job installed as the phase switched: the phase_start stamp read
+        # the new size an operation before the h sample did (w9's W5 T7 256
+        # K19, 2026-10-22). Each phase starts from the H the run holds then.
+        def ahead(records):
+            for r in records:
+                if r.get("name") == "phase_start" and r["phase"] == 2:
+                    r["h"] += 638161
+            return records
+        rewrite(self.run, ahead)
+        row = graphs.collect_arm(self.run.dir)
+        self.assertEqual(sum(p["phase_held_byte_operations"]
+                             for p in row["_phases"]),
+                         row["held_byte_operations"])
+
     def test_04_writes_phases_csv(self):
         ran = subprocess.run(
             ["python3", str(PIPELINE / "04_generate_graphs.py"), "--results",

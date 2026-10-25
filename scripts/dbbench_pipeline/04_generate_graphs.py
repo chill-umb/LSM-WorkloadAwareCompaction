@@ -443,12 +443,16 @@ def phase_metrics(records: list[dict], at: dict[str, int]) -> list[dict]:
     phases' operations and held byte-operations sum to the run's. Needs
     host log schema 3 (flush_end)."""
     phases = []
+    h_run = None  # the H the run holds at this phase's start: its last sample
     for phase, first, last in host_log.phase_bounds(records, at):
         start, end = records[first], records[last]
         mix_end = records[at["drain_start"]] if last == at["drain_end"] else end
         window = records[first + 1:last]
-        samples = [(start["op"], start["h"])] + [
+        # Not the phase_start stamp's own h: a job installing as the phase
+        # switches shows there an operation before its h sample does.
+        samples = [(start["op"], start["h"] if h_run is None else h_run)] + [
             (r["op"], r["h"]) for r in window if r.get("type") == "h"]
+        h_run = samples[-1][1]
         ends = [op for op, _ in samples[1:]] + [end["op"]]
         held = sum(h * (later - op) for (op, h), later in zip(samples, ends))
 
