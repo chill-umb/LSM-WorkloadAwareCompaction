@@ -4268,6 +4268,59 @@ D-31 step run has been read under it. A change is a new dated entry.
 **Falsification.** This entry fails as a record if it is changed after the first run that uses the snapshot fields.
 A change is a new dated entry.
 
+### D-35, 2026-10-25 — the K-step batch's twins of record: the 2026-10-24 rerun of native repeat 1
+
+**The owner's ruling** (2026-10-25): "Make the new twins the official baseline", after the operator's report of the
+rerun (2026-10-24 21:20 UTC).
+
+**Why.**
+- D-32 §1's twin is native repeat 1 at (L1, K = 4). Those twins ran on 2026-10-20/21; the K-step batch ran on
+  2026-10-22.
+- The machine check (2026-10-24, 12 W3 runs) found the twins ran in a faster period than the step runs, on the same
+  nodes: merge time per key about 8-9 µs then against about 12 µs since. Native and hold-only runs made the same day
+  were equally slow, so the plugin is not the cause. The node's CPU settings were unchanged and it had not rebooted.
+  The cause is not known.
+- A speed gap that changes the files per L0 merge after a change is not removed by D-33 §2's change measure.
+
+**The rerun.**
+- All 135 twins: W1-W5 × T 2-10 × L1 64, 128, 256 MiB.
+- Each was run exactly as D-32 §1 runs a twin: native, K = 4, the same tree (identity hash checked), `--seed=1`, the
+  same binary `4dd266bd814b52b14ed6dace79f9b27b9ae514173b653e4dc6c52b7692de19ac`, and D-29 §1's shape.
+- Each ran on the node that ran that setting's step runs, on 2026-10-24 between 17:20 and 21:10 UTC.
+- Every run ended with exit 0, and all 135 were measured.
+- Results on the workers are in `db/rerun-twins-<W>/T<T>-l1<L1>-k4/40M/T<T>/native`. The operator's data is in
+  `~/node_ops/diag/kcase/data/twins_rec/` and `cycles_rec/`.
+- The rerun closes the gap. Before the change, both runs have K = 4. The median ratio of the step's merge time per
+  key to the twin's in that window:
+
+  | Workload | Old twins | New twins |
+  |---|---|---|
+  | W3 | 1.24 | 1.00 |
+  | W4 | 1.09 | 0.99 |
+  | W5 | 1.05 | 0.97 |
+
+**The ruling.**
+1. **The twin of every K-step run is the rerun of its native repeat 1.** This covers:
+   - D-32's 675 single-change runs;
+   - §7's 135 sealed multi-change runs (owner, 2026-10-22: "multi-change runs stay sealed").
+2. **The noise limits stay the three original native repeats'** (D-33 §2: "the 3 native repeats"). The rerun is not
+   pooled with them: a repeat from another period would widen the limits.
+3. **D-33 is otherwise unchanged:** the change measure, the settled rule and the pass rule.
+4. **D-31's twins are not changed by this entry.** They serve the level steps (cases 3 and 4) and need their own
+   entry if they are rerun.
+5. **The old twins stay on disk.** They are the record of the 2026-10-24 scoring, which used them.
+
+**What was seen before this entry.**
+- The cases 1-2 law (round 5) was scored on the 675 single-change runs against both twin sets. 3 of 15 quantities
+  pass with either.
+- Against the twins of record, the operator also scored two trial changes on the same runs (owner, 2026-10-25): the
+  calm-tree lag rule (adopted as round 7) and a plain post-change gap for levels that push data on (dropped; D-33's
+  change measure stays). 3 of 15 pass in every variant.
+- The 135 sealed multi-change runs have not been scored.
+
+**Falsification.** This entry fails as a record if the sealed multi-change runs are scored against any other twin, or
+if it is changed after they are scored. A change is a new dated entry.
+
 ---
 
 ## 2. Gate verdicts as measured
