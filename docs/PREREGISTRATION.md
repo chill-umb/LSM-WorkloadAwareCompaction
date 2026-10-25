@@ -4321,6 +4321,48 @@ rerun (2026-10-24 21:20 UTC).
 **Falsification.** This entry fails as a record if the sealed multi-change runs are scored against any other twin, or
 if it is changed after they are scored. A change is a new dated entry.
 
+### D-36, 2026-10-25 — the propagation law is rolling: its inputs are the run's own recent windows, never a native tree
+
+**The owner's ruling** (2026-10-25, ~21:40 UTC): "Yes, go with (a). This was always supposed to be a Rolling case. We
+should never use another native tree to calculate the propagation law."
+
+**Why.**
+- D-34 limits the law to what the controller observes at run time, as recent-window values.
+- The v2 scorer (rounds 1-14) built every settled prediction from the twin's windows after the change (sizes,
+  flows, L0 cycles, speeds) and the read curve from the twin's whole phase. A controller has no twin. Fed only the
+  run's own data from before the change, the law scored 2 of 13 instead of 7: busy trees keep changing after the
+  change (tree 1.3-1.9x in W3/W4, W5's write volume 0.19x in its later phases), and the twin had carried that.
+
+**The rule.**
+1. **The twin is the scoring baseline only** (D-32 §1, D-33's change measure, D-35). No value from a native run
+   (windows, cycles, speeds, read counters, curves) enters a prediction.
+2. **Settled checks (#1-#6, #10, #11): reverse prediction from the run's own window.** For each settled window k, the
+   law starts from the step run's own window k (running at K'): its sizes, flows, overlaps, L0 merges, its own cycles
+   window k, its level growth from its own window k-1. It predicts the same window at K = 4 from the same state at X
+   (the step's own state at the change). Predicted change (step - twin) = minus that prediction. The law's formulas
+   take the K a window runs at as an input (they assumed K = 4 before).
+3. **Path checks (#7, #8a, #8b, #9): forward from the run's own window before the change** (window 0, its cycles, the
+   per-file snapshot at X, round 14's per-band speeds), as #8 already did. #7's prediction comes from window 0 only.
+4. **Gates that chose a formula from the twin's windows** (round 9-11's calm schedule, round 9's storage term) use
+   the run's own windows instead.
+5. **Read curve (#11):** the per-level read counters were logged only at the phase stamps. Until per-window counters
+   exist, the curve comes from the step run's own whole-phase counters with edges from its own windows (its own data,
+   not the recent window). A fork change to log them per window is recorded as open.
+6. Everything else is unchanged: D-33's settled rule, change measure and noise rule, the hit rules, the 90% rule.
+
+**Scores.** Rounds 1-14 stay on record as twin-fed. Round 15 = round 14's law under this rule.
+
+**What was seen before this entry.**
+- Rounds 1-14 (twin-fed) on the 675 single-change runs: 7 of 13 at round 14. The window-0-only trial: 2 of 13.
+- This text was drafted at 21:43 UTC, before any rolling score. Round 15 (this rule on round 14's law) was then
+  scored, 7 of 13 (report "Round 15: the rolling law"), and reported to the owner before this commit. The
+  sections above are the draft's, unchanged; this section was added at the commit. The draft was not committed,
+  so only the operator's draft file (`~/node_ops/drafts/2026-10-25-D-36-rolling-law-draft.md`) dates it.
+- The 135 sealed multi-change runs have not been scored.
+
+**Falsification.** This entry fails as a record if it is changed after this commit. A change is a new dated
+entry.
+
 ---
 
 ## 2. Gate verdicts as measured
