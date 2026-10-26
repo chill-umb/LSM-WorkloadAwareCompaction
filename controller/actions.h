@@ -53,4 +53,14 @@ L0Control ActL0(const L0Control& c, Action action, int k0, const Bounds& b);
 L0Control RelaxL0(const L0Control& c, double turnovers, int k0_configured,
                   const Bounds& b);
 
+// A-Impl-6's live cap (owner, 2026-10-26). L0's score is the larger of
+// k0 / K_0 and those k0 files' bytes over C_1 (version_set.cc:3846-3853,
+// 3954-3955; C_1 is the configured base, which no multiplier scales). From
+// ceil(C_1 / F) files on, the byte branch alone makes L0 due, so every trigger
+// at or above that count acts as that count. 0 when C_1 or F is unknown.
+int LiveK0Cap(double C1, double F);
+// b with k0_cap lowered to the live cap, never below k0_min; b itself when
+// the cap is 0 or not below k0_cap.
+Bounds L0Bounds(const Bounds& b, int live_cap);
+
 }  // namespace rlc

@@ -11,6 +11,7 @@
 namespace rlc {
 namespace {
 
+using test::kMiB;
 using test::TestBounds;
 
 TEST(Actions, CompactAndDeferSetTheScore) {
@@ -122,6 +123,39 @@ TEST(Actions, L0RelaxesBackToTheConfiguredTrigger) {
   // One kappa_a turnover takes the anchor e^-1 of the way.
   EXPECT_NEAR(RelaxL0({8, 0}, b.kappa_a, 4, b).anchor, 4 + 4 * std::exp(-1.0),
               1e-12);
+}
+
+// A-Impl-6's live cap (owner, 2026-10-26): the first L0 file count whose
+// bytes reach C_1, the K-step batch's caps at its 15.55 MiB files.
+TEST(Actions, TheLiveCapIsTheFirstFileCountWhoseBytesReachC1) {
+  const double F = 15.55 * kMiB;
+  EXPECT_EQ(LiveK0Cap(64 * kMiB, F), 5);  // 4 files hold 62.2 MiB, 5 hold 77.8
+  EXPECT_EQ(LiveK0Cap(128 * kMiB, F), 9);
+  EXPECT_EQ(LiveK0Cap(256 * kMiB, F), 17);
+  EXPECT_EQ(LiveK0Cap(64 * kMiB, 16 * kMiB), 4);  // 4 files reach C_1 exactly
+  EXPECT_EQ(LiveK0Cap(64 * kMiB, std::nan("")), 0);  // no flush yet
+  EXPECT_EQ(LiveK0Cap(64 * kMiB, 0), 0);
+  EXPECT_EQ(LiveK0Cap(0, F), 0);
+  EXPECT_EQ(LiveK0Cap(64 * kMiB, 1e-6), 1e9);  // huge: clamped, never binding
+}
+
+TEST(Actions, L0BoundsLowerOnlyTheTriggerCap) {
+  const Bounds b = TestBounds();  // [2, 8]
+  const Bounds five = L0Bounds(b, 5);
+  EXPECT_EQ(five.k0_cap, 5);
+  EXPECT_EQ(five.k0_min, b.k0_min);
+  EXPECT_EQ(five.m_max, b.m_max);
+  EXPECT_EQ(five.kappa_a, b.kappa_a);
+  EXPECT_EQ(L0Bounds(b, 0).k0_cap, 8);  // unknown: the configured bound
+  EXPECT_EQ(L0Bounds(b, 8).k0_cap, 8);
+  EXPECT_EQ(L0Bounds(b, 17).k0_cap, 8);  // never raised
+  EXPECT_EQ(L0Bounds(b, 1).k0_cap, 2);   // never below k0_min
+  // Under the live cap the actions stop at it: at 64 MiB, K = 6..8 act as 5.
+  const L0Control c{4, 0};
+  EXPECT_EQ(ActL0(c, Action::kDefer, 4, five).K0(five), 5);
+  EXPECT_EQ(ActL0(c, Action::kDefer, 5, five).K0(five), 5);
+  EXPECT_EQ(ActL0({5, 0}, Action::kExpand, 1, five).anchor, 5);
+  EXPECT_EQ(L0Control({4, 4}).K0(five), 5);  // a trigger of 8 held above it
 }
 
 }  // namespace

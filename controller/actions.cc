@@ -89,4 +89,19 @@ L0Control RelaxL0(const L0Control& c, double turnovers, int k0_configured,
           Toward(c.offset, 0, turnovers, b.kappa_d, snap)};
 }
 
+int LiveK0Cap(double C1, double F) {
+  if (!(C1 > 0) || !(F > 0)) return 0;
+  const double n = std::ceil(C1 / F);
+  if (!std::isfinite(n)) return 0;
+  return static_cast<int>(std::min(n, 1e9));
+}
+
+Bounds L0Bounds(const Bounds& b, int live_cap) {
+  Bounds r = b;
+  if (live_cap > 0 && live_cap < b.k0_cap) {
+    r.k0_cap = std::max(b.k0_min, live_cap);
+  }
+  return r;
+}
+
 }  // namespace rlc

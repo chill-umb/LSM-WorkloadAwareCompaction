@@ -121,6 +121,10 @@ struct View {
   int k0 = 0;                 // L0 files not being compacted
   int k0_all = 0;             // all L0 files
   int K0 = 0;                 // the trigger in effect
+  // A-Impl-6's live cap, ceil(C_1 / F) (actions.h LiveK0Cap): the bound the
+  // L0 agent's actions use. Set by the decision modes only; 0 = unknown, or
+  // hold-only, which keeps the configured bound.
+  int k0_live_cap = 0;
   int running = -1;           // start level of the job holding the slot
   double backlog = kNaN;      // pending compaction bytes / H
   double l0_slowdown = kNaN;  // (K_slow - k0) / K_slow

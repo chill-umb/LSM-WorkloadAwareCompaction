@@ -135,7 +135,7 @@ Values LevelPrior(const View& v, int j, const LevelControl& c,
 }
 
 Values L0Prior(const View& v, const L0Control& c, const Config& cfg) {
-  const Bounds& b = cfg.bounds;
+  const Bounds b = L0Bounds(cfg.bounds, v.k0_live_cap);
   const double F = v.F;  // held fixed from the first flush (H §3)
   const double u = Ratio(v.user_bytes, v.ops);
   const double gets = Ratio(v.gets, v.ops);

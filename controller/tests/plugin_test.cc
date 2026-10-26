@@ -35,6 +35,7 @@ namespace {
 using test::BaseConfig;
 using test::CountType;
 using test::FakeHost;
+using test::kMiB;
 using test::ReadLines;
 using test::TempDir;
 using test::WriteConfig;
@@ -646,6 +647,109 @@ TEST_F(PluginTest, AFailedScheduledChangeFallsBack) {
     }
   }
   EXPECT_TRUE(refused);
+}
+
+// `turns` turnovers of writes only, each with 4 flushes of `flush` bytes (N_0
+// stays 100k at any flush size) and Turnover's jobs, 200 ms apart on the
+// fake clock so no apply is held, each followed by a poll.
+void FeedWrites(FakeHost* host, Controller* controller, FakeClock* clock,
+                uint64_t flush, int turns, int* next_job) {
+  for (int turn = 0; turn < turns; ++turn) {
+    host->AddOps(0, 100000);
+    for (int i = 0; i < 4; ++i) host->Job(FakeHost::Flush(flush));
+    for (int level = 0; level < 4; ++level) {
+      const uint64_t target =
+          level == 0 ? 8 * 1024 * 1024 : (8u << 20) << (level);
+      host->Job(FakeHost::Compaction(false, *next_job, level, 1, 0, 0));
+      host->Job(
+          FakeHost::Compaction(true, (*next_job)++, level, target, 0, target));
+    }
+    clock->now += 200000;
+    controller->Step();
+  }
+}
+
+// L0 decision lines' "requested" triggers.
+std::vector<double> L0Requested(const std::vector<std::string>& decisions) {
+  std::vector<double> out;
+  for (const std::string& line : decisions) {
+    if (line.find("\"type\":\"decision\"") == std::string::npos ||
+        line.find("\"level\":0,") == std::string::npos) {
+      continue;
+    }
+    const size_t at = line.find("\"requested\":");
+    if (at != std::string::npos) out.push_back(std::stod(line.substr(at + 12)));
+  }
+  return out;
+}
+
+// A-Impl-6's live cap (owner, 2026-10-26), wired through the decision loop.
+// 3 MiB flushes against the 8 MiB base: L0's byte branch fires at
+// ceil(8 / 3) = 3 files, so the configured trigger 4 acts as 3. Rules mode
+// holds K at the live cap and offers no expand; with 1 MiB flushes (live cap
+// 8, the configured k0_cap) the same run keeps 4 and may expand.
+TEST_F(PluginTest, RulesModeKeepsTheTriggerAtTheLiveCap) {
+  for (const double flush_mib : {3.0, 1.0}) {
+    SCOPED_TRACE(flush_mib);
+    dir_ = TempDir();
+    FakeHost host;
+    FakeClock clock;
+    {
+      Controller controller(
+          &host,
+          Config({{"mode", "\"rules\""}, {"rules", "\"k0_tracking\""}}),
+          clock.Fn());
+      host.SetL0(2);
+      for (int level = 1; level <= 4; ++level) host.SetLevel(level, 0.5);
+      FeedWrites(&host, &controller, &clock,
+                 static_cast<uint64_t>(flush_mib * kMiB), 3, &next_job_);
+      EXPECT_FALSE(controller.fallback());
+    }
+    const std::vector<std::string> decisions = Decisions();
+    const std::vector<double> requested = L0Requested(decisions);
+    ASSERT_FALSE(requested.empty());
+    for (const double k : requested) EXPECT_EQ(k, flush_mib == 3.0 ? 3 : 4);
+    for (const std::string& line : decisions) {
+      if (line.find("\"type\":\"decision\"") == std::string::npos ||
+          line.find("\"level\":0,") == std::string::npos) {
+        continue;
+      }
+      EXPECT_NE(line.find(flush_mib == 3.0 ? "\"mask\":[1,1,0,0]"
+                                           : "\"mask\":[1,1,0,1]"),
+                std::string::npos)
+          << line;
+    }
+    if (flush_mib == 3.0) {
+      ASSERT_EQ(host.applied.size(), 1u);  // the configured 4 is clamped once
+      EXPECT_EQ(host.applied[0].second, 3);
+    } else {
+      EXPECT_TRUE(host.applied.empty());
+    }
+  }
+}
+
+// Hold-only keeps the configured bound: a scheduled trigger of 8 above the
+// live cap (6 at 1.5 MiB flushes) is applied, held, and logged as 8.
+TEST_F(PluginTest, HoldOnlyHoldsAScheduledTriggerAboveTheLiveCap) {
+  FakeHost host;
+  FakeClock clock;
+  {
+    Controller controller(&host,
+                          Config({{"apply_at_op", "150000"},
+                                  {"apply_m", "\"1:1:1:1:1\""},
+                                  {"apply_k0", "8"}}),
+                          clock.Fn());
+    host.SetL0(3);
+    for (int level = 1; level <= 4; ++level) host.SetLevel(level, 0.5);
+    FeedWrites(&host, &controller, &clock,
+               static_cast<uint64_t>(1.5 * kMiB), 4, &next_job_);
+    EXPECT_FALSE(controller.fallback());
+  }
+  ASSERT_EQ(host.applied.size(), 1u);
+  EXPECT_EQ(host.applied[0].second, 8);
+  const std::vector<double> requested = L0Requested(Decisions());
+  ASSERT_GE(requested.size(), 2u);
+  EXPECT_EQ(requested.back(), 8);  // after the change, as it holds it
 }
 
 }  // namespace

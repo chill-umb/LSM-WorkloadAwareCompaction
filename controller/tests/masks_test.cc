@@ -12,6 +12,7 @@
 namespace rlc {
 namespace {
 
+using test::kMiB;
 using test::SetPhi;
 using test::TestBounds;
 using test::TestConfig;
@@ -97,6 +98,20 @@ TEST(Masks, L0) {
   EXPECT_TRUE(L0Mask(c, 2, 4, b)[kExpand]);
   EXPECT_FALSE(L0Mask({8, 0}, 2, 8, b)[kExpand]);
   EXPECT_TRUE(L0Mask(c, 0, 4, b)[kHold]);
+}
+
+// A-Impl-6's live cap (owner, 2026-10-26): at C_1 = 64 MiB and 15.55 MiB
+// files L0's byte branch fires at 5 files, so K = 6..8 act as 5; the agent is
+// offered no action that only moves K above 5.
+TEST(Masks, L0AboveTheLiveCapIsMasked) {
+  const Bounds b = L0Bounds(TestBounds(), LiveK0Cap(64 * kMiB, 15.55 * kMiB));
+  ASSERT_EQ(b.k0_cap, 5);
+  EXPECT_TRUE(L0Mask({4, 0}, 2, 4, b)[kExpand]);   // 4 -> 5 is real
+  EXPECT_FALSE(L0Mask({5, 0}, 2, 5, b)[kExpand]);  // 5 -> 6 is not
+  EXPECT_TRUE(L0Mask({4, 0}, 4, 4, b)[kDefer]);    // trigger 5: real
+  EXPECT_FALSE(L0Mask({5, 0}, 5, 5, b)[kDefer]);   // trigger 6: due anyway
+  EXPECT_TRUE(L0Mask({5, 0}, 3, 5, b)[kCompact]);  // compact is unchanged
+  EXPECT_TRUE(L0Mask({5, 0}, 5, 5, b)[kHold]);
 }
 
 TEST(Masks, AdmissibleAndRepair) {

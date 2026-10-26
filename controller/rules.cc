@@ -28,7 +28,7 @@ int BestTrigger(const View& v, const LevelParts& interval, const Config& cfg) {
   const double A = cfg.beta_w * cfg.c_w * u * v.m[1] * v.C[1] / F;
   const double B = cfg.beta_r / 2 * (gets * per_get + scans * per_scan);
   if (!(A > 0) || !std::isfinite(A) || !(B >= 0) || !std::isfinite(B)) return 0;
-  const Bounds& b = cfg.bounds;
+  const Bounds b = L0Bounds(cfg.bounds, v.k0_live_cap);
   if (B == 0) return b.k0_cap;
   const double star = std::sqrt(A / B);
   const auto g = [&](int K) { return A / K + B * K; };

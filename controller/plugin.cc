@@ -411,6 +411,10 @@ std::vector<DecisionRecord> Controller::Decide(
   View v =
       MakeView(options_, snapshot, stats_, ops, reads, m_target_, k0_target_);
   FillCostModel2(&v, stats_, steps, cfg_);
+  // A-Impl-6's live cap bounds the L0 agent's actions; hold-only keeps the
+  // configured bound, so its log reads the trigger it really holds.
+  if (!hold_only && n_ > 1) v.k0_live_cap = LiveK0Cap(v.C[1], v.F);
+  const Bounds b0 = L0Bounds(b, v.k0_live_cap);
   const uint64_t op = ops.total();
   std::vector<double> m = m_target_;
   std::vector<DecisionRecord> made;
@@ -456,21 +460,21 @@ std::vector<DecisionRecord> Controller::Decide(
       return DecideLearner(q, r.mask, cfg_.explore, u_explore, u_pick, tag);
     };
     if (level == 0) {
-      const L0Control c = RelaxL0(l0_, turnovers, options_.l0_trigger, b);
-      v.K0 = c.K0(b);
+      const L0Control c = RelaxL0(l0_, turnovers, options_.l0_trigger, b0);
+      v.K0 = c.K0(b0);
       r.agent = Agent::kL0;
-      r.mask = L0Mask(c, v.k0, v.K0, b);
+      r.mask = L0Mask(c, v.k0, v.K0, b0);
       r.b = L0Prior(v, c, cfg_);
       state = L0Features(v, c, parts_[0], cfg_);
       choice = learner ? learn(Agent::kL0)
                        : DecideL0(cfg_, v, c, r.mask, parts_[0]);
       next.value_before = v.K0;
-      l0_ = ActL0(c, choice.action, v.k0, b);
+      l0_ = ActL0(c, choice.action, v.k0, b0);
       r.old_value = k0_applied_;
-      r.requested = l0_.K0(b);
+      r.requested = l0_.K0(b0);
       r.anchor = l0_.anchor;
       r.timing = l0_.offset;
-      v.K0 = l0_.K0(b);  // the levels below see the new trigger
+      v.K0 = l0_.K0(b0);  // the levels below see the new trigger
     } else {
       const bool last = level == v.last;
       const LevelControl c = Relax(controls_[level], turnovers, b);
@@ -537,7 +541,7 @@ std::vector<DecisionRecord> Controller::Decide(
                          .str());
   }
   m_target_ = m;
-  k0_target_ = l0_.K0(b);
+  k0_target_ = l0_.K0(b0);
   if (m_target_ != m_applied_ || k0_target_ != k0_applied_) {
     if (pending_first_id_ == 0) pending_first_id_ = made.front().id;
     last_id_ = made.back().id;
@@ -550,10 +554,11 @@ NeighbourView Controller::Neighbour(const View& v, int level,
   NeighbourView n;
   const Bounds& b = cfg_.bounds;
   if (level == 0) {
+    const Bounds b0 = L0Bounds(b, v.k0_live_cap);
     View w = v;
-    w.K0 = l0_.K0(b);
+    w.K0 = l0_.K0(b0);
     n.agent = Agent::kL0;
-    n.mask = L0Mask(l0_, w.k0, w.K0, b);
+    n.mask = L0Mask(l0_, w.k0, w.K0, b0);
     n.b = L0Prior(w, l0_, cfg_);
     n.state = L0Features(w, l0_, parts_[0], cfg_);
     n.c_bytes = Divisor(v, 0);

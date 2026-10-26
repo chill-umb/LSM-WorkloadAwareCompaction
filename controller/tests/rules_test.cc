@@ -46,6 +46,28 @@ TEST(Rules, BestTriggerIsD11sBestAdmissibleInteger) {
   EXPECT_EQ(BestTrigger(v, interval, cfg), 2);
 }
 
+// A-Impl-6's live cap (owner, 2026-10-26) bounds k0_tracking: a K* above it
+// is the cap, and a rule that would expand past it holds.
+TEST(Rules, K0TrackingStopsAtTheLiveCap) {
+  const Config cfg = TestConfig(Mode::kRules, {"k0_tracking"});
+  View v = TestView();  // K* = 5, trigger 4, k0 = 2
+  const L0Control c{4, 0};
+  v.k0_live_cap = 4;
+  EXPECT_EQ(BestTrigger(v, {}, cfg), 4);
+  const Bounds b4 = L0Bounds(cfg.bounds, v.k0_live_cap);
+  EXPECT_EQ(L0Rules(v, c, L0Mask(c, v.k0, v.K0, b4), {}, cfg).action,
+            Action::kHold);
+  v.scans = 0;
+  v.gets = 0;
+  EXPECT_EQ(BestTrigger(v, {}, cfg), 4);  // no reads: the live cap, not 8
+  v = TestView();
+  v.k0_live_cap = 5;  // K* = 5 is allowed: the rule expands to it
+  const Bounds b5 = L0Bounds(cfg.bounds, v.k0_live_cap);
+  EXPECT_EQ(BestTrigger(v, {}, cfg), 5);
+  EXPECT_EQ(L0Rules(v, c, L0Mask(c, v.k0, v.K0, b5), {}, cfg).action,
+            Action::kExpand);
+}
+
 // D-21: with L0's reopens priced (prior_test's L0ReopensRaiseTheReadPrice),
 // g(K) = 3276.8 / K + 265.5 K, K* = 3.51, and g(4) = 1881.2 < g(3) = 1888.8.
 TEST(Rules, BestTriggerPricesL0Reopens) {
