@@ -307,6 +307,17 @@ count_l3_domains() {
   done | sort -u | grep -c . || echo 0
 }
 
+# The online CPUs' governors for the metadata, "unavailable" without cpufreq.
+# A CPU that SMT off took offline keeps cpufreq files that refuse reads (a node
+# with SMT on in firmware, 2026-10-27). CPU_SYSFS lets the tests use a fake tree.
+cpu_governors() {
+  local sysfs="${CPU_SYSFS:-/sys/devices/system/cpu}" cpu governors
+  governors="$(for cpu in $(expand_cpu_list "$(<"$sysfs/online")"); do
+                 cat "$sysfs/cpu$cpu/cpufreq/scaling_governor" 2>/dev/null
+               done | sort -u | paste -sd,)" || true
+  echo "${governors:-unavailable}"
+}
+
 DBBENCH_LAUNCHER=()
 CONTROLLER_LAUNCHER=()
 if [[ -n "$DBBENCH_CPUS" || -n "$CONTROLLER_CPUS" ]]; then
@@ -1566,7 +1577,7 @@ PY
     printf 'build_cxx=%s\n' "$BUILD_CXX_VERSION"
     printf 'dbbench_cpus=%s\n' "${DBBENCH_CPUS:-unpinned}"
     printf 'controller_cpus=%s\n' "${CONTROLLER_CPUS:-unpinned}"
-    printf 'cpu_governor=%s\n' "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | paste -sd, || echo unavailable)"
+    printf 'cpu_governor=%s\n' "$(cpu_governors)"
     printf 'thp_enabled=%s\n' "$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo unavailable)"
     printf 'research_objective_sha256=%s\n' "$RESEARCH_OBJECTIVE_SHA256"
     printf 'diagnostic_run=%s\n' "$DIAGNOSTIC_RUN"

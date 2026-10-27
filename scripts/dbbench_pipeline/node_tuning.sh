@@ -30,12 +30,17 @@ if [[ -r "$smt" && "$(<"$smt")" == on ]]; then
   echo off > "$smt" || status=1
 fi
 
-governors=("$CPU"/cpu[0-9]*/cpufreq/scaling_governor)
-if [[ -e "${governors[0]}" ]]; then
-  for governor in "${governors[@]}"; do
-    [[ "$(<"$governor")" == performance ]] || echo performance > "$governor" || status=1
-  done
-fi
+# Online CPUs only: on a node with SMT on in firmware, the siblings that SMT
+# off takes offline keep their cpufreq files, which then refuse reads and
+# writes ("Device or resource busy").
+governors=()
+for governor in "$CPU"/cpu[0-9]*/cpufreq/scaling_governor; do
+  [[ -e "$governor" && "$(cat "${governor%/cpufreq/*}/online" 2>/dev/null)" != 0 ]] &&
+    governors+=("$governor")
+done
+for governor in "${governors[@]}"; do
+  [[ "$(<"$governor")" == performance ]] || echo performance > "$governor" || status=1
+done
 
 thp="$SYSFS/kernel/mm/transparent_hugepage/enabled"
 if [[ -r "$thp" && "$(selected "$thp")" != madvise ]]; then
@@ -43,6 +48,6 @@ if [[ -r "$thp" && "$(selected "$thp")" != madvise ]]; then
 fi
 
 echo "[tuning] SMT $(cat "$smt" 2>/dev/null || echo absent);" \
-     "governor $( [[ -e "${governors[0]}" ]] && cat "${governors[@]}" | sort -u | paste -sd, || echo none);" \
+     "governor $( (( ${#governors[@]} )) && cat "${governors[@]}" | sort -u | paste -sd, || echo none);" \
      "THP $( [[ -r "$thp" ]] && selected "$thp" || echo absent)"
 exit "$status"

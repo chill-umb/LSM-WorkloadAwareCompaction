@@ -255,7 +255,10 @@ check_tuning() {
   local smt governors thp bad=()
   smt="$(cat "$CPU/smt/control" 2>/dev/null || echo absent)"
   [[ "$smt" != on ]] || bad+=("SMT on")
-  governors="$(cat "$CPU"/cpu[0-9]*/cpufreq/scaling_governor 2>/dev/null | sort -u | paste -sd, || true)"
+  # Online CPUs only, as node_tuning.sh sets them.
+  governors="$(for governor in "$CPU"/cpu[0-9]*/cpufreq/scaling_governor; do
+                 [[ "$(cat "${governor%/cpufreq/*}/online" 2>/dev/null)" == 0 ]] || cat "$governor"
+               done 2>/dev/null | sort -u | paste -sd, || true)"
   [[ -z "$governors" || "$governors" == performance ]] || bad+=("governor $governors")
   thp="$( [[ -r "$SYSFS/kernel/mm/transparent_hugepage/enabled" ]] &&
           selected "$SYSFS/kernel/mm/transparent_hugepage/enabled" || echo absent)"

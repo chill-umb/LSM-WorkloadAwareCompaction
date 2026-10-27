@@ -366,5 +366,42 @@ class RefusalTest(unittest.TestCase):
                     self.assertFalse((Path(tmp) / "db").exists())
 
 
+class GovernorRecordTest(unittest.TestCase):
+    """metadata.env's cpu_governor names the online CPUs' governors, on one
+    line. SMT on in firmware (worker 1, 2026-10-27): the CPUs SMT off takes
+    offline keep cpufreq files, here one readable and one refusing reads (a
+    folder in its place); without cpufreq the value is "unavailable"."""
+
+    def governor(self, cpufreq: bool) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cpu = root / "sys" / "cpu"
+            for n in range(4):
+                (cpu / f"cpu{n}").mkdir(parents=True)
+                if cpufreq:
+                    (cpu / f"cpu{n}" / "cpufreq").mkdir()
+                    (cpu / f"cpu{n}" / "cpufreq" / "scaling_governor").write_text(
+                        "performance\n" if n < 2 else "powersave\n")
+            (cpu / "online").write_text("0-1\n")
+            for n in (2, 3):
+                (cpu / f"cpu{n}" / "online").write_text("0\n")
+            if cpufreq:
+                governor = cpu / "cpu3" / "cpufreq" / "scaling_governor"
+                governor.unlink()
+                governor.mkdir()
+            ran = run03(root, CPU_SYSFS=str(cpu))
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            values = dict(line.split("=", 1) for line in
+                          (root / "results" / "1M" / "T2" / "native" / "metadata.env")
+                          .read_text().splitlines())
+            return values["cpu_governor"]
+
+    def test_offline_cpus_are_left_out(self):
+        self.assertEqual(self.governor(cpufreq=True), "performance")
+
+    def test_no_cpufreq_is_unavailable(self):
+        self.assertEqual(self.governor(cpufreq=False), "unavailable")
+
+
 if __name__ == "__main__":
     unittest.main()

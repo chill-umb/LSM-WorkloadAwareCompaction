@@ -283,6 +283,33 @@ class SetupNodeTest(unittest.TestCase):
                          "[tuning] SMT notsupported; governor none; THP madvise")
         self.assertEqual((cpu / "smt" / "control").read_text(), "notsupported\n")
 
+    def test_siblings_that_smt_off_takes_offline_are_left_alone(self):
+        # SMT on in firmware (worker 1, 2026-10-27): SMT off takes CPUs 2-3
+        # offline, and their cpufreq files stay but refuse reads and writes
+        # ("Device or resource busy"), as a folder in their place does.
+        cpu = self.sysfs / "devices" / "system" / "cpu"
+        (cpu / "online").write_text("0-1\n")
+        for n in (2, 3):
+            (cpu / f"cpu{n}" / "online").write_text("0\n")
+            governor = cpu / f"cpu{n}" / "cpufreq" / "scaling_governor"
+            governor.unlink()
+            governor.mkdir()
+        ran = subprocess.run(["bash", str(PIPELINE / "node_tuning.sh")],
+                             env={**self.env}, capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stderr, "")
+        self.assertEqual(ran.stdout.strip(),
+                         "[tuning] SMT off; governor performance; THP madvise")
+        for n in (0, 1):
+            self.assertEqual((cpu / f"cpu{n}" / "cpufreq" / "scaling_governor")
+                             .read_text().strip(), "performance")
+        # 00 sets the node up and checks it ready, unpinned (two CPUs on one L3).
+        ran = self.setup_node(DBBENCH_CPUS="", CONTROLLER_CPUS="")
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        ran = self.setup_node("check", DBBENCH_CPUS="", CONTROLLER_CPUS="")
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        self.assertIn("SMT off, governor performance, THP madvise", ran.stdout)
+
     def test_usage(self):
         ran = self.setup_node("bogus")
         self.assertEqual(ran.returncode, 2)
