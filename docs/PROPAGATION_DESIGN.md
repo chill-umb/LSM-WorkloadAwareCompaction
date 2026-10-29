@@ -927,6 +927,7 @@ Each is a known gap in the law, stated by its mechanism. None is a rule in the l
 ### 13.12 Open
 - **The clean test.** The owner freezes v2; the predictions for the 135 multi-change runs are written to a file, each
   from the run's own state just before each change; then those runs are opened and scored (v2 draft §7).
+  *Superseded 2026-10-27: the owner dropped the sealed test; the 135 runs are open data. See §13.14.*
 - **§13.4's test misfiles W5's throttled trees.** Their median L0 merge takes 16-19 files, so they fall under
   "neither", although writes are slowed at 20 files for 32-62% of window 0. Their settled batch at K' is predicted
   too small.
@@ -961,3 +962,69 @@ Each is a known gap in the law, stated by its mechanism. None is a rule in the l
   twins, the scoring baseline) and `twins/` (the three original repeats, the noise limits).
 - **Record of every round, trial and diagnosis:** the report `~/node_ops/reports/2026-10-24-case12-test-v2.md` and
   the subagent write-ups `~/node_ops/reports/2026-10-26-sub-{p7,p11,c1,c5,c10,c6}.md`.
+
+### 13.14 Forward mode on the 135 multi-change runs (r1-r7, 2026-10-27/28)
+
+*Entered 2026-10-28 by the operator. After seeing: each part below was written after its misses on the multi-change
+runs had been seen. The owner dropped the sealed test on 2026-10-27, so all 135 runs are open data. The scores are in
+`docs/LAW_SCORES.md`, kept current there; this section records the design only.*
+
+- **What it is.** The round-18 law (§13.5-§13.7) run forward. At each K change in a run (7-16 per run, any K before
+  and after, not only from 4), the law predicts every quantity for the stretch up to the next change. Its inputs are
+  the run's own state just before the change only (D-36): the last stretch, its L0-merge records, the per-file
+  snapshot at the change, and the last stretch's merge speeds.
+- **How it is scored** (owner, 2026-10-28): the run's own change. Measured = the next stretch minus the last stretch
+  of the same run. No twin run. Limit: the noise band from the three original repeats. Pass: at least 90% hits in
+  every workload.
+- **The parts.** Each is a switch; with a part off, the code gives the round before it exactly.
+
+| Round | Part | Case | What it adds | RocksDB basis |
+|---|---|---|---|---|
+| r1 | om5 | 2 mainly | The pour's inflow: bytes arriving in L1 and below from the change to the stretch's middle, at the last stretch's own growth per op | Data only moves down (BK4') |
+| r1 | stor | 1, 2 | What L0 and L1 hold extra at a stretch's end under K' is not passed on to L2 (#5b) | Conservation of bytes |
+| r1 | brake | 1, 2 | A forecast of the 64 GiB pending-bytes brake. A stretch is cut where the forecast estimate crosses 64 GiB; the braked part is predicted at the forecast state | `version_set.cc` EstimateCompactionBytesNeeded; `column_family.cc` GetWriteStallConditionAndCause, SetupDelay |
+| r2 | brake from any K | 1, 2 | The forecast starts from the K in force before the change, not from 4 | Multi-change runs start from any K |
+| r2 | k1t | 1 | The merges after a K raise: each waits for the draining levels' score; N_{k+1} − N\* = ρ·(N_k − N\*) | One compaction slot, score-first picking, the 20-file slowdown |
+| r3 | rolling L0 schedule | 1, 2 (calm) | Round 9-11's calm L0 schedule taken from the last 5M ops before the change | D-36 |
+| r4 | k2t | 2 | The merges after a K lower: each reads all of L1; their size climbs from #8b's first merge until the gap passes 20 files, or up to the brake's level | An L0 merge takes every L0 file and the overlapping L1; one slot |
+| r5 | k2t #4 | 2 | k2t's L1 bytes rewritten, on #4 too | As k2t |
+| r7 | d | 1, 2 (busy) | An L0 merge that begins while writes are slowed (20+ L0 files, or the 64 GiB brake) begins at the write cap, 8 MiB/s ÷ bytes per op. The same regime as before the change keeps round 17's x-rule | SetupDelay: the rate ×0.8 per new version, ×1.25 when the debt falls, capped. 5-27 deep installs per flush hold it at the cap. Measured: 74-100% of slowed stretches within 5% of the cap |
+| r7 | p | 1, 2 (busy) | Part d inside the braked parts | As d |
+| r7 | c | 1, 2 (calm) | #2 = the schedule's mean over the next stretch minus the run's own measured mean over the last stretch | The measure is the run's own change |
+| r7 | o | 1, 2 (busy) | After the change the run follows the new K only. So only the new-K forecast's crossing cuts a stretch, and the braked parts are predicted from the run's own last stretch, with the new-K state taken from the forecast | The measure is the run's own change. The old-K path is the "K never changed" forecast, which is a twin's role |
+| r7 | w | 1, 2 (calm) | An L0 merge of n files writes n·s_f + o_m − h·(o_m·n + s_f·n(n − 1)/2): it drops the L1 copies its batch rewrites and the batch's own older copies. s_f, o_m and h come from the last stretch's own merges | The merge keeps only a key's newest copy (CompactionIterator, no snapshots); first order in h, one h for L0 and L1 (G7's uniform key density). Measured: the share written per byte read falls in a straight line with files per merge (corr −0.98 W1, −0.99 W2); L1's bytes read per merge do not move |
+| r7 | s | 1, 2 (calm) | #4 = the next stretch's merges (part w's bytes each) minus the run's own measured last stretch | The measure is the run's own change |
+| r7 | r | 1, 2 | #4's after-state at the workload's write rate since its last step: in the last stretch, the ops between memtable switches give the write rate; the last step in it is kept when BIC prefers two rates (n·ln(SSE_0/SSE_1) > 2·ln n, each side at least 2 intervals); the after-state is scaled by that rate over the stretch's. No step: no change. Since 2026-10-28 13:41 also busy #5b (and part u's calm bursts) | A memtable switches exactly when it is full, so the spacing is the workload's write rate alone. An L0 merge's bytes per op follow the write rate (BK3), and so do the L1→L2 merges' that pass them on. D-36: only ops before the change |
+| r7 | j | 1, 2 | #8a/#8b start from the tree as it will be when the L0 merge already running at the change finishes. Remaining ops = its start op + its bytes (s + o, fixed when it was picked) × the last stretch's own L0 merge speed in ops per byte − X; L0 then holds n_X − n + (remaining ops)/t_F files; L1 gains its output less the L1 bytes it read (part w's form for its own s, o, n). The k1t/k2t transitions start from the same state, and #7 counts L0's files before that merge finishes. No merge running: no change | One compaction at a time; L0's score counts only files no merge holds and L1+ only bytes no merge holds (`version_set.cc` ComputeCompactionScore, being_compacted); the write slowdown counts every L0 file (CalculateBaseBytes, files_[0].size()); a merge's output lands in L1 when it installs. Measured: all 38 W5 changes with a merge running missed #8a (0%) before part j |
+| r7 | u | 1, 2 (calm) | #5b = the L1→L2 bursts of the next stretch's L0 merges (new-K schedule) minus the run's own measured last stretch. A merge of n files leaves L1 b(n) − o_m above its target (part w's b(n), less the L1 bytes it read); the worker pushes that down before L0's next merge, writing x_1 per byte pushed (the last stretch's own L1 x / (s + trivial bytes), plus the law's overlap change). Scaled by part r's write-rate ratio, as #4. Replaces the settled #5b and stor's term in calm trees | Static targets: L1's score passes 1 after each L0 merge and score-first serving pushes the excess on one worker before L0 reaches K again. Measured (W2): L1→L2 writes come in one burst per L0 merge, about 2 merges per stretch, so 74% of misses were bursts counted at the stretch edges |
+| r7 | e | 1, 2 (busy) | #5 = om_b (L2'/L2)(L1/L1') − om_b, the base form, against the run's own last stretch: om5's override (its L2 baseline T2 = the old-K continuation at the stretch) is dropped, for #5 and for #5b, which uses the same overlap change | The measure is the run's own change; T2 is a twin's role, as part o's old-K path. Measured (busy): with the measured mean L2 / mean L1 the base form reaches W3 142, W4 168, W5 212 hits; with the law's after-state, 102, 169, 201 |
+| r7 | g | 1, 2 (calm and busy) | #6's deepest level grows by its own intake from the level above (x − o + trivial bytes) over the ops between the two stretches' midpoints. Since 2026-10-29 03:38 the rate is timed on whole pours: a pour runs from the level above's first merge after it went over its target to the one that leaves it under; the rate is the bytes of whole pours covering the last stretch over the ops between their ends (fewer than two pours: the last stretch's intake per op). Zero when no merge reached it in the last stretch. Added after every other quantity, so nothing else takes it | The deepest level pushes nowhere, so only merges from the level above change it (conservation alone gives it no growth); a level is pushed down only while it is over its target (static targets). Measured: net new data (flushed − dropped) equals the tree's growth exactly; W2's merges into the deepest level come in bursts (74% of gaps under a tenth of the mean); on the no-change twins the last stretch's intake hits W1 96%, W2 67%, the pour-timed rate 96%, 97% |
+
+- **Single-change runs take r7 parts d, p, c, w and j** (not u, e or g, which are the run's-own measure's forms; the twin grows
+  too, so g cancels in D-33). They are still scored by D-33, which subtracts the twin's
+  change, so their prediction needs the old-K ("K never changed") forecast that part o removes; part w enters there
+  as the schedule's bytes at the new K minus at the old K. Parts o, s and r are the run's-own measure's forms only (a step in the workload's write rate is in the twin too
+  and cancels in D-33). With part o, W4's #2
+  falls from 99 to 47 there. The law is the same; only the before-state it is compared with follows each measure.
+- **Busy level paths (2026-10-28, `clean/diag5/` path5*, paths5*):** a level below its new size gets no merges of its own; after a K raise L0 is
+  not merged until its first merge (#8a) and the worker drains the over-full levels (mostly L2 and deeper); after a K
+  lower L0 takes most of the worker and L2 is starved. A forecast from the law's pause and drain is right at the pause's
+  end but drifts after it; as #5 it trades W4 for W3 (not adopted). Open: the rhythm phase's speeds, and c (the pick
+  discount), which a G-only form cannot follow.
+- **Not adopted:** r6 (busy level sizes), r7 a (the rate ×0.64 per L0 file above 20), r7 b (the same from 0 files
+  under the brake), r7 q (part o's braked form under the twin measure), r7 r with a fixed span (tuned: only 0.5M ops
+  passed). Reasons: `docs/LAW_SCORES.md`, "Trials not
+  adopted".
+- **Open: other places that still compare with a "K never changed" path.** These are not yet tested under the run's
+  own measure:
+  - calm #3 (the schedule's files per merge at K' minus at the old K over the same stretch);
+  - stor's #5b term (L0 and L1 under K' against the old K), busy trees only since part u (calm trees use the bursts).
+  - (om5's #5 L2 baseline, `OM5_TWIN`: dropped in multi runs by part e, 2026-10-28.)
+- **Code and data.**
+  - Code (prime and worker 3): `~/node_ops/diag/kcase/clean/r7/`, with `law_r7.py`, `forward_r7.py`, `brake_r7.py`,
+    `fill_r7.py` and `l0_schedule_r7.py`.
+  - Scorers: `eval_r7_multi.py`, `eval_levels_r7.py` and `eval_r7_single.py`.
+  - The adopted law end to end: `run_adopted.sh`, which gives multi parts d, p, c, o, w, s, r, j, u, e, g with SCORE=own and
+    single parts d, p, c, w, j.
+  - Data on worker 3: `~/clean/multi`, `~/clean/dev`.
+  - Diagnostics: `clean/diag2/`, `clean/diag2b/`, `clean/diag4c/`, `clean/diag8a/`, `clean/diag5/`.
