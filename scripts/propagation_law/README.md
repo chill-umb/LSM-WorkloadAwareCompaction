@@ -8,6 +8,9 @@ raised, case 2 is K lowered. Scores are in `docs/LAW_SCORES.md`; the design is `
 - **The other folders hold only the files the law imports**, found by tracing its imports: `clean/` (`forward.py`,
   `fwd_diag.py`), `clean/r1/`, `clean/r5/` (the baseline the self-check S1 compares with), `learncheck/`, `v2/` and
   `score_k_v1.py`.
+- **Two small files support part zd:** `clean/sub8/sitecustomize.py` makes any read of a per-file snapshot raise, for the
+  proof run, and `clean/sub8_order/drain_fam.py` is the trial's module with every variant it scored.
+  `clean/r7/zd_check.sh` is the one-time adoption check. Do not rerun it: its first step overwrites `adopted_pre_zd_*`.
 
 **To run it, copy it back to `~/node_ops/diag/kcase/`.** The code uses that path directly, so it does not run from the
 repository.
