@@ -1,14 +1,14 @@
 # Cases 1-2 propagation law: scores
 
-Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score changes, this file changes with it.
+Updated 2026-10-31 12:00 UTC. Kept current by the operator: every time a score changes, this file changes with it.
 
 - **Single-change runs:** 675 runs, one K change from a settled K = 4 tree. Law round 18 (`v2/score_k_v2r18.py`), scored
   in settled windows. Pass = at least 90% in every workload. Count: **9 of 13**.
-- **Multi-change runs:** 135 runs, 1,430 changes, 7-16 per run. Law r7 (`clean/r7`, parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc, zd; =
+- **Multi-change runs:** 135 runs, 1,430 changes, 7-16 per run. Law r7 (`clean/r7`, parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc; =
   r5 + the write rate at L0 merge start, the calm before-stretch, the brake forecast on the new K only, an L0 merge's
   dropped copies, the workload's write rate since its last step, the L0 merge already running at the change, and each
   L0 merge's L1→L2 burst in calm trees, busy #5/#5b against the run's own last stretch, with no old-K stand-in, and the
-  deepest level's own intake from its merges, timed on whole pours, files per L0 merge in closed form, #2 and #4 from formulas with no loop over merges, and #8's first merge from level sizes with no per-file snapshot). At
+  deepest level's own intake from its merges, timed on whole pours, files per L0 merge in closed form, and #2 and #4 from formulas with no loop over merges). At
   each K change
   the law predicts every level from the run's own last stretch; the prediction is checked against the run's own next
   stretch (no twin run). Tolerance: the noise band from the original repeats. Pass = at least 90% hits in every
@@ -17,14 +17,14 @@ Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score c
 | # | What it checks | Single-change runs (round 18) | Multi-change runs (r7) |
 |---|---|---|---|
 | 1 | K above the cap acts as the cap | FAIL (W4) | not scored |
-| 2 | Mean L0 file count | PASS | **PASS** (92-100%; W5 92, W4 93) |
+| 2 | Mean L0 file count | PASS | **PASS** (92-100%; W5 92, W4 94) |
 | 3 | Files per L0→L1 merge | PASS | **PASS** (91-100%; W4 91 (244/269, bar 242.1), W5 96) |
 | 4 | L0→L1 bytes written per op | PASS | **PASS** (90-93%; W2 221/245 is half a hit above the bar) |
 | 5 | L1→L2 overlap | FAIL | FAIL in 4 (W1 79, W3 38, W4 63, W5 77; W2 91 passes) |
 | 5b | L1→L2 bytes written per op | PASS (W1 accepted as a limitation) | FAIL in 4 (W1 84, W3 71, W4 69, W5 83; **W2 91 passes**) |
 | 6 | L2 and deeper | FAIL | FAIL in all 5 (L2 misses everywhere; deepest level W1 89 (235/264, bar 237.6), W2 78, W3 82, W4 43, W5 80) |
 | 7 | Writes slowed or not | PASS | **PASS** (94-100%) |
-| 8a | When the first L0 merge after the change starts | PASS | **PASS** (93-100%; W5 93) |
+| 8a | When the first L0 merge after the change starts | PASS | **PASS** (92-100%; W5 92) |
 | 8b | Files in that first merge | PASS | **PASS** (93-100%) |
 | 9 | L0 settles within one cycle | PASS | not scored |
 | 10 | Flows out of L1 and deeper | FAIL (W4) | FAIL (L1 and L2 miss everywhere) |
@@ -277,7 +277,7 @@ Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score c
   317 → 316; #7 W4 254 → 253; #4 and levels unchanged. **The count would fall from 6 to 3 of 10.** Single runs, first window only: #3 W3 130 → 128, W4 117 → 111, W5 100 → 97; #2 W5 124 → 122; #4 W3
   123 → 124. `R18S=1` alone changes 210 predictions and flips no hit, so #8 is the only part of the law that needs the snapshot. `DRAIN=off` did not finish within its 600 s limit, twice, and was not diagnosed.
 
-- **#8 without reading every file (2026-10-31, owner: five Opus agents, one worker each; `clean/sub8_{calib,fit,curve,order,stale}/`, reports `~/node_ops/reports/2026-10-31-sub-8*.md`; `order` adopted 2026-11-02 as part zd, see Changes; the others not adopted):** all with `R18S=1`. Operator's re-score on worker 3, W1/W2/W3/W4/W5 (fit not re-scored): `order` (`DRAIN=flat DRAIN_FAM=uni DF_ARR=mix`, overlap of the cheapest m bytes = next level's bytes × q(1 + q)/2, q = m / level's bytes, level bytes only): #8a 260/206/264/262/311, #8b 260/207/251/252/319, #3 262/201/261/244/323. `curve T` and `calib quad` (overlap rate start, rising to the next level's bytes): #8a 260/206/265/263/308, #8b 260/207/251/251/318, #3 262/201/261/243/324. `curve B2` (2 points per level from all files): 260/206/264/263/313, 260/207/251/250/313, 262/201/261/247/324. `stale p32` (32 files per level at X): 260/206/264/264/311, 260/207/251/255/318, 262/201/262/244/323. All six rows above their bars in all five; no-snapshot proof holds for order and T; order's off switch exact and #8a/#8b unchanged with the future removed. Failed: rolling correction (drains in a run do not correlate), sorted past merges, older snapshots (#3 W4 241-242). Against: forms chosen after seeing; W1 has 0 busy solves, W2 1; starting costs 0.3-0.7 all pass, so the bars do not pin the shape; agents report single-run #8b W3 118-119/135 (adopted 131), W5 123-124, #3 W4 first window 117 → 111-113; sequential workloads untested; live reads from code reading only.
+- **#8 without reading every file (2026-10-31, owner: five Opus agents, one worker each; `clean/sub8_{calib,fit,curve,order,stale}/`, reports `~/node_ops/reports/2026-10-31-sub-8*.md`; awaiting the owner's ruling):** all with `R18S=1`. Operator's re-score on worker 3, W1/W2/W3/W4/W5 (fit not re-scored): `order` (`DRAIN=flat DRAIN_FAM=uni DF_ARR=mix`, overlap of the cheapest m bytes = next level's bytes × q(1 + q)/2, q = m / level's bytes, level bytes only): #8a 260/206/264/262/311, #8b 260/207/251/252/319, #3 262/201/261/244/323. `curve T` and `calib quad` (overlap rate start, rising to the next level's bytes): #8a 260/206/265/263/308, #8b 260/207/251/251/318, #3 262/201/261/243/324. `curve B2` (2 points per level from all files): 260/206/264/263/313, 260/207/251/250/313, 262/201/261/247/324. `stale p32` (32 files per level at X): 260/206/264/264/311, 260/207/251/255/318, 262/201/262/244/323. All six rows above their bars in all five; no-snapshot proof holds for order and T; order's off switch exact and #8a/#8b unchanged with the future removed. Failed: rolling correction (drains in a run do not correlate), sorted past merges, older snapshots (#3 W4 241-242). Against: forms chosen after seeing; W1 has 0 busy solves, W2 1; starting costs 0.3-0.7 all pass, so the bars do not pin the shape; agents report single-run #8b W3 118-119/135 (adopted 131), W5 123-124, #3 W4 first window 117 → 111-113; sequential workloads untested; live reads from code reading only.
 
 ## Sources
 - Single-change runs: `~/node_ops/diag/kcase/v2/out_r18/summary.md`. Accepted limitations: W1 hot key range (#5b), the
@@ -413,11 +413,3 @@ Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score c
   after X removed, #2 and #5b differ in the same 63 changes as before (`c03_parts`), #3 and #4 in none. Up to 6 single-merge evaluations and a root-find per regime as in part y.
   Still not closed form: #8's `drain_order`, a per-file sort and level search over the snapshot at X (no merge loop; the first merge, an input of #2, #3 and #4); the brake forecast's stepped inflow table and level search (#2, #3, #4 on braked
   stretches); the calm schedule's per-merge sums for #5b's bursts and #5b/#10's L1 excess.
-- 2026-11-02 05:27 UTC: part zd, multi only (owner: "adopt order"; `clean/r7/drain_curve_r7.py`, `forward_r7.py`, trial `clean/sub8_order/`, adopted rows before it `adopted_pre_zd_*`). #8's
-  first-merge wait reads each level's bytes at the change, not the per-file snapshot: the overlap of a level's cheapest m bytes = next level's bytes × q(1 + q)/2, q = m / level's bytes, with arrivals as two
-  pools (new files, the old rest), and `R18S=1` for part zr. **#2 W3 262 → 263, W4 252 → 251, W5 317 → 316; #4 W3 248 → 247; #8a W4 263 → 262, W5 310 → 311; #8b W4 251 → 252; #3 unchanged in
-  total (W4 +2/−2); #7 unchanged. Count stays 6 of 10.** Thin margins remain at #3 W4 (244, bar 242.1) and #4 W2 (221, bar 220.5). Checks on worker 3 (`r7/zd_check.out`, last line `ZD_EXIT=0`): old parts on the edited code byte-identical to `adopted_pre_zd_multi_rows`; rows
-  byte-identical to the trial's re-score; single rows byte-identical; S1 1430/1430 twice; with snapshot reads forced to raise, rows byte-identical; with everything after X removed, 0 #8a or #8b predictions differ and the total stays the 126 known (#2 and #5b, 63 each). Level values move, and no hit line in the levels log moves.
-  **Weak spots:** the shape between the floor and the mean was chosen after seeing scores, and floors from 0.3 to 0.7 all pass, so the bars do not pin it. W1 has 0 busy changes and W2 has 1, so only W3-W5 test it. Sequential-style writes are untested. The live reader of level sizes comes from reading the code, was not run, and can lag the change by a job.
-  **Single-change runs keep `drain_order` and its snapshot, so the law now has two forms of #8.** With this form, single #8b W3 would fall from 131 to about 119 of 135 and #3 W4's first window from 117 to about 113 (the agent's figures, not re-scored).
-  Still not closed form on multi runs: the brake forecast's stepped inflow table and level search; the calm schedule's per-merge sums for #5b's bursts and #5b/#10's L1 excess. Still a fixed-step solve in zd: 3 solves of 60 bisection steps, each with an inner 40-step bisection, time and memory independent of the number of files.

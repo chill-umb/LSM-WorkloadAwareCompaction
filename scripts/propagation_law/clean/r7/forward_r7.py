@@ -33,24 +33,15 @@ change, the pre-change window's merge speeds by L0 band, and L0's schedule from 
 """
 import json
 import math
-import os
 import sys
 from pathlib import Path
 
-# r7 part zd (owner, 2026-11-02; multi-change runs only): #8 from level bytes, no per-file snapshot. Set before law_r7 and law_r5 are imported,
-# because they read these switches at import. drain_curve_r7.wait replaces drain_order.wait in this process, the r5 baseline's too.
-ZD = "zd" in os.environ.get("R7_PARTS", "").split(",")
-if ZD:
-    os.environ.update(DRAIN="flat", R18S="1")
 sys.path.insert(0, "/home/cc/node_ops/diag/kcase")
 sys.path.insert(0, "/home/cc/node_ops/diag/kcase/v2")
 sys.path.insert(0, "/home/cc/node_ops/diag/kcase/clean/r7")
 import law_r7 as m  # noqa: E402  (r7: law_r5 + the r7 start-rate block)
 import brake_r7 as brake  # noqa: E402  (r7: byte-identical copy of r5/brake_r5.py)
 import drain_order  # noqa: E402
-import drain_curve_r7  # noqa: E402  (part zd)
-if ZD:
-    drain_order.wait = drain_curve_r7.wait
 import l0_schedule_r7 as l0_schedule  # noqa: E402  (r7: byte-identical copy of r5/l0_schedule_r5.py)
 
 N_SLOW, L0_STOP = m.N_SLOW, m.L0_STOP
@@ -181,8 +172,6 @@ def path_checks(xs, cyc0, run_rs, l1, t, k_from, k2, w0s_path, snap_path, measur
             sc = sorted(((bE[i] / w0.S[i], i) for i in range(1, w0.dp)), reverse=True)
             t20 = max(0.0, (N_SLOW - n_x) * w0.tF)
             t0, s_top, grp, j = 0.0, sc[0][0], [sc[0][1]], 1
-            if ZD:
-                drain_curve_r7.ctx(bE)
             if m.DRAIN != "off" and (m.DRAIN == "flat" or (snap_path is not None and Path(snap_path).exists())):
                 d = drain_order.wait({i: v for v, i in sc}, w0.S, w0.om, n_x, kh2, w0.tF, lam_f, lam_s, t20, w0.dp,
                                      drain_order.Snap(Path(snap_path)) if m.DRAIN == "order" else None)

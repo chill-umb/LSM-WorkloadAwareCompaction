@@ -1003,9 +1003,8 @@ runs had been seen. The owner dropped the sealed test on 2026-10-27, so all 135 
 | r7 | z | 2 (busy) | #2, #3 and #4's K-lower transition from the (N, u) path's sums in closed form. A cycle's L0 integral is t_F (N_j+1² / 2 + a_j N_j); #4 sums u_j S_1 over the merges that install in the stretch. Multi and single | As y |
 | r7 | zr | 1 (busy) | #2 and #3's K-raise transition with no loop: N_k − N* = ρ^(k−1) (N_1 − N*), geometric sums, the x-rule linear in N from the second merge. Multi and single | As k1t |
 | r7 | zc | 1, 2 (calm) | The calm schedule's #2 and #4 with no loop: flush ends are a straight line, merges are arithmetic pieces once they repeat every K_e flushes. Equal to the loop. Multi and single | As the calm schedule |
-| r7 | zd | 1, 2 (busy) | #8's first-merge wait from level bytes at the change, no per-file snapshot: the overlap of a level's cheapest m bytes = B_(i+1) q(1 + q)/2, q = m / B_i; arrivals as two pools with this curve (new files, N = m_up + A bytes, mean w A / N; the old rest, B_i − A bytes, mean w; w = B_(i+1) / B_i). `R18S=1` for part zr. The mean, the floor w/2 and the arrivals follow from RocksDB's code; the shape between them was chosen after seeing scores. Multi only | `compaction_outputs.cc` ShouldStopBefore; `version_set.cc` SortFileByOverlappingRatio; `compaction_job.cc` |
 
-- **Single-change runs take r7 parts d, p, c, w and j** (not u, e, g, y or zd; u, e, g and y are the run's-own measure's forms, and zd lowers single #8b W3 below 90% by the trial agent's figure (about 119/135, not re-scored), so single runs keep `drain_order` and its snapshot; the twin grows
+- **Single-change runs take r7 parts d, p, c, w and j** (not u, e, g or y, which are the run's-own measure's forms; the twin grows
   too, so g cancels in D-33). They are still scored by D-33, which subtracts the twin's
   change, so their prediction needs the old-K ("K never changed") forecast that part o removes; part w enters there
   as the schedule's bytes at the new K minus at the old K. Parts o, s and r are the run's-own measure's forms only (a step in the workload's write rate is in the twin too
@@ -1027,10 +1026,10 @@ runs had been seen. The owner dropped the sealed test on 2026-10-27, so all 135 
   - (om5's #5 L2 baseline, `OM5_TWIN`: dropped in multi runs by part e, 2026-10-28.)
 - **Code and data.**
   - Code (prime and worker 3): `~/node_ops/diag/kcase/clean/r7/`, with `law_r7.py`, `forward_r7.py`, `brake_r7.py`,
-    `fill_r7.py`, `l0_schedule_r7.py`, `closed3.py`, `rate_step.py`, `stepq.py` and `drain_curve_r7.py`; a copy of the source and everything it imports is in `scripts/propagation_law/`. `fill` and `transition` stay for the off state only. Part y also reads `r7/ft/` (worker 3 only), built by `build_ft.py`
+    `fill_r7.py`, `l0_schedule_r7.py`, `closed3.py`, `rate_step.py` and `stepq.py`. `fill` and `transition` stay for the off state only. Part y also reads `r7/ft/` (worker 3 only), built by `build_ft.py`
     from the runs' host logs.
   - Scorers: `eval_r7_multi.py`, `eval_levels_r7.py` and `eval_r7_single.py`.
-  - The adopted law end to end: `run_adopted.sh`, which gives multi parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc, zd with SCORE=own and `R7_PC_NOMF=1`, and
+  - The adopted law end to end: `run_adopted.sh`, which gives multi parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc with SCORE=own and `R7_PC_NOMF=1`, and
     single parts d, p, c, w, j, z, zr, zc.
   - Data on worker 3: `~/clean/multi`, `~/clean/dev`.
   - Diagnostics: `clean/diag2/`, `clean/diag2b/`, `clean/diag4c/`, `clean/diag8a/`, `clean/diag5/`.
