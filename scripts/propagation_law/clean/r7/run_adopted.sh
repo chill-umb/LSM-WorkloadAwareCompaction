@@ -1,0 +1,20 @@
+#!/bin/bash
+# The adopted law (2026-10-28: o 12:12 UTC, owner; w, s 12:23; r 12:39, step rule on memtable switches; j 13:09, the L0
+# merge in flight at the change; u 13:35, calm #5b from each L0 merge's L1 -> L2 burst, multi only; r on busy #5b 13:41; e 14:25, busy #5/#5b in the
+# base form without om5's old-K (twin stand-in) baseline, multi only; g 2026-10-29, the deepest level's own intake, multi
+# only, its rate timed on whole pours since 03:33 UTC: R7_GRATE=pour, the default; R7_GRATE=stretch gives the 02:51 form;
+# needs ~/clean/multi/pour/ from build_pour_r7.py). Multi-change runs: r7 parts d,p,c,o,w,s,r,j,u,e,g,y,z,zr,zc, SCORE=own (no twin, bar 90%).
+# Single-change runs: r7 parts d,p,c,w,j,z,zr,zc, D-33 (twin-differenced; parts o, s and r are the run's-own measure's forms
+# and do not apply to it; parts u, e, g and y are too). The logs before part j are adopted_r_*, before part u adopted_j_*, before r on busy #5b adopted_u_*, before e adopted_pre_e_*, before g adopted_pre_g_*, before g's pour rate adopted_g1_*, before y adopted_pre_y_*.
+# y 2026-10-31 (owner: "Yes, adopt this"), #3 in closed form (closed3.py, rate_step.py, stepq.py), multi only, with R7_PC_NOMF=1 (the first merge's prediction does not depend on a next-stretch fact). Needs ./ft/ from build_ft.py (worker 3).
+# z, zr, zc 2026-10-31 (owner: "replacing the per-merge calculation in #2 and #4 with the two number formula"): #2, #3 and #4's transitions and the calm schedule's #2 and #4 sums, no loop over merges; multi and single. Before them adopted_pre_z_*.
+# Worker 3, from this folder. Writes adopted_*; last line ADOPTED_RUN_EXIT=<failed steps>.
+cd "$(dirname "$0")"
+export PYTHONDONTWRITEBYTECODE=1 R7_QRMODE=cp R7_QRTIME=begin
+fail=0
+SCORE=own R7_PC_NOMF=1 R7_PARTS=d,p,c,o,w,s,r,j,u,e,g,y,z,zr,zc timeout 1800 python3 eval_r7_multi.py ~/clean/multi adopted_multi_rows.jsonl 8 > adopted_multi.log 2> adopted_multi.err || fail=$((fail+1))
+SCORE=own R7SW=on R7_PC_NOMF=1 R7_PARTS=d,p,c,o,w,s,r,j,u,e,g,y,z,zr,zc timeout 1800 python3 eval_levels_r7.py ~/clean/multi adopted_lv_rows.jsonl 8 > adopted_levels.log 2> adopted_levels.err || fail=$((fail+1))
+R7_PARTS=d,p,c,w,j,z,zr,zc timeout 1800 python3 eval_r7_single.py ~/clean/dev adopted_single_rows.jsonl 8 > adopted_single.log 2> adopted_single.err || fail=$((fail+1))
+grep -q '^R7M_EXIT=0$' adopted_multi.log || fail=$((fail+1))
+grep -q '^R7S_EXIT=0$' adopted_single.log || fail=$((fail+1))
+echo "ADOPTED_RUN_EXIT=$fail"

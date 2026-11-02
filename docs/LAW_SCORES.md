@@ -1,24 +1,24 @@
 # Cases 1-2 propagation law: scores
 
-Updated 2026-10-29 03:38 UTC. Kept current by the operator: every time a score changes, this file changes with it.
+Updated 2026-10-31 12:00 UTC. Kept current by the operator: every time a score changes, this file changes with it.
 
 - **Single-change runs:** 675 runs, one K change from a settled K = 4 tree. Law round 18 (`v2/score_k_v2r18.py`), scored
   in settled windows. Pass = at least 90% in every workload. Count: **9 of 13**.
-- **Multi-change runs:** 135 runs, 1,430 changes, 7-16 per run. Law r7 (`clean/r7`, parts d, p, c, o, w, s, r, j, u, e, g; =
+- **Multi-change runs:** 135 runs, 1,430 changes, 7-16 per run. Law r7 (`clean/r7`, parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc; =
   r5 + the write rate at L0 merge start, the calm before-stretch, the brake forecast on the new K only, an L0 merge's
   dropped copies, the workload's write rate since its last step, the L0 merge already running at the change, and each
   L0 merge's L1→L2 burst in calm trees, busy #5/#5b against the run's own last stretch, with no old-K stand-in, and the
-  deepest level's own intake from its merges, timed on whole pours). At
+  deepest level's own intake from its merges, timed on whole pours, files per L0 merge in closed form, and #2 and #4 from formulas with no loop over merges). At
   each K change
   the law predicts every level from the run's own last stretch; the prediction is checked against the run's own next
   stretch (no twin run). Tolerance: the noise band from the original repeats. Pass = at least 90% hits in every
-  workload. Count: **5 of the 10 scored**.
+  workload. Count: **6 of the 10 scored**.
 
 | # | What it checks | Single-change runs (round 18) | Multi-change runs (r7) |
 |---|---|---|---|
 | 1 | K above the cap acts as the cap | FAIL (W4) | not scored |
-| 2 | Mean L0 file count | PASS | **PASS** (91-100%; W4 93, W5 91) |
-| 3 | Files per L0→L1 merge | PASS | FAIL: W4 82, W5 86 |
+| 2 | Mean L0 file count | PASS | **PASS** (92-100%; W5 92, W4 94) |
+| 3 | Files per L0→L1 merge | PASS | **PASS** (91-100%; W4 91 (244/269, bar 242.1), W5 96) |
 | 4 | L0→L1 bytes written per op | PASS | **PASS** (90-93%; W2 221/245 is half a hit above the bar) |
 | 5 | L1→L2 overlap | FAIL | FAIL in 4 (W1 79, W3 38, W4 63, W5 77; W2 91 passes) |
 | 5b | L1→L2 bytes written per op | PASS (W1 accepted as a limitation) | FAIL in 4 (W1 84, W3 71, W4 69, W5 83; **W2 91 passes**) |
@@ -32,9 +32,6 @@ Updated 2026-10-29 03:38 UTC. Kept current by the operator: every time a score c
 
 ## Why the multi-change runs fail
 
-- **#3:** W4 (82; K raised 73, K lowered 90) and W5 (86): not yet re-diagnosed under the run's-own scoring. Earlier
-  signs: the timing of the 64 GiB brake, and trees neither L0-bound nor brake-bound, which the transition model does
-  not cover.
 - **#5:** The overlap shifts during the transition after a change. Even with measured sizes plugged in, the formula
   tops out at W3 59, W4 63 and W5 81. W1 is the hot key range; W2 is one hit short (188 of 209).
 - **#5b:** calm trees now count each L0 merge's L1→L2 burst (part u), which passes W2. W3/W4 follow L1's size and #5
@@ -249,6 +246,38 @@ Updated 2026-10-29 03:38 UTC. Kept current by the operator: every time a score c
   236/198/31/66/266. Measured (N − growth) / the law's L0 change: W1 0.55, W2 0.17, against d0 0.16 / 0.05 and the
   path share 0.91 / 0.22: W1 sits between the two ends, W2 near the path. None reaches W1's bar (237.6); busy trees
   lose (their deepest level takes almost nothing). Not adopted.
+- **L3 size without the lag rule's spill (2026-10-30, owner: "Run it"; `clean/diagL3/`, `l3_report.md`, `l3_twin.md`,
+  diagnostic only, r7's files untouched; base rows equal the adopted rows 1430/1430):** the rule lets the level below
+  the pushing levels go over its new cap and spills the excess whole into the next one. K raised, L3 size, W3 and W4:
+  210 misses of 250 changes, 61 of them with the spill, and only 2 would hit without it while 7 hits are lost. Re-run
+  with the spill dropped (the bytes go nowhere): L3 W3 K raised 20 → 16, W4 20 → 19. Kept in the level above: W3 20 → 16,
+  W4 20 → 20, and #5 W3 102 → 86, W4 169 → 152, #5b W3 191 → 174, W4 186 → 177. Why: L3 really does rise in those
+  changes (median W3 +349 MiB, W4 +2245; the law's spill +1314, +2095), and the no-change twin rises as much (+350,
+  +2348), so the K effect is small (+102, +221) and the spill is wrong as a K effect but stands in for L3's own rise.
+  Where L3 catches and pushes nothing (92 changes K raised, 88 misses) the law says +108, +101 and the run gives
+  +504, +2269 (twin +421, +2343). The run's own last move does not forecast it (1/45, 5/47), and even the twin's move,
+  known after seeing, hits only 33/122 and 36/128 K raised (law 20, 20). This corrects the earlier reading that L3 gets
+  bytes that never arrive: those figures measured the K effect alone. Not adopted.
+- **#3 from each merge's walk (2026-10-31, owner: "start working on #3"; `clean/diag3/`, `clean/sub3_*`, `clean/sub3_combo/`, reports
+  `~/node_ops/reports/2026-10-31-sub-3*.md`; awaiting the owner's ruling):** the law's first merge is nearly always right; what follows is
+  wrong. Five trials, each alone, W1/W2/W3/W4/W5 (r7 248/187/253/221/290; re-scored by the operator, same as the agents' figures):
+  x, the mean built as the measure builds it, 262/202/254/222/295; t, the per-merge walk for all busy trees, 248/187/261/251/313;
+  v, the walk at the rate since a step, 248/187/253/221/313; n, the walk below 20 files, 248/187/257/226/309; h, the hold rule counting
+  the levels that will push at the new water, 248/187/257/243/292 (#5b −4, −4, −5). Merged x + t + v + the score-1 floor + no next-stretch
+  gate: **262/202/261/251/328, all pass (bars 235.8/181.8/242.1/242.1/303.3)**; #2 W5 314 → 318; levels moved in 5 changes, x1 and f1 only;
+  identity with the parts off exact (multi, levels, single). With everything after X removed from the inputs, #3 is unchanged in all 1,430
+  changes. #2 and #5b differ in the 63 changes with a merge running at X (an old read of that merge's own end, 0 hits flip). Without t's
+  snapshot overlap W4 is 241, and that overlap reads about 2x the measured one (1.44 vs 0.77). Single runs, own measure, not used to choose
+  the form (t only): W3 first window 127 → 135/135, later 517 → 626/675; W4 114 → 135/135, 303 → 654/675; W5 92 → 101/135, 89 → 75/675.
+  **Rejected by the owner, 2026-10-31: "I don't want a simulator for the propagation law"; t, v and n loop over merges and flushes.**
+
+- **No per-file snapshot (2026-10-31, owner: "Go with it"; `clean/sub8/`, law as adopted, `DRAIN=flat`, `R18S=1`; not adopted):** #8's first merge from each level's mean overlap
+  instead of RocksDB's least-overlap-first order on the snapshot at X. A proof run in which reading a snapshot raises gives the same rows. W1/W2/W3/W4/W5 against the bars: **#8a** 260/206/259/**238**/**300** (W4
+  bar 242.1, W5 bar 302.4; adopted 263, 310); **#8b** 260/207/**222**/**220**/311 (W3, W4 bar 242.1; adopted 251, 251); **#3** 262/201/256/**236**/321 (W4 bar 242.1; adopted 244); #2 W4 252 → 248, W5
+  317 → 316; #7 W4 254 → 253; #4 and levels unchanged. **The count would fall from 6 to 3 of 10.** Single runs, first window only: #3 W3 130 → 128, W4 117 → 111, W5 100 → 97; #2 W5 124 → 122; #4 W3
+  123 → 124. `R18S=1` alone changes 210 predictions and flips no hit, so #8 is the only part of the law that needs the snapshot. `DRAIN=off` did not finish within its 600 s limit, twice, and was not diagnosed.
+
+- **#8 without reading every file (2026-10-31, owner: five Opus agents, one worker each; `clean/sub8_{calib,fit,curve,order,stale}/`, reports `~/node_ops/reports/2026-10-31-sub-8*.md`; awaiting the owner's ruling):** all with `R18S=1`. Operator's re-score on worker 3, W1/W2/W3/W4/W5 (fit not re-scored): `order` (`DRAIN=flat DRAIN_FAM=uni DF_ARR=mix`, overlap of the cheapest m bytes = next level's bytes × q(1 + q)/2, q = m / level's bytes, level bytes only): #8a 260/206/264/262/311, #8b 260/207/251/252/319, #3 262/201/261/244/323. `curve T` and `calib quad` (overlap rate start, rising to the next level's bytes): #8a 260/206/265/263/308, #8b 260/207/251/251/318, #3 262/201/261/243/324. `curve B2` (2 points per level from all files): 260/206/264/263/313, 260/207/251/250/313, 262/201/261/247/324. `stale p32` (32 files per level at X): 260/206/264/264/311, 260/207/251/255/318, 262/201/262/244/323. All six rows above their bars in all five; no-snapshot proof holds for order and T; order's off switch exact and #8a/#8b unchanged with the future removed. Failed: rolling correction (drains in a run do not correlate), sorted past merges, older snapshots (#3 W4 241-242). Against: forms chosen after seeing; W1 has 0 busy solves, W2 1; starting costs 0.3-0.7 all pass, so the bars do not pin the shape; agents report single-run #8b W3 118-119/135 (adopted 131), W5 123-124, #3 W4 first window 117 → 111-113; sequential workloads untested; live reads from code reading only.
 
 ## Sources
 - Single-change runs: `~/node_ops/diag/kcase/v2/out_r18/summary.md`. Accepted limitations: W1 hot key range (#5b), the
@@ -359,3 +388,28 @@ Updated 2026-10-29 03:38 UTC. Kept current by the operator: every time a score c
   cell moved (identity with R7_GRATE=stretch SAME; multi #2-#8b and single runs identical). #6 still fails everywhere;
   count stays 5 of 10. Logs `clean/r7/run_gp.log`, `gpid_*` (identity), `adopted_*` (before: `adopted_g1_*`),
   `gp_levels.diff`.
+- 2026-10-31 11:50 UTC: part y, #3 in closed form, multi only (owner: "try the closed-form #3", "go, fix the lowered-trigger rise", "Yes, adopt this";
+  `clean/r7/closed3.py`, `rate_step.py`, `stepq.py`, trial `clean/sub3_closed/`, run with `R7_PC_NOMF=1`, adopted rows before it `adopted_pre_y_*`). **#3 passes: count 5 → 6 of 10.** K raised and calm trees: x's mean and
+  one cycle's balance. K lowered, busy trees: the two-number form. An L0 merge reads all of L1, so its length follows L1's score, not K. Files
+  flushed during it, and L1's score after it, are linear in the pick's files and L1 score, with separate branches for L0 past 20 files, and the
+  gap to the next pick is linear level by level. So the path over merges has a closed form in a 2x2 matrix's eigenvalues; it explains the slow rise
+  and the saw-tooth after a large first merge. W1/W2/W3/W4/W5: **262/201/261/244/323, all pass**; K lowered 121/121, 99/99, 135/136, 125/134,
+  156/164; K raised 141/141, 102/103, 126/133, 119/135, 167/173. First attempt, one geometric rise: 262/201/216/204/316. #2 W5 314 → 318
+  (from the no-next-stretch gate); levels moved in the same 5 changes, x1 and f1 only (one cell: W5 L1 73 → 74, no verdict changes); single-run rows unchanged; identity with y off exact (multi, levels, single); the evaluator's self-check against r5 passes in all 1,430 changes (its off state now also turns `R7_PC_NOMF` off). With
+  everything after X removed from the inputs, #3 is unchanged in all changes; #2 and #5b differ in the same 63 changes as above. Not a pure
+  formula: up to 6 single-merge evaluations (one per regime; the merges between them closed, 63% of merges with no cap on pieces), a root-find for
+  each regime's length, and the first merge still from #8's `drain_order` (a per-file sort and level search, not a merge-by-merge walk). 4 pieces gives W4 242 (fails by 0.1), 6 or more 244; form chosen
+  after seeing these runs; W4 passes by 2 hits. The same form on K raised is worse (W3 115/133, W4 113/135, W5 158/173), so it applies to K lowered
+  only. Single runs, own measure, not used to build the form: W3 first window 127 → 132/135, later 517 → 593/675 (K lowered 212 → 204/270, worse
+  than the law); W4 114 → 133/135, 303 → 643/675 (K lowered 135 → 245/270); W5 92 → 108/135, 89 → 72/675. D-33's measure worsens (W4 later
+  586 → 290/675, as with the walk), so y stays out of D-33 scoring.
+- 2026-10-31 12:00 UTC: parts z, zr, zc, multi and single (owner: "replacing the per-merge calculation in #2 and #4 with the two number formula"; `clean/r7/forward_r7.py`,
+  `closed3.py`, `l0_schedule_r7.py`, trial `clean/sub24/`, adopted rows before them `adopted_pre_z_*`). z, K lowered, busy: the two-number path's sums (N, u, N², N u, N a) in closed
+  form replace `fill`; past the brake's crossing, its level at three points of the stretch. zr, K raised, busy: N_k − N* = ρ^(k−1) (N_1 − N*) with geometric sums and x linear in N
+  from the second merge; #2's excess within 0.27 files of the loop, #3's exact. zc, calm: an arithmetic flush line and merge pieces (median 2, at most 3) replace the flush-by-flush
+  schedule for #2 and #4; equal to the loop to within rounding in all 573 and 566 changes. **#2 W4 250 → 252, W5 318 → 317; #4 W4 249 → 250, W5 316 → 318; nothing else moves** (multi
+  #3-#8b and levels unchanged; count stays 6 of 10). Single runs (D-33), first window only: #2 W3 132 → 130, W4 131 → 128; #3 W3 128 → 130, W4 118 → 117, W5 98 → 100; #4 W3
+  126 → 123; later windows' hits unchanged; no pass/fail at 90% changes. Identity with the three parts off exact (multi, levels, single); self-checks against r5 pass. With everything
+  after X removed, #2 and #5b differ in the same 63 changes as before (`c03_parts`), #3 and #4 in none. Up to 6 single-merge evaluations and a root-find per regime as in part y.
+  Still not closed form: #8's `drain_order`, a per-file sort and level search over the snapshot at X (no merge loop; the first merge, an input of #2, #3 and #4); the brake forecast's stepped inflow table and level search (#2, #3, #4 on braked
+  stretches); the calm schedule's per-merge sums for #5b's bursts and #5b/#10's L1 excess.
