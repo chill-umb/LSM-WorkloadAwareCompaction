@@ -71,9 +71,6 @@ scripts/*
 !scripts/dbbench_pipeline/*.sh
 !scripts/dbbench_pipeline/*.py
 !scripts/dbbench_pipeline/*.md
-# The cases 1-2 propagation law: a copy of the node's source, no data (see its README).
-!scripts/propagation_law/
-!scripts/propagation_law/**
 
 # results
 results/*
