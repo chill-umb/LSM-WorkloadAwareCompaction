@@ -193,7 +193,7 @@ b. Tier 2, the fork's gtests in a Debug tree:
    ```
 
    Expected last line:
-   `[tier2] passed: level_target_multipliers_test per_level_read_counters_test rl_controller_host_test`.
+   `[tier2] passed: level_target_multipliers_test per_level_read_counters_test rl_controller_host_test mixgraph_suite_test rl_zero_overlap_test`.
    This is the first time the C++ of plan steps 3 and 4 is compiled and run.
 
 c. The preflight, steps 1–4 (Release build, tiers 1–2, ACT-1, ACT-4, the
