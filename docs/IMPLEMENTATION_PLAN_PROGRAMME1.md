@@ -103,6 +103,23 @@ implementation `db/rl_controller_host.{h,cc}`. It exposes:
   called from the plugin's thread and never under the DB mutex.
 - **Plugin loading**: `dlopen` of `--rl_plugin`, and the C entry points
   `rl_controller_create(host, config_path)` and `rl_controller_destroy`.
+  Since 2026-11-04 also `rl_controller_interface_version()`: the host refuses
+  a plugin built against another `kRLControllerInterfaceVersion` (2), since
+  every struct and the host's virtual table cross the boundary.
+- **The propagation law's live inputs** (2026-11-04, owner: "Change the fork
+  to provide necessary info required by the propagation law"). `Options()`
+  adds the soft and hard pending-bytes limits, the delayed-write-rate cap, the
+  memtable counts, the target file size and multiplier, `max_compaction_bytes`,
+  the compaction priority, dynamic level bytes and the job slots
+  (`GetBGJobLimits`, with and without the speed-up). Each snapshot level adds
+  its zero-overlap bytes; the snapshot adds, live, the write-delayed flag, the
+  write controller's delayed rate and the compaction speed-up flag. Job
+  records add their input files at the start and output level and the files
+  written. `Files()` lists the current version's files per level with each
+  file's run of next-level files and their bytes (the per-file snapshot the
+  law's drain walk reads). The host log carries the same values (h: `kw`,
+  `bw`, `ws`, `wd`, `dr`, `sp`; job records `sn`, `on`, `xn`; snap `bw`;
+  stamps `options`), so the offline law reads what the plugin would.
 
 ### WP3 — instruments (Gate N0 item 3)
 

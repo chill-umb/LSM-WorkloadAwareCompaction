@@ -26,6 +26,7 @@ namespace rlc {
 namespace test {
 
 using ROCKSDB_NAMESPACE::RLControllerHost;
+using ROCKSDB_NAMESPACE::RLFileMeta;
 using ROCKSDB_NAMESPACE::RLHostOptions;
 using ROCKSDB_NAMESPACE::RLJobRecord;
 using ROCKSDB_NAMESPACE::RLLevelReadCounts;
@@ -329,6 +330,12 @@ class FakeHost : public RLControllerHost {
     std::lock_guard<std::mutex> lock(mu);
     return steps;
   }
+  // `level_files`, one vector per level (none set: num_levels empty levels).
+  void Files(std::vector<std::vector<RLFileMeta>>* out) const override {
+    std::lock_guard<std::mutex> lock(mu);
+    *out = level_files;
+    out->resize(options.num_levels);
+  }
   void SetJobCallback(std::function<void(const RLJobRecord&)> cb) override {
     std::function<void(const RLJobRecord&)> previous;
     {
@@ -368,6 +375,7 @@ class FakeHost : public RLControllerHost {
   RLOpCounts ops;
   std::vector<RLLevelReadCounts> reads;
   RLStepCounts steps;
+  std::vector<std::vector<RLFileMeta>> level_files;
   bool draining = false;
   bool fail_apply = false;
   bool apply_unseen = false;  // accept an Apply but never publish it

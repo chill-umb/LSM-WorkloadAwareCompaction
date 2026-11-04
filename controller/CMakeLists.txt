@@ -33,7 +33,8 @@ target_compile_options(rl_controller_objects PRIVATE -Wall -Wextra -Wshadow)
 
 add_library(rl_controller SHARED $<TARGET_OBJECTS:rl_controller_objects>)
 target_link_libraries(rl_controller PRIVATE Threads::Threads)
-# Export only rl_controller_create and rl_controller_destroy.
+# Export only rl_controller_create, rl_controller_destroy and
+# rl_controller_interface_version.
 set(RL_CONTROLLER_MAP "${CMAKE_CURRENT_SOURCE_DIR}/rl_controller.map")
 target_link_options(rl_controller PRIVATE "-Wl,--version-script=${RL_CONTROLLER_MAP}")
 set_target_properties(rl_controller PROPERTIES LINK_DEPENDS "${RL_CONTROLLER_MAP}")

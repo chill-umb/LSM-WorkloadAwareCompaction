@@ -972,3 +972,7 @@ extern "C" void* rl_controller_create(ROCKSDB_NAMESPACE::RLControllerHost* host,
 extern "C" void rl_controller_destroy(void* controller) {
   delete static_cast<rlc::Controller*>(controller);
 }
+
+extern "C" int rl_controller_interface_version() {
+  return ROCKSDB_NAMESPACE::kRLControllerInterfaceVersion;
+}

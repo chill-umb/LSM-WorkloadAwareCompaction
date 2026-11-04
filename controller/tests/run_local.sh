@@ -35,9 +35,10 @@ echo "[build] librl_controller.so"
 g++ "${common[@]}" "${warnings[@]}" -fPIC -shared "${includes[@]}" \
   -Wl,--version-script="$controller/rl_controller.map" \
   "$controller"/*.cc -o "$out/librl_controller.so"
-# The library exports exactly its two C entry points.
+# The library exports exactly its three C entry points (the interface
+# version since 2026-11-04).
 exported="$(nm -D --defined-only "$out/librl_controller.so" | awk '$2 ~ /[TWDBVR]/ {print $3}' | sort | tr '\n' ' ')"
-if [[ "$exported" != "rl_controller_create rl_controller_destroy " ]]; then
+if [[ "$exported" != "rl_controller_create rl_controller_destroy rl_controller_interface_version " ]]; then
   echo "[build] librl_controller.so exports more than its entry points: $exported" >&2
   exit 1
 fi

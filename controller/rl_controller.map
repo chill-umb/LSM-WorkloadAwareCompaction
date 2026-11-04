@@ -1,5 +1,6 @@
-/* librl_controller.so exports only its two C entry points. */
+/* librl_controller.so exports only its three C entry points. */
 {
   global: rl_controller_create; rl_controller_destroy;
+          rl_controller_interface_version;
   local: *;
 };

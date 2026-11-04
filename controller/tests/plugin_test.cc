@@ -300,6 +300,13 @@ TEST_F(PluginTest, TheCEntryPointsStartAndStopTheThread) {
   EXPECT_EQ(rl_controller_create(nullptr, "x"), nullptr);
 }
 
+// The host refuses a plugin built against another interface (2026-11-04).
+TEST_F(PluginTest, TheInterfaceVersionIsTheHeaders) {
+  EXPECT_EQ(rl_controller_interface_version(),
+            ROCKSDB_NAMESPACE::kRLControllerInterfaceVersion);
+  EXPECT_EQ(rl_controller_interface_version(), 2);
+}
+
 // A clock the test moves by hand, in microseconds.
 struct FakeClock {
   uint64_t now = 1000000;
