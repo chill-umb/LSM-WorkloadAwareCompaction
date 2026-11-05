@@ -77,19 +77,33 @@ def act3_changes(decisions: list[dict]) -> dict:
     accepted_at = [position[id(line)] for line in decisions
                    if line["type"] == "apply" and line.get("ok") == 1]
 
+    # A logged repair ("targets must not shrink going down") at the decision's
+    # own poll replaces the requested value with the repaired one; the call
+    # then carries the repaired value, which is the controller's own choice.
+    repaired = {(line["level"], line["op"]): line["new"] for line in decisions
+                if line["type"] == "repair"}
+
     def carried(apply, decision):
         value = (apply.get("k0") if decision["level"] == 0
                  else (apply.get("m") or [None] * (decision["level"] + 1))
                  [decision["level"]])
+        want = [decision["requested"]]
+        if (decision["level"], decision["op"]) in repaired:
+            want.append(repaired[(decision["level"], decision["op"])])
         return (isinstance(value, (int, float)) and
                 apply.get("first_id", 0) <= decision["id"] <=
                 apply.get("last_id", -1) and
-                math.isclose(value, decision["requested"], rel_tol=1e-12))
+                any(math.isclose(value, w, rel_tol=1e-12) for w in want))
 
     faithful, failed, truncated, by_level = 0, [], [], {}
     for index, decision in enumerate(made):
         if math.isclose(decision.get("requested", 0), decision.get("old", 0),
                         rel_tol=1e-12):
+            continue
+        # A repair back to the value in effect undid the change: nothing to send.
+        fixed = repaired.get((decision["level"], decision["op"]))
+        if fixed is not None and math.isclose(fixed, decision.get("old", 0),
+                                              rel_tol=1e-12):
             continue
         deadline = next((later["op"] for later in made[index + 1:]
                          if later["level"] == decision["level"]), None)

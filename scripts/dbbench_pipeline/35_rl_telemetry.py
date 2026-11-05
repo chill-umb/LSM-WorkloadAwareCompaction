@@ -63,17 +63,42 @@ def read_jsonl(path: Path) -> list:
 def walk(root: Path, leaf: str):
     """Every directory named `leaf` under root, following links."""
     for dirpath, dirnames, _ in os.walk(root, followlinks=True):
-        if os.path.basename(dirpath) == leaf:
+        if os.path.basename(dirpath) == leaf and Path(dirpath) != Path(root):
             yield Path(dirpath)
             dirnames[:] = []
 
 
-def find_rl(root: Path) -> dict:
-    runs = {}
+ACT3_ONLY = set()   # runs drawn although 28 failed them on ACT-3 alone (data complete)
+
+
+def act3_only(d: Path) -> bool:
+    try:
+        r = json.loads((d / "plugin_check.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (d / "FAILED_PLUGIN_CHECK").exists() and r.get("failed_checks") == ["act3"]
+
+
+def find_rl(root: Path, tag: str = "rl2", setting: str | None = None) -> dict:
+    """Completed runs of the batch tag (36's RL_TAG) and, if given, of the
+    start setting only; a run 28 failed on ACT-3 alone counts only where no
+    completed run of the same (W, T, mode) exists."""
+    runs, fallback = {}, {}
     for d in walk(root, "learned2"):
-        m = re.search(r"rl2-(\w+)-(W\d)/T(\d+)-l1(\d+)-k(\d+)/", str(d) + "/")
-        if m and (d / "COMPLETED").exists():
-            runs[(m.group(2), int(m.group(3)), m.group(1))] = d
+        m = re.search(re.escape(tag) + r"-(\w+)-(W\d)/T(\d+)-l1(\d+)-k(\d+)/", str(d) + "/")
+        if not m:
+            continue
+        if setting is not None and f"l1{m.group(4)}-k{m.group(5)}" != setting:
+            continue
+        key = (m.group(2), int(m.group(3)), m.group(1))
+        if (d / "COMPLETED").exists():
+            runs[key] = d
+        elif act3_only(d):
+            fallback[key] = d
+    for key, d in fallback.items():
+        if key not in runs:
+            runs[key] = d
+            ACT3_ONLY.add(key)
     return runs
 
 
@@ -86,8 +111,13 @@ def find_native(root: Path, setting: str) -> dict:
     return runs
 
 
+_COLLECT = None
+
+
 def summary_row(run: Path) -> dict:
-    """04's row for the run, from the summary.csv of its results folder."""
+    """04's row for the run: from the summary.csv of its results folder, or,
+    when 04 has not scored it yet, from 04's own collect_arm on the run."""
+    global _COLLECT
     for parent in run.parents:
         f = parent / "graphs" / "summary.csv"
         if f.exists():
@@ -95,7 +125,21 @@ def summary_row(run: Path) -> dict:
             for row in csv.DictReader(open(f)):
                 if row.get("result_directory", "").rstrip("/").endswith(tail):
                     return row
-    return {}
+            break
+    if not (run / "COMPLETED").exists():
+        return {}
+    if _COLLECT is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gen04", PIPE / "04_generate_graphs.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _COLLECT = mod
+    try:
+        row = _COLLECT.collect_arm(run) or {}
+    except Exception as error:  # an arm 04 would refuse: reported, not scored
+        print(f"[35] 04 refuses {run}: {error}", file=sys.stderr)
+        return {}
+    return {k: v for k, v in row.items()}
 
 
 def num(x) -> float:
@@ -148,7 +192,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--q-bar", type=float, default=50000.0)
     ap.add_argument("--beta-star", type=float, default=2.0)
-    ap.add_argument("--setting", default="l1128-k4")
+    ap.add_argument("--setting", default="l1128-k4",
+                    help="the start setting: learner runs and natives of it only")
+    ap.add_argument("--tag", default="rl2", help="36's RL_TAG of the batch")
     args = ap.parse_args(argv)
     import matplotlib
     matplotlib.use("Agg")
@@ -164,7 +210,7 @@ def main(argv=None) -> int:
     pricing = PM.Pricing(v2=v2, c_w=v2.c_w,
                          c_s=ro.checked_prices(record, contract, provisional_ok=True)["c_s"],
                          q_bar=args.q_bar, beta_w=1.0, beta_r=1.0, beta_s=1.0)
-    rl = find_rl(args.rl_root)
+    rl = find_rl(args.rl_root, args.tag, args.setting)
     nat = find_native(args.native_root, args.setting)
     W_all = sorted({w for w, _, _ in rl} | {w for w, _ in nat})
     T_all = sorted({t for _, t, _ in rl} | {t for _, t in nat})
@@ -182,10 +228,20 @@ def main(argv=None) -> int:
         data[key] = {
             "windows": [r for r in dec if r.get("type") == "window"],
             "f2": [r for r in dec if r.get("type") == "f2"],
+            "trial": [r for r in dec if r.get("type") == "trial"],
             "twin": [r for r in tr if r.get("type") == "window"],
             "pred": [r for r in tr if r.get("type") == "pred"],
             "train": [r for r in tr if r.get("type") == "train"],
             "summary": summary_row(run)}
+
+    from matplotlib.lines import Line2D
+
+    def legend(fig, items, ncol=None):
+        """A figure-level legend under the title: (label, colour, style, marker)."""
+        handles = [Line2D([], [], color=c, ls=ls, marker=mk, lw=1.4 if ls != "none" else 0, ms=7)
+                   for _, c, ls, mk in items]
+        fig.legend(handles, [lab for lab, *_ in items], loc="upper center", bbox_to_anchor=(0.5, 0.965),
+                   ncol=ncol or len(items), frameon=False, fontsize=10)
 
     def grid(title):
         fig, axes = plt.subplots(3, 3, figsize=(15, 11), sharex=True)
@@ -194,6 +250,7 @@ def main(argv=None) -> int:
 
     figures = []
     trend_rows = []
+    j_rows = []
     for w in W_all:
         for mode in MODES:
             keys = [(w, t, mode) for t in T_all if (w, t, mode) in data]
@@ -202,9 +259,11 @@ def main(argv=None) -> int:
             # 1: loss per T x level
             fig, axes = plt.subplots(len(T_all), len(LEVELS), figsize=(16, 2.2 * len(T_all)),
                                      squeeze=False)
-            fig.suptitle(f"{w}, {mode} priority (beta* {args.beta_star:g}): training loss "
-                         "(blue, each round) and prequential error (orange, rolling 20 windows; "
-                         "grey = noise floor)", fontsize=10)
+            fig.suptitle(f"{w}, {mode} priority (beta* {args.beta_star:g}): training loss and prediction error "
+                         "per agent (rows: T; columns: level)", fontsize=12, y=0.995)
+            legend(fig, [("Training loss (Huber, each training round)", "tab:blue", "-", None),
+                         ("Prediction error on windows not yet trained on (RMS of log J, last 20 windows)", "tab:orange", "-", None),
+                         ("Noise floor (window-to-window spread at fixed settings)", "grey", "--", None)], ncol=1)
             for i, t in enumerate(T_all):
                 d = data.get((w, t, mode))
                 for j, level in enumerate(LEVELS):
@@ -230,6 +289,10 @@ def main(argv=None) -> int:
                         ax.axhline(nf[-1], color="grey", lw=0.7, ls="--")
                     ax.set_yscale("log")
                     ax.tick_params(labelsize=6)
+                    if i == len(T_all) - 1:
+                        ax.set_xlabel("operations (millions)", fontsize=7)
+                    if j == 0:
+                        ax.set_ylabel("loss / error (log scale)", fontsize=7)
                     # trend: first vs last quarter of the prequential errors
                     if len(pr) >= 8:
                         q = len(pr) // 4
@@ -242,7 +305,7 @@ def main(argv=None) -> int:
                                            "train_last": tr[-1]["train_loss"],
                                            "noise_floor": nf[-1] if nf else math.nan,
                                            "preds": len(pr), "rounds": len(tr)})
-            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            fig.tight_layout(rect=(0, 0, 1, 0.94))
             name = f"loss_{w}_{mode}.png"
             fig.savefig(args.out / name, dpi=80)
             plt.close(fig)
@@ -250,15 +313,27 @@ def main(argv=None) -> int:
 
             # 2: J over the run; 5: throughput
             wts = mode_weights(mode, args.beta_star)
-            fig, axes = grid(f"{w}, {mode} priority: J per operation (rolling 1M ops), "
-                             "learner (red) vs native (black)")
-            fig2, axes2 = grid(f"{w}, {mode} priority: throughput (ops/s, rolling 1M ops), "
-                               "learner (red) vs native (black)")
+            fig, axes = grid(f"{w}, {mode} priority: priced cost J per operation over the run (rolling mean of 1M ops)")
+            legend(fig, [("learned2 (this batch)", "tab:red", "-", None),
+                         ("Native RocksDB, K = 4, same tree (2026-11-04 grid)", "black", "-", None)])
+            fig2, axes2 = grid(f"{w}, {mode} priority: throughput over the run (rolling mean of 1M ops)")
+            legend(fig2, [("learned2 (this batch)", "tab:red", "-", None),
+                          ("Native RocksDB, K = 4, same tree (2026-11-04 grid)", "black", "-", None)])
             for i, t in enumerate(T_all[:9]):
                 ax, ax2 = axes[i], axes2[i]
                 ax.set_title(f"T={t}", fontsize=9)
                 ax2.set_title(f"T={t}", fontsize=9)
                 d = data.get((w, t, mode))
+                nw0 = nat_win.get((w, t))
+                if d and d["twin"] and nw0:
+                    rj = sum(num(r["J"]) for r in d["twin"] if num(r["J"]) is not None)
+                    ro = sum(r["ops"] for r in d["twin"])
+                    nj = sum(wts[0] * p["C_W"] + wts[1] * p["C_R"] + wts[2] * p["C_S"] for p in nw0)
+                    no = sum(p["ops"] for p in nw0)
+                    j_rows.append({"W": w, "T": t, "mode": mode, "J_learner": rj / ro if ro else math.nan,
+                                   "J_native": nj / no if no else math.nan,
+                                   "ratio": (rj / ro) / (nj / no) if ro and no and nj else math.nan,
+                                   "act3_only": (w, t, mode) in ACT3_ONLY})
                 if d and d["twin"]:
                     xs = [r["op1"] / 1e6 for r in d["twin"]]
                     ax.plot(xs, rolling([num(r["J_per_op"]) for r in d["twin"]], 4), color="tab:red", lw=1)
@@ -274,15 +349,30 @@ def main(argv=None) -> int:
                              color="black", lw=1)
                 ax.tick_params(labelsize=7)
                 ax2.tick_params(labelsize=7)
+                if i % 3 == 0:
+                    ax.set_ylabel("J per operation (money units)", fontsize=8)
+                    ax2.set_ylabel("operations per second", fontsize=8)
+                if i >= 6:
+                    ax.set_xlabel("operations (millions)", fontsize=8)
+                    ax2.set_xlabel("operations (millions)", fontsize=8)
             for f, nm in ((fig, f"cost_{w}_{mode}.png"), (fig2, f"throughput_{w}_{mode}.png")):
-                f.tight_layout(rect=(0, 0, 1, 0.96))
+                f.tight_layout(rect=(0, 0, 1, 0.93))
                 f.savefig(args.out / nm, dpi=80)
                 plt.close(f)
                 figures.append(nm)
 
             # 3: outputs
-            fig, axes = grid(f"{w}, {mode} priority: K (black, left) and log2 m_1..m_3 "
-                             "(right); o confident move, x explore move, | gated")
+            fig, axes = grid(f"{w}, {mode} priority: the settings each agent chose over the run")
+            legend(fig, [("K, the L0 trigger (left axis)", "black", "-", None),
+                         ("log2 m_1 (right axis)", "tab:blue", "-", None),
+                         ("log2 m_2 (right axis)", "tab:green", "-", None),
+                         ("log2 m_3 (right axis)", "tab:purple", "-", None),
+                         ("confident move (9 of 10 networks agreed)", "grey", "none", "o"),
+                         ("exploration move (random)", "grey", "none", "x"),
+                         ("gated: wanted to move, not confident", "grey", "none", "|"),
+                         ("K trial switch (planned alternation)", "grey", "none", "."),
+                         ("K trial adopted the neighbour", "red", "none", "*"),
+                         ("K trial rejected / inconclusive", "tab:orange", "none", "s")], ncol=4)
             for i, t in enumerate(T_all[:9]):
                 ax = axes[i]
                 ax.set_title(f"T={t}", fontsize=9)
@@ -311,9 +401,18 @@ def main(argv=None) -> int:
                         tgt.plot([x], [yy], "x", color=col, ms=4)
                     elif r["reason"] == "gate":
                         tgt.plot([x], [yy], "|", color=col, ms=6)
+                    elif r["reason"] in ("trial", "back"):
+                        tgt.plot([x], [yy], ".", color=col, ms=3)
+                    elif r["reason"] == "adopt":
+                        tgt.plot([x], [yy], "*", color="red", ms=9)
+                    elif r["reason"] in ("reject", "inconclusive"):
+                        tgt.plot([x], [yy], "s", color="tab:orange", ms=4, mfc="none")
                 ax.tick_params(labelsize=7)
                 axr.tick_params(labelsize=7)
-            fig.tight_layout(rect=(0, 0, 1, 0.96))
+                axr.set_ylabel("log2 m (0 = RocksDB default)", fontsize=7)
+                if i >= 6:
+                    ax.set_xlabel("operations (millions)", fontsize=8)
+            fig.tight_layout(rect=(0, 0, 1, 0.91))
             name = f"outputs_{w}_{mode}.png"
             fig.savefig(args.out / name, dpi=80)
             plt.close(fig)
@@ -351,7 +450,9 @@ def main(argv=None) -> int:
         for level in sorted(by):
             dec_rows.append({"W": w, "T": t, "mode": mode, "level": level,
                              **{k: by[level].get(k, 0) for k in
-                                ("cold", "hold", "gate", "confident", "explore", "moves")},
+                                ("cold", "hold", "gate", "confident", "explore", "small",
+                                 "frozen", "trial", "back", "adopt", "reject", "inconclusive",
+                                 "moves")},
                              "final_K": last.get("k"),
                              "final_m": (last.get("m") or [None] * (level + 1))[level]
                              if level and last.get("m") and len(last["m"]) > level else None})
@@ -360,6 +461,38 @@ def main(argv=None) -> int:
             wr = csv.DictWriter(fo, fieldnames=list(dec_rows[0]))
             wr.writeheader()
             wr.writerows(dec_rows)
+    # The L0 agent's K trials (the noise fix): per run, its verdicts.
+    trial_rows = []
+    for (w, t, mode), d in sorted(data.items()):
+        if not d["trial"]:
+            continue
+        ends = [r for r in d["trial"] if r.get("reason") in ("adopt", "reject", "inconclusive", "abandon")]
+        first = d["windows"][0] if d["windows"] else {}
+        last = d["windows"][-1] if d["windows"] else {}
+        cyc = [r for r in d["windows"] if r.get("cut") == "cycle"]
+        trial_rows.append({
+            "W": w, "T": t, "mode": mode, "start_K": first.get("k"), "final_K": last.get("k"),
+            "windows": len(d["windows"]), "cycle_windows": len(cyc),
+            "trials": max((r.get("number", 0) for r in d["trial"]), default=0),
+            "switches": sum(1 for r in d["trial"] if r.get("reason") in ("trial", "back")),
+            "adopt": sum(1 for r in ends if r["reason"] == "adopt"),
+            "reject": sum(1 for r in ends if r["reason"] == "reject"),
+            "inconclusive": sum(1 for r in ends if r["reason"] == "inconclusive"),
+            "verdicts": "; ".join(
+                f"{r['reason']} {r['k_inc']}->{r['k_cand']} at {r['op'] / 1e6:.1f}M"
+                + (f" eff {r['effect']:+.3f} ({r['cheaper']}/{r['members']} cheaper)"
+                   if r.get("effect") is not None else " (no model)")
+                for r in ends)})
+    if trial_rows:
+        with open(args.out / "trials.csv", "w", newline="") as fo:
+            wr = csv.DictWriter(fo, fieldnames=list(trial_rows[0]))
+            wr.writeheader()
+            wr.writerows(trial_rows)
+    if j_rows:
+        with open(args.out / "j_summary.csv", "w", newline="") as fo:
+            wr = csv.DictWriter(fo, fieldnames=list(j_rows[0]))
+            wr.writeheader()
+            wr.writerows(j_rows)
     if trend_rows:
         with open(args.out / "loss_trend.csv", "w", newline="") as fo:
             wr = csv.DictWriter(fo, fieldnames=list(trend_rows[0]))
@@ -368,8 +501,10 @@ def main(argv=None) -> int:
         fig, ax = plt.subplots(figsize=(8, 4))
         for level in LEVELS:
             ys = [r["ratio"] for r in trend_rows if r["level"] == level and math.isfinite(r["ratio"])]
-            ax.scatter([level + (i % 9 - 4) * 0.03 for i in range(len(ys))], ys, s=10)
-        ax.axhline(1, color="grey", ls="--", lw=0.8)
+            ax.scatter([level + (i % 9 - 4) * 0.03 for i in range(len(ys))], ys, s=10,
+                       label=f"L{level}: one dot per run ({len(ys)})")
+        ax.axhline(1, color="grey", ls="--", lw=0.8, label="no change (ratio 1)")
+        ax.legend(fontsize=8, frameon=False, loc="best")
         ax.set_xticks(list(LEVELS), [f"L{lv}" for lv in LEVELS])
         ax.set_yscale("log")
         ax.set_ylabel("prequential error, last quarter / first quarter")
@@ -383,6 +518,10 @@ def main(argv=None) -> int:
     L = ["# learned2 batch telemetry", "",
          f"Learner runs: {len(rl)}; native runs matched: {len(nat_win)}. beta* {args.beta_star:g}, "
          f"q-bar {args.q_bar:g} (stand-in), prices {args.prices.name}.", ""]
+    if ACT3_ONLY:
+        L += ["Runs drawn although the plugin check failed them on ACT-3 alone (a logged repair changed "
+              "a requested value; data complete, no 04 scoring so no WA/RA/SA): "
+              + ", ".join(f"{w} T{t} {m}" for w, t, m in sorted(ACT3_ONLY)), ""]
     if amp_rows:
         L += ["## Raw WA / RA / SA (native | read priority | write priority)", "",
               "| W | T | native WA | RA pt | RA scan | SA | read WA | RA pt | RA scan | SA | write WA | RA pt | RA scan | SA |",

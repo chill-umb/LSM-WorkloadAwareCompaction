@@ -142,6 +142,33 @@ class CheckPluginRunTest(unittest.TestCase):
             self.assertEqual(report["checks"]["act3"]["changes"], 100)
             self.assertEqual(report["verdict"] == "passed", passes, late)
 
+    def test_act3_takes_a_logged_repair_as_the_carried_value(self):
+        # learned2 at T = 2 (2026-11-05): L1 at 1.5 makes Repair lift an L2
+        # move to 0.667 up to 0.75 in the same poll; the call carries 0.75.
+        def l2(id, op, old, requested, action="down"):
+            return decision(id, op, level=2, old=old, requested=requested,
+                            action=action, mask=(1, 1, 1, 0), mode="learned2")
+        def repair(op, old, new):
+            return {"type": "repair", "level": 2, "op": op, "old": old,
+                    "new": new, "reason": "targets must not shrink going down"}
+        lifted = verdict(mode="learned2", body=(
+            l2(1, 100, 1.0, 2 / 3), repair(100, 2 / 3, 0.75),
+            apply(101, 1, 1, m=(1, 1.5, 0.75, 1)),
+            l2(2, 900, 0.75, 0.75, action="hold")))
+        self.assertTrue(lifted["checks"]["act3"]["passed"], lifted)
+        self.assertEqual(lifted["checks"]["act3"]["faithful"], 1)
+        # A repair back to the value in effect undid the change: not judged.
+        undone = verdict(mode="learned2", body=(
+            l2(1, 100, 0.75, 0.5), repair(100, 0.5, 0.75),
+            l2(2, 900, 0.75, 0.75, action="hold")))
+        self.assertTrue(undone["checks"]["act3"]["passed"], undone)
+        self.assertEqual(undone["checks"]["act3"]["changes"], 0)
+        # Without a repair line, a call carrying another value still fails.
+        wrong = verdict(mode="learned2", body=(
+            l2(1, 100, 1.0, 2 / 3), apply(101, 1, 1, m=(1, 1.5, 0.75, 1)),
+            l2(2, 900, 0.75, 0.75, action="hold")))
+        self.assertFalse(wrong["checks"]["act3"]["passed"])
+
     def test_each_defect_fails_its_check(self):
         cases = [
             ({"stdout": "RL_PLUGIN_STARTED created=0\nRL_PLUGIN_STOPPED\n"},
