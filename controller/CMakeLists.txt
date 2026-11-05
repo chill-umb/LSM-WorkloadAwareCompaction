@@ -19,7 +19,7 @@ set(ROCKSDB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../lib/rocksdb"
 find_package(Threads REQUIRED)
 
 set(RL_CONTROLLER_SOURCES
-    actions.cc attribution.cc config.cc jobs.cc log.cc masks.cc mlp.cc
+    actions.cc attribution.cc config.cc jobs.cc learned2.cc log.cc masks.cc mlp.cc
     plugin.cc policy.cc prior.cc rules.cc state.cc)
 # This checkout's include dir first, as in run_local.sh.
 set(RL_CONTROLLER_INCLUDES

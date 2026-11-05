@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <exception>
 
+#include "learned2.h"
 #include "policy.h"
 #include "prior.h"
 
@@ -179,6 +181,8 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   for (Interval& interval : intervals_) interval.start_op = ops.total();
   last_decision_op_.assign(n_, ops.total());
   prev_held_.assign(n_, 0);
+  f2_.assign(n_, F2Agent());
+  for (F2Agent& a : f2_) a.decision_op = ops.total();
 
   // Start from the values in effect, so the first Apply is not a jump.
   m_applied_.assign(n_, 1.0);
@@ -372,7 +376,9 @@ void Controller::Poll(bool decide) {
       ops.total() >= cfg_.schedule[next_scheduled_].at_op) {
     ApplyScheduled(ops.total(), now);
   }
-  if (decide && !fallback_ && !draining_ && cfg_.mode == Mode::kLearned) {
+  if (cfg_.mode == Mode::kLearned2) F2Window(ops, now);
+  if (decide && !fallback_ && !draining_ &&
+      (cfg_.mode == Mode::kLearned || cfg_.mode == Mode::kLearned2)) {
     PollWeights(ops.total(), now);
   }
   if (decide && !fallback_ && !draining_ && last_snapshot_) {
@@ -404,6 +410,9 @@ std::vector<DecisionRecord> Controller::Decide(
     const RLTreeSnapshot& snapshot, const RLOpCounts& ops,
     const std::vector<RLLevelReadCounts>& reads, const RLStepCounts& steps,
     uint64_t now) {
+  if (cfg_.mode == Mode::kLearned2) {
+    return DecideLearned2(snapshot, ops, reads, now);
+  }
   const Bounds& b = cfg_.bounds;
   const bool hold_only = cfg_.mode == Mode::kHoldOnly;
   const bool learner = LearnerMode(cfg_);
@@ -542,6 +551,245 @@ std::vector<DecisionRecord> Controller::Decide(
   }
   m_target_ = m;
   k0_target_ = l0_.K0(b0);
+  if (m_target_ != m_applied_ || k0_target_ != k0_applied_) {
+    if (pending_first_id_ == 0) pending_first_id_ = made.front().id;
+    last_id_ = made.back().id;
+  }
+  return made;
+}
+
+double Controller::F2Inflow(int agent) const {
+  const int j = std::max(agent, 1);
+  return j < n_ && j < static_cast<int>(stats_.levels.size())
+             ? stats_.levels[j].inflow_bytes
+             : 0;
+}
+
+bool Controller::F2Settled(int agent) const {
+  const F2Agent& a = f2_[agent];
+  if (!a.changed_once) return true;
+  const int j = std::max(agent, 1);
+  if (j >= static_cast<int>(f2_C_.size()) ||
+      j >= static_cast<int>(m_target_.size())) {
+    return false;
+  }
+  const double cap = f2_C_[j] * m_target_[j];
+  return cap > 0 &&
+         F2Inflow(agent) - a.inflow_at_change >= cfg_.settle_turnovers * cap;
+}
+
+void Controller::F2Changed(int agent, uint64_t op) {
+  F2Agent& a = f2_[agent];
+  a.changed_once = true;
+  a.change_op = op;
+  a.inflow_at_change = F2Inflow(agent);
+  f2_window_changed_ = true;
+  if (agent < static_cast<int>(f2_window_settled_.size())) {
+    f2_window_settled_[agent] = 0;
+  }
+}
+
+void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
+  const uint64_t op = ops.total();
+  const auto open_window = [&]() {
+    f2_window_open_ = true;
+    f2_window_op_ = op;
+    f2_window_ops_ = ops;
+    f2_window_changed_ = false;
+    f2_window_settled_.assign(n_, 0);
+    for (int i = 0; i < n_; ++i) f2_window_settled_[i] = F2Settled(i) ? 1 : 0;
+  };
+  if (!f2_window_open_) {
+    open_window();
+    return;
+  }
+  if (static_cast<double>(Minus(op, f2_window_op_)) < cfg_.window_ops) return;
+  const double puts =
+      static_cast<double>(Minus(ops.keys_written, f2_window_ops_.keys_written));
+  const double gets =
+      static_cast<double>(Minus(ops.keys_read, f2_window_ops_.keys_read));
+  const double scans =
+      static_cast<double>(Minus(ops.seeks, f2_window_ops_.seeks));
+  const double total = puts + gets + scans;
+  if (total > 0) {
+    f2_shares_[0] = puts / total;
+    f2_shares_[1] = gets / total;
+    f2_shares_[2] = scans / total;
+  }
+  const double h =
+      last_snapshot_ ? static_cast<double>(last_snapshot_->live_sst_bytes) : 0;
+  const std::vector<double> x =
+      F2Features(f2_shares_[0], f2_shares_[1], f2_shares_[2], h, op,
+                 k0_applied_, m_applied_);
+  decisions_.Write(JsonLine("window")
+                       .Uint("op0", f2_window_op_)
+                       .Uint("op1", op)
+                       .Uint("t_us", now)
+                       .Features("x", F2FeatureNames(), x)
+                       .Uint("k", static_cast<uint64_t>(k0_applied_))
+                       .Nums("m", m_applied_)
+                       .Nums("settled", f2_window_settled_)
+                       .Uint("changed", f2_window_changed_ ? 1 : 0)
+                       .Num("h", h)
+                       .str());
+  f2_have_window_ = true;
+  open_window();
+}
+
+std::vector<DecisionRecord> Controller::DecideLearned2(
+    const RLTreeSnapshot& snapshot, const RLOpCounts& ops,
+    const std::vector<RLLevelReadCounts>& reads, uint64_t now) {
+  const Bounds& b = cfg_.bounds;
+  View v =
+      MakeView(options_, snapshot, stats_, ops, reads, m_target_, k0_target_);
+  if (n_ > 1) v.k0_live_cap = LiveK0Cap(v.C[1], v.F);
+  const Bounds b0 = L0Bounds(b, v.k0_live_cap);
+  f2_C_ = v.C;
+  const uint64_t op = ops.total();
+  std::vector<double> m = m_target_;
+  int K = k0_target_;
+  std::vector<DecisionRecord> made;
+  if (!f2_have_window_) return made;
+  const double h = static_cast<double>(snapshot.live_sst_bytes);
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  for (int level = 0; level <= v.last && level < n_; ++level) {
+    const int j = std::max(level, 1);
+    if (j >= n_ || j >= static_cast<int>(v.C.size())) continue;
+    const double cap = v.C[j] * m[j];
+    if (!(cap > 0)) continue;
+    F2Agent& a = f2_[level];
+    const double inflow = F2Inflow(level);
+    // F2: settled since the last change, a measurement stretch since the
+    // last decision.
+    if (!F2Settled(level)) continue;
+    if (inflow - a.inflow_at_decision < cfg_.measure_turnovers * cap) continue;
+    if (static_cast<double>(Minus(op, a.decision_op)) < cfg_.min_decision_ops) {
+      continue;
+    }
+    const std::vector<double> x = F2Features(f2_shares_[0], f2_shares_[1],
+                                             f2_shares_[2], h, op, K, m);
+    Mask mask{};
+    mask[0] = true;
+    std::array<double, kNumActions> after{};
+    int own = -1;
+    double old_value = 0;
+    if (level == 0) {
+      own = kF2LogK;
+      old_value = K;
+      if (K - 1 >= b0.k0_min) {
+        mask[1] = true;
+        after[1] = std::log2(static_cast<double>(K - 1));
+      }
+      if (K + 1 <= b0.k0_cap) {
+        mask[2] = true;
+        after[2] = std::log2(static_cast<double>(K + 1));
+      }
+    } else {
+      old_value = m[level];
+      if (level <= kF2Levels && b.alpha > 1) {
+        own = kF2LogM1 + level - 1;
+        const double down = m[level] / b.alpha, up = m[level] * b.alpha;
+        if (down >= b.m_min * (1 - 1e-9)) {
+          mask[1] = true;
+          after[1] = std::log2(down);
+        }
+        if (up <= b.m_max * (1 + 1e-9)) {
+          mask[2] = true;
+          after[2] = std::log2(up);
+        }
+      }
+    }
+    const double u_explore = unit(rng_);
+    const double u_pick = unit(rng_);
+    const std::vector<const Model*> models = weights_.FindAll(Agent::kF, level);
+    const F2Choice choice =
+        F2Decide(models, x, own, after, mask, cfg_.explore, cfg_.vote_share,
+                 u_explore, u_pick);
+    double new_value = old_value;
+    if (choice.action == Action::kCompact) {
+      new_value = level == 0 ? K - 1 : m[level] / b.alpha;
+    } else if (choice.action == Action::kDefer) {
+      new_value = level == 0 ? K + 1 : m[level] * b.alpha;
+    }
+    if (level == 0) {
+      K = static_cast<int>(std::lround(new_value));
+      l0_.anchor = K;
+      l0_.offset = 0;
+    } else {
+      m[level] = new_value;
+      controls_[level].anchor = new_value;
+      controls_[level].timing = 1;
+    }
+    if (new_value != old_value) F2Changed(level, op);
+    a.decision_op = op;
+    a.inflow_at_decision = inflow;
+
+    DecisionRecord r;
+    r.id = next_id_++;
+    r.level = level;
+    r.op = op;
+    r.t_us = now;
+    r.mode = cfg_.mode_name;
+    r.agent = Agent::kF;
+    r.mask = mask;
+    r.b = Values{};
+    r.q.assign(choice.mean.begin(), choice.mean.end());
+    r.weights = models.empty() ? 0 : weights_.version;
+    r.action = choice.action;
+    r.reason = choice.reason;
+    r.old_value = level == 0 ? k0_applied_ : m_applied_[level];
+    r.requested = new_value;
+    r.anchor = new_value;
+    r.timing = level == 0 ? 0 : 1;
+    decisions_.Write(JsonLine("f2")
+                         .Uint("id", r.id)
+                         .Uint("level", static_cast<uint64_t>(level))
+                         .Uint("op", op)
+                         .Str("move", F2ActionName(choice.action))
+                         .Str("greedy", F2ActionName(choice.greedy))
+                         .Str("reason", choice.reason)
+                         .Uint("votes", static_cast<uint64_t>(choice.votes))
+                         .Uint("need", static_cast<uint64_t>(choice.need))
+                         .Uint("members", static_cast<uint64_t>(choice.members))
+                         .Num("old", old_value)
+                         .Num("new", new_value)
+                         .Num("inflow_turnovers", (inflow - a.inflow_at_change) / cap)
+                         .NumsOrNull("mean", r.q)
+                         .Features("x", F2FeatureNames(), x)
+                         .str());
+    Opening next;
+    next.agent = Agent::kF;
+    next.state = x;
+    next.mask = mask;
+    next.b = Values{};
+    next.id = r.id;
+    next.has_action = true;
+    next.action = choice.action;
+    next.value_before = old_value;
+    next.value_after = new_value;
+    CloseInterval(level, v, next, op);
+    last_decision_op_[level] = op;
+    std::deque<uint64_t>& points = decision_ops_[level];
+    points.push_back(op);
+    while (points.size() > 256) points.pop_front();
+    made.push_back(r);
+  }
+  if (made.empty()) return made;
+  const std::vector<double> before = m;
+  for (int level : Repair(&m, v.T, b)) {
+    controls_[level].anchor = m[level];
+    controls_[level].timing = 1;
+    F2Changed(level, op);
+    decisions_.Write(JsonLine("repair")
+                         .Uint("level", static_cast<uint64_t>(level))
+                         .Uint("op", op)
+                         .Num("old", before[level])
+                         .Num("new", m[level])
+                         .Str("reason", "targets must not shrink going down")
+                         .str());
+  }
+  m_target_ = m;
+  k0_target_ = K;
   if (m_target_ != m_applied_ || k0_target_ != k0_applied_) {
     if (pending_first_id_ == 0) pending_first_id_ = made.front().id;
     last_id_ = made.back().id;

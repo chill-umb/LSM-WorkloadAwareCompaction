@@ -297,6 +297,12 @@ PLUGIN_PLACEHOLDERS="${PLUGIN_PLACEHOLDERS:-0}"
 # LEARNER_FROZEN=1 runs no trainer: the plugin reads LEARNER_WEIGHTS_FILE,
 # copied into the arm, with the evaluation settings.
 LEARNER_SETTINGS_FILE="${LEARNER_SETTINGS_FILE:-config/learner_settings.json}"
+# learned2's settings (controller/learned2.h; owner, 2026-11-05): the plugin's
+# keys under "plugin", trainer2's under "learner2".
+LEARNER2_SETTINGS_FILE="${LEARNER2_SETTINGS_FILE:-config/learner2_settings.json}"
+# A diagnostic run may price with a stated q-bar while the contract's is open
+# (D-29 §6); empty: none, and a learner arm is refused.
+CONTROLLER_QBAR_STANDIN="${CONTROLLER_QBAR_STANDIN:-}"
 LEARNER_CHAIN="${LEARNER_CHAIN:-1}"
 LEARNER_CHECKPOINT_IN="${LEARNER_CHECKPOINT_IN:-}"
 LEARNER_FROZEN="${LEARNER_FROZEN:-0}"

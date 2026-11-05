@@ -111,6 +111,9 @@ bool AgentFrom(uint32_t code, Agent* agent) {
     case 2:
       *agent = Agent::kLast;
       return true;
+    case 3:
+      *agent = Agent::kF;
+      return true;
     default:
       return false;
   }
@@ -186,6 +189,14 @@ uint64_t FeaturesHash(Agent agent) {
     joined += name;
   }
   return Fnv1a64(joined.data(), joined.size());
+}
+
+std::vector<const Model*> Weights::FindAll(Agent agent, int level) const {
+  std::vector<const Model*> out;
+  for (const Model& m : models) {
+    if (m.agent == agent && m.level == level) out.push_back(&m);
+  }
+  return out;
 }
 
 const Model* Weights::Find(Agent agent, int level) const {

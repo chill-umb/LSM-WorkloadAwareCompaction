@@ -302,6 +302,12 @@ const std::set<std::string>& KnownKeys() {
                                                "weights_path",
                                                "push_interval_ms",
                                                "weights_required",
+                                               "window_ops",
+                                               "ensemble",
+                                               "vote_share",
+                                               "settle_turnovers",
+                                               "measure_turnovers",
+                                               "min_decision_ops",
                                                "apply_at_op",
                                                "apply_m",
                                                "apply_k0",
@@ -595,6 +601,8 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     c->mode = Mode::kPriorOnly;
   } else if (c->mode_name == "learned") {
     c->mode = Mode::kLearned;
+  } else if (c->mode_name == "learned2") {
+    c->mode = Mode::kLearned2;
   } else if (c->mode_name == "remote-inference") {
     return r.Fail("mode \"remote-inference\" is not built (Gate N6)");
   } else {
@@ -614,8 +622,8 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       }
     }
   }
-  const bool learner =
-      c->mode == Mode::kPriorOnly || c->mode == Mode::kLearned;
+  const bool learner = c->mode == Mode::kPriorOnly ||
+                       c->mode == Mode::kLearned || c->mode == Mode::kLearned2;
   if (learner) {
     // H §3 and §7 price the D-23 terms; the learner modes run under cost
     // model 2 only (D-24 §2).
@@ -628,7 +636,8 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       return false;
     }
   } else if (r.Has("explore") || r.Has("seed")) {
-    return r.Fail("\"explore\" and \"seed\" are for prior-only and learned");
+    return r.Fail("\"explore\" and \"seed\" are for prior-only and learned"
+                  " (or learned2)");
   }
   if (r.Has("apply_schedule")) {
     std::string schedule;
@@ -665,7 +674,7 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     }
     c->schedule = {{c->apply_at_op, c->apply_m, c->apply_k0}};
   }
-  if (c->mode == Mode::kLearned) {
+  if (c->mode == Mode::kLearned || c->mode == Mode::kLearned2) {
     int required = 0;
     if (!r.String("weights_path", &c->weights_path) ||
         !r.Check(!c->weights_path.empty(), "need a weights_path") ||
@@ -679,7 +688,35 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     c->weights_required = required == 1;
   } else if (r.Has("weights_path") || r.Has("push_interval_ms") ||
              r.Has("weights_required")) {
-    return r.Fail("the weights keys are for learned mode");
+    return r.Fail("the weights keys are for learned and learned2");
+  }
+  if (c->mode == Mode::kLearned2) {
+    if (!r.Number("window_ops", &c->window_ops) ||
+        !r.Check(c->window_ops >= 1000 && c->window_ops == std::floor(c->window_ops),
+                 "need window_ops an integer >= 1000") ||
+        !r.Integer("ensemble", &c->ensemble) ||
+        !r.Check(c->ensemble >= 1 && c->ensemble <= 64,
+                 "need 1 <= ensemble <= 64") ||
+        !r.Number("vote_share", &c->vote_share) ||
+        !r.Check(c->vote_share > 0.5 && c->vote_share <= 1,
+                 "need 0.5 < vote_share <= 1") ||
+        !r.Number("settle_turnovers", &c->settle_turnovers) ||
+        !r.Check(c->settle_turnovers >= 0, "need settle_turnovers >= 0") ||
+        !r.Number("measure_turnovers", &c->measure_turnovers) ||
+        !r.Check(c->measure_turnovers >= 0, "need measure_turnovers >= 0") ||
+        !r.Number("min_decision_ops", &c->min_decision_ops) ||
+        !r.Check(c->min_decision_ops >= c->window_ops,
+                 "need min_decision_ops >= window_ops")) {
+      return false;
+    }
+  } else {
+    for (const char* key : {"window_ops", "ensemble", "vote_share",
+                            "settle_turnovers", "measure_turnovers",
+                            "min_decision_ops"}) {
+      if (r.Has(key)) {
+        return r.Fail(std::string("\"") + key + "\" is for learned2");
+      }
+    }
   }
 
   if (r.Has("rules")) {

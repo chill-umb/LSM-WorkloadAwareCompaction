@@ -5,6 +5,7 @@
 #include <iterator>
 
 #include "jobs.h"
+#include "learned2.h"
 
 namespace rlc {
 
@@ -394,6 +395,8 @@ const char* AgentName(Agent agent) {
       return "interior";
     case Agent::kLast:
       return "last";
+    case Agent::kF:
+      return "f";
   }
   return "unknown";
 }
@@ -487,6 +490,8 @@ const std::vector<std::string>& FeatureNames(Agent agent) {
       return kInterior;
     case Agent::kLast:
       return kLast;
+    case Agent::kF:
+      return F2FeatureNames();
   }
   return kInterior;
 }

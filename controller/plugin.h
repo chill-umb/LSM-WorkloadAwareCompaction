@@ -116,6 +116,23 @@ class Controller {
   void RecordJob(const ROCKSDB_NAMESPACE::RLJobRecord& job);
   // Learned mode: re-reads the weights file when its version grew.
   void PollWeights(uint64_t op, uint64_t now);
+  // learned2 (learned2.h): closes the open window once window_ops have
+  // passed, writes its "window" line, and opens the next.
+  void F2Window(const ROCKSDB_NAMESPACE::RLOpCounts& ops, uint64_t now);
+  // learned2's decisions (F1-F5), in place of Decide's.
+  std::vector<DecisionRecord> DecideLearned2(
+      const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
+      const ROCKSDB_NAMESPACE::RLOpCounts& ops,
+      const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
+      uint64_t now);
+  // Net bytes landed so far in the level agent `agent` watches: its own,
+  // L1's for L0.
+  double F2Inflow(int agent) const;
+  // The agent's last change has settled (or it never changed).
+  bool F2Settled(int agent) const;
+  // A change of the agent's setting: it must settle again, and the open
+  // window is no longer clean.
+  void F2Changed(int agent, uint64_t op);
   // Sends the targets to the host if they differ from what it last accepted
   // and the cap allows. Returns false, with the reason, if the host refused
   // them.
@@ -169,6 +186,24 @@ class Controller {
   StepRing ring_;
   ROCKSDB_NAMESPACE::RLStepCounts prev_steps_;
   std::map<int, StepSample> compaction_begins_, flush_begins_;
+  // learned2: per agent (0 = L0), its last change and last decision.
+  struct F2Agent {
+    bool changed_once = false;
+    uint64_t change_op = 0;
+    double inflow_at_change = 0;
+    uint64_t decision_op = 0;
+    double inflow_at_decision = 0;
+  };
+  std::vector<F2Agent> f2_;
+  std::vector<double> f2_C_;  // the nominal targets C_i, from the last view
+  bool f2_window_open_ = false;
+  uint64_t f2_window_op_ = 0;
+  ROCKSDB_NAMESPACE::RLOpCounts f2_window_ops_;
+  std::vector<double> f2_window_settled_;  // per agent, at the window's start
+  bool f2_window_changed_ = false;
+  bool f2_have_window_ = false;
+  double f2_shares_[3] = {0, 0, 0};  // the last closed window's put, get, scan
+
   // The learner modes.
   std::mt19937_64 rng_;
   Weights weights_;

@@ -11,7 +11,7 @@
 //   payload:
 //     n_models                    uint32
 //     per model:
-//       agent                     uint32 (0 l0, 1 interior, 2 last)
+//       agent                     uint32 (0 l0, 1 interior, 2 last, 3 f)
 //       level                     int32 (-1: every level of the agent)
 //       features hash             uint64, FNV-1a 64 of the agent's feature
 //                                 names joined by ','
@@ -66,6 +66,9 @@ struct Weights {
   std::vector<Model> models;
   // The model for (agent, level): an exact level first, then level -1.
   const Model* Find(Agent agent, int level) const;
+  // Every model for exactly (agent, level), in file order: learned2's
+  // ensemble (learned2.h).
+  std::vector<const Model*> FindAll(Agent agent, int level) const;
 };
 
 enum class LoadStatus { kOk, kMissing, kInvalid };

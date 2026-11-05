@@ -142,6 +142,35 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(hold["cost_model"], 1)
         self.assertNotIn("c_st", hold)
 
+    def test_learned2_gets_its_keys_and_a_diagnostic_q_bar_stand_in(self):
+        # controller/learned2.h (owner, 2026-11-05); the shipped settings file.
+        shipped = json.loads((ROOT / "config" / "learner2_settings.json").read_text())
+        learner = pc.learner_values(shipped, "training")
+        config, filled = compose("learned2", prices=PRICES6, diagnostic=True,
+                                 learner=learner, weights_path="/w.bin", seed=4,
+                                 q_bar_standin=50000.0)
+        self.assertEqual(filled, [])
+        self.assertEqual(config["mode"], "learned2")
+        self.assertEqual(config["cost_model"], 2)
+        self.assertEqual(config["q_bar"], 50000.0)
+        self.assertEqual(config["weights_path"], "/w.bin")
+        for key in pc.LEARNED2_KEYS:
+            self.assertEqual(config[key], shipped["plugin"][key])
+        self.assertEqual(config["window_ops"], 250000)
+        # The stand-in: diagnostic only, never over a contract value.
+        with self.assertRaisesRegex(ValueError, "diagnostic run only"):
+            compose("learned2", prices=PRICES6, learner=learner,
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        with self.assertRaisesRegex(ValueError, "the contract has a q-bar"):
+            compose("learned2", contract=with_qbar(61234.5), prices=PRICES6,
+                    diagnostic=True, learner=learner, weights_path="/w.bin",
+                    seed=4, q_bar_standin=50000.0)
+        # Without its keys, learned2 is refused and names them.
+        with self.assertRaisesRegex(ValueError, "window_ops"):
+            compose("learned2", prices=PRICES6, diagnostic=True,
+                    learner=LEARNER, weights_path="/w.bin", seed=4,
+                    q_bar_standin=50000.0)
+
     def test_the_hold_arms_scheduled_change(self):
         """The step-response arm (owner, 2026-10-07): hold only, diagnostic
         only, apply_at_op with apply_m, apply_k0 optional; none by default."""

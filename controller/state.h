@@ -197,7 +197,8 @@ void PriceRatios(const View& v, const Config& cfg, double* r_f, double* r_b,
 void L0ReadPrices(const View& v, const Config& cfg, double* per_get,
                   double* per_scan);
 
-enum class Agent { kL0, kInterior, kLast };
+// kF: the learned2 mode's agent at every level (learned2.h).
+enum class Agent { kL0, kInterior, kLast, kF };
 const char* AgentName(Agent agent);
 const std::vector<std::string>& FeatureNames(Agent agent);
 

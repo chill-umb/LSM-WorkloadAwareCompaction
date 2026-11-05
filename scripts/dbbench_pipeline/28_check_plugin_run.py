@@ -42,6 +42,9 @@ import re
 from pathlib import Path
 
 ACTIONS = ("hold", "compact", "defer", "expand")  # the mask's order (log.h)
+# learned2's names for the same slots (controller/learned2.h): 0 hold, 1 down,
+# 2 up, 3 never allowed.
+F2_ACTIONS = ("hold", "down", "up", "unused")
 ACT3_SHARE = 0.99  # PATHWAYS A §6
 STARTED = re.compile(r"^RL_PLUGIN_STARTED created=(\d)$", re.M)
 STOPPED = re.compile(r"^RL_PLUGIN_STOPPED$", re.M)
@@ -147,10 +150,11 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
            ([f"decisions in modes {wrong_mode}"] if wrong_mode else []),
            decisions=len(made))
 
+    names = F2_ACTIONS if mode == "learned2" else ACTIONS
     masked = [line.get("id") for line in made
-              if line.get("action") not in ACTIONS
+              if line.get("action") not in names
               or not line.get("mask")
-              or line["mask"][ACTIONS.index(line["action"])] != 1]
+              or line["mask"][names.index(line["action"])] != 1]
     record("masks", [f"decisions {masked[:10]} took a masked action"]
            if masked else [], masked_actions=len(masked))
 
@@ -232,7 +236,8 @@ def main() -> int:
     parser.add_argument("--decisions", type=Path, required=True)
     parser.add_argument("--transitions", type=Path, required=True)
     parser.add_argument("--mode", required=True,
-                        choices=("hold-only", "rules", "prior-only", "learned"))
+                        choices=("hold-only", "rules", "prior-only", "learned",
+                                 "learned2"))
     parser.add_argument("--expect-fallback", action="store_true")
     parser.add_argument("--min-changes", type=int, default=0,
                         help="judged ACT-3 changes the run must contain")

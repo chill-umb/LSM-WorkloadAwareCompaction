@@ -26,7 +26,7 @@ struct Bounds {
 
 // learned and prior-only are plan step 10, built for PREREGISTRATION D-24
 // §2's exploratory track; remote-inference (Gate N6) is not built.
-enum class Mode { kHoldOnly, kRules, kPriorOnly, kLearned };
+enum class Mode { kHoldOnly, kRules, kPriorOnly, kLearned, kLearned2 };
 
 // Cost model 2's step types and job kinds (PATHWAYS D §1 as amended
 // 2026-10-03, D-23; scripts/dbbench_pipeline/cost_model_v2.py's STEP_TYPES
@@ -111,6 +111,19 @@ struct Config {
   std::string weights_path;
   double push_interval_ms = 0;
   bool weights_required = false;
+  // learned2 (learned2.h; owner, 2026-11-05): a "window" line every
+  // window_ops operations; an ensemble of `ensemble` models per level, a
+  // greedy move only with vote_share of them behind it; after a change, the
+  // agent's level (L1 for L0) must take settle_turnovers of its capacity in
+  // inflow before the agent decides again, and every decision needs
+  // measure_turnovers of inflow and min_decision_ops operations since the
+  // last one.
+  double window_ops = 0;
+  int ensemble = 0;
+  double vote_share = 0;
+  double settle_turnovers = 0;
+  double measure_turnovers = 0;
+  double min_decision_ops = 0;
   // Hold-only only (owner, 2026-10-07: the step-response test of the
   // settling condition C3): at the first poll at or after operation
   // apply_at_op, apply apply_m (one value per level, ":"-separated in the

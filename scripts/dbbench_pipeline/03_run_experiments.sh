@@ -156,7 +156,7 @@ fi
 arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
   local name variable
   case "$1" in
-    native|static:uniform_1|rules|prior|learned) ;;
+    native|static:uniform_1|rules|prior|learned|learned2) ;;
     hold) printf '%s' "$HOLD_START_M" ;;  # empty unless a diagnostic run sets it
     static:uniform_0_75)
       printf '1'
@@ -175,9 +175,14 @@ arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
   esac
 }
 is_controller_arm() {
-  [[ "$1" == hold || "$1" == rules || "$1" == prior || "$1" == learned ]]
+  [[ "$1" == hold || "$1" == rules || "$1" == prior || "$1" == learned ||
+     "$1" == learned2 ]]
 }
-is_learner_arm() { [[ "$1" == prior || "$1" == learned ]]; }
+is_learner_arm() { [[ "$1" == prior || "$1" == learned || "$1" == learned2 ]]; }
+# The settings file a learner arm reads: learned2 has its own.
+learner_settings_for() {  # $1=arm
+  if [[ "$1" == learned2 ]]; then echo "$LEARNER2_SETTINGS_FILE"; else echo "$LEARNER_SETTINGS_FILE"; fi
+}
 is_programme1_arm() {
   [[ "$1" == native || "$1" == static:* ]] || is_controller_arm "$1"
 }
@@ -196,7 +201,7 @@ for arm in $EXPERIMENT_ARMS; do
   fi
   if is_programme1_arm "$arm"; then
     PROGRAMME1_MATRIX=1
-    [[ "$arm" =~ ^(native|hold|rules|prior|learned|static:[A-Za-z0-9_]+)$ ]] || {
+    [[ "$arm" =~ ^(native|hold|rules|prior|learned|learned2|static:[A-Za-z0-9_]+)$ ]] || {
       echo "Unsupported experiment arm: $arm" >&2
       exit 1
     }
@@ -551,8 +556,11 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
   # beta* other than the headline: plugin_config refuses it unless diagnostic.
   [[ -z "$CONTROLLER_BETA_STAR" ]] ||
     placeholder_flag+=(--beta-star "$CONTROLLER_BETA_STAR")
+  # The contract's q-bar is open: a diagnostic run may name a stand-in.
+  [[ -z "$CONTROLLER_QBAR_STANDIN" ]] ||
+    placeholder_flag+=(--q-bar-standin "$CONTROLLER_QBAR_STANDIN")
   if is_learner_arm "$1"; then
-    learner_flag=(--learner-settings "$LEARNER_SETTINGS_FILE"
+    learner_flag=(--learner-settings "$(learner_settings_for "$1")"
                   --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
     (( ! LEARNER_FROZEN )) || learner_flag+=(--learner-phase evaluation)
   fi
@@ -609,7 +617,7 @@ done
 }
 for arm in $EXPERIMENT_ARMS; do
   case "$arm" in
-    native|static:*|hold|rules|prior|learned) ;;  # checked above
+    native|static:*|hold|rules|prior|learned|learned2) ;;  # checked above
     regular|oracle|prior_only|rl|unconstrained_rl|unconstrained_prior_only) ;;
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
@@ -1173,6 +1181,7 @@ start_trainer() {  # result dir
   dir="$(cd "$1" && pwd)"
   [[ "$settings" = /* ]] || settings="$PROJECT_ROOT/$settings"
   TRAINER_PID=""
+  TRAINER_SUMMARY="trainer_summary.json"
   if (( LEARNER_FROZEN )); then
     [[ -f "$LEARNER_WEIGHTS_FILE" ]] || {
       echo "LEARNER_FROZEN=1 needs LEARNER_WEIGHTS_FILE: '$LEARNER_WEIGHTS_FILE'" >&2
@@ -1214,6 +1223,25 @@ start_trainer() {  # result dir
     }
   fi
 }
+# learned2's trainer (rl_agent/learner/trainer2.py, controller/learned2.h) on
+# CONTROLLER_CPUS: cold every run, it reads the decision log's windows and
+# the host log while db_bench runs and stops after the plugin's stop line.
+start_trainer2() {  # result dir
+  local dir settings="$LEARNER2_SETTINGS_FILE"
+  dir="$(cd "$1" && pwd)"
+  [[ "$settings" = /* ]] || settings="$PROJECT_ROOT/$settings"
+  TRAINER_PID=""
+  TRAINER_SUMMARY="trainer2_summary.json"
+  (
+    cd "$PROJECT_ROOT/rl_agent" &&
+    exec ${CONTROLLER_LAUNCHER[@]+"${CONTROLLER_LAUNCHER[@]}"} "$PYTHON" -m learner.trainer2 \
+      --plugin-config "$dir/plugin_config.json" \
+      --decisions "$dir/decisions.jsonl" --host-log "$dir/host_log.jsonl" \
+      --weights "$dir/weights.bin" --settings "$settings" \
+      --log "$dir/trainer2.jsonl" --summary "$dir/trainer2_summary.json"
+  ) > "$dir/trainer2.out" 2>&1 &
+  TRAINER_PID=$!
+}
 stop_trainer() {  # result dir; waits by PID, never by name
   local dir="$1" waited=0 status=0
   [[ -n "$TRAINER_PID" ]] || return 0
@@ -1229,7 +1257,7 @@ stop_trainer() {  # result dir; waits by PID, never by name
   fi
   wait "$TRAINER_PID" || status=$?
   TRAINER_PID=""
-  (( status == 0 )) && [[ -f "$dir/trainer_summary.json" ]] || return 1
+  (( status == 0 )) && [[ -f "$dir/${TRAINER_SUMMARY:-trainer_summary.json}" ]] || return 1
   if (( LEARNER_CHAIN )); then
     LEARNER_LAST_CHECKPOINT="$dir/trainer_checkpoint.pt"
   fi
@@ -1497,6 +1525,8 @@ PY
   fi
   if [[ "$arm" == learned ]]; then
     start_trainer "$result_dir" || exit 5
+  elif [[ "$arm" == learned2 ]]; then
+    start_trainer2 "$result_dir" || exit 5
   fi
   if (( uses_server )); then
     local eval_mode=0
@@ -1592,7 +1622,8 @@ PY
     fi
     if is_learner_arm "$arm"; then
       printf 'learner_settings_sha256=%s\n' \
-        "$(sha256sum "$LEARNER_SETTINGS_FILE" | awk '{print $1}')"
+        "$(sha256sum "$(learner_settings_for "$arm")" | awk '{print $1}')"
+      printf 'controller_qbar_standin=%s\n' "${CONTROLLER_QBAR_STANDIN:-none}"
       printf 'learner_seed=%s\n' "$learner_seed"
       printf 'learner_frozen=%s\n' "$LEARNER_FROZEN"
       if [[ "$arm" == learned ]]; then
@@ -1762,7 +1793,7 @@ PY
   set -e
   end_ns="$(date +%s%N)"
   (( ! uses_server )) || stop_server
-  if [[ "$arm" == learned ]]; then
+  if [[ "$arm" == learned || "$arm" == learned2 ]]; then
     stop_trainer "$result_dir" || {
       touch "$result_dir/FAILED_TRAINER"
       echo "The trainer failed; keeping the result and DB: $result_dir" >&2
@@ -1794,6 +1825,7 @@ PY
       rules) plugin_mode=rules ;;
       prior) plugin_mode=prior-only ;;
       learned) plugin_mode=learned ;;
+      learned2) plugin_mode=learned2 ;;
     esac
     "$PYTHON" "$PIPELINE_DIR/28_check_plugin_run.py" \
       --stdout "$result_dir/run.log" \

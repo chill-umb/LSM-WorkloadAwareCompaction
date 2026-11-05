@@ -11,7 +11,7 @@ import struct
 from dataclasses import dataclass, field
 
 MAGIC = b"RLCW0001"
-AGENT_CODES = {"l0": 0, "interior": 1, "last": 2}
+AGENT_CODES = {"l0": 0, "interior": 1, "last": 2, "f": 3}   # f: learned2
 CODE_AGENTS = {v: k for k, v in AGENT_CODES.items()}
 N_ACTIONS = 4
 

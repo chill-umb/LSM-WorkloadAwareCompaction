@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "learned2.h"
+
 namespace rlc {
 
 std::string JsonNumber(double value) {
@@ -172,7 +174,8 @@ std::string DecisionLine(const DecisionRecord& r) {
       .Uint("t_us", r.t_us)
       .Str("mode", r.mode)
       .Uint("weights", r.weights)
-      .Str("action", ActionName(r.action))
+      .Str("action", r.agent == Agent::kF ? F2ActionName(r.action)
+                                          : ActionName(r.action))
       .Str("reason", r.reason)
       .Flags("mask", r.mask)
       .Nums("prior_cost", {r.b.begin(), r.b.end()})

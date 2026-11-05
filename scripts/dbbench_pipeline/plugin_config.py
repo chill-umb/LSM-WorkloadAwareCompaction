@@ -49,8 +49,12 @@ from pathlib import Path
 import research_objective
 
 PLUGIN_MODES = {"hold": "hold-only", "rules": "rules", "prior": "prior-only",
-                "learned": "learned"}
-LEARNER_ARMS = ("prior", "learned")
+                "learned": "learned", "learned2": "learned2"}
+LEARNER_ARMS = ("prior", "learned", "learned2")
+# learned2's own keys (controller/learned2.h; owner, 2026-11-05), from the
+# "plugin" part of its settings file (config/learner2_settings.json).
+LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",
+                 "measure_turnovers", "min_decision_ops")
 LEARNER_KEYS = ("explore", "push_interval_ms", "weights_required")
 # The device prices controller/config.cc reads, c_open among them since
 # PREREGISTRATION D-21 (resolving D-20 §2g): measured by stage 18, never a
@@ -119,6 +123,7 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             learner: dict | None = None, weights_path: str | None = None,
             seed: int | None = None,
             beta_star: float | None = None,
+            q_bar_standin: float | None = None,
             apply_at_op: int | None = None, apply_m: str | None = None,
             apply_k0: int | None = None, apply_schedule: str | None = None,
             hold_k0_cap: int | None = None) -> tuple[dict, list[str]]:
@@ -182,6 +187,17 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         contract, objective_mode, headline if beta_star is None else beta_star)
     config.update(beta_w=weights[0], beta_r=weights[1], beta_s=weights[2])
     config["q_bar"] = research_objective.reference_rate(contract, family)
+    if q_bar_standin is not None:
+        # The contract's q-bar is still open (D-29 §6): a diagnostic run may
+        # price with a stated stand-in (50k in every exploratory check since
+        # 2026-10-30), never over a value the contract has.
+        if not diagnostic:
+            raise ValueError("a q-bar stand-in is for a diagnostic run only")
+        if config["q_bar"] is not None:
+            raise ValueError("the contract has a q-bar; no stand-in")
+        if not (isinstance(q_bar_standin, (int, float)) and q_bar_standin > 0):
+            raise ValueError(f"q-bar stand-in must be positive; got {q_bar_standin!r}")
+        config["q_bar"] = float(q_bar_standin)
     if config["q_bar"] is None:
         missing.append(f"q_bar (contract reference_rate.{family}, D-14 §2)")
     if prices is None:
@@ -210,12 +226,15 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         if seed is None:
             missing.append("seed (the arm's)")
         config["seed"] = seed
-        if arm == "learned":
+        if arm in ("learned", "learned2"):
             if not weights_path:
                 missing.append("weights_path (the arm's)")
             config["weights_path"] = weights_path
             for key in ("push_interval_ms", "weights_required"):
                 config[key] = _value(learner, key, "learner settings", missing)
+        if arm == "learned2":
+            for key in LEARNED2_KEYS:
+                config[key] = _value(learner, key, "learner2 settings", missing)
 
     filled: list[str] = []
     if missing and placeholders:
@@ -358,6 +377,9 @@ def main() -> int:
                         help="the priority modes' beta* (default the "
                              "contract's headline); another reported beta* "
                              "only with --diagnostic")
+    parser.add_argument("--q-bar-standin", type=float,
+                        help="diagnostic only, while the contract's q-bar is "
+                             "open: the reference rate to price with")
     parser.add_argument("--apply-at-op", type=int,
                         help="hold arm, diagnostic only: the operation at or "
                              "after which the scheduled change is applied")
@@ -395,7 +417,7 @@ def main() -> int:
                                          "learner settings"),
                                    args.learner_phase),
             weights_path=args.weights_path, seed=args.seed,
-            beta_star=args.beta_star,
+            beta_star=args.beta_star, q_bar_standin=args.q_bar_standin,
             apply_at_op=args.apply_at_op, apply_m=args.apply_m,
             apply_k0=args.apply_k0, apply_schedule=args.apply_schedule,
             hold_k0_cap=args.hold_k0_cap)

@@ -1,0 +1,28 @@
+{
+  "status": "learned2 (F1-F5), owner go 2026-11-05 for the 90-run diagnostic batch (W1-W5 x T 2..10 x read/write, beta* 2); exploratory, not a gate setting. Design: ~/node_ops/workers/2026-11-05-learnfix/design_learned2.md.",
+  "plugin": {
+    "explore": 0.1,
+    "push_interval_ms": 5000,
+    "weights_required": 0,
+    "window_ops": 250000,
+    "ensemble": 10,
+    "vote_share": 0.9,
+    "settle_turnovers": 1.0,
+    "measure_turnovers": 1.0,
+    "min_decision_ops": 1000000
+  },
+  "learner2": {
+    "ensemble": 10,
+    "hidden": 64,
+    "layers": 2,
+    "lr": 0.001,
+    "huber": 1.0,
+    "steps": 200,
+    "batch": 64,
+    "min_windows": 16,
+    "push_interval_ms": 5000,
+    "seed": 1,
+    "preq_span": 20,
+    "torch_threads": 1
+  }
+}
