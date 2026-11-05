@@ -1,33 +1,41 @@
 # Cases 1-2 propagation law: scores
 
-Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score changes, this file changes with it.
+Updated 2026-11-04 ~20:55 UTC. Kept current by the operator: every time a score changes, this file changes with it.
 
 - **Single-change runs:** 675 runs, one K change from a settled K = 4 tree. Law round 18 (`v2/score_k_v2r18.py`), scored
   in settled windows. Pass = at least 90% in every workload. Count: **9 of 13**.
-- **Multi-change runs:** 135 runs, 1,430 changes, 7-16 per run. Law r7 (`clean/r7`, parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc, zd; =
+- **Multi-change runs:** 135 runs, 1,430 changes, 7-16 per run. Law r7 (`clean/r7`, parts d, p, c, o, w, s, r, j, u, e, g, y, z, zr, zc, zd, wr, nc, cm; =
   r5 + the write rate at L0 merge start, the calm before-stretch, the brake forecast on the new K only, an L0 merge's
   dropped copies, the workload's write rate since its last step, the L0 merge already running at the change, and each
   L0 merge's L1→L2 burst in calm trees, busy #5/#5b against the run's own last stretch, with no old-K stand-in, and the
-  deepest level's own intake from its merges, timed on whole pours, files per L0 merge in closed form, #2 and #4 from formulas with no loop over merges, and #8's first merge from level sizes with no per-file snapshot). At
+  deepest level's own intake from its merges, timed on whole pours, files per L0 merge in closed form, #2 and #4 from formulas with no loop over merges, and #8's first merge from level sizes with no per-file snapshot, and the slowed write rate from the last stretch's own slowed time, else RocksDB's write-delay cap, and calm trees' levels from a threshold cascade, one burst down the tree per L0 merge, and busy trees' L1 and deeper levels from a per-L0-cycle map with the five cause-group fixes of 2026-11-04, and its
+  round-2 fixes: the ride's bytes counted once, a rising pause that serves only levels above RocksDB's pick line, L1's
+  inflow from flushed bytes, and the trivial-move share of a level that starts pushing; and its round-3 fixes: the
+  served levels' drain over one L0 cycle after the first L0 merge, L1's drop share from its pick depth and a frozen
+  receiver's filling, L1's hold against its own rest with L2+'s ride on the fast flushes' budget, and the least-overlap
+  pick's discount with the zero-overlap trivial share; and the served group's water under the write stalls, held where
+  RocksDB's pending-bytes estimate sits at its 64 GiB limit, and after a write-rate step the settled water's deep
+  levels joining at the pick water). At
   each K change
   the law predicts every level from the run's own last stretch; the prediction is checked against the run's own next
-  stretch (no twin run). Tolerance: the noise band from the original repeats. Pass = at least 90% hits in every
+  stretch (no twin run). Tolerance: the noise band from the original repeats; where that band is 0 on bytes written
+  or flow out (the repeats never moved that level), one file's bytes per op of the stretch. Pass = at least 90% hits in every
   workload. Count: **6 of the 10 scored**.
 
 | # | What it checks | Single-change runs (round 18) | Multi-change runs (r7) |
 |---|---|---|---|
 | 1 | K above the cap acts as the cap | FAIL (W4) | not scored |
 | 2 | Mean L0 file count | PASS | **PASS** (92-100%; W5 92, W4 93) |
-| 3 | Files per L0→L1 merge | PASS | **PASS** (91-100%; W4 91 (244/269, bar 242.1), W5 96) |
+| 3 | Files per L0→L1 merge | PASS | **PASS** (91-100%; W4 91 (245/269, bar 242.1), W5 96) |
 | 4 | L0→L1 bytes written per op | PASS | **PASS** (90-93%; W2 221/245 is half a hit above the bar) |
 | 5 | L1→L2 overlap | FAIL | FAIL in 4 (W1 79, W3 38, W4 63, W5 77; W2 91 passes) |
 | 5b | L1→L2 bytes written per op | PASS (W1 accepted as a limitation) | FAIL in 4 (W1 84, W3 71, W4 69, W5 83; **W2 91 passes**) |
-| 6 | L2 and deeper | FAIL | FAIL in all 5 (L2 misses everywhere; deepest level W1 89 (235/264, bar 237.6), W2 78, W3 82, W4 43, W5 80) |
+| 6 | L2 and deeper | FAIL | FAIL in 4. **W1 passes every row** (98% pooled); W2 fails one row, bytes written at L6 (23/26, bar 23.4); W3/W4/W5 (busy) miss at most levels (80.8/76.0/89.2% pooled; rows below 90%: W3 17 of 28, W4 26 of 29, W5 15 of 29; busy trees 80.8/76.0/86.6, case 1 70/68/85 (K raised with writes slowed 66/58/85), case 2 91/84/88; deepest level W1 94, W2 96, W3 89, W4 64, W5 88) |
 | 7 | Writes slowed or not | PASS | **PASS** (94-100%) |
 | 8a | When the first L0 merge after the change starts | PASS | **PASS** (93-100%; W5 93) |
 | 8b | Files in that first merge | PASS | **PASS** (93-100%) |
 | 9 | L0 settles within one cycle | PASS | not scored |
-| 10 | Flows out of L1 and deeper | FAIL (W4) | FAIL (L1 and L2 miss everywhere) |
+| 10 | Flows out of L1 and deeper | FAIL (W4) | FAIL in 3. **W1 and W2 pass every row** (97%, 97%); W3/W4/W5 (busy) 90.1/89.3/90.7% pooled (L1 97/94/94, L2 87/91/91); rows below 90%: W3 L2 87, L3 85, L6 84; W4 L3 85, L4 87, L5 89, L6 81, L7 81; W5 L3 86, L7 86, L8 73 |
 | 11 | Probes per Get | PASS (W1/W2 accepted as a limitation) | not scored |
 
 ## Why the multi-change runs fail
@@ -174,8 +182,12 @@ Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score c
   so K moves it too. Busy L2 size: the law's change is mostly the wrong size (W3 big 79, small 53; W4 big 92, small
   46 of 222 misses); the twin holds still 65% (W3), 48% (W4). W2 size: 19 of 28 misses are the law's change pushing a
   no-change hit out (K raised 83%, lowered 95%).
-- **#10:** L1 and L2 flows miss in every workload (34-80%). They track the L1/L2 write misses under #6; not diagnosed
-  separately.
+- **#10:** since part nc (calm cascade) W1 and W2 pass. Since part cm (2026-11-03 22:00) busy L1 and L2 flows hit
+  W3 91/83, W4 88/89, W5 90/90%; L3 and deeper still miss (W4 L3-L6 74-78%), with the deep levels' sizes under #6.
+- **Busy trees (#6, #10), 2026-11-03:** RocksDB's pick rule (highest score at job begin) reproduces every measured
+  merge, so the outcome is set by the scores. The busy trials' parts cancel each other's errors (serving-line trial,
+  test 2's measured L0 rhythm), so the busy forecast is being rebuilt piece by piece, each piece checked against the
+  replay before they are combined (owner: "Go with piece by piece rebuild for busy trees").
 - **#1, #9, #11:** there is no multi-run scorer for these yet.
 
 ## Trials not adopted (multi-change runs)
@@ -278,12 +290,77 @@ Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score c
   123 → 124. `R18S=1` alone changes 210 predictions and flips no hit, so #8 is the only part of the law that needs the snapshot. `DRAIN=off` did not finish within its 600 s limit, twice, and was not diagnosed.
 
 - **#8 without reading every file (2026-10-31, owner: five Opus agents, one worker each; `clean/sub8_{calib,fit,curve,order,stale}/`, reports `~/node_ops/reports/2026-10-31-sub-8*.md`; `order` adopted 2026-11-02 as part zd, see Changes; the others not adopted):** all with `R18S=1`. Operator's re-score on worker 3, W1/W2/W3/W4/W5 (fit not re-scored): `order` (`DRAIN=flat DRAIN_FAM=uni DF_ARR=mix`, overlap of the cheapest m bytes = next level's bytes × q(1 + q)/2, q = m / level's bytes, level bytes only): #8a 260/206/264/262/311, #8b 260/207/251/252/319, #3 262/201/261/244/323. `curve T` and `calib quad` (overlap rate start, rising to the next level's bytes): #8a 260/206/265/263/308, #8b 260/207/251/251/318, #3 262/201/261/243/324. `curve B2` (2 points per level from all files): 260/206/264/263/313, 260/207/251/250/313, 262/201/261/247/324. `stale p32` (32 files per level at X): 260/206/264/264/311, 260/207/251/255/318, 262/201/262/244/323. All six rows above their bars in all five; no-snapshot proof holds for order and T; order's off switch exact and #8a/#8b unchanged with the future removed. Failed: rolling correction (drains in a run do not correlate), sorted past merges, older snapshots (#3 W4 241-242). Against: forms chosen after seeing; W1 has 0 busy solves, W2 1; starting costs 0.3-0.7 all pass, so the bars do not pin the shape; agents report single-run #8b W3 118-119/135 (adopted 131), W5 123-124, #3 W4 first window 117 → 111-113; sequential workloads untested; live reads from code reading only.
+- **Pick rule and the serving line (2026-11-03, owner: "focus on #6 and #10", then "Yes to both"; diagnosis w3
+  `clean/sub6_pick/`, trial w2 `clean/sub6_line/`):** a MANIFEST + host-log replay rebuilt the tree at every job's begin.
+  RocksDB's rule, the highest score at job begin (L0 = max(files / K, L0 bytes / base), ties to the lower level), picks
+  1,458,779 of the 1,458,784 measured-phase merges in all five workloads. Because the picker compares only when a job
+  starts, levels the slot serves rest below L0's score at its pick: L2 by 0.2/2.1/3.0%, L3+ by 1.4/4.3/4.0% (W3/W4/W5
+  medians). Put into the best busy trial (cm + ride + L1 ride + kappa identity, WRATE=Bc) as each level's cap at the
+  water, it makes busy #6 worse: W3/W4/W5 71/64/83 → 69/55/78 with the next stretch's measured values, 69/56/77 with
+  the last stretch's; #10 76/74/84 → 75/67/83. It also makes busy #6 worse with the measured ride (69/56/78). The trial's
+  W4 L2 is already low (median −0.4 limits), and the too-high cap was hiding that. Not adopted.
+- **Water ceiling and round-2 issue agents (2026-11-04; reports `~/node_ops/reports/2026-11-04-0905-water-ceiling.md`,
+  `2026-11-04-i{1..5}-*.md`, `2026-11-04-1045-comb-plus-i2i3.md`; I1 and I4 adopted, see Changes):** a perfect L0-pick
+  water plus a perfect resting line is worth only +2.3/−0.4/+1.3 busy #6 (W3/W4/W5), so no live water fix was built.
+  I2 (case 1 receivers: survive share = 1 − d·ω, `I2_KAPD`): no mode beats the law; on top of I1 + I4 mode 1 nets
+  #6 −6/0/−10 and mode 3 −1/0/−3, and both pull #10 W5 below 90 (90.2 → 89.6/89.9) and fail flows L5 W5; the idle
+  level's d would need a per-file key sketch in the fork. I3 (L2 size in busy trees: fast flushes' own budget, L1's
+  cheapest-first profile, live overlaps for the ride): about zero alone; on top of I1 + I4 −1/−5/+2 (fast only) and
+  −12/−15/+1 (all three), size L6 W5 fails. I5's case-2 pause rule (`I5_PAUSE`) is the same rule as I1's RISE.
+  Multi #2-#8b, single and calm rows unchanged in every variant. Not adopted.
+- **The served group's score path, problem 1 (2026-11-04 16:00-18:20 UTC; reports `~/node_ops/reports/2026-11-04-1630-p1-score-path.md`,
+  `2026-11-04-1650-p1-slope-hindcast.md`, `2026-11-04-p1g-brake-water.md`; w3 `clean/p1_path`, `clean/p1g`):**
+  - A live slope from K's direct effect on L0's L1 read plus the last stretch's balance (hindcast): worse than flat in
+    W4 case 2 and W5 (path error W4 c2 6.8% flat vs 8.4-8.9%).
+  - The L0-L1 cycle map for stretches with no level ≥ 2 served (`P1M`; L0 reaches 20 files during each long L0 merge,
+    L1 pushes its budget per fast flush between merges): it reproduces the climbs, but those stretches carry almost no
+    #6 value (deep levels are frozen receivers there). Busy #6 with the live selection 76.8/71.3/85.6, with the measured
+    class 78.3/73.0/86.0, against 78.5/73.0/86.0.
+  - Agent P1G's other candidates: a join wave timed by the slot's budget (hindcast 9-10% off vs the law's 1.5-6%); a
+    self-calibrated case-1 drain (`P1G_SLF`: busy #6 W3 −6, W4 −41, W5 −3 rows; #10 W4 85.9 → 83.9); the slot time freed
+    by a write-rate step (case 1 worse, 10.1% → 22.5%); an L0 cap during the climb (W4 c2 free-L0 9.2% → 33.3%).
+  - W5: no write stall binds in 171 of its 186 free group stretches, so the brake water does not act there. Part y's pair
+    form froze the deep levels' scores within a regime piece; the fix (`P1G_PAIR=2`, after a write-rate step only) is
+    adopted (see Changes). Not adopted (agent P1G part 2, report `~/node_ops/reports/2026-11-04-p1g-w5-pair.md`; busy #6
+    rows vs the brake-water law): the fix everywhere (`P1G_PAIR=1`: W3 −3, W5 within-phase worse at the picks 4.9% → 8.1%);
+    the slot budget from the recent window (`P1G_BREC=1`: W4 −3; with PAIR=1 W3/W4 churn ±13/±37 for +2/+1); the measured
+    throughput as budget (`BREC=2`: W3 −351, W4 −240); the budget times the busy share (W3 loses); the pair form in case 1
+    (`P1G_PFORM`: W4 −11..−21); survive shares inside part y (`P1G_KAPY`: W5 −18, W3 +9); carrying the last stretch's error
+    ratio (errors anti-correlate, corr −0.20); the L0-L1 map on top of the brake water (`P1M=s`: W4 +16, W5 −9).
+  - W5's remaining gap (busy 86.6 vs the flat measured mean's 91.3): within a phase the water is set by the slot's spare
+    time, 10-30% of its reads, so a 7-9% error in the slot budget becomes a ±4-5% water error, while the #6 size limits
+    need about 1-2%. No live window predicts the next stretch's budget closer than 6-9% (whole last stretch 12-22%, its
+    recent half 7-9%, the last 0.25M ops 6-9%, a trend 10-11%: the client's op rate drifts within a phase). With the next
+    stretch's measured budget (oracle) W5 case 2 within-phase rises 91.0 → 95.8%. The misses left are near misses of
+    mixed sign (1-1.7 limits): no bias to correct.
+- **K raised while writes are slowed, W3/W4 (2026-11-04 19:22-20:06 UTC; agent C1S, w3 `clean/c1s`, report
+  `~/node_ops/reports/2026-11-04-c1s-pinned-raise.md`; work continuing):** writes are slowed by L0's 20 files here (W3
+  1,137 of 1,158 rows, W4 all 880), not the 64 GiB brake. With the measured water and survive shares (oracles) the cell
+  where K's effective trigger moved still caps at 73% (W3) and 61% (W4); measured sizes and flows (form) 90/87%. Not
+  adopted: the corrected balance inside part y itself (`C1S_BAL=2`: #3 W4 91 → 89%, fails); the water relaxing
+  geometrically from the first merge at part y's own ρ (`C1S_GEO`: busy #6 W3 −7, W4 −15 rows; #6 f2 W4 fails); the fast
+  budget from the last stretch's fast flush intervals (`C1S_BF=1`: W4 +19, W5 −62 rows; `=2` only after a 20+-file first
+  merge: W5 −18). Diagnosed, not fixed: after a near-stop first merge (28-34 files; SetupDelay's ×0.6 cut) the count
+  relaxes over several cycles (34, 31, 29, 27, 26, 25, 24) and part y's first step is 0.85 file low in W4; part y's
+  budgets do not carry from the last stretch (B_s 5-10% high, +22% after a free stretch; B_f off 20-60%); an idle L2's
+  survive share is +0.27 high in W3 (needs fork change F, the per-SST key sketch; worth +8 points in W3's moved cells).
+  Part 2 (2026-11-04 20:37-20:50 UTC, report `~/node_ops/reports/2026-11-04-c1s-part2.md`), on top of C1S_BAL: worth of
+  measured inputs in this cell (W3/W4, oracles): exact settled count 68.6/62.7%, exact rhythm mean 69.1/65.7, exact path
+  68.8/66.7, survive shares 69.7/57.7, path + survive shares + two-piece pause 76.8/68.3, sizes + flows 90.4/86.8 (what
+  stays missed there is the x and omega forms). With every input of the pinned balance measured from the next stretch the
+  settled count is within 2% in only 36-47% of W4's moved changes (the limits need about 2%); perfect budgets are worth
+  W3 −2, W4 +18, W5 −30 rows. Not adopted: the settled count in relative form for every pinned last stretch (`C1S_REL=1`:
+  W3 +20, W4 −1, #6 f2 W4 fails; `=3` ratio form worse piece-wise); the late-service term per transient cycle
+  (`C1S_TD`: W3 −2, W4 +5; right for L2, wrong for L3 in W4); geometric relaxation on the new base (`C1S_GEO`: W4 −29);
+  the slowed budget from the last stretch's slowed intervals (`C1S_BS`: W4 −3, W5 −8). The pick gap at slowed-flush
+  landings is small (mean 0.1-0.34 file) and part y's relaxation rate is right with C1S_BAL (ρ 0.45 vs 0.50 measured).
 
 ## Sources
 - Single-change runs: `~/node_ops/diag/kcase/v2/out_r18/summary.md`. Accepted limitations: W1 hot key range (#5b), the
   read limitation (#11 W1/W2), #6 W3/W4/W5.
 - Multi-change runs: `~/node_ops/diag/kcase/clean/r7/adopted_multi.log` (#2-#5b, #7, #8a, #8b) and `adopted_levels.log`
-  (#6, #10: every level, size, bytes written, rewrite per byte pushed, flow out), from `run_adopted.sh` on worker 3.
+  (#6, #10: every level, size, bytes written, rewrite per byte pushed, flow out), from `run_adopted.sh`; since
+  2026-11-04 the same law and byte-identical rows on all five workers (w1-w5 `clean/r7`, kept read-only).
   Scored with SCORE=own (no twin). Single-change runs under r7 (parts d, p, c, w, j): `adopted_single.log`. The logs
   before part j are `adopted_r_*`.
 
@@ -421,3 +498,132 @@ Updated 2026-11-02 05:27 UTC. Kept current by the operator: every time a score c
   **Weak spots:** the shape between the floor and the mean was chosen after seeing scores, and floors from 0.3 to 0.7 all pass, so the bars do not pin it. W1 has 0 busy changes and W2 has 1, so only W3-W5 test it. Sequential-style writes are untested. The live reader of level sizes comes from reading the code, was not run, and can lag the change by a job.
   **Single-change runs keep `drain_order` and its snapshot, so the law now has two forms of #8.** With this form, single #8b W3 would fall from 131 to about 119 of 135 and #3 W4's first window from 117 to about 113 (the agent's figures, not re-scored).
   Still not closed form on multi runs: the brake forecast's stepped inflow table and level search; the calm schedule's per-merge sums for #5b's bursts and #5b/#10's L1 excess. Still a fixed-step solve in zd: 3 solves of 60 bisection steps, each with an inner 40-step bisection, time and memory independent of the number of files.
+- 2026-11-03: live-input check, no score change. The law's input tables rebuilt from the host log's flush and merge
+  records alone (what the plugin receives; `clean/iv_live/`, `clean/multi_live/`, root `~/clean/multi_live`) equal the
+  MANIFEST-built ones in every field the law reads, on all 675 runs; the adopted rows and the cascade trial's rows are
+  byte-identical on that root. Only the tree at open still comes from the MANIFEST (stands in for the first live snapshot).
+- 2026-11-03 15:55 UTC: part wr, multi only (owner: "Adopt Bc"; `clean/r7/forward_r7.py` `wr_rs`, `eval_r7_multi.py`,
+  `eval_levels_r7.py`, table `~/clean/multi/wrate/` from `build_wrate.py`, trial `clean/sub6_wrate/` WRATE=Bc, adopted
+  rows before it `adopted_pre_wr_*`). The hold rule's slowed write rate: where the last stretch had more than 1 s of
+  slowed writes, its own rate as before; where it had none, RocksDB's cap (option delayed_write_rate, 8 MiB/s) / bytes
+  per write (1040), in place of the pool over every stretch since the run's start (earlier K values; owner 2026-11-03:
+  no old stretches). While writes are slowed, keys/s = the delay rate in force / bytes per write (LOG rate / measured
+  1041-1046 B in W3-W5). The pool was used in busy W3 9, W4 43, W5 147 of 269/269/279 changes. **#3 W4 244 → 245;
+  nothing else moves (levels log unchanged); count stays 6 of 10.** Checks (`r7_wr_stage/after_wr.log`, last line
+  `AFTER_WR_EXIT=0`): multi and level rows byte-identical to the trial's; single rows unchanged; with wr off the trial
+  copy gave the adopted rows byte for byte. Other forms tried: last stretch only, else none (multi −13/+1); RocksDB's
+  held rate at the change (fork change 3) as the fallback, the same hits as the cap; the held rate always (multi
+  −18/+6). Live sources: the stretch's slowed keys and seconds (host log, L0 count); bytes per write from RLOpCounts
+  (here the run's end stamp, constant in these runs); the cap needs fork change 1 or the plugin config.
+- 2026-11-03 17:00 UTC: part nc, calm trees, multi levels rows only (owner: "Adopt C for calm trees"; the threshold
+  cascade of agent "cascade", w4 `clean/sub6_cascade`, ported onto the adopted law + wr in w2 `clean/sub6_ncwr/`;
+  installed by `clean/r7_nc_stage/install_nc.sh`, scored by `after_nc.sh`, `AFTER_NC_EXIT=0`; rows before it
+  `adopted_pre_nc_*`). Every level of a calm tree is a threshold element: over its target it is pushed down at once,
+  under it it gets no merges; each L0 merge sets off one burst down the tree (b(n) − o_m into L1, less the copies each
+  merge drops below). Sizes L2.., the deepest level, flows L1.. and bytes written L2.. come from the cascade (nc_r7.py;
+  NC_PREV=0: a level that pushed nothing in the last stretch takes r = 1, no earlier stretch). **#6 W1 92 → 98 (passes
+  every row), W2 84 → 97 (all rows but bytes written L6, 23/26), W5 73 → 73 (+12/−1 calm); #10 W1 78 → 97, W2 56 → 97
+  (both pass every row).** Busy trees untouched; multi #2-#8b and single rows byte-identical. Level rows = the
+  trial's byte for byte; with nc off the trial copy gave the adopted rows byte for byte. Live: on the host-log-built
+  root (`clean/sub6_ncwr_live/`, `~/clean/multi_live` vs `~/clean/multi_nosnap`) all 21,099 forecasts identical.
+  Count stays 6 of 10 (#6 and #10 must pass in every workload).
+- 2026-11-03 ~22:00 UTC: **part cm adopted** (owner: "Adopt the combined fixes"), multi levels rows only, busy trees.
+  It is trial B's per-L0-cycle map (`cycle_cm.py`) with B's ride, L1 ride and survive-share fixes, plus the 11-04
+  cause-group fixes G2 (ride by water-filling), G3 (L1 gains in steps; drops at the new L1 size), G4 (survive share
+  from the receiving level's fullness, idle levels' overlap read, recent pick discount, bytes written per byte read)
+  and G5 (L1 rows from the map; L1's kept share at the new K). Reports `~/node_ops/reports/2026-11-04-g*.md`; trial
+  w2 `clean/g6comb` config cB; stage `clean/r7_g6_stage` (old parts = adopted rows byte for byte; new busy rows = cB,
+  other rows = adopted, multi and single unchanged); install `install_g6.sh`, `*.pre_g6`, `adopted_pre_g6_*`.
+  **#6 W3 51 → 74, W4 43 → 68, W5 73 → 88 (+691/−67, +855/−114, +637/−87); deepest level W3 87, W4 54, W5 89.
+  #10 W3 57 → 87, W4 51 → 83, W5 72 → 90.** W1/W2 unchanged. Rows newly passing: flows L1 (W3, W5), L2, L4 (W5),
+  L5 (W3, W5), L7 (W4), size L8 (W5); none lost. Count stays 6 of 10 (#6 and #10 still fail in W3, W4, W5).
+- 2026-11-04 ~11:30 UTC: **part cm's round-2 fixes I1 + I4 adopted** (owner: "Yes, adopt I1+I4 as the new law"),
+  multi levels rows only, busy trees. Switches `I1_RCONS=1 I1_RISE=1 I1_QF=1 I4_XIDLE=1` in `run_adopted.sh`.
+  - I1 RCONS: the ride's bytes were counted twice (added to a level at the water after the cascade had already passed
+    them down); they now come off the first level below that is not at the water, times its survive share.
+  - I1 RISE (case 2): during the pause before L0's first merge, RocksDB serves a level only if its score beats L0's
+    (the pick rule), so the cap is max(old water, new pick line) × target, not the old water alone.
+  - I1 QF: L1's inflow = flushed bytes per op × the kept share (the last stretch's L0 net gain also counted L0's own
+    stock change).
+  - I4 XIDLE: a level that pushed nothing in the last stretch and pushes in the next takes its trivial-move share from
+    its bytes with no overlap below at X (SortFileByOverlappingRatio puts them first; each such pick is a trivial
+    move). The 135 runs read it from the MANIFEST replay (`i4/zero_tab.json`); new runs read the fork's host-log `zo`
+    (fork 9445c093f, root 8411f99; tests green; all nine workers rebuilt and preflighted 2026-11-04, identity
+    7de7f999). Reader (owner: "Write the law code"): `i4/build_zero_live.py` tables Z_i at X = `zo` of the last h
+    record with op <= X into `i4/zero_live.json`; the law reads it first and falls back to `zero_tab.json` (patch
+    `i4/patch_i4b.py`). On the fork's smoke run every one of 265 h records' `zo` equals the MANIFEST replay at its
+    version (`i4/check_zero_live.py`).
+  Trials w3 `clean/i1_w4deep`, w5 `clean/i4_omx`; combine w3 `clean/comb_i1i4` (report
+  `~/node_ops/reports/2026-11-04-1105-comb-i1i4.md`); install `~/node_ops/workers/2026-11-04-adopt-i1i4/`
+  (`install_law.sh`, `run_law.sh`; old code in `code_pre_i1i4.tgz`, old rows `adopted_pre_i1i4_*`). Checks: with the
+  switches off the rows are the old adopted rows byte for byte; each fix alone = its agent's rows; on all five
+  workers the adopted rows = the combine's (lv 4b20323b, multi 6f569488, single 49a57bb9). **#6 W3 74 → 78, W4 68 →
+  71, W5 87.5 → 87.6 (+111/−18, +115/−32, +22/−20); busy case 1 W3/W4/W5 66/64/83, case 2 89/78/86; deepest level W3
+  89, W4 59, W5 89. #10 W3 86.6 → 89.6, W4 83.5 → 85.1, W5 89.7 → 90.2.** Rows newly passing: flows L1 W4, flows L4
+  W3, size L6 W5, bytes written L8 W4; newly failing: flows L2 W5 (309/344, one hit short), flows L7 W4 (21 changes).
+  W1/W2, calm trees, multi #2-#8b and single rows unchanged. Count stays 6 of 10 (#6 and #10 still fail in W3, W4, W5).
+- 2026-11-04 ~14:40 UTC (owner: "Give these rows a minimum limit, which is one file's worth of bytes"): scorer
+  change, law unchanged. A bytes-written or flow-out row whose limit is 0 (the original repeats never moved that level)
+  now gets one target file (4 MiB) per op of the scored stretch. Installed on w1-w5 (`eval_levels_r7.py`); rows = the
+  offline rescore byte for byte; multi #2-#8b and single rows unchanged. #6 +6 hits (W1 3108 → 3111, W3 2069 → 2070,
+  W5 3411 → 3413), #10 none; no row flips, no cell moves at whole percent. The zero-limit misses left are real errors
+  (median W3 124 files, W4 511 files off). Report `~/node_ops/reports/2026-11-04-1425-lim0-floor.md`.
+- 2026-11-04 ~15:52 UTC: **part cm's round-3 fixes J1-J4 adopted** (owner: "Adopt J1-J4 as the new law"; switches
+  J1_HOLD=g, J2_DEPTH=1 J2_FILL=2, J3_PHI=own J3_FAST=1 J3_TD=m, J4_OMR=1 J4_XZ=1; agents' reports
+  `~/node_ops/reports/2026-11-04-j{1-path,2-kappa,3-top,4-omx,5-idle}.md`, combine `2026-11-04-1650-comb-j1234.md`;
+  install `~/node_ops/workers/2026-11-04-adopt-j1234/`, old code `code_pre_j1234.tgz`, old rows `adopted_pre_j1234_*`).
+  On all five workers the new levels rows = the combine's (c72d953e); multi #2-#8b and single rows unchanged. **#6 W3
+  2070 → 2093, W4 2098 → 2164, W5 3413 → 3460 (+79/−56, +131/−65, +76/−29); busy 77.7/70.7/84.5 → 78.5/73.0/86.0.
+  #10 W4 871 → 879, W5 1173 → 1176, W3 900.** Rows: #10 L2 W4 now passes, L2 W3 86 → 84, L7 W4 86 → 81 (21 changes);
+  #6 rows below 90% W3 22 → 18, W4 27 → 26, W5 19 → 15. W1/W2 unchanged. Count stays 6 of 10. With the measured
+  served-group path (diagnosis only; J1 off) J2-J4 reach busy 83.4/81.4/92.6.
+- 2026-11-04 ~18:24 UTC: **the brake water adopted (P1G_BRK=4)** (owner, 17:45 UTC: "hunt down this issue, and fix it ...
+  If the recommended next step produces a good result, go with it"; agent P1G, w3 `clean/p1g`, report
+  `~/node_ops/reports/2026-11-04-p1g-brake-water.md`; operator's fresh-copy check w3 `clean/vfy_p1g` and trial install
+  `clean/r7_p1g_try`; install `~/node_ops/workers/2026-11-04-adopt-p1g/`, old code `code_pre_p1g.tgz`, old rows
+  `adopted_pre_p1g_*`). When the last stretch was stalled (64 GiB brake or 20 L0 files), the served group's water follows
+  the root of RocksDB's pending-bytes estimate at its soft limit, so the group drains as the level below fills and joins it
+  (piece-wise W4 water error 1.1-1.4% → 0.13-0.16%). On all five workers the new levels rows = the trial's (585e659f);
+  multi #2-#8b and single rows unchanged. **#6 W3 2093 → 2125, W4 2164 → 2248, W5 3460 → 3459 (+34/−2, +119/−35, +1/−2);
+  busy 78.5/73.0/86.0 → 79.7/75.8/86.0. #10 W3 900 → 906, W4 879 → 912, W5 1176 → 1178.** Rows: #6 size L8 W3 now passes
+  (rows below 90% W3 18 → 17); #10 W4 L3 79 → 84, L4 76 → 86, L5 83 → 89, L6 77 → 81. W1/W2 unchanged. Count stays 6 of 10.
+- 2026-11-04 ~18:53 UTC: **part y's pair form after a write-rate step adopted (P1G_PAIR=2)** (same standing instruction;
+  agent P1G part 2, w3 `clean/p1g`, report `~/node_ops/reports/2026-11-04-p1g-w5-pair.md`; operator's fresh-copy check w3
+  `clean/vfy_p1g2` and trial install `clean/r7_p1g2_try`; install `~/node_ops/workers/2026-11-04-adopt-p1g2/`, old code
+  `code_pre_p1g2.tgz`, old rows `adopted_pre_p1g2_*`). The pair form now lets a deep level at the water join at the pick
+  water s = N/K̂ (a state variable), where it used to freeze the deep scores within a regime piece; used only where part y's
+  own write-rate step test fired, and only as the cascade's rhythm water (#2/#3/#4 unchanged). On all five workers the new
+  levels rows = the trial's (8ee34929); multi #2-#8b and single rows unchanged. **#6 W5 3459 → 3477 (+23/−6 vs the
+  pre-brake law's rows), W3 and W4 unchanged; busy W5 86.0 → 86.6 (case 2 86.6 → 87.9; post-step case 2 67.7 → 73.7%).
+  #10 W5 1178 → 1181.** Rows: #6 W5 size L7 now misses (fails at 90 rounded), x L5 W5 now passes; #10 L1 W5 93 → 94, L2 W5
+  90 → 91. Count stays 6 of 10. W5's remaining gap: see "Trials not adopted" (problem 1).
+- 2026-11-04 ~20:12 UTC: **the pinned balance with the L0 merge counted while writes are slowed adopted (C1S_BAL=1)**
+  (owner ~19:20 UTC: an Opus agent on #6 W3/W4 "K raised, writes slowed", "same orders as previous"; agent C1S, w3
+  `clean/c1s`, report `~/node_ops/reports/2026-11-04-c1s-pinned-raise.md`; operator's fresh-copy check w3 `clean/vfy_c1s`
+  and trial install `clean/r7_c1s_try`; kit `~/node_ops/workers/2026-11-04-adopt-c1s/`, old code `code_pre_c1s.tgz`, old
+  rows `adopted_pre_c1s_*`). RocksDB's write-stall L0 count is every L0 file, including those being merged
+  (`version_set.cc` `CalculateBaseBytes`: `files_[0].size()` → `l0_delay_trigger_count`), so an L0 merge of 20 or more
+  files runs while writes are slowed and only displaces the fast flushes it overlaps: part y's slowed budget loses
+  L0c (1 − B_f/B_s) in the settled count N* and in ρ. Used only for the cascade's rhythm water after a raise (part y's
+  one-form, a second part y call); #2/#3/#4 unchanged. Piece-wise, files per L0 merge after a raise with writes slowed:
+  median error +2.7/+0.8/+3.8% → −0.3/−1.6/+0.7% (W3/W4/W5); where K is above its cap (nothing changes), the settled
+  count is within 2% in 71/73/60% of changes (was 12/9/0%). **Installed on w3 only (levels rows d3863b9e; multi #2-#8b and
+  single rows unchanged); see the next entry.** **#6 W3 2125 → 2139, W4 2248 → 2251, W5 3477 → 3476
+  (+65/−51, +47/−44, +9/−10); busy 79.7/75.8/86.6 → 80.3/75.9/86.6; K raised with writes slowed 64.0/57.3/84.8 →
+  65.2/57.7/85.1 (above the cap 67.9 → 79.4 W3, 76.9 → 87.5 W4). #10 W4 912 → 914, W5 1181 → 1180, W3 906.** No row
+  flips. Count stays 6 of 10. The rest of the block: see "Trials not adopted" (K raised with writes slowed).
+- 2026-11-04 ~20:54 UTC: **the two-piece pause and the unchanged-trigger settled count adopted (C1S_PAUSE=1, C1S_REL=2)**
+  (same order; agent C1S part 2, w3 `clean/c1s`, report `~/node_ops/reports/2026-11-04-c1s-part2.md`; operator's
+  fresh-copy check w3 `clean/vfy_c1s2` (script `clean/vfy_base.sh`, base B2) and trial install `clean/r7_c1s2_try`; kit
+  `~/node_ops/workers/2026-11-04-adopt-c1s2/`, old code `code_pre_c1s2.tgz`, old rows `adopted_pre_c1s2_*`). PAUSE: before
+  the first L0 merge after a raise, all L0 files count towards the 20-file slowdown, and the one slot does B_f of work per
+  fast flush and B_s per slowed one, so over the (20 − n_x) fast flushes the water falls only by (τ0 − τ1)·W_f/(W_f + W_s),
+  W_f = (20 − n_x)B_f, W_s = (n1 − 20)B_s, then the rest (falling pause with n_x < 20 ≤ n1 only; rows whose pause part is
+  more than one limit off: W3 L2 57 → 21%, L3 48 → 17%, W4 L2 22 → 6%; W4 L4 26 → 42%, 19 rows, worse). REL=2: where
+  L0's effective trigger K̂ = min(K, B/F0) is the same on both sides, L0's score max(n/K, bytes/B) is unchanged, so the
+  settled pinned count is the last stretch's own (mean of its last 3 L0 merges, all ≥ 20 files and within one file; live:
+  host-log job records; settled count within 2% in those cells W3 60 → 75%, W4 88 → 94%, W5 38 → 62%). **Installed on w3
+  (levels rows fd80387a; multi #2-#8b and single rows unchanged); not installed on w1/w2/w4/w5: the owner closed the
+  propagation-law work at ~21:00 UTC, so those workers keep the P1G law.** **#6 W3 2139 → 2152, W4 2251 → 2254, W5 3476 → 3475 (+27/−14, +9/−6, +6/−7); busy 80.3/75.9/86.6 →
+  80.8/76.0/86.6; K raised with writes slowed 65.2/57.7/85.1 → 66.3/57.8/85.3. #10 W3 906 → 905.** No row flips. Count
+  stays 6 of 10.
