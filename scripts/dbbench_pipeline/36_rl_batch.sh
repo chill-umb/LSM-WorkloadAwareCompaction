@@ -16,10 +16,13 @@
 #   RL_BETA_STAR=2              a contract-reported beta*: diagnostic runs only
 #   RL_QBAR_STANDIN=50000       while the contract's q-bar is open (D-29 §6)
 #   RL_REPEATS=1
+#   RL_TAG=rl2                  the results' folder and session prefix (a new
+#                               tag keeps an earlier batch's results apart,
+#                               since RESUME skips completed runs)
 #   RESUME, ALLOW_ROOT_DISK as 33; the suite's geometry from config.sh.
 # Folders under NVME:
 #   suite-trees/                31's trees (shared with 33)
-#   rl2-<mode>-<W>/T<T>-l1<MiB>-k<K>/   03's results, session rl2-<mode>-<W>
+#   <RL_TAG>-<mode>-<W>/T<T>-l1<MiB>-k<K>/   03's results, session <RL_TAG>-<mode>-<W>
 #   suite-dbs/                  the runs' copies (removed)
 # The last line is RL_BATCH_EXIT=<0 every run completed, 5 something failed>.
 set -Eeuo pipefail
@@ -39,6 +42,7 @@ RL_WORKLOADS="${RL_WORKLOADS:-W1 W2 W3 W4 W5}"
 RL_BETA_STAR="${RL_BETA_STAR:-2}"
 RL_QBAR_STANDIN="${RL_QBAR_STANDIN:-50000}"
 RL_REPEATS="${RL_REPEATS:-1}"
+RL_TAG="${RL_TAG:-rl2}"
 MIN_FREE_GB="${MIN_FREE_GB:-100}"
 export MIN_FREE_GB
 GEOMETRY=(WRITE_BUFFER_SIZE="$SUITE_WRITE_BUFFER_SIZE"
@@ -68,6 +72,7 @@ case "${1:-}" in
 esac
 [[ "$RL_SETTING" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || fail "RL_SETTING is <L1 MiB>:<K>"
 [[ "$RL_REPEATS" =~ ^[1-9][0-9]*$ ]] || fail "RL_REPEATS must be a positive whole number"
+[[ "$RL_TAG" =~ ^[a-z][a-z0-9]*$ ]] || fail "RL_TAG is lower-case letters and digits"
 for mode in $RL_MODES; do
   [[ "$mode" == read || "$mode" == write || "$mode" == space || "$mode" == balanced ]] ||
     fail "unknown mode $mode"
@@ -82,7 +87,7 @@ sys.exit(0 if r.get("schema") == 6 and r.get("cost_model") == 2 else 1)
 PY
 fresh=(suite-dbs)
 for mode in $RL_MODES; do
-  for w in $RL_WORKLOADS; do fresh+=("rl2-$mode-$w"); done
+  for w in $RL_WORKLOADS; do fresh+=("$RL_TAG-$mode-$w"); done
 done
 node_checks "${fresh[@]}"
 failed=()
@@ -119,8 +124,8 @@ for T in $RL_T; do
         WORKLOAD_SIZES_M="$SUITE_RUN_OPERATIONS_M" REPEATS="$RL_REPEATS" \
         DIAGNOSTIC_RUN=1 CONTROLLER_OBJECTIVE_MODE="$mode" \
         CONTROLLER_BETA_STAR="$RL_BETA_STAR" CONTROLLER_QBAR_STANDIN="$RL_QBAR_STANDIN" \
-        RESUME=1 SESSION_ID="rl2-$mode-$w" RESULTS_ROOT="$NVME/rl2-$mode-$w/$id" \
-        DB_ROOT="$NVME/suite-dbs/$w/$id-rl2-$mode" "$PIPELINE_DIR/03_run_experiments.sh" ||
+        RESUME=1 SESSION_ID="$RL_TAG-$mode-$w" RESULTS_ROOT="$NVME/$RL_TAG-$mode-$w/$id" \
+        DB_ROOT="$NVME/suite-dbs/$w/$id-$RL_TAG-$mode" "$PIPELINE_DIR/03_run_experiments.sh" ||
         status=$?
       (( status != 7 )) || fail "03 found no matching preflight; run 13 first"
       if (( status != 0 )); then
@@ -133,16 +138,16 @@ done
 # Each results folder scored by 04 (its summary.csv: WA, RA, SA, stalls).
 for mode in $RL_MODES; do
   for w in $RL_WORKLOADS; do
-    [[ -d "$NVME/rl2-$mode-$w" ]] || continue
+    [[ -d "$NVME/$RL_TAG-$mode-$w" ]] || continue
     status=0
-    "$PY" "$PIPELINE_DIR/04_generate_graphs.py" --results "$NVME/rl2-$mode-$w" \
+    "$PY" "$PIPELINE_DIR/04_generate_graphs.py" --results "$NVME/$RL_TAG-$mode-$w" \
       --summary-only || status=$?
     if (( status == 3 )); then
-      stamp "rl2-$mode-$w: 04 refused arms; see its graphs/refused_arms.json"
-      failed+=("rl2-$mode-$w: refused arms")
+      stamp "$RL_TAG-$mode-$w: 04 refused arms; see its graphs/refused_arms.json"
+      failed+=("$RL_TAG-$mode-$w: refused arms")
     elif (( status != 0 )); then
-      stamp "rl2-$mode-$w: 04 FAILED (exit $status)"
-      failed+=("rl2-$mode-$w: 04")
+      stamp "$RL_TAG-$mode-$w: 04 FAILED (exit $status)"
+      failed+=("$RL_TAG-$mode-$w: 04")
     fi
   done
 done

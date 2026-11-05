@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <exception>
 
@@ -336,6 +337,10 @@ void Controller::Poll(bool decide) {
   for (const RLJobRecord& job : jobs) {
     if (cfg_.cost_model == 2) RecordJob(job);
     stats_.OnJob(job, clock_, &parts_);
+    if (job.kind == RLJobRecord::Kind::kCompactionEnd && job.start_level == 0 &&
+        !job.trivial && job.ok) {
+      ++f2_l0_merges_;
+    }
   }
   if (cfg_.cost_model == 2) ring_.Add({StepOps(steps), steps}, RingKeep(cfg_));
   // Trim only after this poll's records have read their waits (G §3), and
@@ -376,6 +381,7 @@ void Controller::Poll(bool decide) {
       ops.total() >= cfg_.schedule[next_scheduled_].at_op) {
     ApplyScheduled(ops.total(), now);
   }
+  f2_boundary_ = false;
   if (cfg_.mode == Mode::kLearned2) F2Window(ops, now);
   if (decide && !fallback_ && !draining_ &&
       (cfg_.mode == Mode::kLearned || cfg_.mode == Mode::kLearned2)) {
@@ -567,6 +573,9 @@ double Controller::F2Inflow(int agent) const {
 
 bool Controller::F2Settled(int agent) const {
   const F2Agent& a = f2_[agent];
+  // A trial's switches are measured at once: alternation, not settling,
+  // cancels the slow drift (the noise fix, config.h).
+  if (agent == 0 && cfg_.k_trials) return true;
   if (!a.changed_once) return true;
   const int j = std::max(agent, 1);
   if (j >= static_cast<int>(f2_C_.size()) ||
@@ -583,10 +592,119 @@ void Controller::F2Changed(int agent, uint64_t op) {
   a.changed_once = true;
   a.change_op = op;
   a.inflow_at_change = F2Inflow(agent);
-  f2_window_changed_ = true;
-  if (agent < static_cast<int>(f2_window_settled_.size())) {
+  // With cycle windows a change comes at a boundary, at the open window's
+  // first operation: the whole window runs under the new setting.
+  if (!(cfg_.window_cycles > 0 && f2_boundary_ && op == f2_window_op_)) {
+    f2_window_changed_ = true;
+  }
+  if (agent < static_cast<int>(f2_window_settled_.size()) && !F2Settled(agent)) {
     f2_window_settled_[agent] = 0;
   }
+}
+
+bool Controller::F2TrialStep(int* K, int k_min, int k_cap, uint64_t op,
+                             std::string* reason, F2TrialNote* note) {
+  F2Trial& t = f2_trial_;
+  const auto allowed = [&](int k) { return k >= k_min && k <= k_cap; };
+  const auto fill = [&]() {
+    note->inc = t.inc;
+    note->cand = t.cand;
+    note->blocks = t.blocks;
+    note->number = t.number;
+  };
+  if (!t.active) {
+    if (op < t.wait_until) return false;
+    const int k = *K;
+    // The direction: on after an adoption; else the other way from the
+    // last trial; up first when nothing says otherwise. Never one that
+    // failed since the last adoption, never out of bounds.
+    std::vector<int> dirs;
+    if (t.last_adopted && t.last_dir != 0) dirs.push_back(t.last_dir);
+    if (t.last_dir != 0) dirs.push_back(-t.last_dir);
+    dirs.push_back(+1);
+    dirs.push_back(-1);
+    int dir = 0;
+    for (int d : dirs) {
+      const int bit = d > 0 ? 2 : 1;
+      if ((t.failed & bit) == 0 && allowed(k + d)) {
+        dir = d;
+        break;
+      }
+    }
+    if (dir == 0) {
+      // Both neighbours failed (or lie out of bounds): rest, then again.
+      t.failed = 0;
+      t.last_adopted = false;
+      t.wait_until = op + static_cast<uint64_t>(cfg_.trial_rest_ops);
+      return false;
+    }
+    t.active = true;
+    t.inc = k;
+    t.cand = k + dir;
+    t.blocks = 0;
+    t.on_cand = true;
+    t.block_op = op;
+    t.last_dir = dir;
+    ++t.number;
+    *K = t.cand;
+    *reason = "trial";
+    fill();
+    return true;
+  }
+  if (static_cast<double>(Minus(op, t.block_op)) < cfg_.trial_block_ops) {
+    return false;
+  }
+  ++t.blocks;
+  if (t.blocks >= cfg_.trial_min_blocks) {
+    const std::vector<const Model*> models = weights_.FindAll(Agent::kF, 0);
+    if (!models.empty() && !f2_recent_x_.empty()) {
+      const std::vector<std::vector<double>> xs(f2_recent_x_.begin(),
+                                                f2_recent_x_.end());
+      note->verdict = F2TrialVerdict(
+          models, xs, kF2LogK, std::log2(static_cast<double>(t.inc)),
+          std::log2(static_cast<double>(t.cand)), cfg_.vote_share,
+          cfg_.min_effect);
+      note->judged = true;
+    }
+  }
+  const int verdict = note->judged ? note->verdict.verdict : 0;
+  const int bit = t.last_dir > 0 ? 2 : 1;
+  const auto end = [&](bool adopt) {
+    t.active = false;
+    t.last_adopted = adopt;
+    if (adopt) {
+      t.failed = 0;
+    } else {
+      t.failed |= bit;
+    }
+    // One block at the incumbent before the next trial.
+    t.wait_until = op + static_cast<uint64_t>(cfg_.trial_block_ops);
+  };
+  fill();
+  if (verdict != 0 || t.blocks >= cfg_.trial_max_blocks) {
+    const bool adopt = verdict > 0;
+    end(adopt);
+    *K = adopt ? t.cand : t.inc;
+    *reason = adopt ? "adopt" : verdict < 0 ? "reject" : "inconclusive";
+    if (!allowed(*K)) {
+      *K = t.on_cand ? t.cand : t.inc;
+      *reason = "abandon";
+    }
+    return true;
+  }
+  const int next = t.on_cand ? t.inc : t.cand;
+  if (!allowed(next)) {
+    // The bounds moved under the trial: give it up where it stands.
+    end(false);
+    *K = t.on_cand ? t.cand : t.inc;
+    *reason = "abandon";
+    return true;
+  }
+  t.on_cand = !t.on_cand;
+  t.block_op = op;
+  *K = next;
+  *reason = t.on_cand ? "trial" : "back";
+  return true;
 }
 
 void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
@@ -596,6 +714,7 @@ void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
     f2_window_op_ = op;
     f2_window_ops_ = ops;
     f2_window_changed_ = false;
+    f2_l0_merges_ = 0;
     f2_window_settled_.assign(n_, 0);
     for (int i = 0; i < n_; ++i) f2_window_settled_[i] = F2Settled(i) ? 1 : 0;
   };
@@ -603,7 +722,15 @@ void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
     open_window();
     return;
   }
-  if (static_cast<double>(Minus(op, f2_window_op_)) < cfg_.window_ops) return;
+  const double length = static_cast<double>(Minus(op, f2_window_op_));
+  // Cycle windows (config.h window_cycles): close after the L0 merges, or
+  // at window_ops if they do not come; else every window_ops.
+  const bool cycles_done =
+      cfg_.window_cycles > 0 &&
+      f2_l0_merges_ >= static_cast<uint64_t>(cfg_.window_cycles) &&
+      length >= cfg_.window_min_ops;
+  if (!cycles_done && length < cfg_.window_ops) return;
+  const uint64_t merges = f2_l0_merges_;
   const double puts =
       static_cast<double>(Minus(ops.keys_written, f2_window_ops_.keys_written));
   const double gets =
@@ -631,8 +758,16 @@ void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
                        .Nums("settled", f2_window_settled_)
                        .Uint("changed", f2_window_changed_ ? 1 : 0)
                        .Num("h", h)
+                       .Uint("merges", merges)
+                       .Str("cut", cycles_done ? "cycle" : "ops")
                        .str());
   f2_have_window_ = true;
+  f2_boundary_ = true;
+  f2_recent_x_.push_back(x);
+  while (f2_recent_x_.size() >
+         static_cast<size_t>(std::max(cfg_.trial_recent, 1))) {
+    f2_recent_x_.pop_front();
+  }
   open_window();
 }
 
@@ -650,6 +785,8 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
   int K = k0_target_;
   std::vector<DecisionRecord> made;
   if (!f2_have_window_) return made;
+  // Cycle windows: decisions only where a window closed at this poll.
+  if (cfg_.window_cycles > 0 && !f2_boundary_) return made;
   const double h = static_cast<double>(snapshot.live_sst_bytes);
   std::uniform_real_distribution<double> unit(0.0, 1.0);
   for (int level = 0; level <= v.last && level < n_; ++level) {
@@ -659,11 +796,22 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
     if (!(cap > 0)) continue;
     F2Agent& a = f2_[level];
     const double inflow = F2Inflow(level);
+    const bool trial = level == 0 && cfg_.k_trials;
+    const bool frozen = level > 0 && cfg_.deep_frozen;
     // F2: settled since the last change, a measurement stretch since the
-    // last decision.
-    if (!F2Settled(level)) continue;
-    if (inflow - a.inflow_at_decision < cfg_.measure_turnovers * cap) continue;
-    if (static_cast<double>(Minus(op, a.decision_op)) < cfg_.min_decision_ops) {
+    // last decision (the trial keeps its own schedule).
+    if (!trial) {
+      if (!F2Settled(level)) continue;
+      if (inflow - a.inflow_at_decision < cfg_.measure_turnovers * cap) continue;
+      if (static_cast<double>(Minus(op, a.decision_op)) < cfg_.min_decision_ops) {
+        continue;
+      }
+    }
+    int trial_k = K;
+    std::string trial_reason;
+    F2TrialNote note;
+    if (trial && !F2TrialStep(&trial_k, b0.k0_min, b0.k0_cap, op,
+                              &trial_reason, &note)) {
       continue;
     }
     const std::vector<double> x = F2Features(f2_shares_[0], f2_shares_[1],
@@ -699,12 +847,28 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
         }
       }
     }
+    if (frozen) mask = Mask{true, false, false, false};
     const double u_explore = unit(rng_);
     const double u_pick = unit(rng_);
     const std::vector<const Model*> models = weights_.FindAll(Agent::kF, level);
-    const F2Choice choice =
-        F2Decide(models, x, own, after, mask, cfg_.explore, cfg_.vote_share,
-                 u_explore, u_pick);
+    // A trial's means are for the log only: its schedule and verdicts move K.
+    F2Choice choice =
+        F2Decide(models, x, own, after, mask, trial ? 0.0 : cfg_.explore,
+                 cfg_.vote_share, u_explore, u_pick, cfg_.min_effect);
+    if (frozen) {
+      choice.action = Action::kHold;
+      choice.reason = "frozen";
+    } else if (trial) {
+      choice.action = trial_k < K   ? Action::kCompact
+                      : trial_k > K ? Action::kDefer
+                                    : Action::kHold;
+      choice.reason = trial_reason;
+      if (!mask[static_cast<int>(choice.action)]) {
+        // The schedule keeps to the bounds; a refused value holds instead.
+        choice.action = Action::kHold;
+        choice.reason = trial_reason + "_refused";
+      }
+    }
     double new_value = old_value;
     if (choice.action == Action::kCompact) {
       new_value = level == 0 ? K - 1 : m[level] / b.alpha;
@@ -757,6 +921,26 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
                          .NumsOrNull("mean", r.q)
                          .Features("x", F2FeatureNames(), x)
                          .str());
+    if (trial) {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      decisions_.Write(
+          JsonLine("trial")
+              .Uint("id", r.id)
+              .Uint("op", op)
+              .Uint("number", static_cast<uint64_t>(note.number))
+              .Str("reason", choice.reason)
+              .Uint("k_inc", static_cast<uint64_t>(note.inc))
+              .Uint("k_cand", static_cast<uint64_t>(note.cand))
+              .Uint("blocks", static_cast<uint64_t>(note.blocks))
+              .Uint("judged", note.judged ? 1 : 0)
+              .Num("effect", note.judged ? note.verdict.effect : nan)
+              .Uint("cheaper", static_cast<uint64_t>(note.verdict.cheaper))
+              .Uint("dearer", static_cast<uint64_t>(note.verdict.dearer))
+              .Uint("need", static_cast<uint64_t>(note.verdict.need))
+              .Uint("members", static_cast<uint64_t>(note.verdict.members))
+              .Num("k_new", new_value)
+              .str());
+    }
     Opening next;
     next.agent = Agent::kF;
     next.state = x;

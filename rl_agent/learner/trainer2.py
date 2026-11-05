@@ -88,7 +88,10 @@ class Trainer2:
             r = self.pending[0]
             if r.get("type") == "f2":
                 level = int(r["level"])
-                if level not in self.decided and level <= 6:
+                # A frozen level agent only holds (config.h deep_frozen):
+                # nothing to learn for it.
+                if (level not in self.decided and level <= 6 and
+                        r.get("reason") != "frozen"):
                     self.decided.add(level)
                     self.backfill(level)
                 self.pending.pop(0)

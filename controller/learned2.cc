@@ -51,7 +51,7 @@ F2Choice F2Decide(const std::vector<const Model*>& models,
                   const std::vector<double>& x, int own,
                   const std::array<double, kNumActions>& after,
                   const Mask& mask, double explore, double vote_share,
-                  double u_explore, double u_pick) {
+                  double u_explore, double u_pick, double min_effect) {
   F2Choice c;
   const double nan = std::numeric_limits<double>::quiet_NaN();
   c.mean.fill(nan);
@@ -105,13 +105,50 @@ F2Choice F2Decide(const std::vector<const Model*>& models,
   c.need = static_cast<int>(
       std::ceil(vote_share * static_cast<double>(models.size()) - 1e-9));
   if (c.need < 1) c.need = 1;
-  if (c.votes >= c.need) {
+  if (c.votes < c.need) {
+    c.reason = "gate";
+  } else if (c.mean[best] > c.mean[0] - min_effect) {
+    c.reason = "small";
+  } else {
     c.action = c.greedy;
     c.reason = "confident";
-  } else {
-    c.reason = "gate";
   }
   return c;
+}
+
+F2Verdict F2TrialVerdict(const std::vector<const Model*>& models,
+                         const std::vector<std::vector<double>>& xs, int own,
+                         double v_inc, double v_cand, double vote_share,
+                         double min_effect) {
+  F2Verdict v;
+  v.members = static_cast<int>(models.size());
+  v.need = static_cast<int>(
+      std::ceil(vote_share * static_cast<double>(models.size()) - 1e-9));
+  if (v.need < 1) v.need = 1;
+  if (models.empty() || xs.empty()) return v;
+  double sum = 0;
+  for (const Model* model : models) {
+    double d = 0;
+    for (const std::vector<double>& x : xs) {
+      std::vector<double> a = x, b = x;
+      if (own >= 0 && own < static_cast<int>(x.size())) {
+        a[own] = v_cand;
+        b[own] = v_inc;
+      }
+      d += Forward(*model, a)[0] - Forward(*model, b)[0];
+    }
+    d /= static_cast<double>(xs.size());
+    sum += d;
+    v.cheaper += d < 0 ? 1 : 0;
+    v.dearer += d > 0 ? 1 : 0;
+  }
+  v.effect = sum / static_cast<double>(models.size());
+  if (v.cheaper >= v.need && v.effect <= -min_effect) {
+    v.verdict = 1;
+  } else if (v.dearer >= v.need && v.effect >= min_effect) {
+    v.verdict = -1;
+  }
+  return v;
 }
 
 }  // namespace rlc

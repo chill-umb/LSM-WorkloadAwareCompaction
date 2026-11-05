@@ -124,6 +124,34 @@ struct Config {
   double settle_turnovers = 0;
   double measure_turnovers = 0;
   double min_decision_ops = 0;
+  // learned2's noise fix (owner, 2026-11-05: "fix the noise issue. Go with
+  // merge cycle aligned windows"; all optional, the defaults keep the
+  // fixed windows above):
+  //   window_cycles > 0: a window closes at the first poll after that many
+  //     non-trivial L0->L1 merges have ended in it, once it holds
+  //     window_min_ops operations, or at window_ops operations, whichever
+  //     comes first; every decision is then made at a window boundary, so a
+  //     change there leaves no window half under each setting;
+  //   min_effect: a move also needs its mean predicted cost (log J per
+  //     operation) at least this far below hold's;
+  //   deep_frozen: the level agents (L1 and down) only hold;
+  //   k_trials: the L0 agent alternates K between its incumbent and one
+  //     neighbour in blocks of at least trial_block_ops operations; from
+  //     trial_min_blocks blocks on, at each block's end, the ensemble judges
+  //     the pair (F2TrialVerdict over the last trial_recent windows' inputs)
+  //     and the agent adopts the neighbour, rejects it, or after
+  //     trial_max_blocks gives up; once both neighbours have failed since
+  //     the last adoption it holds for trial_rest_ops. Needs window_cycles.
+  int window_cycles = 0;
+  double window_min_ops = 0;
+  double min_effect = 0;
+  bool deep_frozen = false;
+  bool k_trials = false;
+  double trial_block_ops = 0;
+  int trial_min_blocks = 0;
+  int trial_max_blocks = 0;
+  double trial_rest_ops = 0;
+  int trial_recent = 0;
   // Hold-only only (owner, 2026-10-07: the step-response test of the
   // settling condition C3): at the first poll at or after operation
   // apply_at_op, apply apply_m (one value per level, ":"-separated in the

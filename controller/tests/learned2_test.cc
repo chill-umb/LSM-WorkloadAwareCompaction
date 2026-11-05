@@ -1,10 +1,12 @@
 // learned2 (learned2.h; owner, 2026-11-05): F1 persistent moves, F2 settle
 // and measure before deciding, F3 the ensemble's vote, F4 the clean inputs,
 // and the window lines the trainer prices (F5).
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 
 #include "gtest/gtest.h"
@@ -135,6 +137,58 @@ TEST(Learned2, AConfidentEnsembleMovesAndASplitOneHolds) {
   c = F2Decide(ptrs, x, kF2LogK, after, AllMoves(), 0, 0.9, 0.5, 0.5);
   EXPECT_EQ(c.action, Action::kHold);
   EXPECT_EQ(c.reason, "hold");
+}
+
+TEST(Learned2, AConfidentMoveAlsoNeedsTheMinimumEffect) {
+  // The noise fix (owner, 2026-11-05): a unanimous vote for a gain smaller
+  // than min_effect holds ("small").
+  const auto x = SomeInputs();  // log2 K = 2
+  const std::array<double, kNumActions> after = {0, 1, 3, 0};
+  std::vector<Model> members;
+  for (int e = 0; e < 10; ++e) members.push_back(Linear(0, kF2LogK, 0.01));
+  std::vector<const Model*> ptrs;
+  for (const Model& m : members) ptrs.push_back(&m);
+  // Down saves 0.01 x (2 - 1) = 0.01 in every member.
+  F2Choice c =
+      F2Decide(ptrs, x, kF2LogK, after, AllMoves(), 0, 0.9, 0.5, 0.5, 0.02);
+  EXPECT_EQ(c.greedy, Action::kCompact);
+  EXPECT_EQ(c.votes, 10);
+  EXPECT_EQ(c.action, Action::kHold);
+  EXPECT_EQ(c.reason, "small");
+  c = F2Decide(ptrs, x, kF2LogK, after, AllMoves(), 0, 0.9, 0.5, 0.5, 0.005);
+  EXPECT_EQ(c.action, Action::kCompact);
+  EXPECT_EQ(c.reason, "confident");
+}
+
+TEST(Learned2, TheTrialVerdictNeedsTheVoteAndTheMinimumEffect) {
+  const std::vector<std::vector<double>> xs = {SomeInputs(), SomeInputs()};
+  const double k4 = 2, k5 = std::log2(5.0);
+  std::vector<Model> members;
+  for (int e = 0; e < 10; ++e) members.push_back(Linear(0, kF2LogK, -1));
+  std::vector<const Model*> ptrs;
+  for (const Model& m : members) ptrs.push_back(&m);
+  // Cost falls with K: K = 5 is cheaper by log2(5/4) = 0.32 in every member.
+  F2Verdict v = F2TrialVerdict(ptrs, xs, kF2LogK, k4, k5, 0.9, 0.01);
+  EXPECT_EQ(v.verdict, 1);
+  EXPECT_EQ(v.cheaper, 10);
+  EXPECT_EQ(v.need, 9);
+  EXPECT_NEAR(v.effect, -std::log2(1.25), 1e-12);
+  // The same pair judged the other way round: the candidate is dearer.
+  v = F2TrialVerdict(ptrs, xs, kF2LogK, k5, k4, 0.9, 0.01);
+  EXPECT_EQ(v.verdict, -1);
+  EXPECT_EQ(v.dearer, 10);
+  // Too small an effect: no verdict either way.
+  v = F2TrialVerdict(ptrs, xs, kF2LogK, k4, k5, 0.9, 0.5);
+  EXPECT_EQ(v.verdict, 0);
+  // Two members of ten disagree: 8 < 9, no verdict.
+  members[0] = Linear(0, kF2LogK, 1);
+  members[1] = Linear(0, kF2LogK, 1);
+  v = F2TrialVerdict(ptrs, xs, kF2LogK, k4, k5, 0.9, 0.01);
+  EXPECT_EQ(v.cheaper, 8);
+  EXPECT_EQ(v.verdict, 0);
+  // No models or no inputs: no verdict.
+  EXPECT_EQ(F2TrialVerdict({}, xs, kF2LogK, k4, k5, 0.9, 0).verdict, 0);
+  EXPECT_EQ(F2TrialVerdict(ptrs, {}, kF2LogK, k4, k5, 0.9, 0).verdict, 0);
 }
 
 TEST(Learned2, FindAllReturnsEveryModelOfTheLevelInFileOrder) {
@@ -396,6 +450,191 @@ TEST_F(Learned2Test, TheL0MoveStaysWithinTheLiveCap) {
     EXPECT_GE(k, 2) << d;
     EXPECT_LE(k, 8) << d;
   }
+}
+
+// The noise fix (owner, 2026-11-05): windows cut at L0 merges, K trials,
+// frozen level agents.
+std::map<std::string, std::string> CycleTrials() {
+  return {{"window_ops", "10000000"},      {"min_decision_ops", "10000000"},
+          {"window_cycles", "1"},          {"window_min_ops", "0"},
+          {"min_effect", "0.01"},          {"deep_frozen", "1"},
+          {"k_trials", "1"},               {"trial_block_ops", "150000"},
+          {"trial_min_blocks", "2"},       {"trial_max_blocks", "4"},
+          {"trial_rest_ops", "0"}};
+}
+
+TEST_F(Learned2Test, TheNoiseFixKeysAreCheckedAndOptional) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_EQ(c.window_cycles, 0);
+  EXPECT_FALSE(c.k_trials);
+  EXPECT_FALSE(c.deep_frozen);
+  ASSERT_TRUE(LoadConfig(Config(CycleTrials()), &c, &error)) << error;
+  EXPECT_EQ(c.window_cycles, 1);
+  EXPECT_TRUE(c.k_trials);
+  EXPECT_TRUE(c.deep_frozen);
+  EXPECT_DOUBLE_EQ(c.min_effect, 0.01);
+  EXPECT_EQ(c.trial_recent, 20);
+  auto no_cycles = CycleTrials();
+  no_cycles["window_cycles"] = "0";
+  EXPECT_FALSE(LoadConfig(Config(no_cycles), &c, &error));
+  EXPECT_NE(error.find("k_trials needs window_cycles"), std::string::npos) << error;
+  auto lone_trial_key = std::map<std::string, std::string>{{"trial_rest_ops", "5"}};
+  EXPECT_FALSE(LoadConfig(Config(lone_trial_key), &c, &error));
+  EXPECT_NE(error.find("needs k_trials 1"), std::string::npos) << error;
+  auto too_few = CycleTrials();
+  too_few["trial_min_blocks"] = "1";
+  EXPECT_FALSE(LoadConfig(Config(too_few), &c, &error));
+  auto values = BaseConfig(dir_);
+  values["window_cycles"] = "1";
+  EXPECT_FALSE(LoadConfig(WriteConfig(dir_, values), &c, &error));
+  EXPECT_NE(error.find("is for learned2"), std::string::npos) << error;
+}
+
+TEST_F(Learned2Test, CycleWindowsCloseAtTheL0MergesAndDecideOnlyThere) {
+  FakeHost host;
+  {
+    auto keys = CycleTrials();
+    keys["k_trials"] = "0";
+    for (const char* k : {"trial_block_ops", "trial_min_blocks",
+                          "trial_max_blocks", "trial_rest_ops"}) {
+      keys.erase(k);
+    }
+    keys["window_cycles"] = "2";
+    keys["deep_frozen"] = "0";
+    keys["explore"] = "0.999";
+    keys["min_decision_ops"] = "10000000";
+    Controller controller(&host, Config(keys), [this] { return clock_us_; });
+    Serve(&host);
+    for (int i = 0; i < 9; ++i) {
+      controller.Step();
+      clock_us_ += 200000;
+      Turnover(&host);  // 100k operations and one L0 merge
+    }
+    controller.Step();
+  }
+  const auto lines = Lines();
+  const auto windows = OfType(lines, "window");
+  // Nine merges after the first window opened: four windows of two.
+  ASSERT_EQ(windows.size(), 4u);
+  std::vector<double> ends;
+  for (const std::string& w : windows) {
+    EXPECT_EQ(Text(w, "cut"), "cycle") << w;
+    EXPECT_EQ(Number(w, "merges"), 2) << w;
+    EXPECT_EQ(Number(w, "op1") - Number(w, "op0"), 200000) << w;
+    EXPECT_EQ(Number(w, "changed"), 0) << w;
+    ends.push_back(Number(w, "op1"));
+  }
+  // Every decision at a window's end.
+  for (const std::string& d : OfType(lines, "f2")) {
+    EXPECT_NE(std::find(ends.begin(), ends.end(), Number(d, "op")), ends.end())
+        << d;
+  }
+}
+
+TEST_F(Learned2Test, ATrialAlternatesKAndGivesUpWithoutAModel) {
+  FakeHost host;
+  {
+    auto keys = CycleTrials();
+    keys["explore"] = "0.999";  // ignored by the trial and the frozen levels
+    keys["window_ops"] = "200000";
+    keys["min_decision_ops"] = "200000";
+    Controller controller(&host, Config(keys), [this] { return clock_us_; });
+    Serve(&host);
+    for (int i = 0; i < 16; ++i) {
+      controller.Step();
+      clock_us_ += 200000;
+      Turnover(&host);
+    }
+    controller.Step();
+  }
+  const auto lines = Lines();
+  std::vector<std::string> reasons;
+  std::vector<double> ks;
+  for (const std::string& d : OfType(lines, "f2")) {
+    if (Number(d, "level") != 0) {
+      EXPECT_EQ(Text(d, "reason"), "frozen") << d;
+      EXPECT_EQ(Text(d, "move"), "hold") << d;
+      continue;
+    }
+    reasons.push_back(Text(d, "reason"));
+    ks.push_back(Number(d, "new"));
+  }
+  // Up first, blocks of two windows, no model: inconclusive after four
+  // blocks; then a block at K = 4 and the other way.
+  const std::vector<std::string> want_reasons = {
+      "trial", "back", "trial", "back", "inconclusive", "trial", "back"};
+  const std::vector<double> want_ks = {5, 4, 5, 4, 4, 3, 4};
+  ASSERT_GE(reasons.size(), want_reasons.size());
+  for (size_t i = 0; i < want_reasons.size(); ++i) {
+    EXPECT_EQ(reasons[i], want_reasons[i]) << i;
+    EXPECT_EQ(ks[i], want_ks[i]) << i;
+  }
+  EXPECT_EQ(OfType(lines, "trial").size(), reasons.size());
+  // Switches come at window boundaries: no window is half under each K, and
+  // the L0 agent counts as settled in every one.
+  for (const std::string& w : OfType(lines, "window")) {
+    EXPECT_EQ(Number(w, "changed"), 0) << w;
+    EXPECT_NE(w.find("\"settled\":[1,"), std::string::npos) << w;
+  }
+  // Only K moved.
+  for (const std::string& d : OfType(lines, "decision")) {
+    if (Number(d, "level") != 0) {
+      EXPECT_EQ(Text(d, "action"), "hold") << d;
+    }
+  }
+  EXPECT_GT(host.Applies(), 0u);
+}
+
+TEST_F(Learned2Test, AConfidentTrialAdoptsTheNeighbourAndGoesOn) {
+  // Every L0 member says the cost falls with K.
+  std::vector<Model> models;
+  for (int e = 0; e < 10; ++e) models.push_back(Linear(0, kF2LogK, -1));
+  WriteWeights(dir_ + "/weights.bin", 1, models);
+  FakeHost host;
+  {
+    auto keys = CycleTrials();
+    keys["window_ops"] = "200000";
+    keys["min_decision_ops"] = "200000";
+    Controller controller(&host, Config(keys), [this] { return clock_us_; });
+    Serve(&host);
+    for (int i = 0; i < 12; ++i) {
+      controller.Step();
+      clock_us_ += 200000;
+      Turnover(&host);
+    }
+    controller.Step();
+  }
+  std::vector<std::string> reasons;
+  std::vector<double> ks;
+  for (const std::string& d : OfType(Lines(), "f2")) {
+    if (Number(d, "level") != 0) continue;
+    reasons.push_back(Text(d, "reason"));
+    ks.push_back(Number(d, "new"));
+  }
+  // 4 -> 5 (trial), back to 4, judged after two blocks: adopt 5; a block
+  // at 5, then on upwards: 6.
+  const std::vector<std::string> want_reasons = {"trial", "back", "adopt",
+                                                 "trial"};
+  const std::vector<double> want_ks = {5, 4, 5, 6};
+  ASSERT_GE(reasons.size(), want_reasons.size());
+  for (size_t i = 0; i < want_reasons.size(); ++i) {
+    EXPECT_EQ(reasons[i], want_reasons[i]) << i;
+    EXPECT_EQ(ks[i], want_ks[i]) << i;
+  }
+  bool judged = false;
+  for (const std::string& t : OfType(Lines(), "trial")) {
+    if (Text(t, "reason") != "adopt") continue;
+    judged = true;
+    EXPECT_EQ(Number(t, "judged"), 1) << t;
+    EXPECT_EQ(Number(t, "cheaper"), 10) << t;
+    // Slope -1 on log2 K: the effect is -log2(cand / inc).
+    EXPECT_NEAR(Number(t, "effect"),
+                -std::log2(Number(t, "k_cand") / Number(t, "k_inc")), 1e-9)
+        << t;
+  }
+  EXPECT_TRUE(judged);
 }
 
 }  // namespace

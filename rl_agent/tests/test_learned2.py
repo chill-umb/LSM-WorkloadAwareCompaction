@@ -159,6 +159,24 @@ class TrainerTest(unittest.TestCase):
             self.assertEqual(len(w.models), 3)
             tr.log.close()
 
+    def test_a_frozen_level_is_never_trained(self):
+        # The noise fix (controller/config.h deep_frozen; owner, 2026-11-05):
+        # the level agents only hold; their "f2" lines say "frozen", and the
+        # trainer builds no ensemble for them. L0's trial lines start L0's.
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = self.make(tmp)
+            lines = [self.window(250000 * i, 4) for i in range(6)]
+            lines.append({"type": "f2", "level": 1, "op": 1500000, "reason": "frozen"})
+            lines.append({"type": "f2", "level": 0, "op": 1500000, "reason": "trial"})
+            lines += [self.window(250000 * i, 5 if i % 2 else 4) for i in range(6, 10)]
+            Path(tr.args.decisions).write_text("".join(json.dumps(r) + "\n" for r in lines))
+            tr.pricer.k = 4
+            tr.step()
+            self.assertEqual(tr.decided, {0})
+            self.assertEqual(sorted(tr.ens), [0])
+            self.assertEqual(len(tr.ens[0].samples), 10)
+            tr.log.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,15 +1,25 @@
 {
-  "status": "learned2 (F1-F5), owner go 2026-11-05 for the 90-run diagnostic batch (W1-W5 x T 2..10 x read/write, beta* 2); exploratory, not a gate setting. Design: ~/node_ops/workers/2026-11-05-learnfix/design_learned2.md.",
+  "status": "learned2 (F1-F5) with the noise fix (owner go 2026-11-05 ~16:30 UTC: 'Go with merge cycle aligned windows'; then 'Apply the fix, re-run the RL runs', start K 2, 4, 8; level agents frozen at m = 1 by the owner's pick). Windows cut at L0->L1 merges; the L0 agent alternates K with one neighbour in blocks of >= 700k operations and adopts it only on a 9-of-10 vote with a mean effect >= 1%. Exploratory, not a gate setting. Design: ~/node_ops/workers/2026-11-05-learnfix/design_learned2.md (noise fix section); the 90-run batch before the fix used 9200c02's values.",
   "plugin": {
-    "explore": 0.1,
+    "explore": 0.0,
     "push_interval_ms": 5000,
     "weights_required": 0,
-    "window_ops": 250000,
+    "window_ops": 4000000,
     "ensemble": 10,
     "vote_share": 0.9,
     "settle_turnovers": 1.0,
     "measure_turnovers": 1.0,
-    "min_decision_ops": 1000000
+    "min_decision_ops": 4000000,
+    "window_cycles": 1,
+    "window_min_ops": 50000,
+    "min_effect": 0.01,
+    "deep_frozen": 1,
+    "k_trials": 1,
+    "trial_block_ops": 700000,
+    "trial_min_blocks": 4,
+    "trial_max_blocks": 24,
+    "trial_rest_ops": 5000000,
+    "trial_recent": 20
   },
   "learner2": {
     "ensemble": 10,

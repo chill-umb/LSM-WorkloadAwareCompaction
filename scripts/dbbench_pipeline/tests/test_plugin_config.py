@@ -156,7 +156,21 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(config["weights_path"], "/w.bin")
         for key in pc.LEARNED2_KEYS:
             self.assertEqual(config[key], shipped["plugin"][key])
-        self.assertEqual(config["window_ops"], 250000)
+        # The noise fix (owner, 2026-11-05): cycle windows (window_ops their
+        # longest), K trials, frozen level agents, a minimum effect.
+        self.assertEqual(config["window_ops"], 4000000)
+        for key in pc.LEARNED2_OPTIONAL_KEYS:
+            self.assertEqual(config[key], shipped["plugin"][key])
+        self.assertEqual((config["window_cycles"], config["k_trials"],
+                          config["deep_frozen"]), (1, 1, 1))
+        # The optional keys stay out when the settings lack them.
+        plain = {k: v for k, v in learner.items()
+                 if k not in pc.LEARNED2_OPTIONAL_KEYS}
+        config, _ = compose("learned2", prices=PRICES6, diagnostic=True,
+                            learner=plain, weights_path="/w.bin", seed=4,
+                            q_bar_standin=50000.0)
+        for key in pc.LEARNED2_OPTIONAL_KEYS:
+            self.assertNotIn(key, config)
         # The stand-in: diagnostic only, never over a contract value.
         with self.assertRaisesRegex(ValueError, "diagnostic run only"):
             compose("learned2", prices=PRICES6, learner=learner,

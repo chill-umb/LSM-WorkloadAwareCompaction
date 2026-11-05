@@ -41,6 +41,7 @@
 #include "attribution.h"
 #include "config.h"
 #include "jobs.h"
+#include "learned2.h"
 #include "log.h"
 #include "masks.h"
 #include "mlp.h"
@@ -119,6 +120,18 @@ class Controller {
   // learned2 (learned2.h): closes the open window once window_ops have
   // passed, writes its "window" line, and opens the next.
   void F2Window(const ROCKSDB_NAMESPACE::RLOpCounts& ops, uint64_t now);
+  // learned2's L0 agent under k_trials (config.h), at a window boundary:
+  // the trial's schedule and verdicts. Returns false when the agent makes
+  // no decision at this boundary; else true, with *K the value it wants
+  // and *reason one of trial (to the candidate), back (to the incumbent),
+  // adopt, reject, inconclusive.
+  struct F2TrialNote {
+    int inc = 0, cand = 0, blocks = 0, number = 0;
+    bool judged = false;
+    F2Verdict verdict;
+  };
+  bool F2TrialStep(int* K, int k_min, int k_cap, uint64_t op,
+                   std::string* reason, F2TrialNote* note);
   // learned2's decisions (F1-F5), in place of Decide's.
   std::vector<DecisionRecord> DecideLearned2(
       const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
@@ -203,6 +216,25 @@ class Controller {
   bool f2_window_changed_ = false;
   bool f2_have_window_ = false;
   double f2_shares_[3] = {0, 0, 0};  // the last closed window's put, get, scan
+  // The noise fix (config.h window_cycles, k_trials): non-trivial L0->L1
+  // merges ended in the open window; a window closed at this poll; the last
+  // windows' inputs (for the trial verdict); the L0 agent's trial.
+  uint64_t f2_l0_merges_ = 0;
+  bool f2_boundary_ = false;
+  std::deque<std::vector<double>> f2_recent_x_;
+  struct F2Trial {
+    bool active = false;
+    int inc = 0, cand = 0;   // the incumbent K and the neighbour on trial
+    int blocks = 0;          // blocks completed in this trial
+    bool on_cand = false;    // the running block uses the candidate
+    uint64_t block_op = 0;   // the running block's first operation
+    uint64_t wait_until = 0; // no new trial before this operation
+    int last_dir = 0;        // the last trial's direction (+1 up, -1 down)
+    bool last_adopted = false;
+    int failed = 0;          // directions failed since the last adoption: 1 down, 2 up
+    int number = 0;          // trials started
+  };
+  F2Trial f2_trial_;
 
   // The learner modes.
   std::mt19937_64 rng_;

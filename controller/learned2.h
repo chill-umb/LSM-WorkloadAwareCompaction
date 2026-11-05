@@ -52,10 +52,28 @@ struct F2Choice {
 // own: the feature index of the deciding agent's setting; after[slot]: that
 // feature's value after the slot's action (unused where the mask forbids).
 // models: the ensemble (output 0 is the predicted cost, lower is better).
+// min_effect: a confident move also needs mean[move] <= mean[hold] -
+// min_effect (reason "small" when the vote passes but the gain is smaller).
 F2Choice F2Decide(const std::vector<const Model*>& models,
                   const std::vector<double>& x, int own,
                   const std::array<double, kNumActions>& after,
                   const Mask& mask, double explore, double vote_share,
-                  double u_explore, double u_pick);
+                  double u_explore, double u_pick, double min_effect = 0);
+
+// The K trial's judgement (the noise fix, config.h k_trials): per member,
+// the mean over the inputs xs of the predicted cost with the agent's own
+// feature at v_cand minus at v_inc (log J per operation; negative: the
+// candidate is cheaper). verdict +1: the candidate is cheaper with at least
+// ceil(vote_share E) members behind it and a mean effect <= -min_effect;
+// -1: dearer by the same rule; 0: neither (or no models or inputs).
+struct F2Verdict {
+  int verdict = 0;
+  double effect = 0;  // mean over members
+  int cheaper = 0, dearer = 0, need = 0, members = 0;
+};
+F2Verdict F2TrialVerdict(const std::vector<const Model*>& models,
+                         const std::vector<std::vector<double>>& xs, int own,
+                         double v_inc, double v_cand, double vote_share,
+                         double min_effect);
 
 }  // namespace rlc

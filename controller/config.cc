@@ -308,6 +308,16 @@ const std::set<std::string>& KnownKeys() {
                                                "settle_turnovers",
                                                "measure_turnovers",
                                                "min_decision_ops",
+                                               "window_cycles",
+                                               "window_min_ops",
+                                               "min_effect",
+                                               "deep_frozen",
+                                               "k_trials",
+                                               "trial_block_ops",
+                                               "trial_min_blocks",
+                                               "trial_max_blocks",
+                                               "trial_rest_ops",
+                                               "trial_recent",
                                                "apply_at_op",
                                                "apply_m",
                                                "apply_k0",
@@ -709,10 +719,78 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
                  "need min_decision_ops >= window_ops")) {
       return false;
     }
+    // The noise fix's keys, each optional (config.h); absent means off.
+    c->window_cycles = 0;
+    c->window_min_ops = 0;
+    c->min_effect = 0;
+    c->deep_frozen = false;
+    c->k_trials = false;
+    c->trial_block_ops = 0;
+    c->trial_min_blocks = 0;
+    c->trial_max_blocks = 0;
+    c->trial_rest_ops = 0;
+    c->trial_recent = 0;
+    const auto optional_flag = [&r](const char* key, bool* out) {
+      int v = 0;
+      if (!r.Has(key)) return true;
+      if (!r.Integer(key, &v) ||
+          !r.Check(v == 0 || v == 1, std::string("need ") + key + " 0 or 1")) {
+        return false;
+      }
+      *out = v == 1;
+      return true;
+    };
+    if ((r.Has("window_cycles") &&
+         (!r.Integer("window_cycles", &c->window_cycles) ||
+          !r.Check(c->window_cycles >= 0, "need window_cycles >= 0"))) ||
+        (r.Has("window_min_ops") &&
+         (!r.Number("window_min_ops", &c->window_min_ops) ||
+          !r.Check(c->window_min_ops >= 0 && c->window_min_ops <= c->window_ops,
+                   "need 0 <= window_min_ops <= window_ops"))) ||
+        (r.Has("min_effect") &&
+         (!r.Number("min_effect", &c->min_effect) ||
+          !r.Check(c->min_effect >= 0, "need min_effect >= 0"))) ||
+        !optional_flag("deep_frozen", &c->deep_frozen) ||
+        !optional_flag("k_trials", &c->k_trials)) {
+      return false;
+    }
+    if (c->k_trials) {
+      c->trial_recent = 20;
+      if (!r.Check(c->window_cycles > 0,
+                   "k_trials needs window_cycles > 0 (trials switch at "
+                   "window boundaries)") ||
+          !r.Number("trial_block_ops", &c->trial_block_ops) ||
+          !r.Check(c->trial_block_ops >= 0, "need trial_block_ops >= 0") ||
+          !r.Integer("trial_min_blocks", &c->trial_min_blocks) ||
+          !r.Check(c->trial_min_blocks >= 2, "need trial_min_blocks >= 2") ||
+          !r.Integer("trial_max_blocks", &c->trial_max_blocks) ||
+          !r.Check(c->trial_max_blocks >= c->trial_min_blocks,
+                   "need trial_max_blocks >= trial_min_blocks") ||
+          !r.Number("trial_rest_ops", &c->trial_rest_ops) ||
+          !r.Check(c->trial_rest_ops >= 0, "need trial_rest_ops >= 0") ||
+          (r.Has("trial_recent") &&
+           (!r.Integer("trial_recent", &c->trial_recent) ||
+            !r.Check(c->trial_recent >= 1 && c->trial_recent <= 1000,
+                     "need 1 <= trial_recent <= 1000")))) {
+        return false;
+      }
+    } else {
+      for (const char* key : {"trial_block_ops", "trial_min_blocks",
+                              "trial_max_blocks", "trial_rest_ops",
+                              "trial_recent"}) {
+        if (r.Has(key)) {
+          return r.Fail(std::string("\"") + key + "\" needs k_trials 1");
+        }
+      }
+    }
   } else {
     for (const char* key : {"window_ops", "ensemble", "vote_share",
                             "settle_turnovers", "measure_turnovers",
-                            "min_decision_ops"}) {
+                            "min_decision_ops", "window_cycles",
+                            "window_min_ops", "min_effect", "deep_frozen",
+                            "k_trials", "trial_block_ops", "trial_min_blocks",
+                            "trial_max_blocks", "trial_rest_ops",
+                            "trial_recent"}) {
       if (r.Has(key)) {
         return r.Fail(std::string("\"") + key + "\" is for learned2");
       }

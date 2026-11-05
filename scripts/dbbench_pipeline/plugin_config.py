@@ -55,6 +55,13 @@ LEARNER_ARMS = ("prior", "learned", "learned2")
 # "plugin" part of its settings file (config/learner2_settings.json).
 LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",
                  "measure_turnovers", "min_decision_ops")
+# Its noise fix's keys (controller/config.h; owner, 2026-11-05 "merge cycle
+# aligned windows"): optional, passed on only when the settings hold them
+# (absent: fixed windows, no minimum effect, no trials, level agents live).
+LEARNED2_OPTIONAL_KEYS = ("window_cycles", "window_min_ops", "min_effect",
+                          "deep_frozen", "k_trials", "trial_block_ops",
+                          "trial_min_blocks", "trial_max_blocks",
+                          "trial_rest_ops", "trial_recent")
 LEARNER_KEYS = ("explore", "push_interval_ms", "weights_required")
 # The device prices controller/config.cc reads, c_open among them since
 # PREREGISTRATION D-21 (resolving D-20 §2g): measured by stage 18, never a
@@ -235,6 +242,9 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         if arm == "learned2":
             for key in LEARNED2_KEYS:
                 config[key] = _value(learner, key, "learner2 settings", missing)
+            for key in LEARNED2_OPTIONAL_KEYS:
+                if learner.get(key) is not None:
+                    config[key] = learner[key]
 
     filled: list[str] = []
     if missing and placeholders:
