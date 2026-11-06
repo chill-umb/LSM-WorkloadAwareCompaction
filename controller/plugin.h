@@ -222,6 +222,26 @@ class Controller {
   uint64_t f2_l0_merges_ = 0;
   bool f2_boundary_ = false;
   std::deque<std::vector<double>> f2_recent_x_;
+  // Input set 2 (config.h f2_inputs, learned2.h F2StateInputs): the open
+  // window's start (the K before it, RocksDB's pending compaction bytes, L0's
+  // files, the highest deeper score), the activity of the window before it
+  // and of the open one so far, the step counters at its start, and the last
+  // closed window's six values (the decisions' inputs).
+  struct F2Activity {
+    double deep_bytes = 0;   // s + o of non-trivial merges from L1 down
+    double ops = 0;
+    double block_probes = 0;
+    double gets = 0;
+    double stall_ends = 0;   // flush and compaction ends with writes slowed
+    double ends = 0;         // flush and compaction ends
+  };
+  int f2_k_prev_ = 0;
+  double f2_start_pending_ = 0;
+  int f2_start_l0_files_ = 0;
+  double f2_start_deep_max_ = 0;
+  F2Activity f2_prev_act_, f2_act_;
+  ROCKSDB_NAMESPACE::RLStepCounts f2_window_steps_;
+  F2State f2_last_state_;
   struct F2Trial {
     bool active = false;
     int inc = 0, cand = 0;   // the incumbent K and the neighbour on trial

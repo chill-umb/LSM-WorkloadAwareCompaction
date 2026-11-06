@@ -138,6 +138,9 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   n_ = std::max(options_.num_levels, 1);
   std::string error;
   bool ok = LoadConfig(config_path, &cfg_, &error);
+  // The input set every learned2 feature vector and weights check follows
+  // (learned2.h), before any weights are read.
+  SetF2Inputs(ok ? cfg_.f2_inputs : 1);
   if (ok) {
     error = CheckOptions(options_);
     ok = error.empty();
@@ -340,6 +343,24 @@ void Controller::Poll(bool decide) {
     if (job.kind == RLJobRecord::Kind::kCompactionEnd && job.start_level == 0 &&
         !job.trivial && job.ok) {
       ++f2_l0_merges_;
+    }
+    if (cfg_.mode == Mode::kLearned2) {
+      // Input set 2's activity of the open window (learned2.h F2State): the
+      // host log writes an h record, with its write-stall flags, after every
+      // flush and compaction; the plugin reads the flags at this poll.
+      if (job.kind == RLJobRecord::Kind::kCompactionEnd ||
+          job.kind == RLJobRecord::Kind::kFlushEnd) {
+        f2_act_.ends += 1;
+        if (last_snapshot_ && (last_snapshot_->write_stopped ||
+                               last_snapshot_->write_delayed)) {
+          f2_act_.stall_ends += 1;
+        }
+      }
+      if (job.kind == RLJobRecord::Kind::kCompactionEnd && job.ok &&
+          !job.trivial && job.start_level >= 1) {
+        f2_act_.deep_bytes += static_cast<double>(job.s) +
+                              static_cast<double>(job.o);
+      }
     }
   }
   if (cfg_.cost_model == 2) ring_.Add({StepOps(steps), steps}, RingKeep(cfg_));
@@ -717,8 +738,26 @@ void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
     f2_l0_merges_ = 0;
     f2_window_settled_.assign(n_, 0);
     for (int i = 0; i < n_; ++i) f2_window_settled_[i] = F2Settled(i) ? 1 : 0;
+    // Input set 2: the new window's start, before this poll's decision (so
+    // f2_k_prev_ is the K of the window that just closed).
+    f2_act_ = F2Activity();
+    f2_window_steps_ = prev_steps_;
+    f2_k_prev_ = k0_applied_;
+    f2_start_pending_ = 0;
+    f2_start_l0_files_ = 0;
+    f2_start_deep_max_ = 0;
+    if (last_snapshot_) {
+      f2_start_pending_ =
+          static_cast<double>(last_snapshot_->pending_compaction_bytes);
+      const auto& levels = last_snapshot_->levels;
+      if (!levels.empty()) f2_start_l0_files_ = levels[0].num_files;
+      for (size_t i = 1; i + 1 < levels.size(); ++i) {
+        f2_start_deep_max_ = std::max(f2_start_deep_max_, levels[i].score);
+      }
+    }
   };
   if (!f2_window_open_) {
+    f2_prev_act_ = F2Activity();
     open_window();
     return;
   }
@@ -745,9 +784,23 @@ void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
   }
   const double h =
       last_snapshot_ ? static_cast<double>(last_snapshot_->live_sst_bytes) : 0;
+  // Input set 2: this window's six values come from its start and from the
+  // window before it; its own activity becomes the next window's.
+  const F2Activity& p = f2_prev_act_;
+  f2_last_state_ = F2StateInputs(
+      f2_k_prev_, k0_applied_, f2_start_pending_,
+      static_cast<double>(options_.base_level_bytes), f2_start_l0_files_,
+      f2_start_deep_max_, p.deep_bytes, p.ops, p.block_probes, p.gets,
+      p.stall_ends, p.ends);
+  F2Activity done = f2_act_;
+  done.ops = length;
+  done.block_probes = static_cast<double>(
+      Minus(prev_steps_.block_probes, f2_window_steps_.block_probes));
+  done.gets =
+      static_cast<double>(Minus(prev_steps_.gets, f2_window_steps_.gets));
   const std::vector<double> x =
       F2Features(f2_shares_[0], f2_shares_[1], f2_shares_[2], h, op,
-                 k0_applied_, m_applied_);
+                 k0_applied_, m_applied_, f2_last_state_);
   decisions_.Write(JsonLine("window")
                        .Uint("op0", f2_window_op_)
                        .Uint("op1", op)
@@ -768,6 +821,7 @@ void Controller::F2Window(const RLOpCounts& ops, uint64_t now) {
          static_cast<size_t>(std::max(cfg_.trial_recent, 1))) {
     f2_recent_x_.pop_front();
   }
+  f2_prev_act_ = done;
   open_window();
 }
 
@@ -815,7 +869,8 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
       continue;
     }
     const std::vector<double> x = F2Features(f2_shares_[0], f2_shares_[1],
-                                             f2_shares_[2], h, op, K, m);
+                                             f2_shares_[2], h, op, K, m,
+                                             f2_last_state_);
     Mask mask{};
     mask[0] = true;
     std::array<double, kNumActions> after{};

@@ -637,5 +637,194 @@ TEST_F(Learned2Test, AConfidentTrialAdoptsTheNeighbourAndGoesOn) {
   EXPECT_TRUE(judged);
 }
 
+// Input set 2 (config.h f2_inputs; the input study's
+// "six"). Every test that switches the set puts it back.
+struct InputSet {
+  explicit InputSet(int v) { SetF2Inputs(v); }
+  ~InputSet() { SetF2Inputs(1); }
+};
+
+TEST(Learned2, InputSet2AppendsTheSixStateInputs) {
+  {
+    InputSet two(2);
+    const auto& names = F2FeatureNames();
+    ASSERT_EQ(names.size(), 18u);
+    const std::vector<std::string> six = {"up0_x_pending", "dn0_x_pending",
+                                          "top_is_l0",     "prev_deep_bpo",
+                                          "fpos_per_get",  "stall"};
+    EXPECT_EQ(std::vector<std::string>(names.begin() + 12, names.end()), six);
+    EXPECT_EQ(names[kF2Up0Pending], "up0_x_pending");
+    EXPECT_EQ(names[kF2Stall], "stall");
+    EXPECT_EQ(FeatureNames(Agent::kF), names);
+    // rl_agent/tests/test_learned2.py checks the same hash from Python.
+    EXPECT_EQ(FeaturesHash(Agent::kF), 0x3ae249d6de64b390ull);
+    F2State s;
+    s.up0_x_pending = 1.5;
+    s.dn0_x_pending = NAN;
+    s.top_is_l0 = 1;
+    s.prev_deep_bpo = 7;
+    s.fpos_per_get = 1.1;
+    s.stall = 0.25;
+    const std::vector<double> m = {1, 2};
+    const auto x = F2Features(0.5, 0.5, 0, 1e10, 999, 8, m, s);
+    ASSERT_EQ(x.size(), 18u);
+    EXPECT_DOUBLE_EQ(x[kF2LogK], 3.0);
+    EXPECT_DOUBLE_EQ(x[kF2LogM1], 1.0);
+    EXPECT_DOUBLE_EQ(x[kF2Up0Pending], 1.5);
+    EXPECT_DOUBLE_EQ(x[kF2Dn0Pending], 0.0);  // NaN never reaches the model
+    EXPECT_DOUBLE_EQ(x[kF2TopIsL0], 1.0);
+    EXPECT_DOUBLE_EQ(x[kF2PrevDeepBpo], 7.0);
+    EXPECT_DOUBLE_EQ(x[kF2FposPerGet], 1.1);
+    EXPECT_DOUBLE_EQ(x[kF2Stall], 0.25);
+  }
+  EXPECT_EQ(F2FeatureNames().size(), 12u);
+  EXPECT_EQ(FeaturesHash(Agent::kF), 0x4d7a0f34e38d4d67ull);
+  F2State s;
+  s.stall = 1;
+  EXPECT_EQ(F2Features(0.5, 0.5, 0, 1e10, 999, 8, {1}, s).size(), 12u);
+  SetF2Inputs(7);  // anything else is set 1
+  EXPECT_EQ(F2Inputs(), 1);
+}
+
+TEST(Learned2, TheStateInputsFollowTheirDefinitions) {
+  const double B = 8.0 * 1024 * 1024;
+  // K went up: ln(1 + pending / C_1) in up0; down: in dn0; else neither.
+  const F2State up = F2StateInputs(4, 5, 2 * B, B, 0, 0.5, 0, 0, 0, 0, 0, 0);
+  EXPECT_DOUBLE_EQ(up.up0_x_pending, std::log1p(2.0));
+  EXPECT_DOUBLE_EQ(up.dn0_x_pending, 0);
+  const F2State down = F2StateInputs(4, 3, 2 * B, B, 0, 0.5, 0, 0, 0, 0, 0, 0);
+  EXPECT_DOUBLE_EQ(down.up0_x_pending, 0);
+  EXPECT_DOUBLE_EQ(down.dn0_x_pending, std::log1p(2.0));
+  const F2State same = F2StateInputs(4, 4, 2 * B, B, 0, 0.5, 0, 0, 0, 0, 0, 0);
+  EXPECT_DOUBLE_EQ(same.up0_x_pending + same.dn0_x_pending, 0);
+  // No previous window, no C_1, or no estimate: nothing.
+  EXPECT_DOUBLE_EQ(
+      F2StateInputs(0, 4, 2 * B, B, 0, 0.5, 0, 0, 0, 0, 0, 0).up0_x_pending, 0);
+  EXPECT_DOUBLE_EQ(
+      F2StateInputs(4, 5, 2 * B, 0, 0, 0.5, 0, 0, 0, 0, 0, 0).up0_x_pending, 0);
+  EXPECT_DOUBLE_EQ(
+      F2StateInputs(4, 5, NAN, B, 0, 0.5, 0, 0, 0, 0, 0, 0).up0_x_pending, 0);
+  // L0's files / K against the highest deeper score.
+  EXPECT_DOUBLE_EQ(
+      F2StateInputs(4, 4, 0, B, 3, 0.97, 0, 0, 0, 0, 0, 0).top_is_l0, 0);
+  EXPECT_DOUBLE_EQ(
+      F2StateInputs(4, 3, 0, B, 3, 0.97, 0, 0, 0, 0, 0, 0).top_is_l0, 1);
+  // The previous window's activity.
+  const F2State act = F2StateInputs(4, 4, 0, B, 0, 1, 1e8, 1e5, 30, 20, 1, 4);
+  EXPECT_DOUBLE_EQ(act.prev_deep_bpo, std::log1p(1000.0));
+  EXPECT_DOUBLE_EQ(act.fpos_per_get, 1.5);
+  EXPECT_DOUBLE_EQ(act.stall, 0.25);
+  const F2State none = F2StateInputs(4, 4, 0, B, 0, 1, 0, 0, 30, 0, 3, 0);
+  EXPECT_DOUBLE_EQ(none.prev_deep_bpo, 0);
+  EXPECT_DOUBLE_EQ(none.fpos_per_get, 0);  // no lookups
+  EXPECT_DOUBLE_EQ(none.stall, 0);         // no flush or compaction ended
+}
+
+TEST(Learned2, ASet2WeightsFileLoadsOnlyUnderSet2) {
+  const std::string dir = TempDir();
+  {
+    InputSet two(2);
+    std::vector<Model> models;
+    for (int e = 0; e < 2; ++e) models.push_back(Linear(0, kF2Stall, 1 + e));
+    WriteWeights(dir + "/w.bin", 3, models);
+    Weights w;
+    std::string error;
+    ASSERT_EQ(LoadWeights(dir + "/w.bin", &w, &error), LoadStatus::kOk) << error;
+    ASSERT_EQ(w.FindAll(Agent::kF, 0).size(), 2u);
+    F2State s;
+    s.stall = 0.5;
+    const auto x = F2Features(0.2, 0.7, 0.1, 2e10, 1000000, 4, {1}, s);
+    EXPECT_DOUBLE_EQ(Forward(*w.FindAll(Agent::kF, 0)[1], x)[0], 1.0);
+  }
+  Weights w;
+  std::string error;
+  EXPECT_EQ(LoadWeights(dir + "/w.bin", &w, &error), LoadStatus::kInvalid);
+  EXPECT_NE(error.find("other state inputs"), std::string::npos) << error;
+}
+
+TEST_F(Learned2Test, TheInputSetKeyIsOptionalAndChecked) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_EQ(c.f2_inputs, 1);
+  ASSERT_TRUE(LoadConfig(Config({{"f2_inputs", "2"}}), &c, &error)) << error;
+  EXPECT_EQ(c.f2_inputs, 2);
+  EXPECT_FALSE(LoadConfig(Config({{"f2_inputs", "3"}}), &c, &error));
+  EXPECT_NE(error.find("f2_inputs 1 or 2"), std::string::npos) << error;
+  auto values = BaseConfig(dir_);
+  values["f2_inputs"] = "2";
+  EXPECT_FALSE(LoadConfig(WriteConfig(dir_, values), &c, &error));
+  EXPECT_NE(error.find("is for learned2"), std::string::npos) << error;
+}
+
+TEST_F(Learned2Test, Set2WindowsCarryTheTreeStateOfTheirStart) {
+  const double B = 8.0 * 1024 * 1024;  // the fake host's C_1
+  FakeHost host;
+  {
+    auto keys = CycleTrials();
+    keys["window_ops"] = "200000";
+    keys["min_decision_ops"] = "200000";
+    keys["f2_inputs"] = "2";
+    Controller controller(&host, Config(keys), [this] { return clock_us_; });
+    EXPECT_EQ(F2Inputs(), 2);
+    {
+      std::lock_guard<std::mutex> lock(host.mu);
+      host.snapshot->pending_compaction_bytes = static_cast<uint64_t>(3 * B);
+      host.snapshot->write_delayed = true;
+    }
+    Serve(&host);
+    for (int i = 0; i < 16; ++i) {
+      controller.Step();
+      clock_us_ += 200000;
+      {
+        std::lock_guard<std::mutex> lock(host.mu);
+        host.steps.gets += 60000;
+        host.steps.block_probes += 120000;
+      }
+      Turnover(&host);  // one window: 100k operations, one L0 merge
+    }
+    controller.Step();
+  }
+  SetF2Inputs(1);
+  const auto lines = Lines();
+  const auto windows = OfType(lines, "window");
+  ASSERT_GE(windows.size(), 10u);
+  const double pending = std::log1p(3.0);
+  // Each turnover ends merges from L1, L2 and L3 reading 16, 32, 64 MiB.
+  const double deep = 112.0 * 1024 * 1024;
+  int ups = 0, downs = 0, tops = 0;
+  for (size_t i = 0; i < windows.size(); ++i) {
+    const std::string& w = windows[i];
+    const double k = Number(w, "k");
+    const double k_prev = i == 0 ? 4 : Number(windows[i - 1], "k");
+    EXPECT_NEAR(Number(w, "up0_x_pending"), k > k_prev ? pending : 0, 1e-9) << w;
+    EXPECT_NEAR(Number(w, "dn0_x_pending"), k < k_prev ? pending : 0, 1e-9) << w;
+    ups += k > k_prev ? 1 : 0;
+    downs += k < k_prev ? 1 : 0;
+    // L0 holds 3 files; L1 and L2 score 0.97.
+    const bool top = 3.0 / k >= 0.97;
+    EXPECT_EQ(Number(w, "top_is_l0"), top ? 1 : 0) << w;
+    tops += top ? 1 : 0;
+    if (i == 0) {  // no window before the first
+      EXPECT_EQ(Number(w, "prev_deep_bpo"), 0) << w;
+      EXPECT_EQ(Number(w, "fpos_per_get"), 0) << w;
+      EXPECT_EQ(Number(w, "stall"), 0) << w;
+      continue;
+    }
+    const double ops =
+        Number(windows[i - 1], "op1") - Number(windows[i - 1], "op0");
+    EXPECT_NEAR(Number(w, "prev_deep_bpo"), std::log1p(deep / ops), 1e-9) << w;
+    EXPECT_NEAR(Number(w, "fpos_per_get"), 2.0, 1e-12) << w;
+    EXPECT_NEAR(Number(w, "stall"), 1.0, 1e-12) << w;
+  }
+  EXPECT_GT(ups, 0);
+  EXPECT_GT(downs, 0);
+  EXPECT_GT(tops, 0);
+  // The decisions read the last closed window's six values.
+  for (const std::string& d : OfType(lines, "f2")) {
+    EXPECT_NE(d.find("\"stall\":"), std::string::npos) << d;
+  }
+}
+
 }  // namespace
 }  // namespace rlc

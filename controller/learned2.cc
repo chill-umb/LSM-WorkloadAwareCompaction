@@ -1,15 +1,61 @@
 #include "learned2.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 
 namespace rlc {
 
+namespace {
+std::atomic<int> g_f2_inputs{1};
+}  // namespace
+
+void SetF2Inputs(int version) { g_f2_inputs.store(version == 2 ? 2 : 1); }
+
+int F2Inputs() { return g_f2_inputs.load(); }
+
 const std::vector<std::string>& F2FeatureNames() {
   static const std::vector<std::string> kNames = {
       "put_share", "get_share", "scan_share", "log10_h", "log10_op", "log2_k",
       "log2_m1",   "log2_m2",   "log2_m3",    "log2_m4", "log2_m5",  "log2_m6"};
-  return kNames;
+  static const std::vector<std::string> kNames2 = [] {
+    std::vector<std::string> v = kNames;
+    for (const char* name : {"up0_x_pending", "dn0_x_pending", "top_is_l0",
+                             "prev_deep_bpo", "fpos_per_get", "stall"}) {
+      v.push_back(name);
+    }
+    return v;
+  }();
+  return F2Inputs() == 2 ? kNames2 : kNames;
+}
+
+F2State F2StateInputs(int k_prev, int k_window, double pending_bytes,
+                      double base_bytes, int l0_files, double deep_max_score,
+                      double prev_deep_bytes, double prev_ops,
+                      double prev_block_probes, double prev_gets,
+                      double prev_stall_ends, double prev_ends) {
+  const auto finite_or = [](double x, double fallback) {
+    return std::isfinite(x) ? x : fallback;
+  };
+  F2State s;
+  const double pending =
+      base_bytes > 0
+          ? finite_or(std::log1p(std::max(0.0, pending_bytes) / base_bytes), 0)
+          : 0;
+  if (k_prev > 0 && k_window > k_prev) s.up0_x_pending = pending;
+  if (k_prev > 0 && k_window > 0 && k_window < k_prev) s.dn0_x_pending = pending;
+  if (k_window > 0) {
+    const double l0_score =
+        static_cast<double>(l0_files) / static_cast<double>(k_window);
+    s.top_is_l0 = l0_score >= finite_or(deep_max_score, 0) ? 1 : 0;
+  }
+  s.prev_deep_bpo = finite_or(
+      std::log1p(std::max(0.0, prev_deep_bytes) / std::max(1.0, prev_ops)), 0);
+  s.fpos_per_get =
+      prev_gets > 0 ? finite_or(prev_block_probes / prev_gets, 0) : 0;
+  s.stall = prev_ends > 0 ? finite_or(prev_stall_ends / prev_ends, 0) : 0;
+  return s;
 }
 
 const char* F2ActionName(Action action) {
@@ -29,7 +75,8 @@ const char* F2ActionName(Action action) {
 std::vector<double> F2Features(double put_share, double get_share,
                                double scan_share, double live_bytes,
                                uint64_t op, int K,
-                               const std::vector<double>& m) {
+                               const std::vector<double>& m,
+                               const F2State& state) {
   const auto finite_or = [](double x, double fallback) {
     return std::isfinite(x) ? x : fallback;
   };
@@ -43,6 +90,14 @@ std::vector<double> F2Features(double put_share, double get_share,
   for (int i = 1; i <= kF2Levels; ++i) {
     const double mi = i < static_cast<int>(m.size()) ? m[i] : 1.0;
     x[kF2LogM1 + i - 1] = mi > 0 && std::isfinite(mi) ? std::log2(mi) : 0;
+  }
+  if (x.size() > static_cast<size_t>(kF2Stall)) {
+    x[kF2Up0Pending] = finite_or(state.up0_x_pending, 0);
+    x[kF2Dn0Pending] = finite_or(state.dn0_x_pending, 0);
+    x[kF2TopIsL0] = finite_or(state.top_is_l0, 0);
+    x[kF2PrevDeepBpo] = finite_or(state.prev_deep_bpo, 0);
+    x[kF2FposPerGet] = finite_or(state.fpos_per_get, 0);
+    x[kF2Stall] = finite_or(state.stall, 0);
   }
   return x;
 }

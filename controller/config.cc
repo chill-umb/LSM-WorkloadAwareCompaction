@@ -318,6 +318,7 @@ const std::set<std::string>& KnownKeys() {
                                                "trial_max_blocks",
                                                "trial_rest_ops",
                                                "trial_recent",
+                                               "f2_inputs",
                                                "apply_at_op",
                                                "apply_m",
                                                "apply_k0",
@@ -730,6 +731,7 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     c->trial_max_blocks = 0;
     c->trial_rest_ops = 0;
     c->trial_recent = 0;
+    c->f2_inputs = 1;
     const auto optional_flag = [&r](const char* key, bool* out) {
       int v = 0;
       if (!r.Has(key)) return true;
@@ -751,7 +753,11 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
          (!r.Number("min_effect", &c->min_effect) ||
           !r.Check(c->min_effect >= 0, "need min_effect >= 0"))) ||
         !optional_flag("deep_frozen", &c->deep_frozen) ||
-        !optional_flag("k_trials", &c->k_trials)) {
+        !optional_flag("k_trials", &c->k_trials) ||
+        (r.Has("f2_inputs") &&
+         (!r.Integer("f2_inputs", &c->f2_inputs) ||
+          !r.Check(c->f2_inputs == 1 || c->f2_inputs == 2,
+                   "need f2_inputs 1 or 2")))) {
       return false;
     }
     if (c->k_trials) {
@@ -790,7 +796,7 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
                             "window_min_ops", "min_effect", "deep_frozen",
                             "k_trials", "trial_block_ops", "trial_min_blocks",
                             "trial_max_blocks", "trial_rest_ops",
-                            "trial_recent"}) {
+                            "trial_recent", "f2_inputs"}) {
       if (r.Has(key)) {
         return r.Fail(std::string("\"") + key + "\" is for learned2");
       }

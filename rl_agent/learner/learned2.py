@@ -36,6 +36,28 @@ SLOTS = ("hold", "down", "up", "unused")
 OFFSET = [0, 0, 0, 10.0, 6.5, 2.0, 0, 0, 0, 0, 0, 0]
 SCALE = [1, 1, 1, 1.0, 1.0, 1.0, 1, 1, 1, 1, 1, 1]
 EXPORT_CLIP = 1e6
+# Input set 2 (the plugin's config key f2_inputs; after the
+# input study ~/node_ops/reports/2026-11-06-inputstudy.md, set "six"): the 12
+# above and six inputs of the tree's state (controller/learned2.h F2State),
+# scaled by their mean and standard deviation over the rl3 windows
+# (~/node_ops/diag/2026-11-06-inputstudy/res/cand_scales.json), exactly as
+# the study's offline replay scaled them.
+F_NAMES_2 = F_NAMES + ["up0_x_pending", "dn0_x_pending", "top_is_l0",
+                       "prev_deep_bpo", "fpos_per_get", "stall"]
+F_HASH_2 = 0x3AE249D6DE64B390   # controller/tests/learned2_test.cc pins the same
+OFFSET_2 = OFFSET + [0.691502186795821, 0.7231896594541726, 0.00721064036464171,
+                     7.4099445618270865, 1.065412560914091, 0.3322921058054558]
+SCALE_2 = SCALE + [1.7152026340860491, 1.754336562245107, 0.08460878813795589,
+                   1.7755356125088884, 0.11609837076482397, 0.3397887930323844]
+
+
+def input_set(version: int):
+    """(names, offset, scale) of the plugin's input set 1 or 2."""
+    if version == 1:
+        return F_NAMES, OFFSET, SCALE
+    if version == 2:
+        return F_NAMES_2, OFFSET_2, SCALE_2
+    raise ValueError(f"f2_inputs must be 1 or 2, not {version!r}")
 
 
 def own_feature(level: int) -> int:
@@ -138,14 +160,22 @@ class HostLogPricer:
             return None
         if self.ds is not None and op1 > self.recs[self.ds]["op"]:
             return None
-        k1 = bisect.bisect_left(self.snap_ops, op1)
+        # The first snap AFTER op1 (bisect_right): the host log writes a
+        # job's end record after the snap of the same operation count, and a
+        # cycle window closes at the poll at that count, so the window's own
+        # closing L0 merge must fall before hi (agent RS, 2026-11-06: with
+        # bisect_left 17% of W1 windows charged it to the next window).
+        # Consecutive windows share the boundary snap: op0 uses the same rule.
+        k1 = bisect.bisect_right(self.snap_ops, op1)
         if k1 >= len(self.snap_ops):
             return None
         hi = self.snap_idx[k1]
         if op0 <= self.recs[self.ms]["op"]:
             lo = self.ms
         else:
-            k0 = bisect.bisect_left(self.snap_ops, op0)
+            k0 = bisect.bisect_right(self.snap_ops, op0)
+            if k0 >= len(self.snap_ops):
+                return None
             lo = self.snap_idx[k0]
         return (lo, hi) if hi > lo else None
 
@@ -198,8 +228,10 @@ def poisson1(rng: random.Random) -> int:
         k += 1
 
 
-def scaled(x: list) -> list:
-    return [(v - o) / s for v, o, s in zip(x, OFFSET, SCALE)]
+def scaled(x: list, offset: list = None, scale: list = None) -> list:
+    offset = OFFSET if offset is None else offset
+    scale = SCALE if scale is None else scale
+    return [(v - o) / s for v, o, s in zip(x, offset, scale)]
 
 
 @dataclass
@@ -216,14 +248,16 @@ class Ensemble:
     samples: list = field(default_factory=list)
     y0: float = None
     rng: random.Random = None
+    inputs: int = 1              # the plugin's input set (input_set)
 
     def __post_init__(self):
+        self.names, self.offset, self.scale = input_set(self.inputs)
         import torch
         self.rng = random.Random(self.seed)
         g = torch.Generator().manual_seed(self.seed)
         for e in range(self.members):
             torch.manual_seed(self.seed * 1000 + e)
-            mods, width = [], len(F_NAMES)
+            mods, width = [], len(self.names)
             for _ in range(self.layers):
                 mods += [torch.nn.Linear(width, self.hidden), torch.nn.ReLU()]
                 width = self.hidden
@@ -243,7 +277,7 @@ class Ensemble:
         import torch
         if self.y0 is None:
             return []
-        t = torch.tensor([scaled(x)], dtype=torch.float64)
+        t = torch.tensor([scaled(x, self.offset, self.scale)], dtype=torch.float64)
         with torch.no_grad():
             return [float(net(t)[0, 0]) + self.y0 for net in self.nets]
 
@@ -253,7 +287,8 @@ class Ensemble:
         mean's root-mean-square error on every sample."""
         import torch
         n = len(self.samples)
-        X = torch.tensor([scaled(s.x) for s in self.samples], dtype=torch.float64)
+        X = torch.tensor([scaled(s.x, self.offset, self.scale) for s in self.samples],
+                         dtype=torch.float64)
         Y = torch.tensor([s.y - self.y0 for s in self.samples], dtype=torch.float64)
         losses = []
         for e, (net, opt) in enumerate(zip(self.nets, self.opts)):
@@ -287,12 +322,12 @@ class Ensemble:
                 W = lin.weight.detach().double().tolist()
                 b = lin.bias.detach().double().tolist()
                 if li == 0:
-                    W2 = [[w / s for w, s in zip(row, SCALE)] for row in W]
-                    b = [bi - sum(w * o / s for w, o, s in zip(row, OFFSET, SCALE))
+                    W2 = [[w / s for w, s in zip(row, self.scale)] for row in W]
+                    b = [bi - sum(w * o / s for w, o, s in zip(row, self.offset, self.scale))
                          for row, bi in zip(W, b)]
                     W = W2
                 layers.append((W, b))
-            out.append(ModelWeights(agent="f", level=level, names=list(F_NAMES),
+            out.append(ModelWeights(agent="f", level=level, names=list(self.names),
                                     clip=EXPORT_CLIP, layers=layers))
         return out
 

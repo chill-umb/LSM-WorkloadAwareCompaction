@@ -29,17 +29,52 @@ constexpr int kF2Levels = 6;  // log2 m_1 .. m_6 are inputs
 // Feature indices.
 constexpr int kF2PutShare = 0, kF2GetShare = 1, kF2ScanShare = 2,
               kF2LogH = 3, kF2LogOp = 4, kF2LogK = 5, kF2LogM1 = 6;
+// Input set 2 (config.h f2_inputs; after the input study
+// ~/node_ops/reports/2026-11-06-inputstudy.md) appends six inputs of the
+// tree's state, in the study's order ("six"):
+constexpr int kF2Up0Pending = 12, kF2Dn0Pending = 13, kF2TopIsL0 = 14,
+              kF2PrevDeepBpo = 15, kF2FposPerGet = 16, kF2Stall = 17;
 
+// The input set in force for the process (1 or 2; anything else counts as
+// 1). The plugin sets it from its config before it reads any weights; the
+// weights file's feature hash and input count follow F2FeatureNames().
+void SetF2Inputs(int version);
+int F2Inputs();
 const std::vector<std::string>& F2FeatureNames();
 const char* F2ActionName(Action action);
 
+// Input set 2's six values for a window, all from before the window or its
+// first poll (live, the run's own past only):
+//   up0_x_pending / dn0_x_pending: the window is the first after K went up /
+//     down (k_window above / below k_prev, the previous window's K), times
+//     ln(1 + RocksDB's pending compaction bytes at the window's start /
+//     C_1); else 0;
+//   top_is_l0: L0's score at the start (its files / k_window) is at least
+//     every deeper level's score but the last's (deep_max_score): 1, else 0;
+//   prev_deep_bpo: ln(1 + bytes read by non-trivial merges from L1 and
+//     deeper (s + o) that ended in the previous window / its operations);
+//   fpos_per_get: the previous window's data-block probes past the filter
+//     (BLOOM_FILTER_FULL_POSITIVE) per point lookup, 0 without lookups;
+//   stall: the share of the previous window's flush and compaction ends at
+//     which writes were slowed or stopped, 0 without any.
+struct F2State {
+  double up0_x_pending = 0, dn0_x_pending = 0, top_is_l0 = 0,
+         prev_deep_bpo = 0, fpos_per_get = 0, stall = 0;
+};
+F2State F2StateInputs(int k_prev, int k_window, double pending_bytes,
+                      double base_bytes, int l0_files, double deep_max_score,
+                      double prev_deep_bytes, double prev_ops,
+                      double prev_block_probes, double prev_gets,
+                      double prev_stall_ends, double prev_ends);
+
 // The input vector: the last window's operation shares, live SST bytes, the
 // operation count, the L0 trigger K and the multipliers m[1..6] (m[0] unused;
-// absent levels count as 1).
+// absent levels count as 1); under input set 2 also `state`'s six values.
 std::vector<double> F2Features(double put_share, double get_share,
                                double scan_share, double live_bytes,
                                uint64_t op, int K,
-                               const std::vector<double>& m);
+                               const std::vector<double>& m,
+                               const F2State& state = F2State());
 
 struct F2Choice {
   Action action = Action::kHold;

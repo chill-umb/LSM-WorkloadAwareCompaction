@@ -48,6 +48,9 @@ class Trainer2:
         self.args = args
         self.s = settings
         self.pricer = L2.HostLogPricer(from_plugin_config(plugin_cfg))
+        # The plugin's input set (config key f2_inputs, absent = 1).
+        self.inputs = int(plugin_cfg.get("f2_inputs", 1))
+        self.names = L2.input_set(self.inputs)[0]
         self.decisions = LogTail(args.decisions)
         self.host = LogTail(args.host_log)
         self.log = open(args.log, "a", encoding="ascii")
@@ -115,7 +118,7 @@ class Trainer2:
         self.priced += 1
         ops = p["ops"]
         jpo = p["J"] / ops if ops > 0 else math.nan
-        x = [float(w["x"][n]) for n in L2.F_NAMES]
+        x = [float(w["x"][n]) for n in self.names]
         changed = int(w.get("changed", 0)) == 1
         settled = [float(v) for v in w.get("settled", [])]
         self.emit({"type": "window", "op0": w["op0"], "op1": w["op1"], "ops": ops,
@@ -149,7 +152,8 @@ class Trainer2:
             ens = self.ens[level] = L2.Ensemble(
                 members=int(self.s["ensemble"]), hidden=int(self.s["hidden"]),
                 layers=int(self.s["layers"]), lr=float(self.s["lr"]),
-                huber=float(self.s["huber"]), seed=int(self.s["seed"]) * 100 + level)
+                huber=float(self.s["huber"]), seed=int(self.s["seed"]) * 100 + level,
+                inputs=self.inputs)
         return ens
 
     def backfill(self, level: int) -> None:

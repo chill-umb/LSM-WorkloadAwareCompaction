@@ -40,6 +40,73 @@ class InputsTest(unittest.TestCase):
         self.assertEqual(L2.own_feature(2), L2.F_NAMES.index("log2_m2"))
 
 
+class InputSet2Test(unittest.TestCase):
+    # The input study's set "six" (config key f2_inputs 2).
+    def test_names_hash_and_scaling_match_the_plugin(self):
+        names, offset, scale = L2.input_set(2)
+        self.assertEqual(names[:12], L2.F_NAMES)
+        self.assertEqual(names[12:], ["up0_x_pending", "dn0_x_pending", "top_is_l0",
+                                      "prev_deep_bpo", "fpos_per_get", "stall"])
+        self.assertEqual(features_hash(names), L2.F_HASH_2)
+        self.assertEqual(L2.F_HASH_2, 0x3AE249D6DE64B390)  # learned2_test.cc
+        self.assertEqual((len(offset), len(scale)), (18, 18))
+        self.assertTrue(all(v > 0 for v in scale))
+        self.assertEqual(L2.input_set(1), (L2.F_NAMES, L2.OFFSET, L2.SCALE))
+        with self.assertRaises(ValueError):
+            L2.input_set(3)
+
+    def test_export_computes_what_torch_computes(self):
+        ens = L2.Ensemble(members=3, hidden=8, layers=2, lr=1e-2, huber=1.0, seed=2, inputs=2)
+        extra = [0.0, 1.2, 0.0, 7.0, 1.1, 0.25]
+        for i in range(20):
+            ens.add(inputs(log2_k=1 + (i % 3)) + extra, -10.0 + 0.1 * i, op1=i)
+        ens.train(steps=20, batch=8)
+        models = ens.export(level=0)
+        self.assertEqual(models[0].names, L2.F_NAMES_2)
+        w = decode(encode(WeightsFile(version=1, models=models)), {"f": L2.F_NAMES_2})
+        x = inputs(log2_k=2.5, op=3e6) + [1.4, 0.0, 1.0, 8.0, 0.9, 0.5]
+        for model, p in zip(w.models, ens.predict(x)):
+            self.assertAlmostEqual(forward(model, x)[0] + ens.y0, p, places=9)
+        # A set-2 model is refused where the 12 inputs are expected.
+        with self.assertRaises(ValueError):
+            decode(encode(WeightsFile(version=1, models=models)), {"f": L2.F_NAMES})
+
+
+FG = ["rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive", "rocksdb.sorted.run.seek",
+      "rocksdb.read.table.reopen", "rocksdb.number.db.next.found", "rocksdb.number.iter.skip",
+      "rocksdb.number.keys.read", "rocksdb.number.db.seek", "rocksdb.number.keys.written",
+      "rocksdb.read.table.reopen.nanos", "rocksdb.rl.scan.setup.nanos"]
+
+
+class BoundsTest(unittest.TestCase):
+    def test_a_window_keeps_its_own_closing_merge(self):
+        # The host log writes a job's end record after the snap of the same
+        # operation count; a cycle window closes at that count (agent RS,
+        # 2026-11-06). The window's bounds must hold the job's end record, and
+        # the next window must start where it ends.
+        pr = L2.HostLogPricer(None)
+        snap = lambda op: {"type": "snap", "op": op, "fg": [op] * len(FG)}
+        for r in [{"type": "header", "fg": FG},
+                  {"type": "stamp", "name": "measure_start", "op": 0, "h": 1000},
+                  snap(100), snap(500),
+                  {"type": "job_begin", "job": 7, "op": 400, "t_us": 1, "fg": [400] * len(FG)},
+                  snap(1000),
+                  {"type": "job_end", "job": 7, "op": 1000, "t_us": 2, "start_level": 0,
+                   "trivial": 0, "s": 1, "o": 1, "x": 1, "ok": 1, "fg": [1000] * len(FG)},
+                  {"type": "h", "op": 1000, "h": 1000},
+                  snap(1300), snap(2000), snap(2400)]:
+            pr.add(r)
+        end = next(i for i, r in enumerate(pr.recs) if r["type"] == "job_end")
+        lo, hi = pr.bounds(0, 1000)
+        self.assertEqual(lo, pr.ms)
+        self.assertLess(end, hi)               # the merge is this window's
+        self.assertEqual(pr.recs[hi]["op"], 1300)
+        lo2, hi2 = pr.bounds(1000, 2000)
+        self.assertEqual(lo2, hi)              # no gap, no overlap
+        self.assertEqual(pr.recs[hi2]["op"], 2400)
+        self.assertIsNone(pr.bounds(2000, 2400))   # no snap after op1 yet
+
+
 class EnsembleTest(unittest.TestCase):
     def test_export_computes_what_torch_computes(self):
         ens = small()
@@ -116,6 +183,7 @@ class TrainerTest(unittest.TestCase):
         tr = T2.Trainer2.__new__(T2.Trainer2)
         tr.args, tr.s = args, s
         tr.pricer = StubPricer()
+        tr.inputs, tr.names = 1, L2.F_NAMES
         tr.decisions = T2.LogTail(args.decisions)
         tr.host = T2.LogTail(args.host_log)
         tr.log = open(args.log, "a", encoding="ascii")

@@ -56,12 +56,14 @@ LEARNER_ARMS = ("prior", "learned", "learned2")
 LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",
                  "measure_turnovers", "min_decision_ops")
 # Its noise fix's keys (controller/config.h; owner, 2026-11-05 "merge cycle
-# aligned windows"): optional, passed on only when the settings hold them
-# (absent: fixed windows, no minimum effect, no trials, level agents live).
+# aligned windows") and its input set (f2_inputs, from the
+# input study): optional, passed on only when the settings hold them
+# (absent: fixed windows, no minimum effect, no trials, level agents live,
+# the 12 inputs).
 LEARNED2_OPTIONAL_KEYS = ("window_cycles", "window_min_ops", "min_effect",
                           "deep_frozen", "k_trials", "trial_block_ops",
                           "trial_min_blocks", "trial_max_blocks",
-                          "trial_rest_ops", "trial_recent")
+                          "trial_rest_ops", "trial_recent", "f2_inputs")
 LEARNER_KEYS = ("explore", "push_interval_ms", "weights_required")
 # The device prices controller/config.cc reads, c_open among them since
 # PREREGISTRATION D-21 (resolving D-20 §2g): measured by stage 18, never a

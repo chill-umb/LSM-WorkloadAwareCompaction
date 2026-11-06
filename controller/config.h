@@ -152,6 +152,11 @@ struct Config {
   int trial_max_blocks = 0;
   double trial_rest_ops = 0;
   int trial_recent = 0;
+  // learned2's input set (after the input study
+  // ~/node_ops/reports/2026-11-06-inputstudy.md; optional, absent = 1):
+  // 1 = the 12 inputs of F2FeatureNames before; 2 = those 12 and six of the
+  // tree's state (learned2.h kF2Up0Pending..kF2Stall).
+  int f2_inputs = 1;
   // Hold-only only (owner, 2026-10-07: the step-response test of the
   // settling condition C3): at the first poll at or after operation
   // apply_at_op, apply apply_m (one value per level, ":"-separated in the
