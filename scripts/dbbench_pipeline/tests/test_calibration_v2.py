@@ -174,9 +174,22 @@ class ForegroundTest(unittest.TestCase):
         self.assertAlmostEqual(0.5e-6, fg["c_put"], delta=1e-9)
         self.assertAlmostEqual(0.22e-6, fg["c_mt"], delta=1e-9)
         self.assertAlmostEqual(0.4e-6, fg["c_get0"], delta=0.01e-6)
-        self.assertAlmostEqual(0.3e-6, fg["c_st"], delta=0.01e-6)
-        self.assertAlmostEqual(1.5e-6, fg["c_ib"], delta=0.05e-6)
+        # The binary counts no iterator blocks (TYPE_TICKERS["iblock"] is
+        # empty), so by default c_ib is folded into c_st at the b4k tree's
+        # 1/32 iterator blocks per step (owner, 2026-10-05; in the fit
+        # 2026-11-08): 0.3 + 1.5/32 us, c_ib 0.
+        self.assertEqual(cal.cm.TYPE_TICKERS["iblock"], ())
+        self.assertAlmostEqual(0.3e-6 + 1.5e-6 / 32, fg["c_st"], delta=0.01e-6)
+        self.assertEqual(0.0, fg["c_ib"])
         self.assertAlmostEqual(0.7e-6 + 1.0e-6, fg["c_sc0"], delta=0.01e-6)
+        notes = cal.fit_foreground(self.quiet_rows(), self.BASE)["notes"]
+        self.assertIn("folded", notes["c_ib"])
+        self.assertIn("x 0.0313 blocks per step (b4k)", notes["c_st"])
+        # The split fit itself, for a binary that counts them.
+        split = cal.fit_foreground(self.quiet_rows(), self.BASE,
+                                   fold_iblock=False)["core_seconds"]
+        self.assertAlmostEqual(0.3e-6, split["c_st"], delta=0.01e-6)
+        self.assertAlmostEqual(1.5e-6, split["c_ib"], delta=0.05e-6)
 
     def test_kappa_and_lambda(self):
         rows = self.quiet_rows()

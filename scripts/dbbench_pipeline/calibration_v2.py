@@ -348,8 +348,22 @@ def timed(row: dict) -> bool:
     return row.get("perf_level", "1") != "1"
 
 
-def fit_foreground(rows: list[dict], base_core: dict) -> dict:
-    """The quiet foreground prices (core-seconds) from quiet rows."""
+# The experiments' data-block tree in 38b's runs (the shared flags' block size).
+FOLD_TREE = "b4k"
+
+
+def fit_foreground(rows: list[dict], base_core: dict,
+                   fold_iblock: bool | None = None) -> dict:
+    """The quiet foreground prices (core-seconds) from quiet rows.
+
+    fold_iblock (default: the binary counts no iterator blocks, i.e.
+    cost_model_v2.TYPE_TICKERS["iblock"] is empty): c_ib is folded into c_st
+    and set to 0 (owner, 2026-10-05, as in v5; applied in the fit 2026-11-08).
+    A price whose count is always 0 adds nothing to J, so a split fit would
+    price scans' block loads at zero: c_st takes c_ib times the iterator
+    blocks per step of the FOLD_TREE scans instead."""
+    if fold_iblock is None:
+        fold_iblock = not cm.TYPE_TICKERS["iblock"]
     quiet = [r for r in rows if r.get("arm") == "quiet"]
     m = {id(r): per_op(r) for r in quiet}
     out, notes = {}, {}
@@ -395,6 +409,23 @@ def fit_foreground(rows: list[dict], base_core: dict) -> dict:
             notes["c_ib"] = ("identified" if ib_ok else
                              "not identified (two block sizes needed): 0")
             notes["c_st"] = f"slope {coef[1]:.3e} ± {se[1]:.3e} s per step"
+            if fold_iblock and out["c_ib"] > 0:
+                seek_blocks = np.mean(base_blocks.get(FOLD_TREE, [0.0]))
+                pairs = [(max(s["data_blocks"] - seek_blocks, 0.0), s["steps"])
+                         for r, s in scans if r.get("tree") == FOLD_TREE
+                         and int(r.get("nexts", 0)) > 0]
+                steps = sum(p[1] for p in pairs)
+                if not steps:
+                    raise ValueError(f"no {FOLD_TREE} scan with steps: cannot fold c_ib")
+                per_step = sum(p[0] for p in pairs) / steps
+                split = (out["c_st"], out["c_ib"])
+                out["c_st"] = split[0] + split[1] * per_step
+                out["c_ib"] = 0.0
+                notes["c_st"] += (f"; c_ib folded in (no iterator-block counter): "
+                                  f"{split[0]:.4e} + {split[1]:.4e} x {per_step:.4f} "
+                                  f"blocks per step ({FOLD_TREE}) = {out['c_st']:.4e}")
+                notes["c_ib"] = (f"0: folded into c_st (split fit {split[1]:.4e} s per "
+                                 f"iterator block; the binary counts none)")
         at0 = [s for r, s in scans if int(r.get("nexts", 0)) == 0]
         if at0:
             seek_part = np.nanmean([s["seek"] - base_core["c_sk"] * s["run_seeks"]
