@@ -123,6 +123,9 @@ for set in "${sets[@]}"; do
       out="$PRICE_TREES/build/$name/attempt$attempt"
       mkdir -p "$out"
       rm -rf "${BUILD_ROOT:?}/$name"
+      # db_bench creates the database's own folder, not s<set>/ above it
+      # (stage 38's reads failed this way on every worker, 2026-11-08).
+      mkdir -p "$(dirname "$BUILD_ROOT/$name")"
       command=(
         ${launcher[@]+"${launcher[@]}"} "$DB_BENCH"
         --benchmarks=filluniquerandom,settle,levelstats --use_existing_db=0

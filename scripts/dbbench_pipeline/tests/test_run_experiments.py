@@ -366,6 +366,55 @@ class RefusalTest(unittest.TestCase):
                     self.assertFalse((Path(tmp) / "db").exists())
 
 
+class SsdTrimTest(unittest.TestCase):
+    """Owner, 2026-11-08: the SSD is trimmed before every run (config.sh's
+    ssd_trim, with tests/__init__.py's stand-in fstrim). One TRIM per arm,
+    recorded in its metadata.env; a failed TRIM stops 03 (exit 9) before the
+    arm leaves a folder; SSD_TRIM=0 runs without it and records "off"."""
+
+    def metadata(self, root: Path, arm: str) -> dict:
+        return dict(line.split("=", 1) for line in
+                    (root / "results" / "1M" / "T2" / arm / "metadata.env")
+                    .read_text().splitlines())
+
+    def test_one_trim_before_each_run_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "trims.txt"
+            ran = run03(root, EXPERIMENT_ARMS="native static:uniform_0_75",
+                        SSD_TRIM="1", SSD_TRIM_LOG=str(log))
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            trims = log.read_text().splitlines()
+            self.assertEqual(len(trims), 2)
+            self.assertTrue(all(Path(t).is_dir() for t in trims), trims)
+            self.assertEqual(ran.stdout.count("[trim] "), 2)
+            for arm in ("native", "static:uniform_0_75"):
+                values = self.metadata(root, arm)
+                self.assertRegex(values["ssd_trim"], r"trimmed \(stand-in\); \d+ ms$")
+                self.assertEqual(values["machine_calibration"], "none")
+
+    def test_a_failed_trim_stops_before_the_arm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ran = run03(root, SSD_TRIM="1", SSD_TRIM_FAIL="1")
+            self.assertEqual(ran.returncode, 9, ran.stdout)
+            self.assertIn("SSD TRIM before 1M T=2 native failed", ran.stderr)
+            self.assertIn("the stand-in was told to fail", ran.stderr)
+            self.assertFalse((root / "results" / "1M" / "T2" / "native").exists())
+
+    def test_trim_off_is_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "trims.txt"
+            ran = run03(root, SSD_TRIM="0", SSD_TRIM_LOG=str(log),
+                        MACHINE_CAL_ID="0123456789abcdef")
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertFalse(log.exists())
+            values = self.metadata(root, "native")
+            self.assertEqual(values["ssd_trim"], "off")
+            self.assertEqual(values["machine_calibration"], "0123456789abcdef")
+
+
 class GovernorRecordTest(unittest.TestCase):
     """metadata.env's cpu_governor names the online CPUs' governors, on one
     line. SMT on in firmware (worker 1, 2026-10-27): the CPUs SMT off takes

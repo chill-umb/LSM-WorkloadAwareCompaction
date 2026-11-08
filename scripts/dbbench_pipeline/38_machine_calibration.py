@@ -29,6 +29,18 @@ contract's reference rate is open (D-29 §6).
               calibration.json, report.md  every value, and every price's
                                         ratio to the reference prices file
 
+  machine-key  this machine's key: host, /etc/machine-id, and the disk under
+            the databases (its serial and model), the drive q-bar is measured on
+  seal      (owner, 2026-11-08: once in the machine's life) the finished
+            calibration in DIR, sealed to this machine: MACHINE_CALIBRATED
+            holds the machine's key and every output's sha256. Refused if
+            c_set was not measured, a workload lacks a positive q-bar, or DIR
+            is sealed already
+  status    whether DIR holds a sealed calibration of THIS machine whose files
+            are as sealed; prints PRICES_FILE=, QBAR_FILE=,
+            TURN_SETTINGS_FILE=, MACHINE_CAL_ID= (36 reads them). Exit 0
+            yes, 3 nothing sealed, 4 another machine's, 6 a file changed
+
   38_machine_calibration.py reads --runs DIR --base prices.json \\
       --db-bench-sha256 SHA --out base.machine.json
   38_machine_calibration.py arm-dirs --native W1=summary.csv ...
@@ -37,6 +49,10 @@ contract's reference rate is open (D-29 §6).
       --turn-settings config/turn_settings.json \\
       --turn-result <preflight turn arm dir> ... --turn-report <37 report> ... \\
       [--jobs cal_jobs.json] --out-dir DIR
+  38_machine_calibration.py machine-key --db-root DIR
+  38_machine_calibration.py seal --dir DIR --db-root DIR --workload W1 ... \\
+      --db-bench-sha256 SHA [--root-head H --fork-head H --setting S]
+  38_machine_calibration.py status --dir DIR --db-root DIR
 """
 
 from __future__ import annotations
@@ -51,6 +67,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 import sys
 from pathlib import Path
 
@@ -317,6 +334,121 @@ def compose_command(args) -> int:
     return 0
 
 
+# ------------------------------------------- once in the machine's life
+SEALED = "MACHINE_CALIBRATED"
+# What a sealed calibration hands the runs: the name 36 reads, and the file.
+SEALED_FILES = {"PRICES_FILE": "prices.machine.json", "QBAR_FILE": "qbar.json",
+                "TURN_SETTINGS_FILE": "turn_settings.machine.json",
+                "CALIBRATION": "calibration.json"}
+# The fields that name a machine. A home folder copied to a new node keeps
+# the hostname's folder but not /etc/machine-id or the drive.
+KEY_FIELDS = ("host", "machine_id", "disk_serial")
+
+
+def _command_output(command: list[str]) -> str:
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def machine_key(db_root: Path) -> dict:
+    """The machine q-bar is measured on: host, machine id, and the drive that
+    holds db_root (the nearest existing folder up its path)."""
+    path = Path(os.path.realpath(db_root))
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    source = _command_output(["findmnt", "-n", "-o", "SOURCE", "--target", str(path)])
+    parent = _command_output(["lsblk", "-ndo", "PKNAME", source]) if source else ""
+    disk = f"/dev/{parent}" if parent else source
+    try:
+        machine_id = Path("/etc/machine-id").read_text().strip()
+    except OSError:
+        machine_id = ""
+    return {"host": platform.node(), "machine_id": machine_id or "unknown",
+            "filesystem": source or "unknown", "disk": disk or "unknown",
+            "disk_serial": (_command_output(["lsblk", "-ndo", "SERIAL", disk])
+                            if disk else "") or "unknown",
+            "disk_model": (_command_output(["lsblk", "-ndo", "MODEL", disk])
+                           if disk else "") or "unknown"}
+
+
+def same_machine(a: dict, b: dict) -> bool:
+    return all(a.get(k) == b.get(k) for k in KEY_FIELDS)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def machine_key_command(args) -> int:
+    print(json.dumps(machine_key(args.db_root), indent=2, sort_keys=True))
+    return 0
+
+
+def seal_command(args) -> int:
+    d = args.dir
+    if (d / SEALED).exists():
+        raise ValueError(f"{d / SEALED} exists: this machine's calibration is sealed")
+    for name in SEALED_FILES.values():
+        if not (d / name).is_file():
+            raise ValueError(f"{d / name} is missing")
+    cal = json.loads((d / SEALED_FILES["CALIBRATION"]).read_text())
+    if not isinstance(cal.get("c_set"), dict) or "c_set" not in cal["c_set"]:
+        raise ValueError("c_set was not measured (no preflight turn smoke under "
+                         "the preflight's work folder): run 13, then 38's fit again")
+    qbar = json.loads((d / SEALED_FILES["QBAR_FILE"]).read_text())
+    for workload in args.workload:
+        value = qbar.get(workload)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"no positive q-bar for {workload} in qbar.json")
+    prices = json.loads((d / SEALED_FILES["PRICES_FILE"]).read_text())
+    if prices.get("schema") != 6 or prices.get("cost_model") != 2:
+        raise ValueError("prices.machine.json is not a schema-6 (cost model 2) record")
+    record = {"schema": 1, "sealed_utc": now_utc(), "machine": machine_key(args.db_root),
+              "db_root": os.path.realpath(args.db_root),
+              "db_bench_identity": args.db_bench_sha256,
+              "root_head": args.root_head, "fork_head": args.fork_head,
+              "setting": args.setting, "workloads": sorted(qbar),
+              "qbar": qbar, "c_set": cal["c_set"]["c_set"],
+              "files": {key: {"name": name, "sha256": _sha256(d / name)}
+                        for key, name in SEALED_FILES.items()}}
+    write_json(d / SEALED, record)
+    print(f"[38 seal] {d}: id {_sha256(d / SEALED)[:16]}, {record['machine']['host']}, "
+          f"disk {record['machine']['disk_serial']}; q-bar "
+          + ", ".join(f"{w} {v:,.0f}" for w, v in sorted(qbar.items()))
+          + f"; c_set {record['c_set']:.4g}")
+    return 0
+
+
+def status_command(args) -> int:
+    d = args.dir
+    sealed = d / SEALED
+    if not sealed.is_file():
+        print(f"[38 status] no sealed calibration in {d}", file=sys.stderr)
+        return 3
+    record = json.loads(sealed.read_text())
+    here = machine_key(args.db_root)
+    if not same_machine(record["machine"], here):
+        there = record["machine"]
+        print(f"[38 status] {d} is the calibration of another machine: "
+              + ", ".join(f"{k} {there.get(k)} (here {here.get(k)})" for k in KEY_FIELDS),
+              file=sys.stderr)
+        return 4
+    for key, entry in record["files"].items():
+        path = d / entry["name"]
+        if not path.is_file() or _sha256(path) != entry["sha256"]:
+            print(f"[38 status] {path} changed since it was sealed", file=sys.stderr)
+            return 6
+    for key, entry in record["files"].items():
+        if key != "CALIBRATION":
+            print(f"{key}={d.resolve() / entry['name']}")
+    print(f"MACHINE_CAL_ID={_sha256(sealed)[:16]}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -338,9 +470,23 @@ def main() -> int:
     p.add_argument("--jobs", type=Path)
     p.add_argument("--setting", default="")
     p.add_argument("--out-dir", type=Path, required=True)
+    p = sub.add_parser("machine-key")
+    p.add_argument("--db-root", type=Path, required=True)
+    p = sub.add_parser("seal")
+    p.add_argument("--dir", type=Path, required=True)
+    p.add_argument("--db-root", type=Path, required=True)
+    p.add_argument("--workload", action="append", required=True, choices=WORKLOADS)
+    p.add_argument("--db-bench-sha256", required=True)
+    p.add_argument("--root-head", default="unknown")
+    p.add_argument("--fork-head", default="unknown")
+    p.add_argument("--setting", default="")
+    p = sub.add_parser("status")
+    p.add_argument("--dir", type=Path, required=True)
+    p.add_argument("--db-root", type=Path, required=True)
     args = parser.parse_args()
     command = {"reads": reads_command, "arm-dirs": arm_dirs_command,
-               "compose": compose_command}[args.command]
+               "compose": compose_command, "machine-key": machine_key_command,
+               "seal": seal_command, "status": status_command}[args.command]
     try:
         return command(args)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:

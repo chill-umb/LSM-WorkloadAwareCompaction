@@ -14,10 +14,19 @@
 #   RL_MODES="read write"       CONTROLLER_OBJECTIVE_MODE per pass
 #   RL_WORKLOADS="W1 W2 W3 W4 W5"
 #   RL_BETA_STAR=2              a contract-reported beta*: diagnostic runs only
+#   MACHINE_CAL=on              (owner, 2026-11-08) every run is priced with
+#                               this machine's calibration, sealed by stage 38
+#                               in MACHINE_CAL_DIR: its prices.machine.json,
+#                               qbar.json (q-bar per workload) and
+#                               turn_settings.machine.json (c_set). With it on,
+#                               the batch refuses to start without a sealed
+#                               calibration of this machine, and refuses
+#                               PRICES_FILE, TURN_SETTINGS_FILE, RL_QBAR_FILE
+#                               or RL_QBAR_STANDIN given beside it.
+#                               MACHINE_CAL=off: the four below, as given.
 #   RL_QBAR_STANDIN=50000       while the contract's q-bar is open (D-29 §6)
 #   RL_QBAR_FILE=               a JSON object {"W1": ops/s, ...}: each
-#                               workload's own stand-in (38's qbar.json, this
-#                               machine's measured q-bar), in place of
+#                               workload's own stand-in, in place of
 #                               RL_QBAR_STANDIN; it must name every workload
 #   RL_REPEATS=1
 #   RL_ARMS=learned2            03's arms per run, in order (e.g. "native turn
@@ -33,6 +42,11 @@
 #   suite-dbs/                  the runs' copies (removed)
 # The last line is RL_BATCH_EXIT=<0 every run completed, 5 something failed>.
 set -Eeuo pipefail
+# What the caller gave, before config.sh's defaults fill the names in.
+CALLER_FILES=()
+for name in PRICES_FILE TURN_SETTINGS_FILE RL_QBAR_FILE RL_QBAR_STANDIN; do
+  [[ -z "${!name:-}" ]] || CALLER_FILES+=("$name")
+done
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$PIPELINE_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -60,6 +74,28 @@ GEOMETRY=(WRITE_BUFFER_SIZE="$SUITE_WRITE_BUFFER_SIZE"
           OPEN_FILES="$SUITE_OPEN_FILES" RUN_MEMORY_MAX="$SUITE_MEMORY_MAX")
 l1="${RL_SETTING%%:*}" k="${RL_SETTING##*:}"
 setting_id() { echo "T$1-l1$l1-k$k"; }
+# This machine's calibration (stage 38), unless MACHINE_CAL=off.
+case "$MACHINE_CAL" in
+  on)
+    (( ${#CALLER_FILES[@]} == 0 )) ||
+      fail "${CALLER_FILES[*]} given, but MACHINE_CAL=on prices every run with this" \
+           "machine's calibration ($MACHINE_CAL_DIR): drop them, or set MACHINE_CAL=off"
+    status=0
+    cal_env="$("$PY" "$PIPELINE_DIR/38_machine_calibration.py" status \
+      --dir "$MACHINE_CAL_DIR" --db-root "$NVME")" || status=$?
+    (( status == 0 )) ||
+      fail "no usable calibration of this machine in $MACHINE_CAL_DIR (status $status):" \
+           "run 38_calibrate_machine.sh once on this machine first, or set MACHINE_CAL=off"
+    PRICES_FILE="$(sed -n 's/^PRICES_FILE=//p' <<< "$cal_env")"
+    TURN_SETTINGS_FILE="$(sed -n 's/^TURN_SETTINGS_FILE=//p' <<< "$cal_env")"
+    RL_QBAR_FILE="$(sed -n 's/^QBAR_FILE=//p' <<< "$cal_env")"
+    MACHINE_CAL_ID="$(sed -n 's/^MACHINE_CAL_ID=//p' <<< "$cal_env")"
+    [[ -n "$PRICES_FILE" && -n "$TURN_SETTINGS_FILE" && -n "$RL_QBAR_FILE" &&
+       -n "$MACHINE_CAL_ID" ]] || fail "38's status named no files: $cal_env"
+    ;;
+  off) MACHINE_CAL_ID=off ;;
+  *) fail "MACHINE_CAL=$MACHINE_CAL; it is on or off" ;;
+esac
 qbar_for() {  # $1 = workload: its q-bar stand-in
   if [[ -z "$RL_QBAR_FILE" ]]; then
     echo "$RL_QBAR_STANDIN"
@@ -119,7 +155,8 @@ done
 node_checks "${fresh[@]}"
 failed=()
 stamp "rl batch: arms $RL_ARMS; T $RL_T; setting $RL_SETTING; modes $RL_MODES; workloads" \
-      "$RL_WORKLOADS; beta* $RL_BETA_STAR; q-bar ${RL_QBAR_FILE:-stand-in $RL_QBAR_STANDIN}"
+      "$RL_WORKLOADS; beta* $RL_BETA_STAR; q-bar ${RL_QBAR_FILE:-stand-in $RL_QBAR_STANDIN};" \
+      "prices $PRICES_FILE; turn settings $TURN_SETTINGS_FILE; machine calibration $MACHINE_CAL_ID"
 for T in $RL_T; do
   id="$(setting_id "$T")"
   stamp "$id: tree"
@@ -152,10 +189,13 @@ for T in $RL_T; do
         WORKLOAD_SIZES_M="$SUITE_RUN_OPERATIONS_M" REPEATS="$RL_REPEATS" \
         DIAGNOSTIC_RUN=1 CONTROLLER_OBJECTIVE_MODE="$mode" \
         CONTROLLER_BETA_STAR="$RL_BETA_STAR" CONTROLLER_QBAR_STANDIN="$qbar" \
+        PRICES_FILE="$PRICES_FILE" TURN_SETTINGS_FILE="$TURN_SETTINGS_FILE" \
+        MACHINE_CAL_ID="$MACHINE_CAL_ID" \
         RESUME=1 SESSION_ID="$RL_TAG-$mode-$w" RESULTS_ROOT="$NVME/$RL_TAG-$mode-$w/$id" \
         DB_ROOT="$NVME/suite-dbs/$w/$id-$RL_TAG-$mode" "$PIPELINE_DIR/03_run_experiments.sh" ||
         status=$?
       (( status != 7 )) || fail "03 found no matching preflight; run 13 first"
+      (( status != 9 )) || fail "03 could not TRIM the SSD before a run; see above"
       if (( status != 0 )); then
         stamp "$id: $mode $w FAILED (exit $status); going on"
         failed+=("$id: $mode $w")

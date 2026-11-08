@@ -53,7 +53,12 @@ if bench == "filluniquerandom,settle,levelstats":
         (Path(marker) / "s1-T2").write_text("")
         print("RL_SETTLED ok=0 wait_micros=5 hold_micros=0 reason=compaction pending")
         sys.exit(1)
-    db.mkdir(parents=True, exist_ok=True)
+    # As RocksDB: DB::Open creates the database's own folder, not its parents
+    # (stage 38's reads failed this way on every worker, 2026-11-08).
+    if not db.parent.is_dir():
+        print(f"open error: IO error: While mkdir if missing: {db}: No such file or directory")
+        sys.exit(1)
+    db.mkdir(exist_ok=True)
     for number, size in ((10, 4000), (11, 2000)):
         (db / f"0000{number}.sst").write_bytes(
             f"{db.name} {args.get('seed')} {number}\n".encode() * (size // 16))

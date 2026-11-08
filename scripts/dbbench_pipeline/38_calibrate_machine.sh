@@ -5,6 +5,15 @@
 # are provisional, D-24 §2; q-bar is a stand-in while the contract's is
 # open, D-29 §6). After the preflight (13), with nothing else running.
 #
+# Once in the machine's life (owner, 2026-11-08, second ruling): the results
+# go to MACHINE_CAL_DIR (config.sh) and, when every part is done, are sealed
+# there to this machine (38_machine_calibration.py seal: host, machine id and
+# the drive under NVME, every output's sha256). Stage 36 then prices every
+# run with them. Run again on a sealed machine, 38 says so and exits 0 having
+# done nothing; a calibration sealed on another machine (a copied home) is
+# refused. An unfinished calibration resumes: finished parts are skipped.
+# The SSD is trimmed before every db_bench run here and in 03 and 38b.
+#
 # Parts, in order (CAL_PARTS names a subset; a finished part is skipped):
 #   natives  per workload one native run (36: the machine's T at CAL_SETTING,
 #            CAL_OPS million operations, by default the suite's full 40M run,
@@ -22,7 +31,8 @@
 #            jobs (the natives plus the garbage neighbours' host logs); 30 ->
 #            prices.machine.json; 38 compose -> qbar.json,
 #            turn_settings.machine.json (c_set from the preflight's turn
-#            smoke at this machine's prices), calibration.json, report.md
+#            smoke at this machine's prices), calibration.json, report.md;
+#            then the seal (MACHINE_CALIBRATED), which needs c_set measured
 # Not refitted: n_win (the interference window, kept at the base's; the L0
 # merge spans are reported) and the money (core price, c_s: the contract).
 #
@@ -31,12 +41,13 @@
 #     scripts/dbbench_pipeline/38_calibrate_machine.sh
 #   38_calibrate_machine.sh plan          the parts and runs; runs nothing
 #
-# Knobs: CAL_OUT ($HOME/node_ops/machine-cal/<UTC date>-T<T>; reuse it to
-# resume), CAL_SETTING (128:4), CAL_OPS ("W1:40 W2:40 W3:40 W4:40 W5:40"),
-# CAL_TAG (cal<MMDD>, 36's RL_TAG), CAL_READ_ROUNDS (3), CAL_COST_REPEATS (1),
-# CAL_PARTS ("natives reads cost fit"); 36's ALLOW_ROOT_DISK,
-# ACTION_BOUNDS_FILE, CONTROLLER_RULES_FILE pass through. The last line is
-# MACHINE_CAL_EXIT=<0 done, 5 a part failed>.
+# Knobs: MACHINE_CAL_DIR (config.sh; CAL_OUT is gone: one place per
+# machine), CAL_SETTING (128:4), CAL_OPS ("W1:40 W2:40 W3:40 W4:40 W5:40"),
+# CAL_TAG (machinecal, 36's RL_TAG), CAL_READ_ROUNDS (3), CAL_COST_REPEATS
+# (1), CAL_PARTS ("natives reads cost fit"); 36's ALLOW_ROOT_DISK,
+# ACTION_BOUNDS_FILE, CONTROLLER_RULES_FILE pass through; SSD_TRIM and
+# SSD_TRIM_COMMAND (config.sh). The last line is MACHINE_CAL_EXIT=<0 done or
+# done before, 5 a part failed or the calibration is not this machine's>.
 set -Eeuo pipefail
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$PIPELINE_DIR/../.." && pwd)"
@@ -55,11 +66,13 @@ DB_BENCH="$DBBENCH_BUILD_DIR/db_bench"
 CAL_T="${CAL_T:-}"
 CAL_SETTING="${CAL_SETTING:-128:4}"
 CAL_OPS="${CAL_OPS:-W1:40 W2:40 W3:40 W4:40 W5:40}"
-CAL_TAG="${CAL_TAG:-cal$(date -u +%m%d)}"
+CAL_TAG="${CAL_TAG:-machinecal}"
 CAL_READ_ROUNDS="${CAL_READ_ROUNDS:-3}"
 CAL_COST_REPEATS="${CAL_COST_REPEATS:-1}"
 CAL_PARTS="${CAL_PARTS:-natives reads cost fit}"
-CAL_OUT="${CAL_OUT:-$HOME/node_ops/machine-cal/$(date -u +%F)-T${CAL_T}}"
+[[ -z "${CAL_OUT:-}" ]] ||
+  fail "CAL_OUT is gone: a machine has one calibration, in MACHINE_CAL_DIR ($MACHINE_CAL_DIR)"
+CAL_OUT="$MACHINE_CAL_DIR"
 BASE_PRICES_FILE="${BASE_PRICES_FILE:-}"
 [[ "$CAL_T" =~ ^[1-9][0-9]*$ ]] || fail "CAL_T (the machine's size ratio) is not set"
 [[ "$CAL_SETTING" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || fail "CAL_SETTING is <L1 MiB>:<K>"
@@ -85,7 +98,11 @@ DBS="${NVME:-}/machine-cal-dbs"
 summary_of() { echo "$NVME/$CAL_TAG-read-$1/graphs/summary.csv"; }
 
 if [[ "${1:-}" == plan ]]; then
-  echo "machine calibration -> $CAL_OUT (parts: $CAL_PARTS)"
+  if [[ -f "$CAL_OUT/MACHINE_CALIBRATED" ]]; then
+    echo "machine calibration -> $CAL_OUT: SEALED already; a run does nothing"
+    exit 0
+  fi
+  echo "machine calibration -> $CAL_OUT (parts: $CAL_PARTS; then the seal)"
   if has_part natives; then
     for w in "${WORKLOADS[@]}"; do
       echo "  natives: $w native, T$CAL_T setting $CAL_SETTING, ${OPS[$w]}M operations (36, RL_TAG $CAL_TAG)"
@@ -105,6 +122,21 @@ fi
 [[ -n "${NVME:-}" ]] || fail "NVME (the database root, as 36's) is not set"
 NVME="$(realpath -m -- "$NVME")"
 DBS="$NVME/machine-cal-dbs"
+# Once in the machine's life: sealed here already, nothing to do.
+status=0
+"$PY" "$PIPELINE_DIR/38_machine_calibration.py" status --dir "$CAL_OUT" --db-root "$NVME" \
+  > /dev/null || status=$?
+case "$status" in
+  0) stamp "this machine was calibrated already ($CAL_OUT, sealed" \
+           "$(sed -n 's/.*"sealed_utc": "\([^"]*\)".*/\1/p' "$CAL_OUT/MACHINE_CALIBRATED")):" \
+           "a machine is calibrated once; nothing done"
+     echo "MACHINE_CAL_EXIT=0"
+     exit 0 ;;
+  3) ;;
+  4) fail "$CAL_OUT holds another machine's calibration (a copied home?): move it away" ;;
+  6) fail "$CAL_OUT was sealed, then changed: inspect it; a machine is calibrated once" ;;
+  *) fail "38_machine_calibration.py status failed (exit $status)" ;;
+esac
 [[ -f "$BASE_PRICES_FILE" ]] || fail "BASE_PRICES_FILE ($BASE_PRICES_FILE) is not a file"
 [[ -f "$PRICES_FILE" ]] || fail "PRICES_FILE ($PRICES_FILE) is not a file"
 "$PY" - "$BASE_PRICES_FILE" "$PRICES_FILE" <<'PY' || fail "BASE_PRICES_FILE must be schema 4 or 5 and PRICES_FILE schema 6"
@@ -131,18 +163,27 @@ DB_BENCH_SHA256="$("$PY" "$PIPELINE_DIR/preflight_marker.py" identity --db-bench
 } >> "$CAL_OUT/setup.env"
 "$PY" "$PIPELINE_DIR/price_trees.py" machine --cpus "$DBBENCH_CPUS" > "$CAL_OUT/machine.json" ||
   fail "price_trees.py machine failed"
+"$PY" "$PIPELINE_DIR/38_machine_calibration.py" machine-key --db-root "$NVME" \
+  > "$CAL_OUT/machine_key.json" || fail "38_machine_calibration.py machine-key failed"
 launcher=()
 [[ -z "$DBBENCH_CPUS" ]] || launcher=(taskset -c "$DBBENCH_CPUS")
 failed=()
+trim_now() {  # $1 = the file its line goes to; a failed TRIM stops the stage
+  local line
+  line="$(ssd_trim "$NVME")" || fail "SSD TRIM failed: $line"
+  echo "$line" > "$1"
+}
 
 # --- natives: q-bar per workload, and the job fit's reference runs --------
 if has_part natives; then
   for w in "${WORKLOADS[@]}"; do
     stamp "natives: $w, ${OPS[$w]}M operations"
     status=0
+    # MACHINE_CAL=off: these runs measure the calibration, so they cannot
+    # use it; 03 trims the SSD before each.
     env SUITE_RUN_OPERATIONS_M="${OPS[$w]}" NVME="$NVME" RESUME=1 RL_TAG="$CAL_TAG" \
       RL_T="$CAL_T" RL_SETTING="$CAL_SETTING" RL_MODES=read RL_WORKLOADS="$w" \
-      RL_ARMS=native PRICES_FILE="$PRICES_FILE" \
+      RL_ARMS=native PRICES_FILE="$PRICES_FILE" MACHINE_CAL=off \
       "$PIPELINE_DIR/36_rl_batch.sh" >> "$CAL_OUT/natives.log" 2>&1 || status=$?
     if (( status != 0 )) || [[ ! -f "$(summary_of "$w")" ]]; then
       stamp "natives: $w FAILED (36 exit $status; see $CAL_OUT/natives.log)"
@@ -174,13 +215,16 @@ if has_part reads; then
         --compaction_style=0 --db="$DBS/price-trees/T$1" --seed="$DBBENCH_SEED")
     }
     reads_ok=1
-    mkdir -p "$READS_DIR"
+    # db_bench creates only the database's own folder, not its parents
+    # (the 2026-11-08 failure on every worker).
+    mkdir -p "$READS_DIR" "$DBS/price-trees"
     for ratio in "${RATIOS[@]}"; do
       out="$READS_DIR/build/T$ratio"
       if [[ -f "$out/BUILT" ]]; then continue; fi
       mkdir -p "$out"
       rm -rf "${DBS:?}/price-trees/T$ratio"
       tree_flags "$ratio"
+      trim_now "$out/trim.txt"
       stamp "reads: building T$ratio"
       status=0
       ${launcher[@]+"${launcher[@]}"} "$DB_BENCH" \
@@ -200,6 +244,7 @@ if has_part reads; then
       read_run() {  # $1 = T, $2 = output dir, $3 = benchmark
         mkdir -p "$2"
         tree_flags "$1"
+        trim_now "$2/trim.txt"
         local command=(${launcher[@]+"${launcher[@]}"} "$DB_BENCH" "${TREE[@]}"
           "${COMMON_ALL_OPEN[@]}" --use_existing_db=1 --benchmarks="$3"
           --reads="$PRICE_READS" --seek_nexts=0)
@@ -312,5 +357,28 @@ if (( ${#failed[@]} )); then
   echo "MACHINE_CAL_EXIT=5"
   exit 5
 fi
-stamp "done: $CAL_OUT (prices.machine.json, qbar.json, turn_settings.machine.json, report.md)"
+# The seal: only a calibration whose every part is done (in this call or an
+# earlier one), and only with c_set measured (seal checks the fit's files).
+missing=()
+for w in "${WORKLOADS[@]}"; do [[ -f "$(summary_of "$w")" ]] || missing+=("natives $w"); done
+[[ -f "$READS_DIR/DONE" ]] || missing+=(reads)
+[[ -f "$COST_DIR/DONE" ]] || missing+=(cost)
+if (( ${#missing[@]} )); then
+  stamp "not sealed: not done yet: ${missing[*]} (CAL_PARTS=$CAL_PARTS); run them"
+  echo "MACHINE_CAL_EXIT=5"
+  exit 5
+fi
+seal_workloads=()
+for w in "${WORKLOADS[@]}"; do seal_workloads+=(--workload "$w"); done
+"$PY" "$PIPELINE_DIR/38_machine_calibration.py" seal --dir "$CAL_OUT" --db-root "$NVME" \
+  "${seal_workloads[@]}" --db-bench-sha256 "$DB_BENCH_SHA256" \
+  --root-head "$(git rev-parse HEAD 2>/dev/null || echo unknown)" \
+  --fork-head "$(git -C lib/rocksdb rev-parse HEAD 2>/dev/null || echo unknown)" \
+  --setting "T$CAL_T $CAL_SETTING" || {
+    stamp "seal FAILED: the calibration is not this machine's until sealed"
+    echo "MACHINE_CAL_EXIT=5"
+    exit 5
+  }
+stamp "done and sealed: $CAL_OUT (prices.machine.json, qbar.json," \
+      "turn_settings.machine.json, report.md); 36 now prices every run with it"
 echo "MACHINE_CAL_EXIT=0"

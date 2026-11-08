@@ -622,8 +622,9 @@ exploratory track).
 
 ### One machine's calibration (stage 38; exploratory)
 
-q-bar and every price that changes from machine to machine are measured once
-on each machine, after its preflight and before its experiments, with
+q-bar and every price that changes from machine to machine (kappa among
+them) and c_set are measured **once in the machine's life** (owner,
+2026-11-08), after its first preflight and before its experiments, with
 nothing else running (about 2.5 hours):
 
 ```bash
@@ -633,22 +634,55 @@ CONFIRM_MACHINE_CALIBRATION=YES NVME=<db root> ALLOW_ROOT_DISK=1 CAL_T=<the mach
   scripts/dbbench_pipeline/38_calibrate_machine.sh      # `plan` lists the runs
 ```
 
-Its parts: one native run per workload (36, the machine's T at
-`CAL_SETTING`, the full 40M run unless `CAL_OPS` says otherwise; q-bar = its
-measured-phase throughput, and its jobs are the job fit's reference runs); stage 18's read
-fits on one set of six price trees built as 29 builds them; the October
-cost-model recipe (`38b_cost_model_runs.sh`: quiet reads, Puts, scans, the
-memtable at the suite's write buffer, and every reader beside a writing
-neighbour, for kappa and c_cr); then the fits (38's `reads`, calibration_v2's
-`foreground` and `jobs`, 30, 38's `compose`). It leaves in `CAL_OUT`:
-`prices.machine.json` (schema 6), `qbar.json`, `turn_settings.machine.json`
-(c_set from the preflight's turn smoke at this machine's prices),
-`calibration.json` and `report.md` (every price against the reference). A
-finished part is skipped when `CAL_OUT` is reused. Not refitted: n_win and
-the money (the core price and c_s). Experiments then take
-`PRICES_FILE=$CAL_OUT/prices.machine.json`, `RL_QBAR_FILE=$CAL_OUT/qbar.json`
-(36: each workload's own q-bar stand-in) and
-`TURN_SETTINGS_FILE=$CAL_OUT/turn_settings.machine.json`.
+Its parts: one native run per workload (36 with `MACHINE_CAL=off`, the
+machine's T at `CAL_SETTING`, the full 40M run unless `CAL_OPS` says
+otherwise; q-bar = its measured-phase throughput, and its jobs are the job
+fit's reference runs); stage 18's read fits on one set of six price trees
+built as 29 builds them; the October cost-model recipe
+(`38b_cost_model_runs.sh`: quiet reads, Puts, scans, the memtable at the
+suite's write buffer, and every reader beside a writing neighbour, for kappa
+and c_cr); then the fits (38's `reads`, calibration_v2's `foreground` and
+`jobs`, 30, 38's `compose`). It leaves in `MACHINE_CAL_DIR` (`config.sh`,
+default `~/node_ops/machine-cal/this-machine`): `prices.machine.json`
+(schema 6), `qbar.json`, `turn_settings.machine.json` (c_set from the
+preflight's turn smoke at this machine's prices), `calibration.json` and
+`report.md` (every price against the reference). A finished part is skipped
+when 38 runs again. Not refitted: n_win and the money (the core price and
+c_s).
+
+When every part is done, 38 **seals** the folder to the machine
+(`MACHINE_CALIBRATED`: host, `/etc/machine-id`, the serial of the drive under
+`NVME`, every output's sha256); the seal needs c_set measured, so the
+preflight's turn smoke must have run. After that:
+
+- 38 on the same machine prints "calibrated already" and exits 0, doing
+  nothing, so a chain may always call it first.
+- A folder sealed on another machine (a home copied to a new node) is
+  refused by 38 and by 36; move it away.
+- **36 prices every run with it** (`MACHINE_CAL=on`, the default):
+  `prices.machine.json`, each workload's q-bar from `qbar.json`, and
+  `turn_settings.machine.json` go to every 03 run, and each run's
+  `metadata.env` records `machine_calibration=<id>`. 36 refuses to start
+  without a sealed calibration of this machine, and refuses `PRICES_FILE`,
+  `TURN_SETTINGS_FILE`, `RL_QBAR_FILE` or `RL_QBAR_STANDIN` given beside it.
+  `MACHINE_CAL=off` takes those four as given (diagnostics; 38's own natives).
+- `38_machine_calibration.py status --dir <dir> --db-root <NVME>` says
+  whether the folder is this machine's (exit 0, 3 nothing sealed, 4 another
+  machine's, 6 a file changed since the seal).
+
+### SSD TRIM before every run (owner, 2026-11-08)
+
+ext4 tells the drive which blocks are free only at the weekly `fstrim`; on
+an untrimmed drive flushes slowed 28 -> 49 ms and natives up to 2x over one
+week, which moves q-bar. So 03 trims the filesystem under `DB_ROOT` before
+every run (after the previous run's database is gone, before the tree is
+copied) and records the result as `ssd_trim=` in `metadata.env`; 38 and 38b
+trim before each of their db_bench runs. `SSD_TRIM_COMMAND` (default
+`sudo -n fstrim -v`) needs password-free sudo, which the nodes have. A
+failed TRIM stops 03 with exit 9 (36 stops too) before the arm leaves a
+folder. `SSD_TRIM=0` runs without it and records `ssd_trim=off`. The tests
+replace the command with `tests/fixtures/fake_fstrim.sh`
+(`tests/__init__.py`), so no test touches a disk.
 
 ### The workload suite (PREREGISTRATION D-29; D-27's preloaded trees)
 

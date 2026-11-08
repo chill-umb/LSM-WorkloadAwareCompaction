@@ -5,6 +5,7 @@ compose outputs), the machine base through stage 30, 36's per-workload
 q-bar file, and the two shell stages' refusals and dry runs."""
 
 import csv
+import hashlib
 import importlib.util
 import json
 import os
@@ -337,7 +338,7 @@ class ShellStagesTest(unittest.TestCase):
 
     def test_38_plan_and_refusals(self):
         done = self.sh("38_calibrate_machine.sh", "plan", CAL_T="4",
-                       CAL_OPS="W1:20 W4:12", CAL_OUT=str(self.root / "cal"))
+                       CAL_OPS="W1:20 W4:12", MACHINE_CAL_DIR=str(self.root / "cal"))
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("W1 native, T4 setting 128:4, 20M operations", done.stdout)
         self.assertIn("W4 native, T4 setting 128:4, 12M operations", done.stdout)
@@ -349,12 +350,17 @@ class ShellStagesTest(unittest.TestCase):
             done = self.sh("38_calibrate_machine.sh", "plan", **env)
             self.assertEqual(done.returncode, 5, (env, done.stderr))
             self.assertIn(msg, done.stderr)
-        done = self.sh("38_calibrate_machine.sh", CAL_T="4", CAL_OUT=str(self.root / "cal"))
+        done = self.sh("38_calibrate_machine.sh", "plan", CAL_T="4",
+                       CAL_OUT=str(self.root / "cal"))
+        self.assertEqual(done.returncode, 5)
+        self.assertIn("CAL_OUT is gone", done.stderr)
+        done = self.sh("38_calibrate_machine.sh", CAL_T="4",
+                       MACHINE_CAL_DIR=str(self.root / "cal"))
         self.assertEqual(done.returncode, 2)
         self.assertIn("CONFIRM_MACHINE_CALIBRATION", done.stderr)
         done = self.sh("38_calibrate_machine.sh", CAL_T="4", CONFIRM_MACHINE_CALIBRATION="YES",
                        NVME=str(self.root / "db"), BASE_PRICES_FILE=str(self.root / "none"),
-                       CAL_OUT=str(self.root / "cal"))
+                       MACHINE_CAL_DIR=str(self.root / "cal"))
         self.assertEqual(done.returncode, 5)
         self.assertIn("BASE_PRICES_FILE", done.stderr)
 
@@ -387,15 +393,16 @@ class ShellStagesTest(unittest.TestCase):
     def test_36_takes_each_workloads_q_bar_from_the_file(self):
         q = self.root / "qbar.json"
         q.write_text(json.dumps({"W1": 61000.5, "W3": 95000}))
-        done = self.sh("36_rl_batch.sh", "plan", RL_QBAR_FILE=str(q),
+        done = self.sh("36_rl_batch.sh", "plan", RL_QBAR_FILE=str(q), MACHINE_CAL="off",
                        RL_WORKLOADS="W1 W3", RL_MODES="write", RL_T="3")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("q-bar 61000.5 W1 T3", done.stdout)
         self.assertIn("q-bar 95000.0 W3 T3", done.stdout)
-        done = self.sh("36_rl_batch.sh", "plan", RL_WORKLOADS="W1", RL_T="3")
+        done = self.sh("36_rl_batch.sh", "plan", RL_WORKLOADS="W1", RL_T="3",
+                       MACHINE_CAL="off")
         self.assertIn("q-bar 50000 W1", done.stdout)
         done = self.sh("36_rl_batch.sh", RL_QBAR_FILE=str(q), RL_WORKLOADS="W1 W2",
-                       NVME=str(self.root / "db"))
+                       NVME=str(self.root / "db"), MACHINE_CAL="off")
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("no q-bar for W2", done.stderr + done.stdout)
         self.assertFalse((self.root / "db" / "suite-dbs").exists())
@@ -432,7 +439,8 @@ class SandboxTest(unittest.TestCase):
                if not k.startswith(("CAL_", "PRICE", "DBBENCH_", "PREFLIGHT_"))}
         env.update(DBBENCH_CPUS="", CONTROLLER_CPUS="", PYTHON_VENV=str(self.base / "venv"),
                    CONFIRM_MACHINE_CALIBRATION="YES", NVME=str(self.base / "db"),
-                   CAL_T="3", CAL_OUT=str(self.base / "cal"), CAL_PARTS="reads fit",
+                   CAL_T="3", MACHINE_CAL_DIR=str(self.base / "cal"), CAL_PARTS="reads fit",
+                   SSD_TRIM="1", SSD_TRIM_LOG=str(self.base / "trims.txt"),
                    CAL_OPS="W1:25", BASE_PRICES_FILE=str(self.base / "base.json"),
                    PRICES_FILE=str(self.base / "ref.json"))
         done = subprocess.run(
@@ -458,6 +466,238 @@ class SandboxTest(unittest.TestCase):
             self.assertAlmostEqual(out["core_seconds_per_unit"][key] / value, 1, places=6)
         self.assertIn("db_bench_identity=", (cal / "setup.env").read_text())
         self.assertTrue((cal / "machine.json").exists())
+        self.assertIn('"machine_id"', (cal / "machine_key.json").read_text())
+        # A TRIM before each of the reads part's db_bench runs: 6 tree builds,
+        # 6 warm-ups, 3 rounds x 6 trees x 3 benchmarks.
+        trims = (self.base / "trims.txt").read_text().splitlines()
+        self.assertEqual(len(trims), 6 + 6 + 3 * 6 * 3)
+        self.assertIn("trimmed (stand-in)",
+                      (cal / "reads" / "round1" / "T2" / "readmissing" / "trim.txt").read_text())
+        self.assertTrue((cal / "reads" / "build" / "T10" / "trim.txt").exists())
+        self.assertFalse((cal / "MACHINE_CALIBRATED").exists())
+        # The reads are done: asked again they are skipped, and the seal names
+        # the parts still missing instead of sealing a partial calibration.
+        env["CAL_PARTS"] = "reads"
+        done = subprocess.run(
+            ["bash", str(self.repo / "scripts" / "dbbench_pipeline" / "38_calibrate_machine.sh")],
+            cwd=self.repo, env=env, capture_output=True, text=True, timeout=600)
+        self.assertEqual(done.returncode, 5, done.stdout[-3000:] + done.stderr[-3000:])
+        self.assertIn("reads: done before; skipped", done.stdout)
+        self.assertIn("not sealed: not done yet: natives W1 cost", done.stdout)
+        self.assertFalse((cal / "MACHINE_CALIBRATED").exists())
+
+
+def calibration_dir(root: Path, qbar=None, c_set=0.0042) -> Path:
+    """What 38's fit leaves in MACHINE_CAL_DIR before the seal."""
+    d = root / "cal"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "prices.machine.json").write_text(json.dumps(priced6({"c_f": 2e-7})))
+    (d / "qbar.json").write_text(json.dumps(
+        qbar if qbar is not None else
+        {"W1": 61000.5, "W2": 190000.0, "W3": 80000.0, "W4": 45000.0, "W5": 95000.0}))
+    settings = json.loads((REPO / "config" / "turn_settings.json").read_text())
+    settings["trainer"]["c_set"] = c_set
+    (d / "turn_settings.machine.json").write_text(json.dumps(settings))
+    cal = {"host": "h", "qbar": {}}
+    if c_set is not None:
+        cal["c_set"] = {"c_set": c_set, "median_us": 200.0, "calls": 9}
+    (d / "calibration.json").write_text(json.dumps(cal))
+    return d
+
+
+def seal(d: Path, db_root: Path, workloads=("W1", "W2", "W3", "W4", "W5")):
+    args = ["python3", str(PIPELINE / "38_machine_calibration.py"), "seal",
+            "--dir", str(d), "--db-root", str(db_root), "--db-bench-sha256", "b" * 64,
+            "--setting", "T3 128:4"]
+    for w in workloads:
+        args += ["--workload", w]
+    return subprocess.run(args, capture_output=True, text=True)
+
+
+def status(d: Path, db_root: Path):
+    return subprocess.run(["python3", str(PIPELINE / "38_machine_calibration.py"), "status",
+                           "--dir", str(d), "--db-root", str(db_root)],
+                          capture_output=True, text=True)
+
+
+class SealTest(unittest.TestCase):
+    """Owner, 2026-11-08: a machine is calibrated once; the calibration is
+    sealed to the machine (host, machine id, the drive under the databases)
+    and 36 reads it through status."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.db = self.root / "db"   # not created: the key walks up to the drive
+
+    def test_seal_then_status_hands_over_the_files(self):
+        d = calibration_dir(self.root)
+        done = seal(d, self.db)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("W1 61,000", done.stdout)
+        record = json.loads((d / "MACHINE_CALIBRATED").read_text())
+        self.assertEqual(record["machine"], m38.machine_key(self.db))
+        self.assertEqual(record["c_set"], 0.0042)
+        self.assertEqual(record["db_bench_identity"], "b" * 64)
+        done = status(d, self.db)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = dict(line.split("=", 1) for line in done.stdout.splitlines())
+        self.assertEqual(Path(lines["PRICES_FILE"]), (d / "prices.machine.json").resolve())
+        self.assertEqual(Path(lines["QBAR_FILE"]), (d / "qbar.json").resolve())
+        self.assertEqual(Path(lines["TURN_SETTINGS_FILE"]),
+                         (d / "turn_settings.machine.json").resolve())
+        self.assertEqual(lines["MACHINE_CAL_ID"],
+                         hashlib.sha256((d / "MACHINE_CALIBRATED").read_bytes()).hexdigest()[:16])
+        # Once only: a second seal is refused.
+        done = seal(d, self.db)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("sealed", done.stderr)
+
+    def test_no_seal_without_c_set_every_q_bar_or_schema_6_prices(self):
+        done = seal(calibration_dir(self.root / "a", c_set=None), self.db)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("c_set was not measured", done.stderr)
+        done = seal(calibration_dir(self.root / "b", qbar={"W1": 5.0, "W2": 0}), self.db)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("no positive q-bar for W2", done.stderr)
+        d = calibration_dir(self.root / "c")
+        (d / "prices.machine.json").write_text(json.dumps(base_record()))
+        done = seal(d, self.db)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("schema-6", done.stderr)
+        for name in ("a", "b", "c"):
+            self.assertFalse((self.root / name / "cal" / "MACHINE_CALIBRATED").exists())
+
+    def test_status_nothing_another_machine_or_changed(self):
+        d = calibration_dir(self.root)
+        self.assertEqual(status(d, self.db).returncode, 3)
+        self.assertEqual(seal(d, self.db).returncode, 0)
+        q = json.loads((d / "qbar.json").read_text())
+        (d / "qbar.json").write_text(json.dumps({**q, "W1": 1.0}))
+        done = status(d, self.db)
+        self.assertEqual(done.returncode, 6)
+        self.assertIn("changed since it was sealed", done.stderr)
+        (d / "qbar.json").write_text(json.dumps(q))
+        self.assertEqual(status(d, self.db).returncode, 0)
+        record = json.loads((d / "MACHINE_CALIBRATED").read_text())
+        for field in ("host", "machine_id", "disk_serial"):
+            moved = {**record, "machine": {**record["machine"], field: "elsewhere"}}
+            (d / "MACHINE_CALIBRATED").write_text(json.dumps(moved))
+            done = status(d, self.db)
+            self.assertEqual(done.returncode, 4, field)
+            self.assertIn("another machine", done.stderr)
+
+
+class OncePerMachineShellTest(unittest.TestCase):
+    """38 on a sealed machine does nothing; 38 refuses another machine's
+    calibration; 36 prices every run with this machine's calibration and
+    refuses to start without one (or beside files given by hand)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.db = self.root / "db"
+
+    def sh(self, script, *args, pipeline=PIPELINE, cwd=REPO, **env):
+        return subprocess.run(["bash", str(pipeline / script), *args], capture_output=True,
+                              text=True, env={**os.environ, **env}, cwd=cwd)
+
+    def test_38_on_a_sealed_machine_does_nothing(self):
+        d = calibration_dir(self.root)
+        self.assertEqual(seal(d, self.db).returncode, 0)
+        done = self.sh("38_calibrate_machine.sh", "plan", CAL_T="3", MACHINE_CAL_DIR=str(d))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("SEALED already", done.stdout)
+        done = self.sh("38_calibrate_machine.sh", CAL_T="3", CONFIRM_MACHINE_CALIBRATION="YES",
+                       NVME=str(self.db), MACHINE_CAL_DIR=str(d))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("calibrated already", done.stdout)
+        self.assertTrue(done.stdout.rstrip().endswith("MACHINE_CAL_EXIT=0"))
+        self.assertFalse(self.db.exists())
+        record = json.loads((d / "MACHINE_CALIBRATED").read_text())
+        record["machine"]["machine_id"] = "another"
+        (d / "MACHINE_CALIBRATED").write_text(json.dumps(record))
+        done = self.sh("38_calibrate_machine.sh", CAL_T="3", CONFIRM_MACHINE_CALIBRATION="YES",
+                       NVME=str(self.db), MACHINE_CAL_DIR=str(d))
+        self.assertEqual(done.returncode, 5)
+        self.assertIn("another machine's calibration", done.stderr)
+        self.assertFalse(self.db.exists())
+
+    def test_36_refuses_without_a_calibration_or_beside_given_files(self):
+        done = self.sh("36_rl_batch.sh", "plan", RL_WORKLOADS="W1", RL_T="3",
+                       NVME=str(self.db), MACHINE_CAL_DIR=str(self.root / "none"))
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("no usable calibration of this machine", done.stderr)
+        d = calibration_dir(self.root)
+        self.assertEqual(seal(d, self.db).returncode, 0)
+        for name, value in (("PRICES_FILE", "p.json"), ("RL_QBAR_FILE", "q.json"),
+                            ("TURN_SETTINGS_FILE", "t.json"), ("RL_QBAR_STANDIN", "50000")):
+            done = self.sh("36_rl_batch.sh", "plan", RL_WORKLOADS="W1", RL_T="3",
+                           NVME=str(self.db), MACHINE_CAL_DIR=str(d), **{name: value})
+            self.assertNotEqual(done.returncode, 0, name)
+            self.assertIn(f"{name} given, but MACHINE_CAL=on", done.stderr)
+        done = self.sh("36_rl_batch.sh", "plan", RL_WORKLOADS="W1 W4", RL_T="3",
+                       NVME=str(self.db), MACHINE_CAL_DIR=str(d))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("q-bar 61000.5 W1", done.stdout)
+        self.assertIn("q-bar 45000.0 W4", done.stdout)
+        done = self.sh("36_rl_batch.sh", "plan", RL_WORKLOADS="W1", RL_T="3",
+                       NVME=str(self.db), MACHINE_CAL_DIR=str(d), MACHINE_CAL="maybe")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("on or off", done.stderr)
+
+    def test_36_hands_every_run_the_machines_files(self):
+        """On a copy of the pipeline whose 31 and 03 are stand-ins that record
+        what 36 gives them."""
+        repo = self.root / "repo"
+        pipe = repo / "scripts" / "dbbench_pipeline"
+        shutil.copytree(PIPELINE, pipe, ignore=shutil.ignore_patterns("__pycache__", "tests"))
+        shutil.copytree(REPO / "config", repo / "config")
+        log = self.root / "runs.txt"
+        (pipe / "31_preload_tree.sh").write_text(
+            f"#!/usr/bin/env bash\necho TREE_DIR={self.root / 'tree'}\n")
+        (pipe / "03_run_experiments.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "$SUITE_WORKLOAD $CONTROLLER_OBJECTIVE_MODE $CONTROLLER_QBAR_STANDIN '
+            f'$PRICES_FILE $TURN_SETTINGS_FILE $MACHINE_CAL_ID" >> {log}\n')
+        venv = self.root / "venv" / "bin" / "python"
+        venv.parent.mkdir(parents=True)
+        venv.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
+        venv.chmod(0o755)
+        d = calibration_dir(self.root)
+        self.assertEqual(seal(d, self.db).returncode, 0)
+        cal_id = status(d, self.db).stdout.splitlines()[-1].split("=")[1]
+        done = self.sh("36_rl_batch.sh", pipeline=pipe, cwd=repo, RL_WORKLOADS="W1 W3",
+                       RL_MODES="read write", RL_T="3", RL_ARMS="turn", NVME=str(self.db),
+                       MACHINE_CAL_DIR=str(d), PYTHON_VENV=str(self.root / "venv"),
+                       ALLOW_ROOT_DISK="1", MIN_FREE_GB="0", DBBENCH_CPUS="")
+        self.assertEqual(done.returncode, 0, done.stdout[-2000:] + done.stderr[-2000:])
+        self.assertIn(f"machine calibration {cal_id}", done.stdout)
+        runs = [line.split() for line in log.read_text().splitlines()]
+        self.assertEqual([(r[0], r[1]) for r in runs],
+                         [("W1", "read"), ("W3", "read"), ("W1", "write"), ("W3", "write")])
+        for w, _, qbar, prices, settings, run_id in runs:
+            self.assertEqual(float(qbar), {"W1": 61000.5, "W3": 80000.0}[w])
+            self.assertEqual(Path(prices), (d / "prices.machine.json").resolve())
+            self.assertEqual(Path(settings), (d / "turn_settings.machine.json").resolve())
+            self.assertEqual(run_id, cal_id)
+
+
+class TrimIn38bTest(unittest.TestCase):
+    def test_a_failed_trim_stops_38b_before_its_first_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = stub_db_bench(root)
+            done = subprocess.run(
+                [str(PIPELINE / "38b_cost_model_runs.sh")], capture_output=True, text=True,
+                cwd=REPO, env={**os.environ, "OUT": str(root / "cost"),
+                               "DBS": str(root / "dbs"), "DBBENCH_BUILD_DIR": str(build),
+                               "SSD_TRIM": "1", "SSD_TRIM_FAIL": "1"})
+            self.assertEqual(done.returncode, 1, done.stdout[-2000:])
+            self.assertIn("SSD TRIM failed", done.stderr)
+            self.assertFalse((root / "cost" / "build" / "b4k" / "load.txt").exists())
 
 
 if __name__ == "__main__":

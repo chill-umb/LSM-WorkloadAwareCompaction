@@ -1376,6 +1376,17 @@ run_arm() {  # $1=size in millions, $2=T, $3=arm, $4=repeat
     echo "Inspect or remove that arm before resuming." >&2
     exit 1
   fi
+  # Every run starts on a freshly trimmed SSD (owner, 2026-11-08; config.sh):
+  # after the previous run's database is gone, before this one's tree is
+  # copied. A failed TRIM stops the matrix before the arm leaves anything.
+  local ssd_trim_line
+  if ! ssd_trim_line="$(ssd_trim "$DB_ROOT")"; then
+    echo "SSD TRIM before $size_label T=$ratio $arm failed: $ssd_trim_line" >&2
+    echo "Every run starts on a trimmed SSD; fix sudo or fstrim, or set" \
+         "SSD_TRIM=0 (the run then records ssd_trim=off)." >&2
+    exit 9
+  fi
+  echo "[trim] $ssd_trim_line"
   mkdir -p "$result_dir" "$(dirname "$db_dir")"
   if [[ -e "$db_dir" ]]; then
     echo "Database path already exists: $db_dir" >&2
@@ -1712,6 +1723,8 @@ PY
     printf 'session_id=%s\n' "$SESSION_ID"
     printf 'reference_rate=%s\n' "$REFERENCE_RATE"
     printf 'prices_sha256=%s\n' "${PRICES_SHA256:-none}"
+    printf 'ssd_trim=%s\n' "$ssd_trim_line"
+    printf 'machine_calibration=%s\n' "${MACHINE_CAL_ID:-none}"
     # Present only on Programme 1 arms; 04 scores the settled phase on these.
     [[ -z "$settle_step" ]] ||
       printf 'settle_hold_seconds=%s\n' "$SETTLE_HOLD_SECONDS"

@@ -370,6 +370,40 @@ RL_HOST_LOG_STRIDE="${RL_HOST_LOG_STRIDE:-100}"
 # its hash in the fingerprint; an arm run before it exists is scored without
 # J (04: "no prices").
 PRICES_FILE="${PRICES_FILE:-$DBBENCH_BUILD_DIR/prices.json}"
+# The machine's calibration (owner, 2026-11-08): stage 38 measures this
+# machine's q-bar per workload, its prices (kappa among them) and c_set once
+# in the machine's life, into MACHINE_CAL_DIR, and seals it there with the
+# machine's key (host, machine id, the disk under the databases); stage 36
+# then prices every run with it. MACHINE_CAL=off: 36 takes PRICES_FILE,
+# RL_QBAR_FILE and TURN_SETTINGS_FILE as given (38's own natives, which run
+# before the calibration exists; diagnostics), and records that it did.
+MACHINE_CAL_DIR="${MACHINE_CAL_DIR:-$HOME/node_ops/machine-cal/this-machine}"
+MACHINE_CAL="${MACHINE_CAL:-on}"
+# Every measured run starts on a freshly trimmed SSD (owner, 2026-11-08):
+# ext4 tells the drive which blocks are free only at the weekly fstrim, and
+# an untrimmed drive slowed flushes 28 -> 49 ms and a native's throughput up
+# to 2x over one week, which moves q-bar (ops/s). 03 trims before each run,
+# 38 and 38b before each of their db_bench runs. SSD_TRIM=0 skips it (the
+# run records "off"); SSD_TRIM_COMMAND is the command, given the mount point.
+SSD_TRIM="${SSD_TRIM:-1}"
+SSD_TRIM_COMMAND="${SSD_TRIM_COMMAND:-sudo -n fstrim -v}"
+ssd_trim() {  # $1 = a path on the filesystem to trim; prints one line, non-zero if it failed
+  [[ "$SSD_TRIM" == 1 ]] || { echo "off"; return 0; }
+  local path mount out status=0 start
+  path="$(realpath -m -- "$1")"
+  while [[ ! -e "$path" && "$path" != / ]]; do path="$(dirname -- "$path")"; done
+  mount="$(findmnt -n -o TARGET --target "$path" 2>/dev/null)" ||
+    { echo "failed: no mount point for $1"; return 1; }
+  start="$(date +%s%N)"
+  # shellcheck disable=SC2086  # the command is words: "sudo -n fstrim -v"
+  out="$($SSD_TRIM_COMMAND "$mount" 2>&1)" || status=$?
+  out="$(tr '\n' ' ' <<< "$out" | sed 's/ *$//')"
+  if (( status != 0 )); then
+    echo "failed (exit $status): $out"
+    return 1
+  fi
+  echo "$out; $(( ($(date +%s%N) - start) / 1000000 )) ms"
+}
 # 18's read benchmarks (D-15 §3): operations per process.
 PRICE_READS="${PRICE_READS:-1000000}"
 # 18's sessions (PREREGISTRATION D-22 c): each its own folder, never

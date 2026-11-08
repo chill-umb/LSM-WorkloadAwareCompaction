@@ -176,8 +176,13 @@ def turn_changes(decisions: list[dict]) -> tuple[list[str], dict]:
             continue
         if sent == in_effect:
             continue                       # nothing to send
+        # The next turn that decided anything: the final line only marks the
+        # drain, so a change whose turn ends there with no accepted call after
+        # it (its own call refused, "the drain has started") is cut off by the
+        # drain, as in act3_changes (w6 and w8's preflights, 2026-11-08).
         nxt = next((j for j in range(index + 1, len(decisions))
-                    if decisions[j]["type"] == "turn"), None)
+                    if decisions[j]["type"] == "turn"
+                    and decisions[j].get("final") != 1), None)
         later = decisions[index + 1:nxt]
         if any(a["type"] == "apply" and a.get("ok") == 1 and a.get("seen") == 1
                for a in later):

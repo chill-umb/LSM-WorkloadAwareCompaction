@@ -287,6 +287,24 @@ class CheckPluginRunTest(unittest.TestCase):
         self.assertIn("act3", report["failed_checks"])
         self.assertEqual(report["checks"]["act3"]["failed_ids"], [0])
         self.assertEqual(report["checks"]["act3"]["truncated_ids"], [1])
+        # A real log's end (w6 and w8, 2026-11-08): the last turn's own call
+        # refused because the drain started, then the drain and the final
+        # line. Cut off by the drain, not lost; a refusal before a later
+        # deciding turn still fails.
+        drained = apply(200, 0, 0, m=up)
+        drained.update(ok=0, error="Operation aborted: RLControllerHost: the drain has started")
+        final = {"type": "turn", "t": 2, "op0": 200, "op1": 200, "final": 1}
+        report = judged([turn(0, ones, ones, 0), drained, turn(1, up, ones, 0, action="expand"),
+                         {"type": "drain", "op": 200}, final])
+        self.assertNotIn("act3", report["failed_checks"])
+        self.assertEqual(report["checks"]["act3"]["failed_ids"], [])
+        self.assertEqual(report["checks"]["act3"]["truncated_ids"], [1])
+        report = judged([turn(0, ones, ones, 0), drained, turn(1, up, ones, 0, action="expand"),
+                         turn(2, up, ones, 0), {"type": "drain", "op": 300},
+                         {**final, "t": 3, "op0": 300, "op1": 300}])
+        self.assertIn("act3", report["failed_checks"])
+        self.assertEqual(report["checks"]["act3"]["failed_ids"], [1])
+        self.assertEqual(report["checks"]["act3"]["truncated_ids"], [2])
         # A gap in operations, and a masked action.
         report = judged([turn(0, ones, ones, 0), turn(1, ones, ones, 0, op0=150)])
         self.assertIn("turn", report["failed_checks"])

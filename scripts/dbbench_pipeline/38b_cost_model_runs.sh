@@ -102,6 +102,14 @@ MB=1000000
 
 stamp() { echo "=== $(date -u '+%F %T') UTC $*"; }
 fail() { echo "[calib_v2] $*" >&2; exit 1; }
+# The SSD is trimmed before every db_bench run (owner, 2026-11-08; config.sh);
+# a failed TRIM stops the runs. $1 = the file its line goes to.
+trim_now() {
+  [[ "$DRY" == 1 ]] && return 0
+  local line
+  line="$(ssd_trim "$DBS")" || fail "SSD TRIM failed: $line"
+  echo "$line" >> "$1"
+}
 run() {  # $1 = file for the command; the rest is the command
   local file="$1"; shift
   printf '%q ' "$@" > "$file"
@@ -205,10 +213,12 @@ for tree in b4k b16k; do
   flags "$KEY_SIZE" 1
   out="$OUT/build/$tree"; mkdir -p "$out"
   [[ "$DRY" == 1 ]] || { rm -rf "${MASTERS:?}/$tree"; mkdir -p "$MASTERS"; }
+  trim_now "$out/trim.txt"
   stamp "tree $tree: load"
   run "$out/load.command.txt" "${reader[@]}" "$DB_BENCH" \
     --benchmarks=filluniquerandom,settle,levelstats --use_existing_db=0 \
     "${GEOMETRY[@]}" --db="$MASTERS/$tree" "${FLAGS[@]}" > "$out/load.txt" 2>&1
+  trim_now "$out/trim.txt"
   stamp "tree $tree: overwrite $CALIB_OVERWRITES keys"
   run "$out/overwrite.command.txt" "${reader[@]}" "$DB_BENCH" \
     --benchmarks=overwrite,settle,levelstats --use_existing_db=1 \
@@ -291,6 +301,7 @@ run_one() {  # $1 = label, $2 = arm, $3 = kind, $4 = tree, $5 = nexts, $6 = perf
   measured+=(--db="$db")
   if [[ "$DRY" != 1 ]]; then
     rm -rf "${WORK:?}" "${WORK2:?}" "${DBS:?}/put"
+    trim_now "$out/trim.txt"
     [[ "$kind" == put ]] || cp -a "$MASTERS/$tree" "$WORK"
     [[ "$arm" == quiet ]] || cp -a "$MASTERS/b4k" "$WORK2"
     sync
