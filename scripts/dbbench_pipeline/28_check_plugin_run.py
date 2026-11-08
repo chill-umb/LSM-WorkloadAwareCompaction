@@ -29,6 +29,13 @@ db_bench's output and the plugin's decision and transition logs.
              marked "scheduled", at or after its apply_at_op, and no other
   fallback   with --expect-fallback, a fallback line and a stop line saying
              fallback 1; otherwise neither
+  turn       mode turn (controller/turn.h): the "turn" lines are numbered
+             0, 1, ... and join without a gap in operations, only the last
+             is final, and no line's action was masked; ACT-3 is judged on
+             them: a boundary whose sent vector (sent_m, sent_k) differs from
+             the one in effect before it reached RocksDB at its own poll
+             (set 1, the snapshot read after it carried it), or, held by the
+             SetOptions cap, in an accepted apply before the next line
 
 Exit 0 when every check passes, 1 otherwise; the report says which failed.
 """
@@ -125,6 +132,67 @@ def act3_changes(decisions: list[dict]) -> dict:
             "truncated_ids": truncated}
 
 
+def turn_changes(decisions: list[dict]) -> tuple[list[str], dict]:
+    """Mode turn: the turn lines' problems, and ACT-3 over their changes."""
+    problems = []
+    turns = [line for line in decisions if line["type"] == "turn"]
+    masked = []
+    for i, line in enumerate(turns):
+        if line.get("t") != i:
+            problems.append(f"turn line {i} is numbered {line.get('t')}")
+            break
+        if i and line.get("op0") != turns[i - 1].get("op1"):
+            problems.append(f"turn {i} starts at op {line.get('op0')}, not where "
+                            f"turn {i - 1} ended ({turns[i - 1].get('op1')})")
+        if line.get("final") == 1:
+            if i != len(turns) - 1:
+                problems.append(f"turn {i} is final but not the last")
+            continue
+        for level, (action, mask) in enumerate(zip(line.get("action", []),
+                                                   line.get("masks", []))):
+            if action not in ACTIONS or mask[ACTIONS.index(action)] != 1:
+                masked.append((i, level))
+    if masked:
+        problems.append(f"masked actions taken (turn, level): {masked[:10]}")
+    faithful, failed, truncated = 0, [], []
+    in_effect = None
+    start = decisions[0] if decisions and decisions[0]["type"] == "start" else {}
+    if isinstance(start.get("m"), list):
+        in_effect = (start["m"], start.get("k0"))
+    for index, line in enumerate(decisions):
+        if line["type"] == "apply" and line.get("ok") == 1:
+            in_effect = (line.get("m"), line.get("k0"))
+        if line["type"] != "turn" or line.get("final") == 1:
+            continue
+        sent = (line.get("sent_m"), line.get("sent_k"))
+        if line.get("set") == 1:
+            call = next((a for a in reversed(decisions[:index])
+                         if a["type"] == "apply" and a.get("ok") == 1), None)
+            if (call is not None and (call.get("m"), call.get("k0")) == sent and
+                    call.get("seen") == 1):
+                faithful += 1
+            else:
+                failed.append(line.get("t"))
+            continue
+        if sent == in_effect:
+            continue                       # nothing to send
+        nxt = next((j for j in range(index + 1, len(decisions))
+                    if decisions[j]["type"] == "turn"), None)
+        later = decisions[index + 1:nxt]
+        if any(a["type"] == "apply" and a.get("ok") == 1 and a.get("seen") == 1
+               for a in later):
+            faithful += 1
+        elif nxt is None:
+            truncated.append(line.get("t"))
+        else:
+            failed.append(line.get("t"))
+    judged = faithful + len(failed)
+    return problems, {"changes": judged, "faithful": faithful,
+                      "share": faithful / judged if judged else None,
+                      "failed_ids": failed[:20], "failed_by_level": {},
+                      "truncated_ids": truncated, "turns": len(turns)}
+
+
 def check(stdout: str, decisions: list[dict], transitions: list[dict],
           log_problems: list[str], mode: str, expect_fallback: bool,
           min_changes: int) -> dict:
@@ -174,7 +242,11 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
 
     applies = [line for line in decisions if line["type"] == "apply"]
     accepted = [line for line in applies if line.get("ok") == 1]
-    fidelity = act3_changes(decisions)
+    if mode == "turn":
+        turn_problems, fidelity = turn_changes(decisions)
+        record("turn", turn_problems, turns=fidelity["turns"])
+    else:
+        fidelity = act3_changes(decisions)
     held = sum(1 for line in decisions if line["type"] == "apply_held")
     act3 = []
     if fidelity["changes"] < min_changes:
@@ -251,7 +323,7 @@ def main() -> int:
     parser.add_argument("--transitions", type=Path, required=True)
     parser.add_argument("--mode", required=True,
                         choices=("hold-only", "rules", "prior-only", "learned",
-                                 "learned2"))
+                                 "learned2", "turn"))
     parser.add_argument("--expect-fallback", action="store_true")
     parser.add_argument("--min-changes", type=int, default=0,
                         help="judged ACT-3 changes the run must contain")

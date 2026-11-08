@@ -93,6 +93,12 @@ JsonLine& JsonLine::Flags(const char* key, const Mask& mask) {
   return *this;
 }
 
+JsonLine& JsonLine::Raw(const char* key, const std::string& json) {
+  Key(key);
+  s_ += json;
+  return *this;
+}
+
 JsonLine& JsonLine::Features(const char* key,
                              const std::vector<std::string>& names,
                              const std::vector<double>& values) {

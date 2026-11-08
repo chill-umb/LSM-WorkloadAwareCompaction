@@ -17,6 +17,15 @@
 // window's step counts (jobs.h), and in the learner modes each transition
 // carries its neighbours' states at the decision (H §3).
 //
+// Turn mode (turn.h): the operation clock's turns of turn_ops operations.
+// At the first poll past each boundary the plugin closes the turn, builds
+// the tree, decays the anchors, computes the state and masks, loads a newer
+// weights file, chooses (greedy, then one level explores), encodes, sends
+// one Apply if the vector changed, and writes a "turn" line. Between
+// boundaries only a deferred level's top-ups change a target. Turns keep
+// closing during a write stop; at the drain a final "turn" line carries the
+// state only.
+//
 // Fallback (A-Impl-8): an invalid config or host options, a failed Apply, a
 // failed log write, an invalid weights file (or a missing one when
 // weights_required) or an exception applies m = 1 and the configured
@@ -47,6 +56,7 @@
 #include "mlp.h"
 #include "rocksdb/rl_controller_host.h"
 #include "state.h"
+#include "turn.h"
 
 namespace rlc {
 
@@ -146,6 +156,32 @@ class Controller {
   // A change of the agent's setting: it must settle again, and the open
   // window is no longer clean.
   void F2Changed(int agent, uint64_t op);
+  // Turn mode: the boundary's steps or, between boundaries, the defer
+  // top-ups, then Flush. Returns false, with the reason, if an Apply failed.
+  bool TurnPoll(const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
+                const ROCKSDB_NAMESPACE::RLOpCounts& ops,
+                const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
+                uint64_t now, std::string* error);
+  // Closes the open turn and, unless `final`, chooses and applies the next
+  // turn's actions; writes the "turn" line either way.
+  bool TurnBoundary(const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
+                    const ROCKSDB_NAMESPACE::RLOpCounts& ops,
+                    const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
+                    uint64_t now, bool final, std::string* error);
+  // A completed job's share of the open turn's activity.
+  void TurnJob(const ROCKSDB_NAMESPACE::RLJobRecord& job);
+  // Raises a deferred level's override when it nears due (at most
+  // turn_max_topups a turn), or logs the defer broken. True if a target
+  // changed.
+  bool TurnTopUps(const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
+                  uint64_t op, uint64_t now);
+  // A newer weights version, checked at a boundary at most once per
+  // push_interval_ms; an invalid file (another arch, say) falls back.
+  void TurnWeights(uint64_t op, uint64_t now);
+  // The drain: its line, the intervals invalidated, the turn's final line.
+  void EnterDrain(const ROCKSDB_NAMESPACE::RLOpCounts& ops,
+                  const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
+                  uint64_t now);
   // Sends the targets to the host if they differ from what it last accepted
   // and the cap allows. Returns false, with the reason, if the host refused
   // them.
@@ -255,6 +291,41 @@ class Controller {
     int number = 0;          // trials started
   };
   F2Trial f2_trial_;
+
+  // Turn mode (turn.h).
+  struct TurnActivity {      // one turn's measured activity
+    double ops = 0;
+    double puts = 0, gets = 0, scans = 0;
+    double polls = 0, busy_polls = 0, stall_polls = 0;
+    double flushes = 0;
+    double merge_bytes = 0;  // S + O of the slot's non-trivial merges
+    std::vector<double> inflow;  // net bytes landed, per level
+    std::vector<double> probes;  // SST probes, per level
+  };
+  struct TurnDefer {         // a defer in force this turn
+    bool active = false;
+    int topups = 0;
+    double flushes_expected = 0;  // L0: f_hat at the boundary
+    double inflow_expected = 0;   // level i: I_hat at the boundary
+  };
+  Ladder turn_k_ladder_, turn_m_ladder_;
+  std::vector<AnchorState> turn_anchors_;
+  uint64_t turn_index_ = 0;    // turns closed
+  uint64_t turn_op0_ = 0;      // the open turn's first operation
+  uint64_t turn_next_op_ = 0;  // its boundary: the start plus whole turns
+  uint64_t turn_start_op_ = 0;
+  ROCKSDB_NAMESPACE::RLOpCounts turn_ops0_;
+  std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts> turn_reads0_;
+  TurnActivity turn_act_;
+  std::deque<TurnActivity> turn_ring_;  // the last turn_forecast_turns
+  std::vector<TurnDefer> turn_defer_;
+  TurnNet turn_net_;
+  bool turn_have_net_ = false;
+  bool turn_weights_checked_ = false;
+  uint64_t turn_weights_check_us_ = 0;
+  uint64_t applies_ok_ = 0;          // accepted Flush calls
+  uint64_t turn_applies_at_line_ = 0;
+  bool turn_final_written_ = false;
 
   // The learner modes.
   std::mt19937_64 rng_;

@@ -117,6 +117,52 @@ std::vector<double> Held(const RLTreeSnapshot& snapshot, int n) {
   return held;
 }
 
+// The turn line's lists (log.h "turn").
+std::string JsonMasks(const std::vector<TurnMask>& masks) {
+  std::string out = "[";
+  for (size_t i = 0; i < masks.size(); ++i) {
+    out += i ? ",[" : "[";
+    for (size_t a = 0; a < masks[i].size(); ++a) {
+      out += (a ? "," : "") + std::string(masks[i][a] ? "1" : "0");
+    }
+    out += "]";
+  }
+  return out + "]";
+}
+
+std::string JsonActions(const std::vector<Action>& actions) {
+  std::string out = "[";
+  for (size_t i = 0; i < actions.size(); ++i) {
+    out += (i ? "," : "") + JsonString(ActionName(actions[i]));
+  }
+  return out + "]";
+}
+
+std::string JsonScores(
+    const std::vector<std::array<double, kNumActions>>& scores) {
+  std::string out = "[";
+  for (size_t i = 0; i < scores.size(); ++i) {
+    out += i ? ",[" : "[";
+    for (int a = 0; a < kNumActions; ++a) {
+      out += (a ? "," : "") + JsonNumber(scores[i][a]);
+    }
+    out += "]";
+  }
+  return out + "]";
+}
+
+std::string JsonBools(const std::vector<bool>& values) {
+  std::string out = "[";
+  for (size_t i = 0; i < values.size(); ++i) {
+    out += (i ? "," : "") + std::string(values[i] ? "1" : "0");
+  }
+  return out + "]";
+}
+
+double At(const std::vector<double>& v, int i) {
+  return i >= 0 && i < static_cast<int>(v.size()) ? v[i] : 0.0;
+}
+
 // The oldest due-since among due levels; 0 if none is due.
 uint64_t OldestDueSince(const RLTreeSnapshot& snapshot) {
   uint64_t oldest = 0;
@@ -147,6 +193,19 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   }
   ok = ok && CheckConfigAgainstHost(cfg_, options_.l0_trigger,
                                     options_.l0_slowdown_trigger, &error);
+  if (ok && cfg_.mode == Mode::kTurn) {
+    std::string why;
+    if (cfg_.turn.acting > n_) {
+      error = "config: turn_acting exceeds the host's " + std::to_string(n_) +
+              " levels";
+      ok = false;
+    } else if (!MakeLadder(cfg_.turn.k_rungs, options_.l0_trigger,
+                           &turn_k_ladder_, &why) ||
+               !MakeLadder(cfg_.turn.m_rungs, 1.0, &turn_m_ladder_, &why)) {
+      error = "config: " + why;
+      ok = false;
+    }
+  }
   for (const ScheduledChange& change : cfg_.schedule) {
     if (ok && change.m.size() != static_cast<size_t>(n_)) {
       error = "config: apply_m needs one value per level (" +
@@ -187,6 +246,16 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   prev_held_.assign(n_, 0);
   f2_.assign(n_, F2Agent());
   for (F2Agent& a : f2_) a.decision_op = ops.total();
+  // Turn mode: native anchors, the first turn open from here.
+  turn_anchors_.assign(n_, AnchorState());
+  turn_defer_.assign(n_, TurnDefer());
+  turn_act_.inflow.assign(n_, 0.0);
+  turn_act_.probes.assign(n_, 0.0);
+  turn_op0_ = turn_start_op_ = ops.total();
+  turn_next_op_ =
+      turn_start_op_ + static_cast<uint64_t>(std::max(1.0, cfg_.turn.turn_ops));
+  turn_ops0_ = ops;
+  turn_reads0_ = reads;
 
   // Start from the values in effect, so the first Apply is not a jump.
   m_applied_.assign(n_, 1.0);
@@ -238,6 +307,40 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
           .Nums("m", m_applied_)
           .Num("k0", k0_applied_)
           .str());
+  if (cfg_.mode == Mode::kTurn) {
+    const TurnConfig& t = cfg_.turn;
+    std::string names = "[";
+    const std::vector<std::string> features = TurnFeatureNames(t.acting);
+    for (size_t i = 0; i < features.size(); ++i) {
+      names += (i ? "," : "") + JsonString(features[i]);
+    }
+    decisions_.Write(JsonLine("turn_start")
+                         .Uint("op", ops.total())
+                         .Uint("t_us", now_())
+                         .Num("turn_ops", t.turn_ops)
+                         .Num("acting", t.acting)
+                         .Str("arch", t.arch == 1 ? "vdn" : "factored")
+                         .Num("kappa", t.kappa)
+                         .Num("margin", t.margin)
+                         .Num("sigma_max", t.sigma_max)
+                         .Num("glide_share", t.glide_share)
+                         .Num("forecast_turns", t.forecast_turns)
+                         .Num("guard_owed_bytes", t.guard_owed_bytes)
+                         .Num("guard_l0_flushes", t.guard_l0_flushes)
+                         .Num("safety_l0_flushes", t.safety_l0_flushes)
+                         .Num("safety_pending_bytes", t.safety_pending_bytes)
+                         .Num("k_defer_max", t.k_defer_max)
+                         .Num("renew_band", t.renew_band)
+                         .Num("max_topups", t.max_topups)
+                         .Num("explore_start", t.explore_start)
+                         .Num("explore_end", t.explore_end)
+                         .Num("explore_turns", t.explore_turns)
+                         .Nums("k_rungs", t.k_rungs)
+                         .Nums("m_rungs", t.m_rungs)
+                         .Num("k_cfg", options_.l0_trigger)
+                         .Raw("features", names + "]")
+                         .str());
+  }
   // One line per scheduled change; a schedule of several also numbers them.
   for (size_t i = 0; i < cfg_.schedule.size(); ++i) {
     const ScheduledChange& change = cfg_.schedule[i];
@@ -339,6 +442,7 @@ void Controller::Poll(bool decide) {
   // log's periodic snap records only (cost_model_v2.window).
   for (const RLJobRecord& job : jobs) {
     if (cfg_.cost_model == 2) RecordJob(job);
+    if (cfg_.mode == Mode::kTurn) TurnJob(job);
     stats_.OnJob(job, clock_, &parts_);
     if (job.kind == RLJobRecord::Kind::kCompactionEnd && job.start_level == 0 &&
         !job.trivial && job.ok) {
@@ -391,13 +495,18 @@ void Controller::Poll(bool decide) {
     }
     prev_held_ = Held(*last_snapshot_, n_);
   }
-
-  if (!draining_ && host_->Draining()) {
-    draining_ = true;
-    decisions_.Write(
-        JsonLine("drain").Uint("op", ops.total()).Uint("t_us", now).str());
-    Invalidate("drain");
+  if (cfg_.mode == Mode::kTurn) {
+    // The open turn's share of polls with a merge running and with writes
+    // slowed or stopped (the state's busy_share and stall_share).
+    turn_act_.polls += 1;
+    if (prev_running_ >= 0) turn_act_.busy_polls += 1;
+    if (last_snapshot_ &&
+        (last_snapshot_->write_stopped || last_snapshot_->write_delayed)) {
+      turn_act_.stall_polls += 1;
+    }
   }
+
+  if (!draining_ && host_->Draining()) EnterDrain(ops, reads, now);
   if (next_scheduled_ < cfg_.schedule.size() && !fallback_ && !draining_ &&
       ops.total() >= cfg_.schedule[next_scheduled_].at_op) {
     ApplyScheduled(ops.total(), now);
@@ -408,7 +517,18 @@ void Controller::Poll(bool decide) {
       (cfg_.mode == Mode::kLearned || cfg_.mode == Mode::kLearned2)) {
     PollWeights(ops.total(), now);
   }
-  if (decide && !fallback_ && !draining_ && last_snapshot_) {
+  if (decide && !fallback_ && !draining_ && last_snapshot_ &&
+      cfg_.mode == Mode::kTurn) {
+    // Turns close during a write stop too: the operation clock decides.
+    std::string error;
+    if (!TurnPoll(*last_snapshot_, ops, reads, now, &error)) {
+      if (host_->Draining()) {
+        EnterDrain(ops, reads, now);
+      } else {
+        EnterFallback("Apply failed: " + error);
+      }
+    }
+  } else if (decide && !fallback_ && !draining_ && last_snapshot_) {
     std::vector<DecisionRecord> made;
     if (!last_snapshot_->write_stopped) {
       made = Decide(*last_snapshot_, ops, reads, steps, now);
@@ -421,16 +541,29 @@ void Controller::Poll(bool decide) {
     }
     if (!ok) {
       if (host_->Draining()) {
-        draining_ = true;
-        decisions_.Write(
-            JsonLine("drain").Uint("op", ops.total()).Uint("t_us", now).str());
-        Invalidate("drain");
+        EnterDrain(ops, reads, now);
       } else {
         EnterFallback("Apply failed: " + error);
       }
     }
   }
   CheckLogs();
+}
+
+void Controller::EnterDrain(const RLOpCounts& ops,
+                            const std::vector<RLLevelReadCounts>& reads,
+                            uint64_t now) {
+  draining_ = true;
+  decisions_.Write(
+      JsonLine("drain").Uint("op", ops.total()).Uint("t_us", now).str());
+  Invalidate("drain");
+  // The last turn's line: the state where the run's turns end.
+  if (cfg_.mode == Mode::kTurn && !fallback_ && !turn_final_written_ &&
+      last_snapshot_) {
+    turn_final_written_ = true;
+    std::string error;
+    TurnBoundary(*last_snapshot_, ops, reads, now, /*final=*/true, &error);
+  }
 }
 
 std::vector<DecisionRecord> Controller::Decide(
@@ -1036,6 +1169,380 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
   return made;
 }
 
+// --- Turn mode -------------------------------------------------------------
+
+void Controller::TurnJob(const RLJobRecord& job) {
+  using Kind = RLJobRecord::Kind;
+  if (!job.ok) return;
+  if (job.kind == Kind::kFlushEnd) {
+    turn_act_.flushes += 1;
+    turn_act_.inflow[0] += static_cast<double>(job.x);
+    return;
+  }
+  if (job.kind != Kind::kCompactionEnd) return;
+  const int out = job.output_level;
+  // Inflow is the net bytes a job lands one or more levels down; a job
+  // whose output is its own level moves nothing between levels.
+  if (out <= job.start_level || out < 0 || out >= n_) return;
+  if (job.trivial) {
+    turn_act_.inflow[out] += static_cast<double>(job.s);
+    return;
+  }
+  turn_act_.merge_bytes +=
+      static_cast<double>(job.s) + static_cast<double>(job.o);
+  turn_act_.inflow[out] +=
+      static_cast<double>(job.x) - static_cast<double>(job.o);
+}
+
+bool Controller::TurnPoll(const RLTreeSnapshot& snapshot, const RLOpCounts& ops,
+                          const std::vector<RLLevelReadCounts>& reads,
+                          uint64_t now, std::string* error) {
+  const uint64_t op = ops.total();
+  if (op >= turn_next_op_) {
+    return TurnBoundary(snapshot, ops, reads, now, /*final=*/false, error);
+  }
+  const bool changed = TurnTopUps(snapshot, op, now);
+  return Flush(op, now, changed, error);
+}
+
+bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
+                              const RLOpCounts& ops,
+                              const std::vector<RLLevelReadCounts>& reads,
+                              uint64_t now, bool final, std::string* error) {
+  const TurnConfig& tc = cfg_.turn;
+  const Ladder& kl = turn_k_ladder_;
+  const Ladder& ml = turn_m_ladder_;
+  const uint64_t op = ops.total();
+  const uint64_t closed = turn_index_;
+  const uint64_t op0 = turn_op0_;
+
+  // 1. Close the open turn; its activity joins the forecasts' ring.
+  TurnActivity done = turn_act_;
+  done.ops = static_cast<double>(Minus(op, op0));
+  done.puts = static_cast<double>(Minus(ops.keys_written, turn_ops0_.keys_written));
+  done.gets = static_cast<double>(Minus(ops.keys_read, turn_ops0_.keys_read));
+  done.scans = static_cast<double>(Minus(ops.seeks, turn_ops0_.seeks));
+  for (int i = 0; i < n_ && i < static_cast<int>(reads.size()) &&
+                  i < static_cast<int>(turn_reads0_.size());
+       ++i) {
+    done.probes[i] =
+        static_cast<double>(Minus(reads[i].probes, turn_reads0_[i].probes));
+  }
+  turn_ring_.push_back(done);
+  while (turn_ring_.size() > static_cast<size_t>(std::max(1, tc.forecast_turns))) {
+    turn_ring_.pop_front();
+  }
+  turn_act_ = TurnActivity();
+  turn_act_.inflow.assign(n_, 0.0);
+  turn_act_.probes.assign(n_, 0.0);
+  turn_op0_ = op;
+  turn_ops0_ = ops;
+  turn_reads0_ = reads;
+  const uint64_t step = static_cast<uint64_t>(std::max(1.0, tc.turn_ops));
+  while (turn_next_op_ <= op) turn_next_op_ += step;
+  ++turn_index_;
+  for (TurnDefer& d : turn_defer_) d = TurnDefer();
+  const uint64_t mid_applies = applies_ok_ - turn_applies_at_line_;
+  turn_applies_at_line_ = applies_ok_;
+
+  // 2. The tree now, with the forecasts and the closed turn's counters.
+  TurnTree t;
+  t.num_levels = n_;
+  t.T = options_.level_multiplier;
+  t.C.assign(n_, 0.0);
+  for (int i = 1; i < n_; ++i) {
+    t.C[i] = static_cast<double>(options_.base_level_bytes) * std::pow(t.T, i - 1);
+  }
+  t.B = Held(snapshot, n_);
+  t.B_all.assign(n_, 0.0);
+  t.score.assign(n_, 0.0);
+  for (int i = 0; i < n_ && i < static_cast<int>(snapshot.levels.size()); ++i) {
+    t.B_all[i] = static_cast<double>(snapshot.levels[i].bytes);
+    t.score[i] = snapshot.levels[i].score;
+    if (i >= 1 && snapshot.levels[i].bytes > 0) t.last = i;
+  }
+  t.m_applied = m_applied_;
+  const double F = stats_.flush_file_bytes;
+  const double wb = static_cast<double>(options_.write_buffer_size);
+  const double tf = static_cast<double>(options_.target_file_size_base);
+  const double tm = std::max(1, options_.target_file_size_multiplier);
+  t.file_bytes.assign(n_, wb);
+  if (F > 0) t.file_bytes[0] = F;
+  for (int i = 1; i < n_; ++i) {
+    if (tf > 0) t.file_bytes[i] = tf * std::pow(tm, i - 1);
+  }
+  if (!snapshot.levels.empty()) {
+    const auto& l0 = snapshot.levels[0];
+    t.n0_all = std::max(0, l0.num_files);
+    t.n0 = std::max(0, l0.num_files - l0.num_files_compacting);
+  }
+  t.K_applied = k0_applied_;
+  t.K_cfg = options_.l0_trigger;
+  t.K_slow = options_.l0_slowdown_trigger;
+  t.k_live_cap = n_ > 1 ? LiveK0Cap(t.C[1], F) : 0;
+  t.pending = static_cast<double>(snapshot.pending_compaction_bytes);
+  t.soft_limit = static_cast<double>(options_.soft_pending_bytes_limit);
+  double ring_ops = 0, ring_flushes = 0, ring_merge = 0;
+  std::vector<double> ring_inflow(n_, 0.0);
+  for (const TurnActivity& a : turn_ring_) {
+    ring_ops += a.ops;
+    ring_flushes += a.flushes;
+    ring_merge += a.merge_bytes;
+    for (int i = 0; i < n_ && i < static_cast<int>(a.inflow.size()); ++i) {
+      ring_inflow[i] += a.inflow[i];
+    }
+  }
+  // The last forecast_turns turns' rates, scaled to one turn's operations.
+  const double scale = ring_ops > 0 ? tc.turn_ops / ring_ops : 0.0;
+  t.f_hat = ring_flushes * scale;
+  t.X_bar = ring_merge * scale;
+  t.I_hat.assign(n_, 0.0);
+  for (int i = 0; i < n_; ++i) t.I_hat[i] = ring_inflow[i] * scale;
+  const double total = done.puts + done.gets + done.scans;
+  if (total > 0) {
+    t.put_share = done.puts / total;
+    t.get_share = done.gets / total;
+    t.scan_share = done.scans / total;
+  }
+  t.stall_share = done.polls > 0 ? done.stall_polls / done.polls : 0.0;
+  t.busy_share = done.polls > 0 ? done.busy_polls / done.polls : 0.0;
+  t.probes_per_get.assign(n_, 0.0);
+  for (int i = 0; i < n_; ++i) {
+    t.probes_per_get[i] = done.gets > 0 ? At(done.probes, i) / done.gets : 0.0;
+  }
+
+  // 3. The design's order (as ~/node_ops/diag/2026-11-07-turn-core/trace.cc):
+  // decay first, then the state, the shaping's owed work and the masks at
+  // the decayed anchors.
+  std::vector<bool> waited(n_, false);
+  if (!final) waited = DecayAnchors(t, tc, kl, ml, &turn_anchors_);
+  const TurnSettings rungs = RungSettings(t, kl, ml, turn_anchors_);
+  const std::vector<double> owed = OwedWork(t, rungs.m, rungs.K);
+  const TurnSettings base = AnchorSettings(t, tc, kl, ml, turn_anchors_);
+  const std::vector<double> x =
+      TurnInputs(t, tc, turn_anchors_, base, rungs, owed);
+  const std::vector<TurnMask> masks =
+      Masks(t, tc, kl, ml, turn_anchors_, base);
+  std::vector<double> anchors(n_, 0.0);
+  for (int i = 0; i < n_; ++i) anchors[i] = turn_anchors_[i].a;
+
+  JsonLine line("turn");
+  line.Uint("t", closed)
+      .Uint("op0", op0)
+      .Uint("op1", op)
+      .Uint("t_us", now)
+      .Uint("final", final ? 1 : 0)
+      .Features("x", TurnFeatureNames(tc.acting), x)
+      .Raw("masks", JsonMasks(masks))
+      .Nums("anchors", anchors)
+      .Num("rung_k", rungs.K)
+      .Nums("rung_m", rungs.m)
+      .Num("base_k", base.K)
+      .Nums("base_m", base.m)
+      .Nums("owed", owed)
+      .Nums("B", t.B)
+      .Nums("C", t.C)
+      .Num("pending", t.pending)
+      .Num("f_hat", t.f_hat)
+      .Nums("I_hat", t.I_hat)
+      .Num("X_bar", t.X_bar)
+      .Num("ops", done.ops)
+      .Num("flushes", done.flushes)
+      .Num("merge_bytes", done.merge_bytes)
+      .Nums("inflow", done.inflow)
+      .Num("polls", done.polls)
+      .Uint("mid_applies", mid_applies)
+      .Raw("decay_waited", JsonBools(waited));
+  if (final) {
+    decisions_.Write(line.Num("applied_k", k0_applied_)
+                         .Nums("applied_m", m_applied_)
+                         .str());
+    return true;
+  }
+
+  // 4. Choose: a newer net if one is there, greedy, then one level explores.
+  TurnWeights(op, now);
+  if (fallback_) return true;  // an invalid weights file: native from here
+  const double eps = ExploreRate(tc, static_cast<double>(closed));
+  const std::vector<std::array<double, kNumActions>> scores =
+      TurnScores(turn_have_net_ ? &turn_net_ : nullptr, x, tc.acting);
+  const std::vector<Action> greedy = Greedy(scores, masks);
+  std::vector<Action> actions = greedy;
+  const int explored = Explore(eps, masks, &actions, &rng_);
+
+  // 5. Encode, the defers' top-up state, and one Apply if the vector changed.
+  std::vector<TurnNote> notes;
+  const TurnSettings sent =
+      Encode(t, tc, kl, ml, actions, &turn_anchors_, &notes);
+  std::vector<bool> renewed(n_), moved(n_), blocked(n_), overridden(n_);
+  for (int i = 0; i < n_; ++i) {
+    renewed[i] = notes[i].renewed;
+    moved[i] = notes[i].moved;
+    blocked[i] = notes[i].guard_blocked;
+    overridden[i] = notes[i].overridden;
+    if (actions[i] == Action::kDefer && notes[i].overridden) {
+      TurnDefer& d = turn_defer_[i];
+      d.active = true;
+      d.flushes_expected = t.f_hat;
+      d.inflow_expected = At(t.I_hat, i);
+    }
+  }
+  m_target_ = sent.m;
+  k0_target_ = sent.K;
+  const uint64_t before = applies_ok_;
+  const bool ok = Flush(op, now, true, error);
+  const bool set = applies_ok_ > before;
+  turn_applies_at_line_ = applies_ok_;
+  for (int i = 0; i < n_; ++i) anchors[i] = turn_anchors_[i].a;
+  decisions_.Write(line.Num("eps", eps)
+                       .Uint("weights", turn_have_net_ ? turn_net_.version : 0)
+                       .Num("explored", explored)
+                       .Raw("action", JsonActions(actions))
+                       .Raw("greedy", JsonActions(greedy))
+                       .Raw("scores", JsonScores(scores))
+                       .Nums("anchors_after", anchors)
+                       .Num("sent_k", sent.K)
+                       .Nums("sent_m", sent.m)
+                       .Num("applied_k", k0_applied_)
+                       .Nums("applied_m", m_applied_)
+                       .Uint("set", set ? 1 : 0)
+                       .Raw("renewed", JsonBools(renewed))
+                       .Raw("moved", JsonBools(moved))
+                       .Raw("guard_blocked", JsonBools(blocked))
+                       .Raw("overridden", JsonBools(overridden))
+                       .str());
+  return ok;
+}
+
+bool Controller::TurnTopUps(const RLTreeSnapshot& snapshot, uint64_t op,
+                            uint64_t now) {
+  const TurnConfig& tc = cfg_.turn;
+  bool changed = false;
+  const std::vector<double> held = Held(snapshot, n_);
+  for (int i = 0; i < n_; ++i) {
+    TurnDefer& d = turn_defer_[i];
+    if (!d.active) continue;
+    // The raise the bounds (or the turn's top-up count) refuse: the defer
+    // is broken, and RocksDB compacts as the setting allows.
+    const auto broken = [&](const char* why) {
+      d.active = false;
+      decisions_.Write(JsonLine("defer_broken")
+                           .Uint("t", turn_index_)
+                           .Uint("level", static_cast<uint64_t>(i))
+                           .Uint("op", op)
+                           .Uint("t_us", now)
+                           .Str("reason", why)
+                           .Uint("topups", static_cast<uint64_t>(d.topups))
+                           .str());
+    };
+    double before = 0, after = 0;
+    if (i == 0) {
+      if (snapshot.levels.empty()) continue;
+      const auto& l0 = snapshot.levels[0];
+      const int n0 = std::max(0, l0.num_files - l0.num_files_compacting);
+      int K = k0_target_;
+      if (n0 + 1 < K) continue;  // not within one file of due
+      if (d.topups >= tc.max_topups) {
+        broken("max_topups");
+        continue;
+      }
+      const double left = std::max(0.0, d.flushes_expected - turn_act_.flushes);
+      const int cap = LiveK0Cap(static_cast<double>(options_.base_level_bytes),
+                                stats_.flush_file_bytes);
+      if (!TopUpL0(n0, left, cap, tc.k_defer_max, &K)) {
+        broken("bounds");
+        continue;
+      }
+      if (K == k0_target_) continue;
+      before = k0_target_;
+      after = K;
+      k0_target_ = K;
+    } else {
+      const double C = static_cast<double>(options_.base_level_bytes) *
+                       std::pow(options_.level_multiplier, i - 1);
+      double m = m_target_[i];
+      if (!(C > 0) || held[i] / (m * C) < 1 / (1 + tc.margin / 2)) continue;
+      if (d.topups >= tc.max_topups) {
+        broken("max_topups");
+        continue;
+      }
+      const double left =
+          std::max(0.0, d.inflow_expected - At(turn_act_.inflow, i));
+      const double below_T = i + 1 < n_
+                                 ? m_target_[i + 1] * options_.level_multiplier
+                                 : std::numeric_limits<double>::infinity();
+      if (!TopUpLevel(held[i], C, left, tc.margin, below_T, &m)) {
+        broken("bounds");
+        continue;
+      }
+      if (m == m_target_[i]) continue;
+      before = m_target_[i];
+      after = m;
+      m_target_[i] = m;
+    }
+    ++d.topups;
+    changed = true;
+    decisions_.Write(JsonLine("turn_topup")
+                         .Uint("t", turn_index_)
+                         .Uint("level", static_cast<uint64_t>(i))
+                         .Uint("op", op)
+                         .Uint("t_us", now)
+                         .Num("old", before)
+                         .Num("new", after)
+                         .Uint("topups", static_cast<uint64_t>(d.topups))
+                         .str());
+  }
+  return changed;
+}
+
+void Controller::TurnWeights(uint64_t op, uint64_t now) {
+  const double interval_us = cfg_.push_interval_ms * 1000;
+  if (turn_weights_checked_ &&
+      static_cast<double>(Minus(now, turn_weights_check_us_)) < interval_us) {
+    return;
+  }
+  const bool first = !turn_weights_checked_;
+  turn_weights_checked_ = true;
+  turn_weights_check_us_ = now;
+  uint64_t version = 0;
+  std::string error;
+  TurnLoad status = PeekTurnVersion(cfg_.weights_path, &version, &error);
+  if (status == TurnLoad::kMissing) {
+    if (first && cfg_.weights_required) {
+      EnterFallback("weights required but missing: " + error);
+    } else if (first) {
+      decisions_.Write(JsonLine("turn_weights_missing")
+                           .Uint("op", op)
+                           .Uint("t_us", now)
+                           .Str("path", cfg_.weights_path)
+                           .str());
+    }
+    return;
+  }
+  if (status == TurnLoad::kInvalid) {
+    EnterFallback(error);
+    return;
+  }
+  if (turn_have_net_ && version <= turn_net_.version) return;
+  TurnNet net;
+  status = LoadTurnNet(cfg_.weights_path, cfg_.turn.arch, cfg_.turn.acting,
+                       &net, &error);
+  if (status == TurnLoad::kMissing) return;  // replaced between the reads
+  if (status != TurnLoad::kOk) {
+    EnterFallback(error);
+    return;
+  }
+  turn_net_ = std::move(net);
+  turn_have_net_ = true;
+  decisions_.Write(JsonLine("turn_weights")
+                       .Uint("op", op)
+                       .Uint("t_us", now)
+                       .Uint("version", turn_net_.version)
+                       .Str("arch", turn_net_.arch == 1 ? "vdn" : "factored")
+                       .Uint("nets", turn_net_.nets.size())
+                       .str());
+}
+
 NeighbourView Controller::Neighbour(const View& v, int level,
                                    const std::vector<double>& m) const {
   NeighbourView n;
@@ -1199,10 +1706,13 @@ bool Controller::Flush(uint64_t op, uint64_t now, bool new_changes,
   // values it sent.
   bool seen = false;
   uint64_t seen_generation = 0;
+  uint64_t apply_us = 0;  // the call's wall time (the turn reward's c_set)
   if (!ok) {
     *error = "multipliers inadmissible after repair";
   } else {
+    const uint64_t t0 = SteadyMicros();
     ok = host_->Apply(m_target_, k0_target_, error);
+    apply_us = Minus(SteadyMicros(), t0);
     applied_once_ = true;
     last_apply_us_ = now;
     if (ok) {
@@ -1223,11 +1733,13 @@ bool Controller::Flush(uint64_t op, uint64_t now, bool new_changes,
                        .Str("error", *error)
                        .Uint("seen", seen ? 1 : 0)
                        .Uint("seen_generation", seen_generation)
+                       .Uint("apply_us", apply_us)
                        .str());
   if (ok) {
     m_applied_ = m_target_;
     k0_applied_ = k0_target_;
     pending_first_id_ = 0;
+    ++applies_ok_;
   }
   return ok;
 }

@@ -25,8 +25,33 @@ struct Bounds {
 };
 
 // learned and prior-only are plan step 10, built for PREREGISTRATION D-24
-// §2's exploratory track; remote-inference (Gate N6) is not built.
-enum class Mode { kHoldOnly, kRules, kPriorOnly, kLearned, kLearned2 };
+// §2's exploratory track; remote-inference (Gate N6) is not built. turn is
+// the turn learner (turn.h; ~/latex/2026-11-07-rl-design).
+enum class Mode { kHoldOnly, kRules, kPriorOnly, kLearned, kLearned2, kTurn };
+
+// The turn mode's settings (turn.h), from the config's "turn_*" keys; every
+// one is required in mode "turn" and refused in any other.
+struct TurnConfig {
+  double turn_ops = 0;      // operations per turn, any kind
+  int acting = 0;           // acting levels, L0 included (n + 1 in the design)
+  int arch = 0;             // 0: factored (one agent), 1: VDN (one per level)
+  double kappa = 0;         // anchor decay constant, in turns
+  double margin = 0;        // epsilon of the encoding
+  double sigma_max = 0;     // compact's score cap (4/3)
+  double glide_share = 0;   // R_i's share of the slot's merge bytes (1/2)
+  int forecast_turns = 0;   // turns behind the rate forecasts (8)
+  double guard_owed_bytes = 0;     // no anchor drop above this owed work
+  int guard_l0_flushes = 0;        // ... or within this many flushes of slowdown
+  int safety_l0_flushes = 0;       // no defer/expand within this many
+  double safety_pending_bytes = 0; // no deep defer/expand above this
+  int k_defer_max = 0;      // defer's highest L0 trigger (18)
+  double renew_band = 0;    // see Press
+  int max_topups = 0;       // defer raises within a turn (2)
+  double explore_start = 0, explore_end = 0;
+  double explore_turns = 0;  // linear from start to end over this many turns
+  std::vector<double> k_rungs;  // ascending, whole files, K_cfg among them
+  std::vector<double> m_rungs;  // ascending, 1 among them, inside [0.5, 2]
+};
 
 // Cost model 2's step types and job kinds (PATHWAYS D §1 as amended
 // 2026-10-03, D-23; scripts/dbbench_pipeline/cost_model_v2.py's STEP_TYPES
@@ -157,6 +182,12 @@ struct Config {
   // 1 = the 12 inputs of F2FeatureNames before; 2 = those 12 and six of the
   // tree's state (learned2.h kF2Up0Pending..kF2Stall).
   int f2_inputs = 1;
+  // Turn mode (turn.h). It also needs seed, weights_path, push_interval_ms
+  // (the least time between two checks of the weights file, which happen
+  // at turn boundaries only) and weights_required; explore is refused (the
+  // turn's own rate, turn_explore_*, replaces it). cost_model must be 2 and
+  // m_min, m_max the fork's 0.5 and 2: compact and defer use the whole range.
+  TurnConfig turn;
   // Hold-only only (owner, 2026-10-07: the step-response test of the
   // settling condition C3): at the first poll at or after operation
   // apply_at_op, apply apply_m (one value per level, ":"-separated in the
@@ -198,7 +229,9 @@ bool ParseConfig(const std::string& text, Config* config, std::string* error);
 bool LoadConfig(const std::string& path, Config* config, std::string* error);
 
 // The configured trigger must lie in [k0_min, k0_cap], and k0_cap below the
-// slowdown trigger (A-Impl-6).
+// slowdown trigger (A-Impl-6). In mode "turn" the K rungs must also hold the
+// configured trigger, and the top rung and turn_k_defer_max stay below the
+// slowdown trigger.
 bool CheckConfigAgainstHost(const Config& config, int l0_trigger,
                             int l0_slowdown_trigger, std::string* error);
 

@@ -300,6 +300,10 @@ LEARNER_SETTINGS_FILE="${LEARNER_SETTINGS_FILE:-config/learner_settings.json}"
 # learned2's settings (controller/learned2.h; owner, 2026-11-05): the plugin's
 # keys under "plugin", trainer2's under "learner2".
 LEARNER2_SETTINGS_FILE="${LEARNER2_SETTINGS_FILE:-config/learner2_settings.json}"
+# The turn arms' settings (controller/turn.h): the plugin's keys under
+# "plugin" (turn_arch comes from the arm: turn factored, turn_vdn vdn), the
+# turn trainer's under "trainer".
+TURN_SETTINGS_FILE="${TURN_SETTINGS_FILE:-config/turn_settings.json}"
 # A diagnostic run may price with a stated q-bar while the contract's is open
 # (D-29 §6); empty: none, and a learner arm is refused.
 CONTROLLER_QBAR_STANDIN="${CONTROLLER_QBAR_STANDIN:-}"

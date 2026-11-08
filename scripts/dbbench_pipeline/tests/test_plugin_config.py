@@ -3,6 +3,7 @@ missing value is named, and the smoke config the preflight composes is the
 one controller/tests/config_test.cc proves the plugin accepts."""
 import importlib.util
 import json
+import os
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,9 @@ CONTRACT, _ = research_objective.load_contract()
 ADMISSION = json.loads((ROOT / "config" / "admission_test.json").read_text())
 # Shared with controller/tests/config_test.cc, which parses it.
 SMOKE_FIXTURE = ROOT / "controller" / "tests" / "fixtures" / "smoke_config.json"
+# The turn arm's config from the shipped settings, which turn_plugin_test.cc
+# parses (regenerate with RL_REGEN_GOLDEN=1 after an intended change).
+TURN_FIXTURE = ROOT / "controller" / "tests" / "fixtures" / "turn_config.json"
 
 BOUNDS = {"m_min": 0.5, "m_max": 2.0, "k0_min": 2, "k0_cap": 8,
           "epsilon": 0.15, "phi_min": 0.575, "alpha": 1.5, "kappa_d": 0.25,
@@ -184,6 +188,42 @@ class ComposeTest(unittest.TestCase):
             compose("learned2", prices=PRICES6, diagnostic=True,
                     learner=LEARNER, weights_path="/w.bin", seed=4,
                     q_bar_standin=50000.0)
+
+    def test_the_turn_arms_get_their_keys_from_the_turn_settings(self):
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = pc.learner_values(shipped, "training")
+        configs = {}
+        for arm, arch in pc.TURN_ARMS.items():
+            config, filled = compose(arm, prices=PRICES6, diagnostic=True,
+                                     learner=learner, weights_path="/w.bin", seed=4,
+                                     q_bar_standin=50000.0,
+                                     decision_log="decisions.jsonl",
+                                     transition_log="transitions.jsonl")
+            self.assertEqual(filled, [])
+            self.assertEqual((config["mode"], config["turn_arch"]), ("turn", arch))
+            self.assertEqual(config["cost_model"], 2)
+            self.assertEqual(config["weights_path"], "/w.bin")
+            self.assertEqual(config["seed"], 4)
+            self.assertNotIn("explore", config)       # the turn's own rate
+            for key in (*pc.TURN_KEYS, "push_interval_ms", "weights_required"):
+                self.assertEqual(config[key], shipped["plugin"][key], key)
+            configs[arm] = config
+        # The two arms differ in the value function only.
+        self.assertEqual({k for k in configs["turn"] if configs["turn"][k] !=
+                          configs["turn_vdn"][k]}, {"turn_arch"})
+        if os.environ.get("RL_REGEN_GOLDEN") == "1":
+            TURN_FIXTURE.write_text(json.dumps(configs["turn"], indent=2,
+                                               sort_keys=True) + "\n")
+        self.assertEqual(configs["turn"], json.loads(TURN_FIXTURE.read_text()))
+        # Without a turn key, the arm is refused and names it.
+        partial = {k: v for k, v in learner.items() if k != "turn_kappa"}
+        with self.assertRaisesRegex(ValueError, "turn_kappa"):
+            compose("turn", prices=PRICES6, diagnostic=True, learner=partial,
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        with self.assertRaisesRegex(ValueError, "turn_m_rungs must be a string"):
+            compose("turn", prices=PRICES6, diagnostic=True,
+                    learner={**learner, "turn_m_rungs": 1.0},
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
 
     def test_the_hold_arms_scheduled_change(self):
         """The step-response arm (owner, 2026-10-07): hold only, diagnostic

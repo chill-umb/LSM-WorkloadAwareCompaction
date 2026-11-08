@@ -5,7 +5,9 @@ fingerprint's plugin segment parsing in fingerprint.py, the arm checked and scor
 the refusals before any run."""
 import importlib.util
 import json
+import os
 import shlex
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -256,6 +258,42 @@ class CheckPluginRunTest(unittest.TestCase):
                                False, 0)
         self.assertEqual(report["failed_checks"], ["mode"])
 
+    def test_turn_mode_judges_its_turn_lines(self):
+        ones, up = [1, 1, 1, 1], [1, 1.4142135623730951, 1, 1]
+        start = {"type": "start", "mode": "turn", "num_levels": 4, "m": ones, "k0": 4}
+        stop = {"type": "stop", "fallback": 0}
+
+        def turn(t, sent, applied, set_, op0=None, action="hold", expand=1):
+            return {"type": "turn", "t": t, "op0": 100 * t if op0 is None else op0,
+                    "op1": 100 * (t + 1), "final": 0,
+                    "masks": [[1, 1, 1, 1], [1, 1, 1, expand], [1, 0, 0, 0], [1, 0, 0, 0]],
+                    "action": ["hold", action, "hold", "hold"], "sent_m": sent,
+                    "sent_k": 4, "applied_m": applied, "applied_k": 4, "set": set_}
+
+        def judged(body):
+            lines = [start, *body, stop]
+            transitions = [{"type": "transition", "level": i} for i in range(4)]
+            return check28.check(STARTED, lines, transitions, [], "turn", False, 0)
+
+        # Sent at its boundary; then held by the cap and sent within the turn.
+        report = judged([apply(100, 0, 0, m=up), turn(0, up, up, 1, action="expand"),
+                         turn(1, ones, up, 0), apply(150, 0, 0, m=ones),
+                         turn(2, ones, ones, 0)])
+        self.assertEqual(report["verdict"], "passed", report)
+        self.assertEqual(report["checks"]["act3"]["faithful"], 2)
+        self.assertEqual(report["checks"]["turn"]["turns"], 3)
+        # Held and never sent before the next turn: a lost change.
+        report = judged([turn(0, up, ones, 0, action="expand"), turn(1, up, ones, 0)])
+        self.assertIn("act3", report["failed_checks"])
+        self.assertEqual(report["checks"]["act3"]["failed_ids"], [0])
+        self.assertEqual(report["checks"]["act3"]["truncated_ids"], [1])
+        # A gap in operations, and a masked action.
+        report = judged([turn(0, ones, ones, 0), turn(1, ones, ones, 0, op0=150)])
+        self.assertIn("turn", report["failed_checks"])
+        report = judged([apply(100, 0, 0, m=up),
+                         turn(0, up, up, 1, action="expand", expand=0)])
+        self.assertIn("turn", report["failed_checks"])
+
     def test_a_truncated_last_line_is_a_problem(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"
@@ -268,9 +306,19 @@ class CheckPluginRunTest(unittest.TestCase):
                              ["none missing"])
 
 
+# The turn mode's 35 input names (rl_agent/learner/turn_weights.py at five
+# acting levels), for the stub's turn lines.
+TURN_NAMES = (["put_share", "get_share", "scan_share", "pending_soft",
+               "stall_share", "busy_share", "l0_files_k", "l0_anchor", "l0_slow",
+               "l0_flushes_hat", "l0_probes_get"] +
+              [f"l{i}_{f}" for i in range(1, 5)
+               for f in ("score", "anchor", "backlog", "owed", "inflow_hat",
+                         "probes_get")])
+
 # The stub db_bench of test_run_experiments, plus the plugin's part: with
 # --rl_plugin_config it writes the logs the config names. STUB_PLUGIN_MASKED=1
-# makes its one decision take a masked action.
+# makes its one decision (or, in mode turn, its one expand) take a masked
+# action.
 PLUGIN_STUB = STUB.replace(
     "cat " + shlex.quote(str(FIXTURE / "run.log")), f"""
 for a in "$@"; do
@@ -290,6 +338,23 @@ if mode == "rules":
                 "requested": 0.9}},
               {{"type": "apply", "op": 10, "first_id": 1, "last_id": 1,
                 "m": [1, 0.9, 1, 1], "k0": 4, "ok": 1, "seen": 1}}]
+if mode == "turn":
+    lines[0].update({{"m": [1, 1, 1, 1], "k0": 4}})
+    names = {json.dumps(TURN_NAMES)}
+    up = [1, 1.4142135623730951, 1, 1]
+    turn = {{"masks": [[1, 1, 1, 1], [1, 1, 1, mask[2]], [1, 0, 0, 0],
+                       [1, 0, 0, 0]],
+             "x": {{n: 0.5 for n in names}}, "owed": [0, 0, 0, 0],
+             "mid_applies": 0}}
+    lines += [{{"type": "turn_start", "arch": config["turn_arch"], "acting": 5,
+                "features": names}},
+              {{"type": "apply", "op": 600, "first_id": 0, "last_id": 0,
+                "m": up, "k0": 4, "ok": 1, "seen": 1}},
+              {{"type": "turn", "t": 0, "op0": 290, "op1": 600, "final": 0,
+                "action": ["hold", "expand", "hold", "hold"], "sent_m": up,
+                "sent_k": 4, "applied_m": up, "applied_k": 4, "set": 1, **turn}},
+              {{"type": "turn", "t": 1, "op0": 600, "op1": 1000, "final": 1,
+                **turn}}]
 lines.append({{"type": "stop", "fallback": 0}})
 with open(config["decision_log"], "w") as out:
     out.writelines(json.dumps(line) + "\\n" for line in lines)
@@ -303,10 +368,10 @@ fi
 """)
 
 
-def run03_plugin(root: Path, **overrides):
+def run03_plugin(root: Path, stub: str = PLUGIN_STUB, **overrides):
     build = root / "build"
     build.mkdir(parents=True)
-    (build / "db_bench").write_text(PLUGIN_STUB)
+    (build / "db_bench").write_text(stub)
     (build / "db_bench").chmod(0o755)
     plugin = root / "librl_controller.so"
     plugin.write_bytes(b"stand-in plugin")
@@ -404,6 +469,84 @@ class ControllerArmsTest(unittest.TestCase):
                         CONTROLLER_PLUGIN=str(Path(tmp) / "missing.so"))
             self.assertEqual(ran.returncode, 1)
             self.assertIn("13's step 1 builds the plugin", ran.stderr)
+
+
+ROOT = PIPELINE.parents[1]
+VENV = ROOT / ".venv-dbbench"
+
+
+def venv_has_torch() -> bool:
+    python = VENV / "bin" / "python"
+    return python.exists() and subprocess.run(
+        [str(python), "-c", "import torch"], capture_output=True).returncode == 0
+
+
+# The host log fixture predates the step counters (schema 2): the turn
+# trainer's pricer reads them, so this stub adds them to its copy, the
+# header's names and each job record's cumulative counts.
+FG = ["rocksdb.point.sst.probe", "rocksdb.bloom.filter.full.positive",
+      "rocksdb.sorted.run.seek", "rocksdb.read.table.reopen",
+      "rocksdb.number.db.next.found", "rocksdb.number.iter.skip",
+      "rocksdb.number.keys.read", "rocksdb.number.db.seek",
+      "rocksdb.number.keys.written", "rocksdb.read.table.reopen.nanos",
+      "rocksdb.rl.scan.setup.nanos"]
+_COPY = "cp " + shlex.quote(str(FIXTURE / "host_log.jsonl")) + ' "$log"'
+TURN_STUB = PLUGIN_STUB.replace(_COPY, _COPY + f"""
+python3 - "$log" <<'PY'
+import json, sys
+names = {json.dumps(FG)}
+recs = [json.loads(line) for line in open(sys.argv[1])]
+for r in recs:
+    if r["type"] == "header":
+        r["fg"] = names
+    elif r["type"] in ("job_begin", "job_end", "flush_begin", "flush_end", "snap"):
+        r["fg"] = [r["op"]] * len(names)
+with open(sys.argv[1], "w") as out:
+    out.writelines(json.dumps(r) + "\\n" for r in recs)
+PY""")
+
+
+@unittest.skipUnless(venv_has_torch(), "the turn trainer needs the venv's torch")
+class TurnArmsTest(unittest.TestCase):
+    """03's turn arms with the stub: each composes its config from the turn
+    settings, runs the turn trainer beside db_bench and stops it after the
+    plugin's stop line, and is checked by 28 in mode turn."""
+
+    def run_turn(self, tmp, **overrides):
+        from tests.test_plugin_config import PRICES6
+        prices = Path(tmp) / "prices6.json"
+        prices.write_text(json.dumps(PRICES6))
+        return run03_plugin(Path(tmp), stub=TURN_STUB, EXPERIMENT_ARMS="turn turn_vdn",
+                            PLUGIN_PLACEHOLDERS="1", DIAGNOSTIC_RUN="1",
+                            CONTROLLER_QBAR_STANDIN="50000",
+                            PRICES_FILE=str(prices), PYTHON_VENV=str(VENV),
+                            LEARNER_STOP_TIMEOUT_SECONDS="60", **overrides)
+
+    def test_both_turn_arms_run_their_trainer_and_pass_the_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = self.run_turn(tmp)
+            self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+            cell = Path(tmp) / "results" / "1M" / "T2"
+            for arm, arch in (("turn", "factored"), ("turn_vdn", "vdn")):
+                config = json.loads((cell / arm / "plugin_config.json").read_text())
+                self.assertEqual((config["mode"], config["turn_arch"]), ("turn", arch))
+                self.assertEqual(config["weights_path"], str(cell / arm / "weights.bin"))
+                report = json.loads((cell / arm / "plugin_check.json").read_text())
+                self.assertEqual(report["verdict"], "passed", (arm, report))
+                self.assertEqual(report["checks"]["turn"]["turns"], 2)
+                self.assertEqual(report["checks"]["act3"]["faithful"], 1)
+                summary = json.loads((cell / arm / "turn_trainer_summary.json")
+                                     .read_text())
+                self.assertEqual((summary["arch"], summary["lines"]), (arch, 2))
+                self.assertEqual(summary["why"], "plugin stop")
+
+    def test_a_masked_turn_action_fails_the_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = self.run_turn(tmp, STUB_PLUGIN_MASKED="1")
+            self.assertEqual(ran.returncode, 8, ran.stderr[-3000:])
+            report = json.loads((Path(tmp) / "results" / "1M" / "T2" / "turn" /
+                                 "plugin_check.json").read_text())
+            self.assertIn("turn", report["failed_checks"])
 
 
 if __name__ == "__main__":

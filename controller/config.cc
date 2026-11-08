@@ -9,6 +9,8 @@
 #include <set>
 #include <sstream>
 
+#include "turn.h"
+
 namespace rlc {
 
 const double kForkMultiplierMin = 0.5;
@@ -322,7 +324,27 @@ const std::set<std::string>& KnownKeys() {
                                                "apply_at_op",
                                                "apply_m",
                                                "apply_k0",
-                                               "apply_schedule"};
+                                               "apply_schedule",
+                                               "turn_ops",
+                                               "turn_acting",
+                                               "turn_arch",
+                                               "turn_kappa",
+                                               "turn_margin",
+                                               "turn_sigma_max",
+                                               "turn_glide_share",
+                                               "turn_forecast_turns",
+                                               "turn_guard_owed_bytes",
+                                               "turn_guard_l0_flushes",
+                                               "turn_safety_l0_flushes",
+                                               "turn_safety_pending_bytes",
+                                               "turn_k_defer_max",
+                                               "turn_renew_band",
+                                               "turn_max_topups",
+                                               "turn_explore_start",
+                                               "turn_explore_end",
+                                               "turn_explore_turns",
+                                               "turn_k_rungs",
+                                               "turn_m_rungs"};
   static const std::set<std::string> kWithKappa = [] {
     std::set<std::string> keys = kKnown;
     for (const char* x : kStepTypeNames) {
@@ -540,6 +562,112 @@ static bool ParseSchedule(const std::string& text, const Bounds& b,
   return true;
 }
 
+// The turn mode's keys (config.h TurnConfig), each refused in other modes.
+static const char* const kTurnKeys[] = {
+    "turn_ops",          "turn_acting",           "turn_arch",
+    "turn_kappa",        "turn_margin",           "turn_sigma_max",
+    "turn_glide_share",  "turn_forecast_turns",   "turn_guard_owed_bytes",
+    "turn_guard_l0_flushes", "turn_safety_l0_flushes",
+    "turn_safety_pending_bytes", "turn_k_defer_max", "turn_renew_band",
+    "turn_max_topups",   "turn_explore_start",    "turn_explore_end",
+    "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs"};
+
+// A rung ladder: ":"-separated finite numbers, ascending, at most 16; K's
+// whole files.
+static bool ParseRungs(const char* key, const std::string& text, bool whole,
+                       std::vector<double>* out, Reader* r) {
+  out->clear();
+  size_t start = 0;
+  for (;;) {
+    const size_t colon = text.find(':', start);
+    const std::string item = text.substr(
+        start, colon == std::string::npos ? std::string::npos : colon - start);
+    char* end = nullptr;
+    const double value = std::strtod(item.c_str(), &end);
+    if (item.empty() || end != item.c_str() + item.size() ||
+        !std::isfinite(value) || !(value > 0) ||
+        (whole && value != std::floor(value))) {
+      return r->Fail(std::string(key) + ": \"" + item + "\" is not a " +
+                     (whole ? "positive whole number" : "positive number"));
+    }
+    if (!out->empty() && !(value > out->back())) {
+      return r->Fail(std::string(key) + ": rungs must ascend");
+    }
+    out->push_back(value);
+    if (out->size() > 16) return r->Fail(std::string(key) + ": at most 16 rungs");
+    if (colon == std::string::npos) return true;
+    start = colon + 1;
+  }
+}
+
+static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
+  const auto number = [r](const char* key, double* out, bool ok_if(double),
+                          const char* need) {
+    return r->Number(key, out) &&
+           r->Check(ok_if(*out), std::string("need ") + need);
+  };
+  const auto integer = [r](const char* key, int* out, int lo, int hi) {
+    return r->Integer(key, out) &&
+           r->Check(*out >= lo && *out <= hi,
+                    std::string("need ") + std::to_string(lo) + " <= " + key +
+                        " <= " + std::to_string(hi));
+  };
+  std::string arch, k_rungs, m_rungs;
+  if (!number("turn_ops", &t->turn_ops,
+              [](double v) { return v >= 1000 && v < 1e15 && v == std::floor(v); },
+              "turn_ops an integer >= 1000") ||
+      !integer("turn_acting", &t->acting, 1, 16) ||
+      !r->String("turn_arch", &arch) ||
+      !r->Check(arch == "factored" || arch == "vdn",
+                "need turn_arch \"factored\" or \"vdn\"") ||
+      !number("turn_kappa", &t->kappa, [](double v) { return v > 0; },
+              "turn_kappa > 0") ||
+      !number("turn_margin", &t->margin,
+              [](double v) { return v > 0 && v < 1; }, "0 < turn_margin < 1") ||
+      !r->Number("turn_sigma_max", &t->sigma_max) ||
+      !r->Check(t->sigma_max > 1 + t->margin,
+                "need turn_sigma_max > 1 + turn_margin") ||
+      !number("turn_glide_share", &t->glide_share,
+              [](double v) { return v > 0 && v <= 1; },
+              "0 < turn_glide_share <= 1") ||
+      !integer("turn_forecast_turns", &t->forecast_turns, 1, 1000) ||
+      !number("turn_guard_owed_bytes", &t->guard_owed_bytes,
+              [](double v) { return v > 0; }, "turn_guard_owed_bytes > 0") ||
+      !integer("turn_guard_l0_flushes", &t->guard_l0_flushes, 0, 1000) ||
+      !integer("turn_safety_l0_flushes", &t->safety_l0_flushes, 0, 1000) ||
+      !number("turn_safety_pending_bytes", &t->safety_pending_bytes,
+              [](double v) { return v > 0; }, "turn_safety_pending_bytes > 0") ||
+      !integer("turn_k_defer_max", &t->k_defer_max, 2, 1000) ||
+      !number("turn_renew_band", &t->renew_band,
+              [](double v) { return v >= 0 && v <= 1; },
+              "0 <= turn_renew_band <= 1") ||
+      !integer("turn_max_topups", &t->max_topups, 0, 16) ||
+      !number("turn_explore_start", &t->explore_start,
+              [](double v) { return v >= 0 && v < 1; },
+              "0 <= turn_explore_start < 1") ||
+      !number("turn_explore_end", &t->explore_end,
+              [](double v) { return v >= 0 && v < 1; },
+              "0 <= turn_explore_end < 1") ||
+      !number("turn_explore_turns", &t->explore_turns,
+              [](double v) { return v >= 0; }, "turn_explore_turns >= 0") ||
+      !r->String("turn_k_rungs", &k_rungs) ||
+      !ParseRungs("turn_k_rungs", k_rungs, true, &t->k_rungs, r) ||
+      !r->String("turn_m_rungs", &m_rungs) ||
+      !ParseRungs("turn_m_rungs", m_rungs, false, &t->m_rungs, r)) {
+    return false;
+  }
+  t->arch = arch == "vdn" ? 1 : 0;
+  // The m ladder holds native (1); the K ladder's native is the host's
+  // trigger, checked against it (CheckConfigAgainstHost).
+  Ladder ladder;
+  std::string why;
+  if (!MakeLadder(t->m_rungs, 1.0, &ladder, &why)) {
+    return r->Fail("turn_m_rungs: " + why);
+  }
+  return r->Check(t->m_rungs.front() >= b.m_min && t->m_rungs.back() <= b.m_max,
+                  "turn_m_rungs must lie within [m_min, m_max]");
+}
+
 bool ParseConfig(const std::string& text, Config* c, std::string* error) {
   std::map<std::string, JsonValue> values;
   if (!ParseFlatJson(text, &values, error)) return false;
@@ -614,6 +742,8 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     c->mode = Mode::kLearned;
   } else if (c->mode_name == "learned2") {
     c->mode = Mode::kLearned2;
+  } else if (c->mode_name == "turn") {
+    c->mode = Mode::kTurn;
   } else if (c->mode_name == "remote-inference") {
     return r.Fail("mode \"remote-inference\" is not built (Gate N6)");
   } else {
@@ -646,9 +776,28 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
         !r.Integer("seed", &c->seed) || !r.Check(c->seed >= 0, "need seed >= 0")) {
       return false;
     }
+  } else if (c->mode == Mode::kTurn) {
+    // The turn mode explores at its own rate (turn_explore_*).
+    if (!r.Check(c->cost_model == 2, "mode \"turn\" needs cost_model 2") ||
+        !r.Check(!r.Has("explore"),
+                 "\"explore\" is not used in mode \"turn\" (turn_explore_*"
+                 " set its rate)") ||
+        !r.Integer("seed", &c->seed) || !r.Check(c->seed >= 0, "need seed >= 0") ||
+        // Compact-now and defer use the fork's whole range, and Flush checks
+        // every vector against these bounds.
+        !r.Check(b.m_min == kForkMultiplierMin && b.m_max == kForkMultiplierMax,
+                 "mode \"turn\" needs m_min 0.5 and m_max 2") ||
+        !ParseTurn(&r, b, &c->turn)) {
+      return false;
+    }
   } else if (r.Has("explore") || r.Has("seed")) {
     return r.Fail("\"explore\" and \"seed\" are for prior-only and learned"
-                  " (or learned2)");
+                  " (or learned2, turn)");
+  }
+  if (c->mode != Mode::kTurn) {
+    for (const char* key : kTurnKeys) {
+      if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
+    }
   }
   if (r.Has("apply_schedule")) {
     std::string schedule;
@@ -685,7 +834,8 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     }
     c->schedule = {{c->apply_at_op, c->apply_m, c->apply_k0}};
   }
-  if (c->mode == Mode::kLearned || c->mode == Mode::kLearned2) {
+  if (c->mode == Mode::kLearned || c->mode == Mode::kLearned2 ||
+      c->mode == Mode::kTurn) {
     int required = 0;
     if (!r.String("weights_path", &c->weights_path) ||
         !r.Check(!c->weights_path.empty(), "need a weights_path") ||
@@ -699,7 +849,7 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
     c->weights_required = required == 1;
   } else if (r.Has("weights_path") || r.Has("push_interval_ms") ||
              r.Has("weights_required")) {
-    return r.Fail("the weights keys are for learned and learned2");
+    return r.Fail("the weights keys are for learned, learned2 and turn");
   }
   if (c->mode == Mode::kLearned2) {
     if (!r.Number("window_ops", &c->window_ops) ||
@@ -857,6 +1007,24 @@ bool CheckConfigAgainstHost(const Config& config, int l0_trigger,
     *error = "config: k0_cap must be below the slowdown trigger " +
              std::to_string(l0_slowdown_trigger) + " (A-Impl-6)";
     return false;
+  }
+  if (config.mode == Mode::kTurn) {
+    const TurnConfig& t = config.turn;
+    Ladder ladder;
+    std::string why;
+    if (!MakeLadder(t.k_rungs, l0_trigger, &ladder, &why)) {
+      *error = "config: turn_k_rungs must hold the configured L0 trigger " +
+               std::to_string(l0_trigger) + " (" + why + ")";
+      return false;
+    }
+    // No trigger the turn mode sends (a rung, or defer's) reaches the
+    // slowdown trigger.
+    if (t.k_rungs.back() > l0_slowdown_trigger - 1 ||
+        t.k_defer_max > l0_slowdown_trigger - 1) {
+      *error = "config: turn_k_rungs and turn_k_defer_max must stay below the "
+               "slowdown trigger " + std::to_string(l0_slowdown_trigger);
+      return false;
+    }
   }
   return true;
 }

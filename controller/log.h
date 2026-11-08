@@ -16,13 +16,21 @@
 //   apply       one SetOptions call: the vector, K0, ok, and first_id..last_id
 //               of the decisions it carries; after an accepted call, whether
 //               the snapshot read next already carried those values (seen)
-//               and its generation (ACT-3)
+//               and its generation (ACT-3), and the call's wall time
+//               (apply_us, the turn reward's SetOptions price)
 //   apply_held  a new change held back by the SetOptions cap
 //   apply_scheduled  hold-only with apply_at_op or apply_schedule: each
 //               scheduled change, at the start ("index" when there are
 //               several); its call is an apply line with "scheduled": 1
 //   repair      a level raised so targets do not shrink going down
 //   drain, fallback, stop
+//   turn        mode "turn" (turn.h, plugin.cc): one per turn boundary, the
+//               turn [op0, op1) just closed and the state, masks and actions
+//               for the next; "final": 1 at the drain (state only)
+//   turn_topup, defer_broken  mode "turn": a defer's raise within a turn,
+//               or a raise the bounds refuse (RocksDB then compacts)
+//   turn_weights, turn_weights_missing  mode "turn": a weights version
+//               loaded at a boundary, or none there yet
 //
 // The SetOptions cap (setoptions_min_interval_ms). A decision's "effective"
 // is the value in effect after its poll; a change held by the cap reaches
@@ -78,6 +86,8 @@ class JsonLine {
   JsonLine& Nums(const char* key, const std::vector<double>& values);
   JsonLine& NumsOrNull(const char* key, const std::vector<double>& values);
   JsonLine& Flags(const char* key, const Mask& mask);
+  // `json` as it is: a value the caller has already formatted as JSON.
+  JsonLine& Raw(const char* key, const std::string& json);
   // {"name": value, ...}; null when values is empty.
   JsonLine& Features(const char* key, const std::vector<std::string>& names,
                      const std::vector<double>& values);

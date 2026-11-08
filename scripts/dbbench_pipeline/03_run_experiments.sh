@@ -43,6 +43,13 @@ scored from the first mixgraph operation to the end of the drain:
                      checkpoints (LEARNER_CHAIN) and frozen evaluation
                      (LEARNER_FROZEN, LEARNER_WEIGHTS_FILE) as config.sh says.
                      Each learned arm is also reported by 21_check_learner.py.
+  learned2           the ensemble learner (controller/learned2.h), settings
+                     in LEARNER2_SETTINGS_FILE, trainer2.py.
+  turn, turn_vdn     the turn learner (controller/turn.h): one double DQN
+                     over 64k-operation turns, the factored value function
+                     (turn) or one agent per level (turn_vdn); settings in
+                     TURN_SETTINGS_FILE; rl_agent/learner/turn_trainer.py
+                     learns while the arm runs. Cold every run.
 
 The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
 unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
@@ -156,7 +163,7 @@ fi
 arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
   local name variable
   case "$1" in
-    native|static:uniform_1|rules|prior|learned|learned2) ;;
+    native|static:uniform_1|rules|prior|learned|learned2|turn|turn_vdn) ;;
     hold) printf '%s' "$HOLD_START_M" ;;  # empty unless a diagnostic run sets it
     static:uniform_0_75)
       printf '1'
@@ -176,12 +183,19 @@ arm_multipliers() {  # $1=arm; prints the vector, nothing for m = 1
 }
 is_controller_arm() {
   [[ "$1" == hold || "$1" == rules || "$1" == prior || "$1" == learned ||
-     "$1" == learned2 ]]
+     "$1" == learned2 ]] || is_turn_arm "$1"
 }
-is_learner_arm() { [[ "$1" == prior || "$1" == learned || "$1" == learned2 ]]; }
-# The settings file a learner arm reads: learned2 has its own.
+# The turn learner (controller/turn.h): turn is the factored value function,
+# turn_vdn one agent per level; the same plugin mode and trainer.
+is_turn_arm() { [[ "$1" == turn || "$1" == turn_vdn ]]; }
+is_learner_arm() {
+  [[ "$1" == prior || "$1" == learned || "$1" == learned2 ]] || is_turn_arm "$1"
+}
+# The settings file a learner arm reads: learned2 and the turn arms have their own.
 learner_settings_for() {  # $1=arm
-  if [[ "$1" == learned2 ]]; then echo "$LEARNER2_SETTINGS_FILE"; else echo "$LEARNER_SETTINGS_FILE"; fi
+  if [[ "$1" == learned2 ]]; then echo "$LEARNER2_SETTINGS_FILE"
+  elif is_turn_arm "$1"; then echo "$TURN_SETTINGS_FILE"
+  else echo "$LEARNER_SETTINGS_FILE"; fi
 }
 is_programme1_arm() {
   [[ "$1" == native || "$1" == static:* ]] || is_controller_arm "$1"
@@ -201,7 +215,7 @@ for arm in $EXPERIMENT_ARMS; do
   fi
   if is_programme1_arm "$arm"; then
     PROGRAMME1_MATRIX=1
-    [[ "$arm" =~ ^(native|hold|rules|prior|learned|learned2|static:[A-Za-z0-9_]+)$ ]] || {
+    [[ "$arm" =~ ^(native|hold|rules|prior|learned|learned2|turn|turn_vdn|static:[A-Za-z0-9_]+)$ ]] || {
       echo "Unsupported experiment arm: $arm" >&2
       exit 1
     }
@@ -617,7 +631,7 @@ done
 }
 for arm in $EXPERIMENT_ARMS; do
   case "$arm" in
-    native|static:*|hold|rules|prior|learned|learned2) ;;  # checked above
+    native|static:*|hold|rules|prior|learned|learned2|turn|turn_vdn) ;;  # checked above
     regular|oracle|prior_only|rl|unconstrained_rl|unconstrained_prior_only) ;;
     *) echo "Unsupported experiment arm: $arm" >&2; exit 1 ;;
   esac
@@ -1242,6 +1256,26 @@ start_trainer2() {  # result dir
   ) > "$dir/trainer2.out" 2>&1 &
   TRAINER_PID=$!
 }
+# The turn trainer (rl_agent/learner/turn_trainer.py, controller/turn.h) on
+# CONTROLLER_CPUS: cold every run; it prices each turn line on the host log
+# while db_bench runs and stops after the plugin's stop line.
+start_turn_trainer() {  # result dir
+  local dir settings="$TURN_SETTINGS_FILE"
+  dir="$(cd "$1" && pwd)"
+  [[ "$settings" = /* ]] || settings="$PROJECT_ROOT/$settings"
+  TRAINER_PID=""
+  TRAINER_SUMMARY="turn_trainer_summary.json"
+  (
+    cd "$PROJECT_ROOT/rl_agent" &&
+    exec ${CONTROLLER_LAUNCHER[@]+"${CONTROLLER_LAUNCHER[@]}"} "$PYTHON" -m learner.turn_trainer \
+      --plugin-config "$dir/plugin_config.json" \
+      --decisions "$dir/decisions.jsonl" --host-log "$dir/host_log.jsonl" \
+      --weights "$dir/weights.bin" --settings "$settings" \
+      --log "$dir/turn_trainer.jsonl" --summary "$dir/turn_trainer_summary.json" \
+      --archive "$dir/weights"
+  ) > "$dir/turn_trainer.out" 2>&1 &
+  TRAINER_PID=$!
+}
 stop_trainer() {  # result dir; waits by PID, never by name
   local dir="$1" waited=0 status=0
   [[ -n "$TRAINER_PID" ]] || return 0
@@ -1527,6 +1561,8 @@ PY
     start_trainer "$result_dir" || exit 5
   elif [[ "$arm" == learned2 ]]; then
     start_trainer2 "$result_dir" || exit 5
+  elif is_turn_arm "$arm"; then
+    start_turn_trainer "$result_dir" || exit 5
   fi
   if (( uses_server )); then
     local eval_mode=0
@@ -1793,7 +1829,7 @@ PY
   set -e
   end_ns="$(date +%s%N)"
   (( ! uses_server )) || stop_server
-  if [[ "$arm" == learned || "$arm" == learned2 ]]; then
+  if [[ "$arm" == learned || "$arm" == learned2 ]] || is_turn_arm "$arm"; then
     stop_trainer "$result_dir" || {
       touch "$result_dir/FAILED_TRAINER"
       echo "The trainer failed; keeping the result and DB: $result_dir" >&2
@@ -1826,6 +1862,7 @@ PY
       prior) plugin_mode=prior-only ;;
       learned) plugin_mode=learned ;;
       learned2) plugin_mode=learned2 ;;
+      turn|turn_vdn) plugin_mode=turn ;;
     esac
     "$PYTHON" "$PIPELINE_DIR/28_check_plugin_run.py" \
       --stdout "$result_dir/run.log" \

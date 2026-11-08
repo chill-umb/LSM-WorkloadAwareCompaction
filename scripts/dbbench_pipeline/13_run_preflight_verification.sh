@@ -6,7 +6,8 @@
 #   1 rebuild the Release db_bench (and the plugin)   4 parity, ACT-4 and ARCH-5,
 #   2 tier 1 and tier 2 suites                          and the evaluator smoke
 #   3 ACT-1 on the real binary                        5 rules-mode smoke
-#                                                     6 learner smoke
+#                                                     6 learner smoke (the
+#                                                       learned and turn arms)
 #                                                     7 the workload suite (D-29)
 #
 # A step whose component does not exist yet is skipped and recorded as skipped;
@@ -254,6 +255,56 @@ if len(rows) != 1 or rows[0]["settle_ok"] != "1":
 print(f"[step 6] evaluator: {rows[0]['measured_operations']} operations, "
       f"throughput {float(rows[0]['throughput_ops_per_second']):.0f} ops/s")
 PY
+
+  # The turn arms (controller/turn.h): both value functions at 2M, T=2, with
+  # turns of 10k operations so the trainer learns and pushes within the run.
+  # 03 runs 28 (mode turn) on each; 37 --strict then requires at least 3
+  # versions written and loaded, ARCH-1 (finite scores and losses) and
+  # ARCH-6 (every logged score equal to Python's forward pass of its archived
+  # version, every greedy choice the same), and measures c_set, the price of
+  # one SetOptions call, from the calls' wall time and an OPTIONS file's
+  # bytes (reported in turn_smoke_<arm>_report.json; the turn settings take
+  # it by hand). 04 must score both.
+  TURN_RESULTS="$PREFLIGHT_WORK_DIR/turn_smoke"
+  rm -rf "$TURN_RESULTS" "$DB_ROOT/preflight-turn-smoke"
+  mkdir -p "$TURN_RESULTS"
+  turn_settings="$TURN_RESULTS/turn_settings.json"
+  "$PYTHON" - "$TURN_SETTINGS_FILE" "$turn_settings" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+s["plugin"].update(turn_ops=10000, turn_explore_turns=50)
+s["trainer"].update(min_replay=16, batch=8)
+json.dump(s, open(sys.argv[2], "w"), indent=2)
+PY
+  CONFIRM_EXPERIMENTS=YES EXPERIMENT_ARMS="turn turn_vdn" WORKLOAD_SIZES_M=2 \
+    SIZE_RATIOS=2 REPEATS=1 RESUME=0 PLUGIN_PLACEHOLDERS=1 DIAGNOSTIC_RUN=1 \
+    CONTROLLER_OBJECTIVE_MODE=balanced PRICES_FILE="$LEARNER_PRICES" \
+    TURN_SETTINGS_FILE="$turn_settings" KEEP_DATABASES=1 \
+    RESULTS_ROOT="$TURN_RESULTS/results" \
+    DB_ROOT="$DB_ROOT/preflight-turn-smoke" \
+    "$PIPELINE_DIR/03_run_experiments.sh"
+  for arm in turn turn_vdn; do
+    options_bytes="$(find "$DB_ROOT/preflight-turn-smoke/2M/T2/$arm" -maxdepth 1 \
+      -name 'OPTIONS-*' -printf '%T@ %s\n' 2>/dev/null | sort -n | tail -n 1 |
+      awk '{print $2}')"
+    "$PYTHON" "$PIPELINE_DIR/37_check_turn_run.py" \
+      --result "$TURN_RESULTS/results/2M/T2/$arm" --prices "$LEARNER_PRICES" \
+      ${options_bytes:+--options-bytes "$options_bytes"} --min-pushes 3 --strict \
+      --output "$PREFLIGHT_WORK_DIR/turn_smoke_${arm}_report.json"
+  done
+  rm -rf "$DB_ROOT/preflight-turn-smoke"
+  "$PYTHON" "$PIPELINE_DIR/04_generate_graphs.py" \
+    --results "$TURN_RESULTS/results" --summary-only
+  "$PYTHON" - "$TURN_RESULTS/results/graphs/summary.csv" <<'PY'
+import csv, sys
+rows = {r["arm"]: r for r in csv.DictReader(open(sys.argv[1]))}
+for arm in ("turn", "turn_vdn"):
+    if rows.get(arm, {}).get("settle_ok") != "1":
+        raise SystemExit(f"[step 6] FAIL: the {arm} arm was not scored as a "
+                         "Programme 1 arm (no settled measured phase)")
+    print(f"[step 6] {arm}: {rows[arm]['measured_operations']} operations, "
+          f"throughput {float(rows[arm]['throughput_ops_per_second']):.0f} ops/s")
+PY
   pass 6
 fi
 
@@ -339,5 +390,6 @@ if [[ -d controller ]]; then plugin_args=(--plugin "$CONTROLLER_PLUGIN"); fi
 echo "passed: ${passed[*]}"
 echo "skipped: ${skipped[*]:-none}"
 echo "03 accepts a long run only when every step its arms need passed:"
-echo "static arms need 1-4, rules also 5, learned arms 1-6; a suite workload"
+echo "static arms need 1-4, rules also 5, learner arms (learned, learned2, turn,"
+echo "turn_vdn) 1-6; a suite workload"
 echo "(SUITE_WORKLOAD) or a tree's preload (31) also needs 7."

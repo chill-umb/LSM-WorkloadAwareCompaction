@@ -15,7 +15,14 @@
 #   RL_WORKLOADS="W1 W2 W3 W4 W5"
 #   RL_BETA_STAR=2              a contract-reported beta*: diagnostic runs only
 #   RL_QBAR_STANDIN=50000       while the contract's q-bar is open (D-29 §6)
+#   RL_QBAR_FILE=               a JSON object {"W1": ops/s, ...}: each
+#                               workload's own stand-in (38's qbar.json, this
+#                               machine's measured q-bar), in place of
+#                               RL_QBAR_STANDIN; it must name every workload
 #   RL_REPEATS=1
+#   RL_ARMS=learned2            03's arms per run, in order (e.g. "native turn
+#                               turn_vdn": the turn arms beside a same-day
+#                               native on the same tree)
 #   RL_TAG=rl2                  the results' folder and session prefix (a new
 #                               tag keeps an earlier batch's results apart,
 #                               since RESUME skips completed runs)
@@ -41,7 +48,9 @@ RL_MODES="${RL_MODES:-read write}"
 RL_WORKLOADS="${RL_WORKLOADS:-W1 W2 W3 W4 W5}"
 RL_BETA_STAR="${RL_BETA_STAR:-2}"
 RL_QBAR_STANDIN="${RL_QBAR_STANDIN:-50000}"
+RL_QBAR_FILE="${RL_QBAR_FILE:-}"
 RL_REPEATS="${RL_REPEATS:-1}"
+RL_ARMS="${RL_ARMS:-learned2}"
 RL_TAG="${RL_TAG:-rl2}"
 MIN_FREE_GB="${MIN_FREE_GB:-100}"
 export MIN_FREE_GB
@@ -51,6 +60,20 @@ GEOMETRY=(WRITE_BUFFER_SIZE="$SUITE_WRITE_BUFFER_SIZE"
           OPEN_FILES="$SUITE_OPEN_FILES" RUN_MEMORY_MAX="$SUITE_MEMORY_MAX")
 l1="${RL_SETTING%%:*}" k="${RL_SETTING##*:}"
 setting_id() { echo "T$1-l1$l1-k$k"; }
+qbar_for() {  # $1 = workload: its q-bar stand-in
+  if [[ -z "$RL_QBAR_FILE" ]]; then
+    echo "$RL_QBAR_STANDIN"
+    return 0
+  fi
+  "$PY" - "$RL_QBAR_FILE" "$1" <<'PY'
+import json, math, sys
+value = json.load(open(sys.argv[1])).get(sys.argv[2])
+if isinstance(value, bool) or not isinstance(value, (int, float)) \
+        or not math.isfinite(value) or value <= 0:
+    sys.exit(f"{sys.argv[1]} has no positive q-bar for {sys.argv[2]}")
+print(repr(float(value)))
+PY
+}
 case "${1:-}" in
   plan)
     n=0
@@ -58,9 +81,9 @@ case "${1:-}" in
       echo "tree $(setting_id "$T"): reused if kept, else $SUITE_PRELOAD_KEYS keys"
       for mode in $RL_MODES; do
         for w in $RL_WORKLOADS; do
-          echo "  learned2 $mode beta*=$RL_BETA_STAR $w $(setting_id "$T"):" \
-               "$RL_REPEATS x ${SUITE_RUN_OPERATIONS_M}M operations"
-          n=$(( n + RL_REPEATS ))
+          echo "  $RL_ARMS $mode beta*=$RL_BETA_STAR q-bar $(qbar_for "$w") $w" \
+               "$(setting_id "$T"): $RL_REPEATS x ${SUITE_RUN_OPERATIONS_M}M operations"
+          n=$(( n + RL_REPEATS * $(wc -w <<< "$RL_ARMS") ))
         done
       done
     done
@@ -73,12 +96,16 @@ esac
 [[ "$RL_SETTING" =~ ^[1-9][0-9]*:[1-9][0-9]*$ ]] || fail "RL_SETTING is <L1 MiB>:<K>"
 [[ "$RL_REPEATS" =~ ^[1-9][0-9]*$ ]] || fail "RL_REPEATS must be a positive whole number"
 [[ "$RL_TAG" =~ ^[a-z][a-z0-9]*$ ]] || fail "RL_TAG is lower-case letters and digits"
+for arm in $RL_ARMS; do
+  [[ "$arm" =~ ^(native|learned2|turn|turn_vdn)$ ]] || fail "unknown arm $arm"
+done
 for mode in $RL_MODES; do
   [[ "$mode" == read || "$mode" == write || "$mode" == space || "$mode" == balanced ]] ||
     fail "unknown mode $mode"
 done
 for w in $RL_WORKLOADS; do
   suite_workload_recipe "$w" > /dev/null || fail "unknown workload $w (W1-W5)"
+  qbar_for "$w" > /dev/null || fail "no q-bar for $w (RL_QBAR_FILE $RL_QBAR_FILE)"
 done
 "$PY" - "$PRICES_FILE" <<'PY' || fail "PRICES_FILE must be a schema-6 (cost model 2) record"
 import json, sys
@@ -91,8 +118,8 @@ for mode in $RL_MODES; do
 done
 node_checks "${fresh[@]}"
 failed=()
-stamp "rl batch: T $RL_T; setting $RL_SETTING; modes $RL_MODES; workloads" \
-      "$RL_WORKLOADS; beta* $RL_BETA_STAR; q-bar stand-in $RL_QBAR_STANDIN"
+stamp "rl batch: arms $RL_ARMS; T $RL_T; setting $RL_SETTING; modes $RL_MODES; workloads" \
+      "$RL_WORKLOADS; beta* $RL_BETA_STAR; q-bar ${RL_QBAR_FILE:-stand-in $RL_QBAR_STANDIN}"
 for T in $RL_T; do
   id="$(setting_id "$T")"
   stamp "$id: tree"
@@ -116,14 +143,15 @@ for T in $RL_T; do
         failed+=("$id: disk")
         break 3
       fi
-      stamp "$id: $mode $w"
+      qbar="$(qbar_for "$w")"
+      stamp "$id: $mode $w (q-bar $qbar)"
       status=0
       env "${GEOMETRY[@]}" CONFIRM_EXPERIMENTS=YES SUITE_WORKLOAD="$w" \
-        TREE_DIR="$tree" EXPERIMENT_ARMS=learned2 SIZE_RATIOS="$T" \
+        TREE_DIR="$tree" EXPERIMENT_ARMS="$RL_ARMS" SIZE_RATIOS="$T" \
         MAX_BYTES_FOR_LEVEL_BASE="$(( l1 * 1048576 ))" L0_COMPACTION_TRIGGER="$k" \
         WORKLOAD_SIZES_M="$SUITE_RUN_OPERATIONS_M" REPEATS="$RL_REPEATS" \
         DIAGNOSTIC_RUN=1 CONTROLLER_OBJECTIVE_MODE="$mode" \
-        CONTROLLER_BETA_STAR="$RL_BETA_STAR" CONTROLLER_QBAR_STANDIN="$RL_QBAR_STANDIN" \
+        CONTROLLER_BETA_STAR="$RL_BETA_STAR" CONTROLLER_QBAR_STANDIN="$qbar" \
         RESUME=1 SESSION_ID="$RL_TAG-$mode-$w" RESULTS_ROOT="$NVME/$RL_TAG-$mode-$w/$id" \
         DB_ROOT="$NVME/suite-dbs/$w/$id-$RL_TAG-$mode" "$PIPELINE_DIR/03_run_experiments.sh" ||
         status=$?

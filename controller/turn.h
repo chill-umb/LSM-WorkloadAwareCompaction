@@ -22,28 +22,8 @@
 
 namespace rlc {
 
-// The turn mode's settings (config.h; every one is required in mode "turn").
-struct TurnConfig {
-  double turn_ops = 0;      // operations per turn, any kind
-  int acting = 0;           // acting levels, L0 included (n + 1 in the design)
-  int arch = 0;             // 0: factored (one agent), 1: VDN (one per level)
-  double kappa = 0;         // anchor decay constant, in turns
-  double margin = 0;        // epsilon of the encoding
-  double sigma_max = 0;     // compact's score cap (4/3)
-  double glide_share = 0;   // R_i's share of the slot's merge bytes (1/2)
-  int forecast_turns = 0;   // turns behind the rate forecasts (8)
-  double guard_owed_bytes = 0;     // no anchor drop above this owed work
-  int guard_l0_flushes = 0;        // ... or within this many flushes of slowdown
-  int safety_l0_flushes = 0;       // no defer/expand within this many
-  double safety_pending_bytes = 0; // no deep defer/expand above this
-  int k_defer_max = 0;      // defer's highest L0 trigger (18)
-  double renew_band = 0;    // see Press
-  int max_topups = 0;       // defer raises within a turn (2)
-  double explore_start = 0, explore_end = 0;
-  double explore_turns = 0;  // linear from start to end over this many turns
-  std::vector<double> k_rungs;  // ascending, whole files, K_cfg among them
-  std::vector<double> m_rungs;  // ascending, 1 among them, inside [0.5, 2]
-};
+// The turn mode's settings, TurnConfig, are in config.h (every one is
+// required in mode "turn").
 
 // --- Rungs and anchors -----------------------------------------------------
 
@@ -76,7 +56,6 @@ struct AnchorState {
 double Decay(double a, double kappa);
 
 struct TurnTree;
-struct TurnConfig;
 // One turn of decay for every anchor, done first at each turn boundary. A
 // step that lowers a target (an anchor above native crossing to a lower rung)
 // goes through the guards: it waits this turn while RocksDB's pending

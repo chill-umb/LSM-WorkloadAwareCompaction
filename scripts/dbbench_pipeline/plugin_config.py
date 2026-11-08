@@ -16,7 +16,7 @@ value, so no value is chosen when an arm starts.
   prices (18, D-15)      c_w c_f c_blk c_sk c_open (D-21: the controller
                          prices each level's reopens at stage 18's c_open)
   D-16                   config/admission_test.json: k
-  cost model 2 (D-23)    the learner arms only (prior, learned): from a
+  cost model 2 (D-23)    the learner arms only (prior, learned, turn): from a
                          schema-6 prices file (stage 30; cost_model_v2's
                          load_prices), c_cr c_job_<kind> c_st c_ib c_mt
                          c_get0 c_sc0 c_put p_dev lambda n_win and every
@@ -25,6 +25,10 @@ value, so no value is chosen when an arm starts.
   learner settings       LEARNER_SETTINGS_FILE (D-24 §2, exploratory):
                          explore, push_interval_ms, weights_required; the
                          seed and the weights path come from the arm
+  turn settings          the turn arms (turn, turn_vdn; controller/turn.h):
+                         TURN_SETTINGS_FILE's "plugin" part, every turn_*
+                         key but turn_arch (the arm's), push_interval_ms and
+                         weights_required; no explore
 
 Every value missing, or null, in its file is listed and the arm is refused:
 the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
@@ -49,8 +53,21 @@ from pathlib import Path
 import research_objective
 
 PLUGIN_MODES = {"hold": "hold-only", "rules": "rules", "prior": "prior-only",
-                "learned": "learned", "learned2": "learned2"}
-LEARNER_ARMS = ("prior", "learned", "learned2")
+                "learned": "learned", "learned2": "learned2", "turn": "turn",
+                "turn_vdn": "turn"}
+LEARNER_ARMS = ("prior", "learned", "learned2", "turn", "turn_vdn")
+# The turn arms (controller/turn.h): one plugin mode, the arm picks the
+# value function; every other turn key comes from the "plugin" part of the
+# turn settings (config/turn_settings.json), with the weights keys.
+TURN_ARMS = {"turn": "factored", "turn_vdn": "vdn"}
+TURN_KEYS = ("turn_ops", "turn_acting", "turn_kappa", "turn_margin",
+             "turn_sigma_max", "turn_glide_share", "turn_forecast_turns",
+             "turn_guard_owed_bytes", "turn_guard_l0_flushes",
+             "turn_safety_l0_flushes", "turn_safety_pending_bytes",
+             "turn_k_defer_max", "turn_renew_band", "turn_max_topups",
+             "turn_explore_start", "turn_explore_end", "turn_explore_turns",
+             "turn_k_rungs", "turn_m_rungs")
+TURN_STRING_KEYS = ("turn_arch", "turn_k_rungs", "turn_m_rungs")
 # learned2's own keys (controller/learned2.h; owner, 2026-11-05), from the
 # "plugin" part of its settings file (config/learner2_settings.json).
 LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",
@@ -230,12 +247,14 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
                              f"schema 6, not {prices.get('schema')!r}")
         config.update(cost_model_2_keys(prices))
         learner = learner or {}
-        config["explore"] = _value(learner, "explore", "learner settings",
-                                   missing)
+        # The turn arms explore at their own rate (turn_explore_*).
+        if arm not in TURN_ARMS:
+            config["explore"] = _value(learner, "explore", "learner settings",
+                                       missing)
         if seed is None:
             missing.append("seed (the arm's)")
         config["seed"] = seed
-        if arm in ("learned", "learned2"):
+        if arm in ("learned", "learned2", *TURN_ARMS):
             if not weights_path:
                 missing.append("weights_path (the arm's)")
             config["weights_path"] = weights_path
@@ -247,6 +266,10 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             for key in LEARNED2_OPTIONAL_KEYS:
                 if learner.get(key) is not None:
                     config[key] = learner[key]
+        if arm in TURN_ARMS:
+            config["turn_arch"] = TURN_ARMS[arm]
+            for key in TURN_KEYS:
+                config[key] = _value(learner, key, "turn settings", missing)
 
     filled: list[str] = []
     if missing and placeholders:
@@ -268,7 +291,10 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     config.update(schedule)
     for key, value in config.items():
         if key.endswith("_log") or key in ("mode", "rules", "weights_path",
-                                           "apply_m", "apply_schedule"):
+                                           "apply_m", "apply_schedule",
+                                           *TURN_STRING_KEYS):
+            if key in TURN_STRING_KEYS and not isinstance(value, str):
+                raise ValueError(f"{key} must be a string; got {value!r}")
             continue
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or
                 not math.isfinite(value)):

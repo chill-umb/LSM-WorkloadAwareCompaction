@@ -100,6 +100,7 @@ gate1
 !config/controller_rules.json
 !config/learner_settings.json
 !config/learner2_settings.json
+!config/turn_settings.json
 # The controller plugin's build file (plan §8). Its per-arm config is composed by
 # the pipeline, not committed, so it has no re-include.
 !controller/CMakeLists.txt

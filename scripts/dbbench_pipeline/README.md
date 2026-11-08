@@ -620,6 +620,36 @@ the plugin falls back unless the file is valid. Every learned arm is
 reported by `21_check_learner.py` (`learner_check.json`; report-only on the
 exploratory track).
 
+### One machine's calibration (stage 38; exploratory)
+
+q-bar and every price that changes from machine to machine are measured once
+on each machine, after its preflight and before its experiments, with
+nothing else running (about 2.5 hours):
+
+```bash
+CONFIRM_MACHINE_CALIBRATION=YES NVME=<db root> ALLOW_ROOT_DISK=1 CAL_T=<the machine's T> \
+  BASE_PRICES_FILE=<stage 18's schema-4 prices.json> PRICES_FILE=<schema-6 reference> \
+  ACTION_BOUNDS_FILE=... CONTROLLER_RULES_FILE=... \
+  scripts/dbbench_pipeline/38_calibrate_machine.sh      # `plan` lists the runs
+```
+
+Its parts: one native run per workload (36, the machine's T at
+`CAL_SETTING`, the full 40M run unless `CAL_OPS` says otherwise; q-bar = its
+measured-phase throughput, and its jobs are the job fit's reference runs); stage 18's read
+fits on one set of six price trees built as 29 builds them; the October
+cost-model recipe (`38b_cost_model_runs.sh`: quiet reads, Puts, scans, the
+memtable at the suite's write buffer, and every reader beside a writing
+neighbour, for kappa and c_cr); then the fits (38's `reads`, calibration_v2's
+`foreground` and `jobs`, 30, 38's `compose`). It leaves in `CAL_OUT`:
+`prices.machine.json` (schema 6), `qbar.json`, `turn_settings.machine.json`
+(c_set from the preflight's turn smoke at this machine's prices),
+`calibration.json` and `report.md` (every price against the reference). A
+finished part is skipped when `CAL_OUT` is reused. Not refitted: n_win and
+the money (the core price and c_s). Experiments then take
+`PRICES_FILE=$CAL_OUT/prices.machine.json`, `RL_QBAR_FILE=$CAL_OUT/qbar.json`
+(36: each workload's own q-bar stand-in) and
+`TURN_SETTINGS_FILE=$CAL_OUT/turn_settings.machine.json`.
+
 ### The workload suite (PREREGISTRATION D-29; D-27's preloaded trees)
 
 Five workloads, set by `SUITE_WORKLOAD` (`config.sh`'s
