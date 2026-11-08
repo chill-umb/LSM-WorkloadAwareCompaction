@@ -700,5 +700,95 @@ class TrimIn38bTest(unittest.TestCase):
             self.assertFalse((root / "cost" / "build" / "b4k" / "load.txt").exists())
 
 
+class FitToSealSandboxTest(unittest.TestCase):
+    """38's fit through to the seal, on a copy of the pipeline whose
+    calibration_v2.py and stage 30 are stand-ins (they record what 38 gives
+    them); the read fit, arm-dirs, compose and the seal are the real ones.
+    The measured parts are on disk as a finished calibration leaves them.
+    2026-11-08: every machine's fit stopped at "10 native arm dirs" (the
+    count took --run DIR as two folders); no test had reached that line."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = self.base = Path(self.tmp.name)
+        repo = self.repo = base / "repo"
+        pipe = repo / "scripts" / "dbbench_pipeline"
+        shutil.copytree(PIPELINE, pipe, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "config", repo / "config")
+        # compose measures c_set through 37, which imports rl_agent/learner.
+        shutil.copytree(REPO / "rl_agent", repo / "rl_agent",
+                        ignore=shutil.ignore_patterns("__pycache__", "tests"))
+        self.log = base / "stub_calls.txt"
+        (pipe / "calibration_v2.py").write_text(
+            "import json, sys\n"
+            f"open({str(self.log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "args = sys.argv[1:]\n"
+            "if '--out' in args:\n"
+            "    out = args[args.index('--out') + 1]\n"
+            "    json.dump({'l0_merge_span_ops_percentiles': {'50': 9000.0},\n"
+            "               'c_cr_combined': False}, open(out, 'w'))\n")
+        (base / "fitted.json").write_text(json.dumps(priced6({"c_f": 2e-7})))
+        (pipe / "30_provisional_prices_v2.py").write_text(
+            "import shutil, sys\n"
+            f"shutil.copy({str(base / 'fitted.json')!r}, sys.argv[sys.argv.index('--out') + 1])\n")
+        for path, text in (
+                (repo / "build-dbbench" / "db_bench", "#!/usr/bin/env bash\nexit 0\n"),
+                (base / "venv" / "bin" / "python",
+                 f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+            path.chmod(0o755)
+        (base / "base.json").write_text(json.dumps(base_record()))
+        (base / "ref.json").write_text(json.dumps(priced6({"c_f": 1e-7})))
+        cal = self.cal = base / "cal"
+        write_rounds(cal / "reads")
+        (cal / "reads" / "DONE").write_text("")
+        nb = cal / "cost" / "runs" / "r1-nbgarb-hit"
+        nb.mkdir(parents=True)
+        (nb / "neighbour_host_log.jsonl").write_text("{}\n")
+        (cal / "cost" / "DONE").write_text("")
+        for i, rate in enumerate((60000, 190000, 80000, 45000, 95000), 1):
+            summary(base / "db" / f"machinecal-read-W{i}" / "graphs" / "summary.csv",
+                    [native(rate, result_directory=str(base / "db" / f"arm-W{i}"))])
+        smoke = repo / "build-dbbench" / "preflight" / "turn_smoke" / "results" / "2M" / "T2"
+        result, report = turn_result(smoke / "turn", [100, 300])
+        shutil.copy(report, repo / "build-dbbench" / "preflight" / "turn_smoke_turn_report.json")
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(("CAL_", "PRICE", "DBBENCH_", "PREFLIGHT_"))}
+        self.env.update(DBBENCH_CPUS="", CONTROLLER_CPUS="", PYTHON_VENV=str(base / "venv"),
+                        CONFIRM_MACHINE_CALIBRATION="YES", NVME=str(base / "db"), CAL_T="3",
+                        MACHINE_CAL_DIR=str(cal), CAL_PARTS="fit",
+                        BASE_PRICES_FILE=str(base / "base.json"),
+                        PRICES_FILE=str(base / "ref.json"))
+
+    def run38(self):
+        return subprocess.run(
+            ["bash", str(self.repo / "scripts" / "dbbench_pipeline" / "38_calibrate_machine.sh")],
+            cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=600)
+
+    def test_the_fit_reaches_the_seal_with_one_folder_per_workload(self):
+        done = self.run38()
+        self.assertEqual(done.returncode, 0, done.stdout[-3000:] + done.stderr[-3000:])
+        self.assertNotIn("native arm dirs", done.stdout)
+        self.assertIn("done and sealed", done.stdout)
+        self.assertTrue(done.stdout.rstrip().endswith("MACHINE_CAL_EXIT=0"))
+        jobs = [line.split() for line in self.log.read_text().splitlines()
+                if line.startswith("jobs ")]
+        self.assertEqual(len(jobs), 1)
+        runs = [jobs[0][i + 1] for i, a in enumerate(jobs[0]) if a == "--run"]
+        self.assertEqual(runs, [str(self.base / "db" / f"arm-W{i}") for i in range(1, 6)])
+        self.assertEqual(jobs[0].count("--neighbour-log"), 1)
+        record = json.loads((self.cal / "MACHINE_CALIBRATED").read_text())
+        self.assertEqual(record["workloads"], ["W1", "W2", "W3", "W4", "W5"])
+        self.assertEqual(record["qbar"]["W4"], 45000.0)
+        self.assertGreater(record["c_set"], 0)
+        self.assertEqual(status(self.cal, self.base / "db").returncode, 0)
+        # Once only: a second call does nothing.
+        done = self.run38()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("calibrated already", done.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

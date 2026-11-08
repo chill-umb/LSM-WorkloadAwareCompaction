@@ -320,7 +320,9 @@ if has_part fit; then
     for log in "$COST_DIR"/runs/r*-nbgarb-*/neighbour_host_log.jsonl; do
       [[ -f "$log" ]] && neighbours+=(--neighbour-log "$log")
     done
-    (( ${#runs[@]} == ${#WORKLOADS[@]} )) || { stamp "fit: ${#runs[@]} native arm dirs"; fit_ok=0; }
+    # One arm folder per workload; runs holds two words per folder (--run DIR).
+    (( ${#arm_dirs[@]} == ${#WORKLOADS[@]} )) ||
+      { stamp "fit: ${#arm_dirs[@]} native arm dirs for ${#WORKLOADS[@]} workloads"; fit_ok=0; }
     (( ${#neighbours[@]} )) || { stamp "fit: no garbage neighbour's host log"; fit_ok=0; }
     if (( fit_ok )); then
       "$PY" "$PIPELINE_DIR/calibration_v2.py" jobs "${runs[@]}" "${neighbours[@]}" \
