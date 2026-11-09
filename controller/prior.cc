@@ -134,8 +134,7 @@ Values LevelPrior(const View& v, int j, const LevelControl& c,
   return Clip(out, cfg.b_max);
 }
 
-Values L0Prior(const View& v, const L0Control& c, const Config& cfg) {
-  const Bounds b = L0Bounds(cfg.bounds, v.k0_live_cap);
+L0Costs L0TriggerCosts(const View& v, const Config& cfg, double K) {
   const double F = v.F;  // held fixed from the first flush (H §3)
   const double u = Ratio(v.user_bytes, v.ops);
   const double gets = Ratio(v.gets, v.ops);
@@ -151,13 +150,35 @@ Values L0Prior(const View& v, const L0Control& c, const Config& cfg) {
       cfg.cost_model == 2
           ? cfg.JobPrice(kL0Merge) + cfg.v2.c_cr * m1C1
           : 0.0;
-  const auto write = [&](double K) {
-    return cfg.beta_w * (cfg.c_w * m1C1 + per_merge) * u / (K * F);
-  };
-  const auto read = [&](double K) {
-    return cfg.beta_r * (K / 2) * (gets * per_get + scans * per_scan);
-  };
-  const auto cost = [&](double K) { return write(K) + read(K); };
+  L0Costs out;
+  out.write = cfg.beta_w * (cfg.c_w * m1C1 + per_merge) * u / (K * F);
+  out.read = cfg.beta_r * (K / 2) * (gets * per_get + scans * per_scan);
+  return out;
+}
+
+Values L0TurnPrior(const View& w, const Config& cfg, int k_now, int k_up,
+                   int k_down) {
+  Values out{};
+  if (!(w.ops > 0) || !(w.F > 0) || k_now < 1 || k_up < 1 || k_down < 1) {
+    return out;
+  }
+  const double now = L0TriggerCosts(w, cfg, k_now).total();
+  const double up = L0TriggerCosts(w, cfg, k_up).total();
+  const double down = L0TriggerCosts(w, cfg, k_down).total();
+  if (!std::isfinite(now) || !std::isfinite(up) || !std::isfinite(down)) {
+    return out;
+  }
+  out[kExpand] = cfg.turn.turn_ops * (up - now);
+  out[kCompact] = cfg.turn.turn_ops * (down - now);
+  return out;
+}
+
+Values L0Prior(const View& v, const L0Control& c, const Config& cfg) {
+  const Bounds b = L0Bounds(cfg.bounds, v.k0_live_cap);
+  const double F = v.F;
+  const auto write = [&](double K) { return L0TriggerCosts(v, cfg, K).write; };
+  const auto read = [&](double K) { return L0TriggerCosts(v, cfg, K).read; };
+  const auto cost = [&](double K) { return L0TriggerCosts(v, cfg, K).total(); };
   // Over one turnover, N_0 operations, divided by c_w C_0.
   const double norm = Ratio(v.N[0], cfg.c_w * v.k0_cfg * F);
   const double K = v.K0;

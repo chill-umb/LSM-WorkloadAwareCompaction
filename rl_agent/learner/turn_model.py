@@ -120,17 +120,41 @@ def scale_inputs(x: torch.Tensor, mean: torch.Tensor, scale: torch.Tensor,
 
 
 def greedy(model: torch.nn.Module, xs: torch.Tensor,
-           masks: torch.Tensor) -> torch.Tensor:
+           masks: torch.Tensor, prior: torch.Tensor | None = None) -> torch.Tensor:
     """Each level's best allowed action, ties to the lowest index (hold), as
-    the plugin's Greedy. [B, acting] long."""
-    s = model.scores(xs).masked_fill(~masks, float("-inf"))
-    return s.argmax(-1)
+    the plugin's Greedy: of the scores less the L0 prior when one is given
+    (prior [B, acting, 4] in the reward's units, 0 but at L0). [B, acting]
+    long."""
+    s = model.scores(xs)
+    if prior is not None:
+        s = s - prior
+    return s.masked_fill(~masks, float("-inf")).argmax(-1)
+
+
+def prior_term(prior: torch.Tensor, actions: torch.Tensor, masks: torch.Tensor,
+               arch: str) -> torch.Tensor:
+    """What the L0 prior takes from Q(s, a) [B]. VDN: the taken actions'
+    prior values summed; factored: each taken value less the mean over the
+    allowed actions, as its advantages are centred."""
+    taken = prior.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
+    if arch == "factored":
+        allowed = masks.double()
+        taken = taken - (prior * allowed).sum(-1) / allowed.sum(-1).clamp(min=1)
+    return taken.sum(-1)
+
+
+def joint_prior(model: torch.nn.Module, xs: torch.Tensor, actions: torch.Tensor,
+                masks: torch.Tensor, prior: torch.Tensor | None = None) -> torch.Tensor:
+    """Q(s, a) = the net's joint value less the L0 prior's term: the net
+    learns the correction to the prior (controller/config.h turn_prior)."""
+    q = model.joint(xs, actions, masks)
+    return q if prior is None else q - prior_term(prior, actions, masks, model.arch)
 
 
 def export(model: torch.nn.Module, version: int, mean: list, scale: list,
-           clip: float) -> TW.TurnWeights:
+           clip: float, spread: float = 1.0) -> TW.TurnWeights:
     return TW.TurnWeights(version=version, arch=TW.ARCHS[model.arch],
                           acting=model.acting, clip=float(clip),
                           mean=[float(v) for v in mean],
                           scale=[float(v) for v in scale],
-                          nets=model.export_nets())
+                          nets=model.export_nets(), spread=float(spread))

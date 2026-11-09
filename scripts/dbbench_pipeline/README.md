@@ -682,6 +682,22 @@ it to `plugin_config.py`, the turn arms' config carries it as `turn_decay`
 refused outside a diagnostic run; 36's runs are diagnostic. Example:
 `env DECAY=0 RL_TAG=<tag> ... scripts/dbbench_pipeline/36_rl_batch.sh`.
 
+### The turn arms' L0 prior flag, PRIOR
+
+`PRIOR=0` (the default): the net's scores alone. `PRIOR=1` (owner,
+2026-11-09): L0's greedy choice is the net's score minus the October L0
+formula (PATHWAYS Prop. D.11, `controller/prior.h` `L0TriggerCosts`) as one
+turn's change of cost at the rung each move leaves (`L0TurnPrior`: expand
+one rung up, compact one down, hold and defer 0), from the last
+`turn_forecast_turns` turns' counts only; it is divided by the reward's
+spread, which the trainer writes into the weights file (RLTW0002; 1 before
+the first push). The trainer learns the net as the correction (Q = net -
+prior), so a cold start acts on the formula. The turn lines log `prior` (J
+per turn, null when off) and `prior_spread`; 37's ARCH-6 check subtracts it.
+Carried like DECAY: `turn_prior` in the config, `turn_prior=` in
+`metadata.env`; 1 only in a diagnostic run. Example:
+`env PRIOR=1 RL_TAG=<tag> ... scripts/dbbench_pipeline/36_rl_batch.sh`.
+
 ### SSD TRIM before every run (owner, 2026-11-08)
 
 ext4 tells the drive which blocks are free only at the weekly `fstrim`; on

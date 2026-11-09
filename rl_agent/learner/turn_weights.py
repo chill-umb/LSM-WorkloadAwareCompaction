@@ -1,4 +1,4 @@
-"""The turn mode's inputs and weights file (controller/turn.h, RLTW0001):
+"""The turn mode's inputs and weights file (controller/turn.h, RLTW0002):
 the 35 input names in the plugin's order, the blocks and the VDN views,
 the file's encoding, an atomic writer, and a forward pass that follows
 turn.cc's TurnScores operation for operation. Pure Python, so the golden
@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from .weights import features_hash, fnv1a64
 
-MAGIC = b"RLTW0001"
+MAGIC = b"RLTW0002"
 ARCHS = {"factored": 0, "vdn": 1}
 ACTIONS = ("hold", "compact", "defer", "expand")
 N_ACTIONS = 4
@@ -72,6 +72,7 @@ class TurnWeights:
     mean: list
     scale: list
     nets: list = field(default_factory=list)
+    spread: float = 1.0   # the reward's frozen spread (J per reward unit)
 
     @property
     def names(self) -> list:
@@ -99,13 +100,15 @@ def encode(w: TurnWeights) -> bytes:
         raise ValueError("mean and scale need one value per input")
     if not all(s > 0 for s in w.scale) or not w.clip > 0:
         raise ValueError("scale and clip must be positive")
+    if not (w.spread > 0 and math.isfinite(w.spread)):
+        raise ValueError("spread must be positive and finite")
     want_nets = 1 if w.arch == 0 else w.acting
     if len(w.nets) != want_nets:
         raise ValueError(f"arch {w.arch} needs {want_nets} nets, not {len(w.nets)}")
     want_out = 1 + N_ACTIONS * w.acting if w.arch == 0 else N_ACTIONS
     out = [struct.pack("<III", w.arch, w.acting, n_in),
            struct.pack("<Q", features_hash(w.names)),
-           _f64s([w.clip]), _f64s(w.mean), _f64s(w.scale),
+           _f64s([w.clip]), _f64s([w.spread]), _f64s(w.mean), _f64s(w.scale),
            struct.pack("<I", len(w.nets))]
     for net in w.nets:
         if not net.view or any(not -1 <= v < n_in for v in net.view):
@@ -148,6 +151,9 @@ def decode(data: bytes) -> TurnWeights:
     if n_in != len(feature_names(acting)) or hash_ != features_hash(feature_names(acting)):
         raise ValueError("inputs differ from the plugin's")
     (clip,) = take("<d")
+    (spread,) = take("<d")
+    if not (spread > 0 and math.isfinite(spread)):
+        raise ValueError("spread must be positive and finite")
     mean = list(take(f"<{n_in}d"))
     scale = list(take(f"<{n_in}d"))
     (n_nets,) = take("<I")
@@ -165,7 +171,7 @@ def decode(data: bytes) -> TurnWeights:
         nets.append(Net(view, layers))
     if pos != len(payload):
         raise ValueError("trailing bytes")
-    return TurnWeights(version, arch, acting, clip, mean, scale, nets)
+    return TurnWeights(version, arch, acting, clip, mean, scale, nets, spread)
 
 
 def write_atomic(w: TurnWeights, path: str) -> None:

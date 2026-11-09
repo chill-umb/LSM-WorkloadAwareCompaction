@@ -227,5 +227,65 @@ class RewardTest(unittest.TestCase):
             tr.log.close()
 
 
+@unittest.skipIf(torch is None, "needs torch")
+class PriorTest(unittest.TestCase):
+    """turn_prior: the trainer reads each line's L0 prior (zeros when off),
+    puts it in the reward's units (over the frozen spread, as the plugin
+    divides by its weights' spread), learns Q = net - prior, and pushes its
+    spread in the weights file."""
+    def test_lines_carry_the_prior_or_zeros(self):
+        names = TW.feature_names(ACTING)
+        line = turn_line(3)
+        self.assertEqual(TT.parse_turn(line, names, ACTING).prior, [0.0] * 4)
+        line["prior"] = None
+        self.assertEqual(TT.parse_turn(line, names, ACTING).prior, [0.0] * 4)
+        line["prior"] = [0, 1.5, 0, -2]
+        self.assertEqual(TT.parse_turn(line, names, ACTING).prior, [0.0, 1.5, 0.0, -2.0])
+
+    def test_prior_q_is_l0_only_over_the_spread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp, "vdn")
+            tr.spread = 4.0
+            pq = tr.prior_q([[0, 8, 0, -4], [0, 0, 0, 0]])
+            self.assertEqual(tuple(pq.shape), (2, ACTING, 4))
+            self.assertEqual(pq[0, 0].tolist(), [0.0, 2.0, 0.0, -1.0])
+            self.assertEqual(float(pq[:, 1:].abs().sum()), 0.0)
+            tr.log.close()
+
+    def test_a_cold_net_is_valued_at_minus_the_prior(self):
+        """Cold (every net output 0): Q(s, a) = -p0[a] / spread (factored:
+        centred over the allowed actions), and the bootstrap takes s' at its
+        cheapest allowed L0 action."""
+        names = TW.feature_names(ACTING)
+        for arch in ("factored", "vdn"):
+            with tempfile.TemporaryDirectory() as tmp:
+                tr = make(tmp, arch)
+                tr.jbar, tr.spread, tr.gamma, tr.c_set = 0.0, 2.0, 0.9, 0.0
+                tr.p = [0.0] * LEVELS
+                d = [0.0] * LEVELS
+                masks = [[True] * 4] * ACTING
+                tr0 = TT.Transition(t=1, x0=[0.0] * len(names), m0=masks, a=[3] + [0] * (ACTING - 1),
+                                    x1=[0.0] * len(names), m1=masks, d0=d, d1=d, J=6.0, changes=0,
+                                    p0=[0.0, 4.0, 0.0, -6.0], p1=[0.0, 2.0, 0.0, -8.0])
+                r = tr.reward(tr0)
+                if arch == "vdn":
+                    q, boot = 6.0 / 2, 8.0 / 2
+                else:   # centred over the four allowed actions
+                    q = -(-6.0 - (-2.0) / 4) / 2
+                    boot = -(-8.0 - (-6.0) / 4) / 2
+                self.assertAlmostEqual(tr.td_error(tr0), r + 0.9 * boot - q, places=12)
+                no_prior = TT.Transition(**{**tr0.__dict__, "p0": [0.0] * 4, "p1": [0.0] * 4})
+                self.assertAlmostEqual(tr.td_error(no_prior), r, places=12)
+                tr.log.close()
+
+    def test_the_push_carries_the_spread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp, "vdn")
+            tr.spread = 3.25
+            tr.push()
+            self.assertEqual(TW.decode(Path(tr.args.weights).read_bytes()).spread, 3.25)
+            tr.log.close()
+
+
 if __name__ == "__main__":
     unittest.main()

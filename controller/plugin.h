@@ -168,6 +168,13 @@ class Controller {
                     const ROCKSDB_NAMESPACE::RLOpCounts& ops,
                     const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
                     uint64_t now, bool final, std::string* error);
+  // The View the L0 prior reads (turn_prior): the tree and options now, the
+  // settings in force, and every count summed over the forecast window
+  // (turn_ring_, the last turn_forecast_turns turns, the one just closed
+  // included); F is that window's flushed bytes per flush.
+  View TurnWindowView(const ROCKSDB_NAMESPACE::RLTreeSnapshot& snapshot,
+                      const ROCKSDB_NAMESPACE::RLOpCounts& ops,
+                      const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads) const;
   // A completed job's share of the open turn's activity.
   void TurnJob(const ROCKSDB_NAMESPACE::RLJobRecord& job);
   // Raises a deferred level's override when it nears due (at most
@@ -301,6 +308,9 @@ class Controller {
     double merge_bytes = 0;  // S + O of the slot's non-trivial merges
     std::vector<double> inflow;  // net bytes landed, per level
     std::vector<double> probes;  // SST probes, per level
+    // The L0 prior's window counts (turn_prior), per level as the View's.
+    double user_bytes = 0;       // BYTES_WRITTEN
+    std::vector<double> hit_reads, fp_reads, seeks, get_reopens, iter_reopens;
   };
   struct TurnDefer {         // a defer in force this turn
     bool active = false;

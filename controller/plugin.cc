@@ -138,6 +138,15 @@ std::string JsonActions(const std::vector<Action>& actions) {
   return out + "]";
 }
 
+// One action's four values as a JSON list (the L0 prior).
+std::string JsonValues(const std::array<double, kNumActions>& values) {
+  std::string out = "[";
+  for (int a = 0; a < kNumActions; ++a) {
+    out += (a ? "," : "") + JsonNumber(values[a]);
+  }
+  return out + "]";
+}
+
 std::string JsonScores(
     const std::vector<std::array<double, kNumActions>>& scores) {
   std::string out = "[";
@@ -251,6 +260,10 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   turn_defer_.assign(n_, TurnDefer());
   turn_act_.inflow.assign(n_, 0.0);
   turn_act_.probes.assign(n_, 0.0);
+  for (auto* f : {&turn_act_.hit_reads, &turn_act_.fp_reads, &turn_act_.seeks,
+                  &turn_act_.get_reopens, &turn_act_.iter_reopens}) {
+    f->assign(n_, 0.0);
+  }
   turn_op0_ = turn_start_op_ = ops.total();
   turn_next_op_ =
       turn_start_op_ + static_cast<uint64_t>(std::max(1.0, cfg_.turn.turn_ops));
@@ -1172,6 +1185,37 @@ std::vector<DecisionRecord> Controller::DecideLearned2(
 
 // --- Turn mode -------------------------------------------------------------
 
+View Controller::TurnWindowView(const RLTreeSnapshot& snapshot,
+                                const RLOpCounts& ops,
+                                const std::vector<RLLevelReadCounts>& reads) const {
+  View w = MakeView(options_, snapshot, stats_, ops, reads, m_applied_,
+                    k0_applied_);
+  double flushes = 0, flushed = 0;
+  w.ops = w.gets = w.scans = w.user_bytes = 0;
+  for (auto* f : {&w.probes, &w.hit_reads, &w.fp_reads, &w.seeks,
+                  &w.get_reopens, &w.iter_reopens}) {
+    f->assign(n_, 0.0);
+  }
+  for (const TurnActivity& a : turn_ring_) {
+    w.ops += a.ops;
+    w.gets += a.gets;
+    w.scans += a.scans;
+    w.user_bytes += a.user_bytes;
+    flushes += a.flushes;
+    flushed += At(a.inflow, 0);
+    for (int i = 0; i < n_; ++i) {
+      w.probes[i] += At(a.probes, i);
+      w.hit_reads[i] += At(a.hit_reads, i);
+      w.fp_reads[i] += At(a.fp_reads, i);
+      w.seeks[i] += At(a.seeks, i);
+      w.get_reopens[i] += At(a.get_reopens, i);
+      w.iter_reopens[i] += At(a.iter_reopens, i);
+    }
+  }
+  w.F = flushes > 0 ? flushed / flushes : 0.0;
+  return w;
+}
+
 void Controller::TurnJob(const RLJobRecord& job) {
   using Kind = RLJobRecord::Kind;
   if (!job.ok) return;
@@ -1228,7 +1272,21 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
        ++i) {
     done.probes[i] =
         static_cast<double>(Minus(reads[i].probes, turn_reads0_[i].probes));
+    const RLLevelReadCounts& now_r = reads[i];
+    const RLLevelReadCounts& start_r = turn_reads0_[i];
+    done.hit_reads[i] =
+        static_cast<double>(Minus(now_r.filter_hits, start_r.filter_hits));
+    done.fp_reads[i] =
+        static_cast<double>(Minus(now_r.filter_passes, start_r.filter_passes)) -
+        done.hit_reads[i];
+    done.seeks[i] = static_cast<double>(Minus(now_r.seeks, start_r.seeks));
+    done.get_reopens[i] =
+        static_cast<double>(Minus(now_r.get_reopens, start_r.get_reopens));
+    done.iter_reopens[i] =
+        static_cast<double>(Minus(now_r.iter_reopens, start_r.iter_reopens));
   }
+  done.user_bytes =
+      static_cast<double>(Minus(ops.bytes_written, turn_ops0_.bytes_written));
   turn_ring_.push_back(done);
   while (turn_ring_.size() > static_cast<size_t>(std::max(1, tc.forecast_turns))) {
     turn_ring_.pop_front();
@@ -1236,6 +1294,10 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   turn_act_ = TurnActivity();
   turn_act_.inflow.assign(n_, 0.0);
   turn_act_.probes.assign(n_, 0.0);
+  for (auto* f : {&turn_act_.hit_reads, &turn_act_.fp_reads, &turn_act_.seeks,
+                  &turn_act_.get_reopens, &turn_act_.iter_reopens}) {
+    f->assign(n_, 0.0);
+  }
   turn_op0_ = op;
   turn_ops0_ = ops;
   turn_reads0_ = reads;
@@ -1367,7 +1429,21 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   const double eps = ExploreRate(tc, static_cast<double>(closed));
   const std::vector<std::array<double, kNumActions>> scores =
       TurnScores(turn_have_net_ ? &turn_net_ : nullptr, x, tc.acting);
-  const std::vector<Action> greedy = Greedy(scores, masks);
+  // The L0 prior (turn_prior): L0's greedy choice is the net's score minus
+  // the October L0 formula's change of one turn's cost over the forecast
+  // window, in the reward's units (the weights' spread; 1 before the first
+  // push, when every net score is 0 and only the prior's order matters).
+  // "scores" stays the net's alone; "prior" and "prior_spread" are logged.
+  Values prior{};
+  const double spread = turn_have_net_ ? turn_net_.spread : 1.0;
+  std::vector<std::array<double, kNumActions>> acted = scores;
+  if (tc.prior && !acted.empty()) {
+    const L0Rungs k = L0RungMoves(t, kl, turn_anchors_[0].a, tc.renew_band);
+    prior = L0TurnPrior(TurnWindowView(snapshot, ops, reads), cfg_, k.now,
+                        k.up, k.down);
+    for (int a = 0; a < kNumActions; ++a) acted[0][a] -= prior[a] / spread;
+  }
+  const std::vector<Action> greedy = Greedy(acted, masks);
   std::vector<Action> actions = greedy;
   const int explored = Explore(eps, masks, &actions, &rng_);
 
@@ -1401,6 +1477,8 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
                        .Raw("action", JsonActions(actions))
                        .Raw("greedy", JsonActions(greedy))
                        .Raw("scores", JsonScores(scores))
+                       .Raw("prior", tc.prior ? JsonValues(prior) : "null")
+                       .Num("prior_spread", spread)
                        .Nums("anchors_after", anchors)
                        .Num("sent_k", sent.K)
                        .Nums("sent_m", sent.m)

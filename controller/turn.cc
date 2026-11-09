@@ -17,7 +17,7 @@ namespace {
 constexpr double kTiny = 1e-9;
 constexpr double kForkMin = 0.5;
 constexpr double kForkMax = 2.0;
-constexpr char kTurnMagic[9] = "RLTW0001";
+constexpr char kTurnMagic[9] = "RLTW0002";
 
 double Get(const std::vector<double>& v, int i) {
   return i >= 0 && i < static_cast<int>(v.size()) ? v[i] : 0.0;
@@ -319,6 +319,20 @@ TurnSettings RungSettings(const TurnTree& t, const Ladder& k_ladder,
   return s;
 }
 
+L0Rungs L0RungMoves(const TurnTree& t, const Ladder& k_ladder, double anchor,
+                    double renew_band) {
+  const auto k_at = [&](double a) {
+    const int K = static_cast<int>(k_ladder.rungs[RungIndex(k_ladder, a)]);
+    return std::max(1, std::min(K, LiveCap(t)));
+  };
+  bool renew = false;
+  L0Rungs r;
+  r.now = k_at(anchor);
+  r.up = k_at(Press(k_ladder, anchor, true, renew_band, &renew));
+  r.down = k_at(Press(k_ladder, anchor, false, renew_band, &renew));
+  return r;
+}
+
 double GlideStep(const TurnTree& t, const TurnConfig& cfg, int level,
                  double m_rung, AnchorState* anchor) {
   // Before the first turn: the multiplier in effect.
@@ -591,6 +605,7 @@ std::string SerializeTurnNet(const TurnNet& net) {
   Put<uint32_t>(&payload, net.n_in);
   Put<uint64_t>(&payload, TurnFeaturesHash(net.acting));
   Put<double>(&payload, net.clip);
+  Put<double>(&payload, net.spread);
   for (double v : net.mean) Put<double>(&payload, v);
   for (double v : net.scale) Put<double>(&payload, v);
   Put<uint32_t>(&payload, static_cast<uint32_t>(net.nets.size()));
@@ -662,7 +677,7 @@ TurnLoad LoadTurnNet(const std::string& path, int arch, int acting,
   uint32_t a = 0, act = 0, n_nets = 0;
   uint64_t hash = 0;
   if (!r.Read(&a) || !r.Read(&act) || !r.Read(&net.n_in) || !r.Read(&hash) ||
-      !r.Read(&net.clip)) {
+      !r.Read(&net.clip) || !r.Read(&net.spread)) {
     return bad("truncated");
   }
   net.arch = static_cast<int>(a);
@@ -672,6 +687,7 @@ TurnLoad LoadTurnNet(const std::string& path, int arch, int acting,
   if (net.n_in != TurnFeatureNames(acting).size()) return bad("input count");
   if (hash != TurnFeaturesHash(acting)) return bad("feature names differ");
   if (!(net.clip > 0) || !std::isfinite(net.clip)) return bad("clip");
+  if (!(net.spread > 0) || !std::isfinite(net.spread)) return bad("spread");
   if (!r.Doubles(net.n_in, &net.mean) || !r.Doubles(net.n_in, &net.scale)) {
     return bad("scaling");
   }

@@ -40,6 +40,12 @@ struct TurnConfig {
   // decay toward native (DecayAnchors); off, they stay where the agent's
   // presses left them (DecayStep).
   bool decay = true;
+  // The L0 prior's feature flag (turn_prior; PRIOR, set per run): on, L0's
+  // greedy choice is the net's score minus the October L0 formula's change
+  // of one turn's cost (L0TurnPrior, over the forecast window), in the
+  // reward's units (the weights file's spread); the trainer learns the net
+  // as that correction. Off, the net's scores alone.
+  bool prior = false;
   double margin = 0;        // epsilon of the encoding
   double sigma_max = 0;     // compact's score cap (4/3)
   double glide_share = 0;   // R_i's share of the slot's merge bytes (1/2)

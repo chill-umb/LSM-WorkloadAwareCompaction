@@ -59,6 +59,65 @@ class ColdStartTest(unittest.TestCase):
                              [[0] * ACTING] * 3, arch)
 
 
+def l0_prior(values, batch=1):
+    """[B, acting, 4]: `values` at L0, 0 elsewhere (the trainer's prior_q)."""
+    out = torch.zeros(batch, ACTING, 4, dtype=torch.float64)
+    out[:, 0, :] = torch.tensor(values, dtype=torch.float64)
+    return out
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class PriorTest(unittest.TestCase):
+    """turn_prior: Q = net - prior, the plugin's greedy choice of L0's scores
+    less the prior; the factored arm's prior centred over the allowed
+    actions like its advantages."""
+    @no_grad
+    def test_cold_greedy_follows_the_prior_within_the_masks(self):
+        for arch in ("factored", "vdn"):
+            model = TM.make(arch, ACTING)
+            x = torch.randn(1, N_IN, dtype=torch.float64)
+            prior = l0_prior([0.0, 2.0, 0.0, -3.0])       # expand cheapest
+            got = TM.greedy(model, x, all_allowed(), prior)[0].tolist()
+            self.assertEqual(got, [3] + [0] * (ACTING - 1), arch)
+            masks = all_allowed()
+            masks[0, 0, 3] = False                      # expand masked: hold (0 ties defer)
+            self.assertEqual(TM.greedy(model, x, masks, prior)[0, 0].item(), 0, arch)
+            prior = l0_prior([0.0, -1.0, 0.0, 2.0])     # compact cheapest
+            self.assertEqual(TM.greedy(model, x, all_allowed(), prior)[0, 0].item(), 1, arch)
+
+    @no_grad
+    def test_joint_less_the_prior_term(self):
+        x = torch.randn(4, N_IN, dtype=torch.float64)
+        a = torch.tensor([[3, 0, 2, 0, 1], [1, 2, 0, 0, 0], [0, 1, 1, 3, 0], [3, 0, 0, 0, 0]])
+        masks = all_allowed(4)
+        masks[:, 0, 2] = False
+        p = [0.5, -1.5, 4.0, 2.0]
+        prior = l0_prior(p, 4)
+        for arch in ("factored", "vdn"):
+            model = TM.make(arch, ACTING)
+            randomise(model, 3)
+            q = model.joint(x, a, masks)
+            got = TM.joint_prior(model, x, a, masks, prior)
+            self.assertTrue(torch.equal(TM.joint_prior(model, x, a, masks, None), q))
+            for b in range(4):
+                taken = p[a[b, 0]]
+                if arch == "factored":     # centred over L0's allowed actions
+                    taken -= (p[0] + p[1] + p[3]) / 3
+                self.assertAlmostEqual(float(got[b]), float(q[b]) - taken, places=12)
+            # greedy of (scores - prior) maximises joint_prior over L0's action
+            best = TM.greedy(model, x, masks, prior)
+            for b in range(4):
+                values = []
+                for act in (0, 1, 3):
+                    aa = best[b:b + 1].clone()
+                    aa[0, 0] = act
+                    values.append(float(TM.joint_prior(model, x[b:b + 1], aa,
+                                                       masks[b:b + 1], prior[b:b + 1])[0]))
+                self.assertAlmostEqual(max(values), float(TM.joint_prior(
+                    model, x[b:b + 1], best[b:b + 1], masks[b:b + 1], prior[b:b + 1])[0]),
+                    places=12)
+
+
 @unittest.skipIf(torch is None, "needs torch")
 class FactoredTest(unittest.TestCase):
     @no_grad
@@ -151,6 +210,12 @@ class VdnTest(unittest.TestCase):
 
 @unittest.skipIf(torch is None, "needs torch")
 class ExportTest(unittest.TestCase):
+    def test_export_carries_the_spread(self):
+        model = TM.make("vdn", ACTING)
+        w = TM.export(model, 3, [0.0] * N_IN, [1.0] * N_IN, 5.0, spread=7.5)
+        self.assertEqual(TW.decode(TW.encode(w)).spread, 7.5)
+        self.assertEqual(TM.export(model, 3, [0.0] * N_IN, [1.0] * N_IN, 5.0).spread, 1.0)
+
     @no_grad
     def test_export_computes_what_torch_computes(self):
         rng = random.Random(5)

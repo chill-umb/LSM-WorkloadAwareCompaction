@@ -38,7 +38,7 @@ const char* const kTurnKeys[] = {
     "turn_safety_pending_bytes", "turn_k_defer_max", "turn_renew_band",
     "turn_max_topups",   "turn_explore_start",    "turn_explore_end",
     "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs",
-    "turn_decay"};
+    "turn_decay",        "turn_prior"};
 
 // A net of one layer with zero weights: every score is a bias, 1 for
 // `action` at `level` and 0 elsewhere, so greedy picks it wherever allowed.
@@ -154,6 +154,7 @@ class TurnTest : public testing::Test {
     values["turn_arch"] = "\"factored\"";
     values["turn_kappa"] = "50";
     values["turn_decay"] = "1";
+    values["turn_prior"] = "0";
     values["turn_margin"] = "0.1";
     values["turn_sigma_max"] = "1.3333333333333333";
     values["turn_glide_share"] = "0.5";
@@ -231,6 +232,7 @@ TEST_F(TurnTest, TheConfigNeedsEveryTurnKeyAndOtherModesRefuseThem) {
   EXPECT_EQ(c.turn.arch, 0);
   EXPECT_EQ(c.turn.max_topups, 2);
   EXPECT_TRUE(c.turn.decay);
+  EXPECT_FALSE(c.turn.prior);
   EXPECT_DOUBLE_EQ(c.turn.guard_owed_bytes, 16.0 * (1ull << 30));
   EXPECT_EQ(c.turn.k_rungs, (std::vector<double>{2, 3, 4, 6, 8}));
   ASSERT_EQ(c.turn.m_rungs.size(), 5u);
@@ -240,6 +242,8 @@ TEST_F(TurnTest, TheConfigNeedsEveryTurnKeyAndOtherModesRefuseThem) {
   EXPECT_EQ(c.turn.arch, 1);
   ASSERT_TRUE(LoadConfig(Config({{"turn_decay", "0"}}), &c, &error)) << error;
   EXPECT_FALSE(c.turn.decay);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_prior", "1"}}), &c, &error)) << error;
+  EXPECT_TRUE(c.turn.prior);
 
   for (const char* key : kTurnKeys) {
     auto values = Values();
@@ -260,6 +264,8 @@ TEST_F(TurnTest, TheConfigNeedsEveryTurnKeyAndOtherModesRefuseThem) {
       {{"turn_decay", "2"}},
       {{"turn_decay", "-1"}},
       {{"turn_decay", "0.5"}},
+      {{"turn_prior", "2"}},
+      {{"turn_prior", "-1"}},
       {{"turn_explore_start", "1"}},
       {{"turn_k_rungs", "\"2:4:3\""}},
       {{"turn_k_rungs", "\"2:3.5:4\""}},
@@ -518,6 +524,88 @@ TEST_F(TurnTest, ColdItHoldsAndTheDrainWritesTheFinalState) {
   EXPECT_EQ(host.Applies(), 0u);
 }
 
+// turn_prior 1, cold (no net: every score 0): L0's greedy choice is the
+// October L0 formula's cheapest move over the forecast window, logged with
+// its prior and spread 1; the net's scores stay 0. Per step 1,000 probes at
+// every level, 10 false positives (1%). Writes (1,500 of 2,500 per step, a
+// 1 MiB flush): K* ~ 15, so L0 expands from 4 to 6 and on. Reads (2,400 of
+// 2,500, 100 writes, a 1 MiB flush): g(K) = 327.68 / K + 52.8 K per
+// operation (u = 40.96 B, m_1 C_1 = 8 MiB, a Get's L0 file 100 + 0.01 x 1000),
+// K* = 2.49: from 4 compact (to 3), then at 3 both moves cost more, so hold.
+// Off: no prior, L0 holds.
+TEST_F(TurnTest, TheL0PriorStartsL0FromTheFormula) {
+  const auto probes = [](FakeHost* host) {
+    std::lock_guard<std::mutex> lock(host->mu);
+    for (RLLevelReadCounts& r : host->reads) {
+      r.probes += 1000;
+      r.filter_passes += 10;
+    }
+  };
+  const auto run = [&](const std::string& config, bool writes) {
+    FakeHost host;
+    Tree(&host);
+    Controller controller(&host, config, [this] { return clock_us_; });
+    for (int i = 0; i < 9; ++i) {
+      if (writes) {
+        Ops(&host, true);
+      } else {
+        host.AddOps(2400, 100);
+        host.Job(FakeHost::Flush(1024 * 1024));
+      }
+      probes(&host);
+      controller.Step();
+      clock_us_ += 200000;
+    }
+  };
+  run(Config({{"turn_prior", "1"}}), true);
+  auto turns = Lines("turn");
+  ASSERT_GE(turns.size(), 2u);
+  for (const std::string& line : turns) {
+    const std::vector<double> prior = Array(line, "prior");
+    ASSERT_EQ(prior.size(), 4u) << line;
+    EXPECT_EQ(prior[0], 0);
+    EXPECT_EQ(prior[2], 0);
+    EXPECT_LT(prior[3], 0) << line;   // expand cheaper
+    EXPECT_GT(prior[1], 0) << line;   // compact dearer
+    EXPECT_EQ(Number(line, "prior_spread"), 1);
+    EXPECT_EQ(Names(line, "greedy")[0], "expand") << line;
+    for (double score : Array(line, "scores")) EXPECT_EQ(score, 0);
+  }
+
+  std::remove((dir_ + "/decisions.jsonl").c_str());
+  run(Config({{"turn_prior", "1"}}), false);
+  turns = Lines("turn");
+  ASSERT_GE(turns.size(), 2u);
+  const auto g = [](double K) {
+    return (8.0 * 1024 * 1024 + 50) * 40.96 / (K * 1024 * 1024) + 52.8 * K;
+  };
+  std::vector<double> prior = Array(turns[0], "prior");
+  ASSERT_EQ(prior.size(), 4u) << turns[0];
+  EXPECT_EQ(Number(turns[0], "rung_k"), 4);
+  EXPECT_NEAR(prior[1], 10000 * (g(3) - g(4)), 1e-6 * 10000 * g(4));
+  EXPECT_NEAR(prior[3], 10000 * (g(6) - g(4)), 1e-6 * 10000 * g(4));
+  EXPECT_LT(prior[1], 0);   // compact cheaper
+  EXPECT_GT(prior[3], 0);   // expand dearer
+  EXPECT_EQ(Names(turns[0], "greedy")[0], "compact");
+  for (size_t t = 1; t < turns.size(); ++t) {
+    prior = Array(turns[t], "prior");
+    EXPECT_EQ(Number(turns[t], "rung_k"), 3) << turns[t];
+    EXPECT_NEAR(prior[1], 10000 * (g(2) - g(3)), 1e-6 * 10000 * g(3));
+    EXPECT_GT(prior[1], 0) << turns[t];   // at K* ~ 2.5 both moves cost more
+    EXPECT_GT(prior[3], 0) << turns[t];
+    EXPECT_EQ(Names(turns[t], "greedy")[0], "hold") << turns[t];
+  }
+
+  std::remove((dir_ + "/decisions.jsonl").c_str());
+  run(Config(), true);
+  turns = Lines("turn");
+  ASSERT_GE(turns.size(), 2u);
+  for (const std::string& line : turns) {
+    EXPECT_NE(line.find("\"prior\":null"), std::string::npos) << line;
+    EXPECT_EQ(Names(line, "greedy")[0], "hold") << line;
+  }
+}
+
 // The turn arm's config as plugin_config.py composes it from the shipped
 // settings (scripts/dbbench_pipeline/tests/test_plugin_config.py writes it):
 // the composer and the plugin stay in lockstep.
@@ -562,6 +650,7 @@ TEST(TurnGolden, ScoresMatchThePythonForwardPass) {
                           kActing, &net, &error),
               TurnLoad::kOk)
         << error;
+    EXPECT_DOUBLE_EQ(net.spread, 2.5);  // the reward spread rides along
     const auto scores = TurnScores(&net, x, kActing);
     for (int level = 0; level < kActing; ++level) {
       for (int a = 0; a < kNumActions; ++a) {

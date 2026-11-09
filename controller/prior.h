@@ -41,4 +41,24 @@ Values LevelPrior(const View& v, int level, const LevelControl& c,
 // only while the slot is idle (H §7).
 Values L0Prior(const View& v, const L0Control& c, const Config& cfg);
 
+// Proposition D.11's two terms of g(K), per operation, from the View's
+// counts (L0Prior's and the turn mode's L0 prior's one formula): the L0->L1
+// merges' write (cost model 2 adds each merge's job price and L1's overlap
+// read) and the reads' K / 2 L0 files.
+struct L0Costs {
+  double write = 0, read = 0;
+  double total() const { return write + read; }
+};
+L0Costs L0TriggerCosts(const View& v, const Config& cfg, double K);
+
+// The turn mode's L0 prior (turn_prior; owner's go 2026-11-09): each L0
+// action's change of one turn's cost, turn_ops (g(K_after) - g(K_now)) in J
+// per turn, lower better, g from L0TriggerCosts on `w`, a View whose counts
+// are the forecast window's (the last turn_forecast_turns turns: the
+// owner's recent-window rule). Expand goes to K_up, compact to K_down
+// (L0RungMoves); hold and defer keep K (0). All 0 when the window has no
+// operation or no flush, or a cost is not finite.
+Values L0TurnPrior(const View& w, const Config& cfg, int k_now, int k_up,
+                   int k_down);
+
 }  // namespace rlc

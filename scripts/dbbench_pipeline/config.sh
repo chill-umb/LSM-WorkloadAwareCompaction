@@ -309,6 +309,13 @@ TURN_SETTINGS_FILE="${TURN_SETTINGS_FILE:-config/turn_settings.json}"
 # (controller/turn.cc DecayAnchors, turn_kappa); 0 a level stays where the
 # agent set it (hold keeps it). 0 breaks ACT-5, so a diagnostic run only.
 DECAY="${DECAY:-1}"
+# The turn arms' L0 prior feature flag, the plugin config's turn_prior
+# (owner, 2026-11-09): 1 L0's choice is the net's score minus the October L0
+# formula's change of one turn's cost over the forecast window
+# (controller/prior.h L0TurnPrior), the trainer learning the net as that
+# correction; 0 the net's scores alone. 1 is not preregistered: a diagnostic
+# run only.
+PRIOR="${PRIOR:-0}"
 # A diagnostic run may price with a stated q-bar while the contract's is open
 # (D-29 §6); empty: none, and a learner arm is refused.
 CONTROLLER_QBAR_STANDIN="${CONTROLLER_QBAR_STANDIN:-}"

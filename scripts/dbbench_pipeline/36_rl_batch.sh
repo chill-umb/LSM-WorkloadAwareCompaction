@@ -157,7 +157,7 @@ failed=()
 stamp "rl batch: arms $RL_ARMS; T $RL_T; setting $RL_SETTING; modes $RL_MODES; workloads" \
       "$RL_WORKLOADS; beta* $RL_BETA_STAR; q-bar ${RL_QBAR_FILE:-stand-in $RL_QBAR_STANDIN};" \
       "prices $PRICES_FILE; turn settings $TURN_SETTINGS_FILE; machine calibration $MACHINE_CAL_ID;" \
-      "decay $DECAY"
+      "decay $DECAY; prior $PRIOR"
 for T in $RL_T; do
   id="$(setting_id "$T")"
   stamp "$id: tree"
@@ -191,7 +191,7 @@ for T in $RL_T; do
         DIAGNOSTIC_RUN=1 CONTROLLER_OBJECTIVE_MODE="$mode" \
         CONTROLLER_BETA_STAR="$RL_BETA_STAR" CONTROLLER_QBAR_STANDIN="$qbar" \
         PRICES_FILE="$PRICES_FILE" TURN_SETTINGS_FILE="$TURN_SETTINGS_FILE" \
-        MACHINE_CAL_ID="$MACHINE_CAL_ID" DECAY="$DECAY" \
+        MACHINE_CAL_ID="$MACHINE_CAL_ID" DECAY="$DECAY" PRIOR="$PRIOR" \
         RESUME=1 SESSION_ID="$RL_TAG-$mode-$w" RESULTS_ROOT="$NVME/$RL_TAG-$mode-$w/$id" \
         DB_ROOT="$NVME/suite-dbs/$w/$id-$RL_TAG-$mode" "$PIPELINE_DIR/03_run_experiments.sh" ||
         status=$?

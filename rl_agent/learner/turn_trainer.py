@@ -41,7 +41,7 @@ import random
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -143,6 +143,9 @@ class Turn:
     mid_applies: int
     explored: int
     eps: float
+    # The L0 prior the plugin logged (turn_prior; J per turn, one value per
+    # action, lower better); zeros when it was off.
+    prior: list = field(default_factory=lambda: [0.0] * TW.N_ACTIONS)
 
 
 @dataclass
@@ -157,6 +160,15 @@ class Transition:
     d1: list
     J: float
     changes: int
+    p0: list = field(default_factory=lambda: [0.0] * TW.N_ACTIONS)  # L0 prior at s
+    p1: list = field(default_factory=lambda: [0.0] * TW.N_ACTIONS)  # and at s'
+
+
+def parse_prior(value) -> list:
+    """A turn line's "prior": four numbers, or zeros (null or absent)."""
+    if isinstance(value, list) and len(value) == TW.N_ACTIONS:
+        return [float(v) for v in value]
+    return [0.0] * TW.N_ACTIONS
 
 
 def parse_turn(r: dict, names: list, acting: int) -> Turn:
@@ -167,7 +179,8 @@ def parse_turn(r: dict, names: list, acting: int) -> Turn:
                 final=int(r.get("final", 0)) == 1, x=x, masks=masks,
                 actions=actions, owed=[float(v) for v in r["owed"]],
                 set=int(r.get("set", 0)), mid_applies=int(r.get("mid_applies", 0)),
-                explored=int(r.get("explored", -1)), eps=float(r.get("eps", 0)))
+                explored=int(r.get("explored", -1)), eps=float(r.get("eps", 0)),
+                prior=parse_prior(r.get("prior")))
 
 
 class TurnTrainer:
@@ -301,17 +314,30 @@ class TurnTrainer:
     def masks(ms: list) -> torch.Tensor:
         return torch.tensor(ms, dtype=torch.bool)
 
-    def bootstrap(self, xs: torch.Tensor, ms: torch.Tensor) -> torch.Tensor:
-        """Q_target(s', a*) with a* the online net's greedy allowed choice."""
+    def prior_q(self, ps: list) -> torch.Tensor:
+        """The L0 prior in the reward's units [B, acting, 4]: the plugin's
+        values (J per turn) over the frozen spread, as the plugin divides by
+        its weights' spread; 0 at every other level. Q = net - prior: the net
+        learns the correction (zeros when the prior was off)."""
+        out = torch.zeros(len(ps), self.acting, TM.N_ACTIONS, dtype=torch.float64)
+        out[:, 0, :] = torch.tensor(ps, dtype=torch.float64) / self.spread
+        return out
+
+    def bootstrap(self, xs: torch.Tensor, ms: torch.Tensor,
+                  pq: torch.Tensor | None = None) -> torch.Tensor:
+        """Q_target(s', a*) with a* the online net's greedy allowed choice,
+        both less the L0 prior at s' (pq)."""
         with torch.no_grad():
-            a_star = TM.greedy(self.model, xs, ms)
-            return self.target.joint(xs, a_star, ms)
+            a_star = TM.greedy(self.model, xs, ms, pq)
+            return TM.joint_prior(self.target, xs, a_star, ms, pq)
 
     def td_error(self, tr: Transition) -> float:
         x0, x1 = self.tensors([tr.x0]), self.tensors([tr.x1])
         with torch.no_grad():
-            q = self.model.joint(x0, torch.tensor([tr.a]), self.masks([tr.m0]))
-        y = self.reward(tr) + self.gamma * float(self.bootstrap(x1, self.masks([tr.m1]))[0])
+            q = TM.joint_prior(self.model, x0, torch.tensor([tr.a]), self.masks([tr.m0]),
+                               self.prior_q([tr.p0]))
+        y = self.reward(tr) + self.gamma * float(
+            self.bootstrap(x1, self.masks([tr.m1]), self.prior_q([tr.p1]))[0])
         return y - float(q[0])
 
     # ------------------------------------------------------------- learning
@@ -333,12 +359,13 @@ class TurnTrainer:
         batch = [eligible[self.rng.randrange(len(eligible))]
                  for _ in range(int(self.s["batch"]))]
         g = self.gamma
-        returns, boot_x, boot_m, gammas = [], [], [], []
+        returns, boot_x, boot_m, boot_p, gammas = [], [], [], [], []
         for i, n in batch:
             returns.append(sum(g ** k * self.reward(self.replay[i + k]) for k in range(n)))
             last = self.replay[i + n - 1]
             boot_x.append(last.x1)
             boot_m.append(last.m1)
+            boot_p.append(last.p1)
             gammas.append(g ** n)
         first = [self.replay[i] for i, _ in batch]
         x0 = self.tensors([tr.x0 for tr in first])
@@ -346,8 +373,8 @@ class TurnTrainer:
         m0 = self.masks([tr.m0 for tr in first])
         y = (torch.tensor(returns, dtype=torch.float64) +
              torch.tensor(gammas, dtype=torch.float64) *
-             self.bootstrap(self.tensors(boot_x), self.masks(boot_m)))
-        q = self.model.joint(x0, a, m0)
+             self.bootstrap(self.tensors(boot_x), self.masks(boot_m), self.prior_q(boot_p)))
+        q = TM.joint_prior(self.model, x0, a, m0, self.prior_q([tr.p0 for tr in first]))
         loss = torch.nn.functional.huber_loss(q, y, delta=float(self.s["huber"]))
         self.opt.zero_grad()
         loss.backward()
@@ -365,7 +392,7 @@ class TurnTrainer:
     def push(self) -> None:
         self.version += 1
         weights = TM.export(self.model, self.version, self.mean, self.scale,
-                            float(self.s["clip"]))
+                            float(self.s["clip"]), spread=self.spread)
         TW.write_atomic(weights, self.args.weights)
         # Every version, for the check of the plugin's scores (37's ARCH-6).
         archive = getattr(self.args, "archive", None)
@@ -378,7 +405,8 @@ class TurnTrainer:
     def learn(self, prev: Turn, line: Turn, price: dict) -> None:
         tr = Transition(t=line.t, x0=prev.x, m0=prev.masks, a=prev.actions,
                         x1=line.x, m1=line.masks, d0=prev.owed, d1=line.owed,
-                        J=float(price["J"]), changes=prev.set + line.mid_applies)
+                        J=float(price["J"]), changes=prev.set + line.mid_applies,
+                        p0=prev.prior, p1=line.prior)
         self.priced += 1
         if len(tr.a) != self.acting:     # the earlier line chose nothing
             return

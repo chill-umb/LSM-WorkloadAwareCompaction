@@ -151,6 +151,46 @@ TEST(Prior, L0EarlyCompactionTradesOverlapForReads) {
   EXPECT_LT(L0Prior(v, c, cfg)[kCompact], 0);
 }
 
+// The turn mode's L0 prior (turn_prior): one turn's change of D.11's cost at
+// the rung each move leaves (TestView: g(K) = 3276.8 / K + 128 K per
+// operation, K* = 5.06); L0TriggerCosts is L0Prior's own formula.
+TEST(Prior, L0TurnPriorIsOneTurnsCostChangeAtTheNewRung) {
+  const View v = TestView();
+  Config cfg = TestConfig();
+  cfg.turn.turn_ops = 64000;
+  const auto g = [](double K) { return 3276.8 / K + 128 * K; };
+  for (double K : {2.0, 3.0, 4.0, 6.0, 8.0}) {
+    const L0Costs c = L0TriggerCosts(v, cfg, K);
+    EXPECT_NEAR(c.write, 3276.8 / K, 1e-9);
+    EXPECT_NEAR(c.read, 128 * K, 1e-9);
+    EXPECT_NEAR(c.total(), g(K), 1e-9);
+  }
+  const Values b = L0TurnPrior(v, cfg, 4, 6, 3);
+  EXPECT_EQ(b[kHold], 0);
+  EXPECT_EQ(b[kDefer], 0);
+  EXPECT_NEAR(b[kExpand], 64000 * (g(6) - g(4)), 1e-6);
+  EXPECT_NEAR(b[kCompact], 64000 * (g(3) - g(4)), 1e-6);
+  EXPECT_LT(b[kExpand], 0);  // below K*: up is cheaper, down dearer
+  EXPECT_GT(b[kCompact], 0);
+  // Ten times the reads flip it (g = 3276.8 / K + 1280 K, K* = 1.6).
+  View reads = v;
+  reads.gets *= 10;
+  reads.scans *= 10;
+  const Values r = L0TurnPrior(reads, cfg, 4, 6, 3);
+  EXPECT_GT(r[kExpand], 0);
+  EXPECT_LT(r[kCompact], 0);
+  // A press that keeps the rung (the ladder's end, a renew) prices 0.
+  EXPECT_EQ(L0TurnPrior(v, cfg, 8, 8, 6)[kExpand], 0);
+  // Nothing to price: no operation, or no flush, in the window.
+  View empty = v;
+  empty.ops = 0;
+  View no_flush = v;
+  no_flush.F = 0;
+  for (const View& w : {empty, no_flush}) {
+    for (double x : L0TurnPrior(w, cfg, 4, 6, 3)) EXPECT_EQ(x, 0);
+  }
+}
+
 // D-21: an L0 file's reads are priced with L0's reopens. 3000 reopens over
 // 30000 probes and 500 over 10000 seeks, at c_open = 5000: a Get pays 100 +
 // 0.012 * 1000 + 0.1 * 5000 = 612 per file, a scan 2000 + 0.05 * 5000 =

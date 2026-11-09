@@ -250,6 +250,27 @@ class ComposeTest(unittest.TestCase):
             compose("rules", contract=with_qbar(61234.5), decay=1)
         self.assertNotIn("turn_decay", compose("rules", contract=with_qbar(61234.5))[0])
 
+    def test_the_prior_flag(self):
+        """PRIOR: the turn arms' turn_prior, 0 by default; 1, the L0 prior,
+        only in a diagnostic run and only for a turn arm."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        turn = dict(prices=PRICES6, learner=pc.learner_values(shipped, "training"),
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0, decay=1)
+        for arm in pc.TURN_ARMS:
+            off, _ = compose(arm, diagnostic=True, **turn)
+            on, _ = compose(arm, diagnostic=True, prior=1, **turn)
+            self.assertEqual((off["turn_prior"], on["turn_prior"]), (0, 1))
+            # The flag is the only difference (03's plugin_config_sha256).
+            self.assertEqual({k for k in on if on[k] != off[k]}, {"turn_prior"})
+            with self.assertRaisesRegex(ValueError, "diagnostic run only"):
+                compose(arm, prior=1, **turn)
+            for bad in (2, -1, True, 0.5):
+                with self.assertRaisesRegex(ValueError, "0 or 1"):
+                    compose(arm, diagnostic=True, prior=bad, **turn)
+        with self.assertRaisesRegex(ValueError, "turn arms"):
+            compose("rules", contract=with_qbar(61234.5), diagnostic=True, prior=1)
+        self.assertNotIn("turn_prior", compose("rules", contract=with_qbar(61234.5))[0])
+
     def test_the_hold_arms_scheduled_change(self):
         """The step-response arm (owner, 2026-10-07): hold only, diagnostic
         only, apply_at_op with apply_m, apply_k0 optional; none by default."""

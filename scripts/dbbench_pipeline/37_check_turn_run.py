@@ -11,6 +11,9 @@ from its result directory:
           the line's own inputs (rl_agent/learner/turn_weights.py forward,
           which follows turn.cc); every score must agree to 1e-9 (relative)
           and every level's greedy allowed action must be the logged one
+          (with the L0 prior on, turn_prior, of L0's scores less the logged
+          prior over the weights' spread, which must be the logged
+          prior_spread)
   c_set   the SetOptions call's price, measured (the turn reward's change
           price): the accepted apply lines' wall time (apply_us) at the
           price per core-second, plus, with --options-bytes, the OPTIONS
@@ -62,6 +65,7 @@ def arch6(decisions: list, archive: Path, acting: int) -> dict:
     turns = [r for r in decisions if r["type"] == "turn" and r.get("final") != 1
              and int(r.get("weights", 0)) > 0]
     cache, missing, score_bad, greedy_bad, judged = {}, set(), [], [], 0
+    spread_bad = []
     names = TW.feature_names(acting)
     for r in turns:
         v = int(r["weights"])
@@ -79,7 +83,14 @@ def arch6(decisions: list, archive: Path, acting: int) -> dict:
                     math.isclose(a, b, rel_tol=TOLERANCE, abs_tol=TOLERANCE))
                for la, lb in zip(ours, theirs) for a, b in zip(la, lb)):
             score_bad.append(r["t"])
-        if greedy(ours, r["masks"]) != r.get("greedy"):
+        acted = [list(level) for level in ours]
+        prior = r.get("prior")
+        if isinstance(prior, list) and acted:
+            if not math.isclose(float(r.get("prior_spread", math.nan)), w.spread,
+                                rel_tol=TOLERANCE, abs_tol=TOLERANCE):
+                spread_bad.append(r["t"])
+            acted[0] = [a - float(b) / w.spread for a, b in zip(acted[0], prior)]
+        if greedy(acted, r["masks"]) != r.get("greedy"):
             greedy_bad.append(r["t"])
     problems = []
     if missing:
@@ -88,6 +99,8 @@ def arch6(decisions: list, archive: Path, acting: int) -> dict:
         problems.append(f"turns whose scores differ from Python's: {score_bad[:10]}")
     if greedy_bad:
         problems.append(f"turns whose greedy choice differs: {greedy_bad[:10]}")
+    if spread_bad:
+        problems.append(f"turns whose prior_spread is not the weights': {spread_bad[:10]}")
     return {"passed": not problems, "problems": problems, "judged": judged,
             "turns_with_weights": len(turns)}
 

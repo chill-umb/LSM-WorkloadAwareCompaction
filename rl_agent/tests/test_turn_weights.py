@@ -46,7 +46,7 @@ def golden(arch: str) -> TW.TurnWeights:
         nets = [fixed_net(TW.vdn_view(level, ACTING), 4, 0.5 + 0.1 * level)
                 for level in range(ACTING)]
     return TW.TurnWeights(version=4, arch=TW.ARCHS[arch], acting=ACTING, clip=5.0,
-                          mean=mean, scale=scale, nets=nets)
+                          mean=mean, scale=scale, nets=nets, spread=2.5)
 
 
 def cases():
@@ -94,6 +94,7 @@ class FileTest(unittest.TestCase):
             back = TW.decode(TW.encode(w))
             self.assertEqual((back.version, back.arch, back.acting), (4, w.arch, ACTING))
             self.assertEqual(back.mean, w.mean)
+            self.assertEqual(back.spread, 2.5)    # the reward's spread rides along
             for x in cases():
                 self.assertEqual(TW.forward(back, x), TW.forward(w, x))
             data = bytearray(TW.encode(w))
@@ -108,6 +109,11 @@ class FileTest(unittest.TestCase):
         bad.scale[0] = 0
         with self.assertRaises(ValueError):
             TW.encode(bad)
+        for spread in (0.0, -1.0, math.nan, math.inf):
+            bad = golden("vdn")
+            bad.spread = spread
+            with self.assertRaises(ValueError):
+                TW.encode(bad)
 
     def test_write_atomic_replaces_the_file(self):
         with tempfile.TemporaryDirectory() as d:

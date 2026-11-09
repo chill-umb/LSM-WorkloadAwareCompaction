@@ -156,6 +156,15 @@ struct TurnSettings {
 TurnSettings RungSettings(const TurnTree& t, const Ladder& k_ladder,
                           const Ladder& m_ladder,
                           const std::vector<AnchorState>& anchors);
+// L0's trigger at its anchor now and after an expand or a compact press, as
+// Encode moves the anchor (Press) and RungSettings rounds it (rung, live
+// cap); hold and defer keep the rung (their one-turn overrides aside). The
+// L0 prior (turn_prior) prices these three.
+struct L0Rungs {
+  int now = 0, up = 0, down = 0;
+};
+L0Rungs L0RungMoves(const TurnTree& t, const Ladder& k_ladder, double anchor,
+                    double renew_band);
 // One turn of the glide at level i >= 1 toward the rung target m_rung: while
 // m_rung is below last turn's target, the target is the lower of last turn's
 // target and the fill, less R_i / C_i (never below m_rung). Each turn the
@@ -228,12 +237,14 @@ int TurnBlockSize(int level);
 
 // The weights file the trainer writes (rl_agent/learner/turn_weights.py),
 // little-endian:
-//   "RLTW0001" (8 bytes), version uint64 > 0, payload length uint64,
+//   "RLTW0002" (8 bytes), version uint64 > 0, payload length uint64,
 //   checksum uint64 (FNV-1a 64 of the payload)
 //   payload:
 //     arch uint32 (0 factored, 1 vdn), acting uint32, n_in uint32,
 //     features hash uint64 (FNV-1a 64 of TurnFeatureNames joined by ','),
-//     clip float64 > 0, mean float64[n_in], scale float64[n_in] (> 0)
+//     clip float64 > 0, spread float64 > 0 (the reward's frozen spread: J
+//     per reward unit, which the L0 prior divides by), mean float64[n_in],
+//     scale float64[n_in] (> 0)
 //     n_nets uint32 (factored 1, vdn acting)
 //     per net: n_view uint32, view int32[n_view] (input index, -1 = zero),
 //              n_layers uint32 >= 1, per layer out, in (uint32), weights
@@ -256,6 +267,7 @@ struct TurnNet {
   int acting = 0;
   uint32_t n_in = 0;
   double clip = 0;
+  double spread = 1;
   std::vector<double> mean, scale;
   std::vector<Net> nets;
 };

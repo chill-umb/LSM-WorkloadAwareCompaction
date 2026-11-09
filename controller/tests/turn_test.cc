@@ -180,6 +180,31 @@ TEST(TurnPress, MovesARungOrRenews) {
 }
 
 // A renew keeps the rung, so the settings sent do not change: no call.
+// The L0 prior's three triggers (turn_prior): the anchor's rung now and after
+// an expand or a compact press, as Encode presses and RungSettings rounds.
+TEST(TurnPress, L0RungMovesFollowThePresses) {
+  const TurnConfig c = Cfg();
+  const Ladders l = MakeLadders(c);
+  TurnTree t = Tree();
+  const auto moves = [&](double a) {
+    const L0Rungs r = L0RungMoves(t, l.k, a, c.renew_band);
+    return std::vector<int>{r.now, r.up, r.down};
+  };
+  EXPECT_EQ(moves(0.0), (std::vector<int>{4, 6, 3}));
+  EXPECT_EQ(moves(l.k.logs[4]), (std::vector<int>{8, 8, 6}));  // the top renews
+  EXPECT_EQ(moves(l.k.logs[0]), (std::vector<int>{2, 3, 2}));  // the bottom renews
+  // An anchor decayed past half the band renews on an expand: K stays.
+  double a = l.k.logs[3];
+  for (int i = 0; i < 20; ++i) a = Decay(a, c.kappa);
+  ASSERT_EQ(RungIndex(l.k, a), 3);
+  const L0Rungs r = L0RungMoves(t, l.k, a, c.renew_band);
+  EXPECT_EQ(r.now, 6);
+  EXPECT_EQ(r.up, 6);
+  // The live cap bounds all three.
+  t.k_live_cap = 4;
+  EXPECT_EQ(moves(0.0), (std::vector<int>{4, 4, 3}));
+}
+
 TEST(TurnPress, RenewMakesNoSettingsChange) {
   const TurnConfig c = Cfg();
   const Ladders l = MakeLadders(c);
