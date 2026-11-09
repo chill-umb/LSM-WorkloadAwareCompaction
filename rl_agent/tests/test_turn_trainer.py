@@ -77,7 +77,7 @@ def turn_line(t, owed=None, set_=0, mid=0, action="hold", final=False):
     line = {"type": "turn", "t": t, "op0": t * TURN, "op1": (t + 1) * TURN,
             "final": int(final), "x": x, "masks": [[1, 1, 1, 1]] * LEVELS,
             "owed": owed if owed is not None else [1e6 * (t % 3), 0, 5e6, 0, 0, 0],
-            "mid_applies": mid}
+            "mid_applies": mid, "inflow": [1 << 20, 4 << 20, 2 << 20, 0, 0, 0]}
     if not final:
         line.update({"action": [action] + ["hold"] * (LEVELS - 1), "set": set_,
                      "explored": -1, "eps": 0.1})
@@ -289,3 +289,108 @@ class PriorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class RewardOptionsTest(unittest.TestCase):
+    """The reward options (optional settings; defaults = the reward as before):
+    shaping 0 drops the owed-work term; merge_charge "rate" replaces the merges
+    that finished in a turn by each level's last rate_turns turns' merge price
+    per byte landed there, times the bytes landed this turn; anything else is
+    refused."""
+    def transition(self, d0, d1, J=3.0, changes=1):
+        return TT.Transition(t=1, x0=[], m0=[], a=[], x1=[], m1=[], d0=d0, d1=d1, J=J,
+                             changes=changes)
+
+    def test_shaping_off_leaves_the_cost_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for flag, has_phi in ((1, True), (0, False)):
+                tr = make(tmp, shaping=flag)
+                tr.p = [2.0, 1.0, 0, 0, 0, 0]
+                tr.jbar, tr.spread, tr.gamma, tr.c_set = -10.0, 4.0, 0.9, 0.5
+                r = tr.reward(self.transition([3, 1, 0, 0, 0, 0], [1, 2, 0, 0, 0, 0], J=12.0, changes=2))
+                cost = (-12.0 - 0.5 * 2 + 10.0) / 4.0
+                shaping = (0.9 * -(2 * 1 + 1 * 2) - -(2 * 3 + 1 * 1)) / 4.0
+                self.assertAlmostEqual(r, cost + shaping if has_phi else cost, places=12)
+                tr.log.close()
+
+    def test_rate_charges_merges_per_byte_landed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp, merge_charge="rate", rate_turns=2)
+            line = lambda inflow: TT.Turn(t=1, op0=0, op1=1, final=False, x=[], masks=[], actions=[],
+                                          owed=[], set=0, mid_applies=0, explored=-1, eps=0.0,
+                                          inflow=inflow)
+            # turn 1: no history -> each level keeps its own merges' price: J unchanged
+            self.assertAlmostEqual(tr.charged_j(line([10.0, 4.0]), {"J": 100.0, "merges": {0: [30.0, 1], 1: [8.0, 1]}}), 100.0)
+            # turn 2: L0 rate 30/10 per byte, L1 8/4; landed 5 and 0 -> 15 + 0 replace 0 finished merges
+            self.assertAlmostEqual(tr.charged_j(line([5.0, 0.0]), {"J": 50.0, "merges": {}}), 50.0 + 15.0)
+            # turn 3: window = turns 1-2: L0 (30 + 0) / 15, L1 8 / 4; landed 3 and 2; a 40 L1 merge finished
+            self.assertAlmostEqual(tr.charged_j(line([3.0, 2.0]), {"J": 70.0, "merges": {1: [40.0, 1]}}),
+                                   70.0 - 40.0 + 30.0 / 15.0 * 3.0 + 8.0 / 4.0 * 2.0)
+            # turn 4: window = turns 2-3 only (rate_turns 2): L0 0 / 8, L1 40 / 2
+            self.assertAlmostEqual(tr.charged_j(line([1.0, 1.0]), {"J": 20.0, "merges": {}}),
+                                   20.0 + 0.0 + 40.0 / 2.0 * 1.0)
+            # a line without inflow (an older log) keeps the evaluator's J
+            self.assertAlmostEqual(tr.charged_j(line([]), {"J": 9.0, "merges": {0: [5.0, 1]}}), 9.0)
+            tr.log.close()
+
+    def test_defaults_and_bad_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp)
+            self.assertTrue(tr.shaping)
+            self.assertEqual(tr.merge_charge, "done")
+            tr.log.close()
+            with self.assertRaises(ValueError):
+                make(tmp, merge_charge="later")
+            with self.assertRaises(ValueError):
+                make(tmp, merge_charge="rate", rate_turns=0)
+
+    def test_end_to_end_with_rate_no_shaping_and_16_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp, merge_charge="rate", shaping=0, n_step=16, rate_turns=4)
+            write(tr.args.host_log, host_log())
+            lines = [{"type": "turn_start", "arch": "factored", "acting": ACTING,
+                      "features": TW.feature_names(ACTING)}]
+            lines += [turn_line(t, action="compact" if t % 2 else "hold") for t in range(TURNS)]
+            lines.append({"type": "stop"})
+            write(tr.args.decisions, lines)
+            tr.step()
+            tr.finish("test")
+            log = [json.loads(line) for line in Path(tr.args.log).read_text().splitlines()]
+            turns = [r for r in log if r["type"] == "turn"]
+            self.assertTrue(turns)
+            self.assertTrue(all("J_reward" in r for r in turns))
+            self.assertTrue(any(abs(r["J_reward"] - r["J"]) > 1e-12 for r in turns))
+            self.assertTrue(any(r["type"] == "push" for r in log))
+            # no shaping: the reward is the cost part alone
+            for r in turns:
+                self.assertTrue(math.isfinite(r["r"]))
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class OneActingLevelTest(unittest.TestCase):
+    """turn_acting 1 (L0 the only agent, every deeper level held native): the trainer reads the L0-only inputs,
+    learns, and pushes a one-level net (both arms), with the reward options on."""
+    def test_l0_only_trains_and_pushes(self):
+        for arch in ("vdn", "factored"):
+            with tempfile.TemporaryDirectory() as tmp:
+                args = type("A", (), {})()
+                for name in ("decisions", "host_log", "log", "summary", "weights"):
+                    setattr(args, name, str(Path(tmp) / f"{name}.out"))
+                cfg = fx.plugin_config(); cfg.update({"mode": "turn", "turn_arch": arch, "turn_acting": 1})
+                tr = TT.TurnTrainer(args, settings(merge_charge="rate", shaping=0, n_step=16), cfg)
+                write(args.host_log, host_log())
+                names = TW.feature_names(1)
+                lines = [{"type": "turn_start", "arch": arch, "acting": 1, "features": names}]
+                for t in range(TURNS):
+                    line = turn_line(t, action="expand" if t % 3 else "hold")
+                    line["x"] = {n: 0.01 * ((i * 7 + t) % 13) for i, n in enumerate(names)}
+                    lines.append(line)
+                lines.append({"type": "stop"})
+                write(args.decisions, lines)
+                tr.step()
+                tr.finish("test")
+                log = [json.loads(line) for line in Path(args.log).read_text().splitlines()]
+                self.assertTrue(any(r["type"] == "train" for r in log), arch)
+                self.assertTrue(any(r["type"] == "push" for r in log), arch)
+                self.assertTrue(Path(args.weights).stat().st_size > 0)

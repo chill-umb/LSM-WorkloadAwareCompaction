@@ -146,6 +146,9 @@ class Turn:
     # The L0 prior the plugin logged (turn_prior; J per turn, one value per
     # action, lower better); zeros when it was off.
     prior: list = field(default_factory=lambda: [0.0] * TW.N_ACTIONS)
+    # Bytes landed per level over the turn ("inflow"; empty in older logs):
+    # merge_charge "rate" charges each level's merges per byte landed there.
+    inflow: list = field(default_factory=list)
 
 
 @dataclass
@@ -180,7 +183,8 @@ def parse_turn(r: dict, names: list, acting: int) -> Turn:
                 actions=actions, owed=[float(v) for v in r["owed"]],
                 set=int(r.get("set", 0)), mid_applies=int(r.get("mid_applies", 0)),
                 explored=int(r.get("explored", -1)), eps=float(r.get("eps", 0)),
-                prior=parse_prior(r.get("prior")))
+                prior=parse_prior(r.get("prior")),
+                inflow=[float(v) for v in r.get("inflow", [])])
 
 
 class TurnTrainer:
@@ -204,6 +208,20 @@ class TurnTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=float(settings["lr"]))
         self.gamma = float(settings["gamma"])
         self.c_set = float(settings["c_set"])
+        # Reward options (optional keys; defaults = the reward as before).
+        # shaping 0 drops the owed-work shaping term. merge_charge "rate"
+        # charges merges as the L0 prior does, per byte as data lands: each
+        # level's merges cost its last rate_turns turns' merge price per byte
+        # landed there, times the bytes landed this turn ("done": as each
+        # merge finishes, the evaluator's J).
+        self.shaping = int(settings.get("shaping", 1)) == 1
+        self.merge_charge = str(settings.get("merge_charge", "done"))
+        if self.merge_charge not in ("done", "rate"):
+            raise ValueError(f"merge_charge is done or rate, not {self.merge_charge!r}")
+        self.rate_turns = int(settings.get("rate_turns", 32))
+        if self.rate_turns < 1:
+            raise ValueError("rate_turns must be >= 1")
+        self.rate_hist = []          # (merge price per level, inflow per level), last rate_turns
         n = len(self.names)
         self.x_stats = Running(n)
         self.j_stats = Running(1)
@@ -270,11 +288,12 @@ class TurnTrainer:
                     continue
                 break
             price = self.pricer.price(*b)
-            for level, (cost, nbytes) in merge_prices(self.pricer, *b).items():
+            merges = merge_prices(self.pricer, *b)
+            for level, (cost, nbytes) in merges.items():
                 acc = self.merge.setdefault(level, [0.0, 0.0])
                 acc[0] += cost
                 acc[1] += nbytes
-            new.append((self.prev, line, price))
+            new.append((self.prev, line, dict(price, merges=merges)))
             self.prev = self.pending.pop(0)
         return new
 
@@ -287,7 +306,31 @@ class TurnTrainer:
 
     def reward(self, tr: Transition) -> float:
         cost = (-tr.J - self.c_set * tr.changes - self.jbar) / self.spread
+        if not self.shaping:
+            return cost
         return cost + (self.gamma * self.phi(tr.d1) - self.phi(tr.d0)) / self.spread
+
+    def charged_j(self, line: Turn, price: dict) -> float:
+        """The J the reward uses. "done": the evaluator's J. "rate": J with
+        the merges that finished in the turn replaced by, per level, the last
+        rate_turns turns' merge price per byte landed there times the bytes
+        landed this turn (a level with no landed bytes in that window keeps
+        its own merges' price); causal: this turn is added afterwards."""
+        J = float(price["J"])
+        if self.merge_charge != "rate" or not line.inflow:
+            return J
+        merges = price.get("merges", {})
+        done = sum(v[0] for v in merges.values())
+        levels = set(merges) | set(range(len(line.inflow)))
+        charge = 0.0
+        for lv in levels:
+            cost = sum(h[0].get(lv, 0.0) for h in self.rate_hist)
+            landed = sum(h[1][lv] for h in self.rate_hist if lv < len(h[1]))
+            now = line.inflow[lv] if lv < len(line.inflow) else 0.0
+            charge += cost / landed * now if landed > 0 else merges.get(lv, [0.0])[0]
+        self.rate_hist.append(({lv: v[0] for lv, v in merges.items()}, list(line.inflow)))
+        del self.rate_hist[:-self.rate_turns]
+        return J - done + charge
 
     def freeze(self) -> None:
         """The scaling, the reward's centre and spread, and the merge prices
@@ -403,16 +446,17 @@ class TurnTrainer:
                    "jbar": self.jbar, "spread": self.spread, "p": self.p})
 
     def learn(self, prev: Turn, line: Turn, price: dict) -> None:
+        J = self.charged_j(line, price)
         tr = Transition(t=line.t, x0=prev.x, m0=prev.masks, a=prev.actions,
                         x1=line.x, m1=line.masks, d0=prev.owed, d1=line.owed,
-                        J=float(price["J"]), changes=prev.set + line.mid_applies,
+                        J=J, changes=prev.set + line.mid_applies,
                         p0=prev.prior, p1=line.prior)
         self.priced += 1
         if len(tr.a) != self.acting:     # the earlier line chose nothing
             return
         td = self.td_error(tr)
         self.emit({"type": "turn", "t": line.t, "op0": line.op0, "op1": line.op1,
-                   "ops": price["ops"], "secs": price["secs"], "J": price["J"],
+                   "ops": price["ops"], "secs": price["secs"], "J": price["J"], "J_reward": J,
                    "C_W": price["C_W"], "C_R": price["C_R"], "C_S": price["C_S"],
                    "jobs": price["jobs"], "changes": tr.changes,
                    "phi0": self.phi(tr.d0), "phi1": self.phi(tr.d1),
