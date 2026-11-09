@@ -149,6 +149,81 @@ class VdnTest(unittest.TestCase):
             self.assertTrue(moved, level)
 
 
+SPLIT = [{"levels": [0, 1], "summary": True}, {"levels": [2, 3, 4], "l0_inputs": True}]
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class SplitTest(unittest.TestCase):
+    def test_views_add_the_deep_summary_and_l0_inputs(self):
+        ix = {n: i for i, n in enumerate(TW.feature_names(ACTING))}
+        deep = lambda ks: [v for k in ks for v in (ix[f"l{k}_anchor"], ix[f"l{k}_owed"])]
+        self.assertEqual(TM.split_view(0, ACTING, True, False), TW.vdn_view(0, ACTING) + deep([2, 3, 4]))
+        self.assertEqual(TM.split_view(1, ACTING, True, False), TW.vdn_view(1, ACTING) + deep([3, 4]))
+        self.assertEqual(TM.split_view(3, ACTING, True, False), TW.vdn_view(3, ACTING))
+        self.assertEqual(TM.split_view(1, ACTING, False, True), TW.vdn_view(1, ACTING))
+        self.assertEqual(TM.split_view(2, ACTING, False, True),
+                         TW.vdn_view(2, ACTING) + [ix["l0_files_k"], ix["l0_anchor"]])
+        self.assertEqual(TM.split_view(4, ACTING, False, False), TW.vdn_view(4, ACTING))
+
+    def test_groups_must_cover_every_level_once(self):
+        for bad in ([{"levels": [0, 1]}, {"levels": [1, 2, 3, 4]}],
+                    [{"levels": [0, 1]}, {"levels": [2, 3]}],
+                    [{"levels": [0, 1, 2, 3, 4]}],
+                    [{"levels": [0, 1]}, {"levels": []}, {"levels": [2, 3, 4]}]):
+            with self.assertRaises(ValueError, msg=bad):
+                TM.SplitVdn(ACTING, bad)
+
+    @no_grad
+    def test_cold_start_ties_and_each_level_reads_only_its_view(self):
+        model = TM.SplitVdn(ACTING, SPLIT)
+        x = torch.randn(3, N_IN, dtype=torch.float64)
+        self.assertEqual(float(model.scores(x).abs().max()), 0.0)
+        self.assertEqual(TM.greedy(model, x, all_allowed(3)).tolist(), [[0] * ACTING] * 3)
+        randomise(model, 6)
+        x = torch.randn(1, N_IN, dtype=torch.float64)
+        base = model.scores(x)
+        for level, g in ((0, SPLIT[0]), (1, SPLIT[0]), (2, SPLIT[1]), (3, SPLIT[1]), (4, SPLIT[1])):
+            view = TM.split_view(level, ACTING, g.get("summary", False), g.get("l0_inputs", False))
+            y = x.clone()
+            y[0, [j for j in range(N_IN) if j not in view]] += 3.0
+            self.assertTrue(torch.equal(model.scores(y)[0, level], base[0, level]), level)
+            y = x.clone()
+            y[0, [j for j in view if j >= 0]] += 3.0
+            self.assertFalse(torch.equal(model.scores(y)[0, level], base[0, level]), level)
+
+    def test_a_groups_seed_fixes_its_nets_whatever_the_other_group(self):
+        a = TM.SplitVdn(ACTING, SPLIT, seed=3)
+        b = TM.SplitVdn(ACTING, [SPLIT[0], {"levels": [2, 3, 4]}], seed=3)
+        for pa, pb in zip(a.groups[0].parameters(), b.groups[0].parameters()):
+            self.assertTrue(torch.equal(pa, pb))
+        c = TM.SplitVdn(ACTING, SPLIT, seed=4)
+        self.assertFalse(all(torch.equal(pa, pc) for pa, pc in
+                             zip(a.groups[0].parameters(), c.groups[0].parameters())))
+
+    @no_grad
+    def test_export_is_a_vdn_file_with_the_split_views(self):
+        rng = random.Random(8)
+        model = TM.SplitVdn(ACTING, SPLIT)
+        randomise(model, 9)
+        mean = [rng.uniform(-1, 1) for _ in range(N_IN)]
+        scale = [rng.uniform(0.5, 2) for _ in range(N_IN)]
+        w = TW.decode(TW.encode(TM.export(model, 3, mean, scale, 5.0)))
+        self.assertEqual((w.arch, w.acting, len(w.nets)), (TW.ARCHS["vdn"], ACTING, ACTING))
+        for level, g in ((0, SPLIT[0]), (1, SPLIT[0]), (2, SPLIT[1]), (3, SPLIT[1]), (4, SPLIT[1])):
+            self.assertEqual(w.nets[level].view, TM.split_view(level, ACTING, g.get("summary", False),
+                                                               g.get("l0_inputs", False)))
+        for _ in range(5):
+            x = [rng.uniform(-12, 12) for _ in range(N_IN)]
+            xs = TM.scale_inputs(torch.tensor([x], dtype=torch.float64),
+                                 torch.tensor(mean, dtype=torch.float64),
+                                 torch.tensor(scale, dtype=torch.float64), 5.0)
+            ours, theirs = TW.forward(w, x), model.scores(xs)[0]
+            for i in range(ACTING):
+                for k in range(4):
+                    self.assertTrue(math.isclose(ours[i][k], float(theirs[i, k]),
+                                                 rel_tol=1e-9, abs_tol=1e-12), (i, k))
+
+
 @unittest.skipIf(torch is None, "needs torch")
 class ExportTest(unittest.TestCase):
     @no_grad

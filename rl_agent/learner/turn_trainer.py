@@ -21,6 +21,19 @@ push_every_turns transitions they are refrozen and the weights are written
 atomically (RLTW0001, turn_weights.py). Cold start: nothing is read from
 another run.
 
+Split learners (optional settings key "split", the VDN arm only): a list of
+groups, e.g. [{"levels": [0, 1], "n_step": 8, "shaping": "none",
+"summary": true}, {"levels": [2, 3, 4], "n_step": 4, "shaping": "own",
+"l0_inputs": true}], together every acting level once. Each group is its own
+learner (turn_model.SplitVdn): its own nets, Adam, target, batch draws and
+n-step return, bootstrapping on its own greedy choice, and its own reward:
+the same cost term, with shaping "none" (cost only), "own" (Phi over the
+group's levels) or "all" (Phi over every level, as above). "summary" adds
+the anchor and owed work of the levels two or more below each of the
+group's levels to its view; "l0_inputs" adds L0's file count and anchor to
+its levels 2 and deeper. The file the plugin reads is an ordinary VDN file.
+The logged "r" stays the unsplit reward; "r_groups" holds each group's.
+
   python -m learner.turn_trainer --plugin-config CFG --decisions D.jsonl \\
       --host-log H.jsonl --weights W.bin --settings S.json \\
       --log turn_trainer.jsonl --summary turn_trainer_summary.json \\
@@ -177,18 +190,37 @@ class TurnTrainer:
         self.arch = plugin_cfg["turn_arch"]
         self.acting = int(plugin_cfg["turn_acting"])
         self.names = TW.feature_names(self.acting)
+        self.split = settings.get("split")
+        if self.split is not None:
+            check_split(self.split)
+            TM.check_groups(self.split, self.acting)
+            if self.arch != "vdn":
+                raise SystemExit("split learners need the VDN arm (turn_arch vdn)")
         self.pricer = L2.HostLogPricer(from_plugin_config(plugin_cfg))
         self.decisions = LogTail(args.decisions)
         self.host = LogTail(args.host_log)
         self.log = open(args.log, "a", encoding="ascii")
         torch.manual_seed(int(settings["seed"]))
         self.rng = random.Random(int(settings["seed"]))
-        self.model = TM.make(self.arch, self.acting, int(settings["hidden_factored"]),
-                             int(settings["hidden_vdn"]), int(settings["layers"]))
+        if self.split is not None:
+            self.model = TM.SplitVdn(self.acting, self.split, int(settings["hidden_vdn"]),
+                                     int(settings["layers"]), int(settings["seed"]))
+        else:
+            self.model = TM.make(self.arch, self.acting, int(settings["hidden_factored"]),
+                                 int(settings["hidden_vdn"]), int(settings["layers"]))
         self.target = copy.deepcopy(self.model)
         for param in self.target.parameters():
             param.requires_grad_(False)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=float(settings["lr"]))
+        self.groups = []
+        for k, g in enumerate(self.split or []):
+            levels = list(g["levels"])
+            shape = {"none": [], "own": levels, "all": None}[g["shaping"]]
+            self.groups.append({
+                "levels": levels, "n_step": int(g["n_step"]), "shape": shape,
+                "rng": random.Random(int(settings["seed"]) + k),
+                "opt": torch.optim.Adam(self.model.groups[k].parameters(),
+                                        lr=float(settings["lr"]))})
         self.gamma = float(settings["gamma"])
         self.c_set = float(settings["c_set"])
         n = len(self.names)
@@ -269,12 +301,19 @@ class TurnTrainer:
         self.x_stats.add(x)
 
     # ------------------------------------------------------------- reward
-    def phi(self, d: list) -> float:
-        return -sum(p * v for p, v in zip(self.p, d))
+    def phi(self, d: list, levels=None) -> float:
+        """-sum_i p_i d_i over every level, or over the given levels."""
+        if levels is None:
+            return -sum(p * v for p, v in zip(self.p, d))
+        return -sum(self.p[i] * d[i] for i in levels if i < len(self.p) and i < len(d))
 
-    def reward(self, tr: Transition) -> float:
+    def reward(self, tr: Transition, group=None) -> float:
+        """The reward (§7); with a split group, its own shaping."""
         cost = (-tr.J - self.c_set * tr.changes - self.jbar) / self.spread
-        return cost + (self.gamma * self.phi(tr.d1) - self.phi(tr.d0)) / self.spread
+        levels = None if group is None else group["shape"]
+        if levels == []:
+            return cost
+        return cost + (self.gamma * self.phi(tr.d1, levels) - self.phi(tr.d0, levels)) / self.spread
 
     def freeze(self) -> None:
         """The scaling, the reward's centre and spread, and the merge prices
@@ -309,16 +348,33 @@ class TurnTrainer:
 
     def td_error(self, tr: Transition) -> float:
         x0, x1 = self.tensors([tr.x0]), self.tensors([tr.x1])
+        if self.groups:
+            return sum(self.td_groups(tr, x0, x1))
         with torch.no_grad():
             q = self.model.joint(x0, torch.tensor([tr.a]), self.masks([tr.m0]))
         y = self.reward(tr) + self.gamma * float(self.bootstrap(x1, self.masks([tr.m1]))[0])
         return y - float(q[0])
 
+    def td_groups(self, tr: Transition, x0=None, x1=None) -> list:
+        """Each split group's 1-step TD error on its own reward and levels."""
+        x0 = self.tensors([tr.x0]) if x0 is None else x0
+        x1 = self.tensors([tr.x1]) if x1 is None else x1
+        out = []
+        with torch.no_grad():
+            for k, g in enumerate(self.groups):
+                net, tgt, L = self.model.groups[k], self.target.groups[k], g["levels"]
+                q = net.joint(x0, torch.tensor([[tr.a[i] for i in L]]))
+                m1 = self.masks([[tr.m1[i] for i in L]])
+                a_star = net.scores(x1).masked_fill(~m1, float("-inf")).argmax(-1)
+                y = self.reward(tr, g) + self.gamma * float(tgt.joint(x1, a_star)[0])
+                out.append(y - float(q[0]))
+        return out
+
     # ------------------------------------------------------------- learning
-    def eligible(self, final: bool) -> list:
+    def eligible(self, final: bool, n_step=None) -> list:
         """Replay indices with n_step contiguous transitions ahead (fewer at
         the run's end), and how many."""
-        n_step = int(self.s["n_step"])
+        n_step = int(self.s["n_step"] if n_step is None else n_step)
         out = []
         for i in range(len(self.replay)):
             n = 1
@@ -362,6 +418,45 @@ class TurnTrainer:
         return {"loss": loss.item(), "q": q.detach().mean().item(), "y": y.mean().item(),
                 "grad_norm": float(norm)}
 
+    def train_group_step(self, k: int, eligible: list) -> dict:
+        """One step of split group k: its own batch draws, n-step return of
+        its own reward, double-Q bootstrap on its own greedy choice over its
+        levels, its own Adam and soft target update."""
+        g = self.groups[k]
+        net, tgt, L = self.model.groups[k], self.target.groups[k], g["levels"]
+        batch = [eligible[g["rng"].randrange(len(eligible))]
+                 for _ in range(int(self.s["batch"]))]
+        gm = self.gamma
+        returns, boot_x, boot_m, gammas = [], [], [], []
+        for i, n in batch:
+            returns.append(sum(gm ** j * self.reward(self.replay[i + j], g) for j in range(n)))
+            last = self.replay[i + n - 1]
+            boot_x.append(last.x1)
+            boot_m.append([last.m1[level] for level in L])
+            gammas.append(gm ** n)
+        first = [self.replay[i] for i, _ in batch]
+        x0 = self.tensors([tr.x0 for tr in first])
+        a = torch.tensor([[tr.a[level] for level in L] for tr in first], dtype=torch.long)
+        xb, mb = self.tensors(boot_x), self.masks(boot_m)
+        with torch.no_grad():
+            a_star = net.scores(xb).masked_fill(~mb, float("-inf")).argmax(-1)
+            boot = tgt.joint(xb, a_star)
+        y = (torch.tensor(returns, dtype=torch.float64) +
+             torch.tensor(gammas, dtype=torch.float64) * boot)
+        q = net.joint(x0, a)
+        loss = torch.nn.functional.huber_loss(q, y, delta=float(self.s["huber"]))
+        g["opt"].zero_grad()
+        loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(net.parameters(), float(self.s["grad_clip"]))
+        g["opt"].step()
+        tau = float(self.s["tau"])
+        with torch.no_grad():
+            for pt, po in zip(tgt.parameters(), net.parameters()):
+                pt.mul_(1 - tau).add_(po, alpha=tau)
+        self.steps += 1
+        return {"loss": loss.item(), "q": q.detach().mean().item(), "y": y.mean().item(),
+                "grad_norm": float(norm)}
+
     def push(self) -> None:
         self.version += 1
         weights = TM.export(self.model, self.version, self.mean, self.scale,
@@ -383,13 +478,16 @@ class TurnTrainer:
         if len(tr.a) != self.acting:     # the earlier line chose nothing
             return
         td = self.td_error(tr)
-        self.emit({"type": "turn", "t": line.t, "op0": line.op0, "op1": line.op1,
-                   "ops": price["ops"], "secs": price["secs"], "J": price["J"],
-                   "C_W": price["C_W"], "C_R": price["C_R"], "C_S": price["C_S"],
-                   "jobs": price["jobs"], "changes": tr.changes,
-                   "phi0": self.phi(tr.d0), "phi1": self.phi(tr.d1),
-                   "r": self.reward(tr), "td": td, "actions": tr.a,
-                   "explored": prev.explored, "eps": prev.eps, "final": int(line.final)})
+        record = {"type": "turn", "t": line.t, "op0": line.op0, "op1": line.op1,
+                  "ops": price["ops"], "secs": price["secs"], "J": price["J"],
+                  "C_W": price["C_W"], "C_R": price["C_R"], "C_S": price["C_S"],
+                  "jobs": price["jobs"], "changes": tr.changes,
+                  "phi0": self.phi(tr.d0), "phi1": self.phi(tr.d1),
+                  "r": self.reward(tr), "td": td, "actions": tr.a,
+                  "explored": prev.explored, "eps": prev.eps, "final": int(line.final)}
+        if self.groups:
+            record["r_groups"] = [self.reward(tr, g) for g in self.groups]
+        self.emit(record)
         if math.isfinite(td):
             self.preq.append(td)
         self.replay.append(tr)
@@ -398,13 +496,30 @@ class TurnTrainer:
         if len(self.replay) % int(self.s["push_every_turns"]) == 0:
             self.freeze()
             self.push()
-        if len(self.replay) >= int(self.s["min_replay"]):
-            eligible = self.eligible(final=False)
-            if eligible:
+        if len(self.replay) < int(self.s["min_replay"]):
+            return
+        if self.groups:
+            per = []
+            for k, g in enumerate(self.groups):
+                eligible = self.eligible(final=False, n_step=g["n_step"])
+                if not eligible:
+                    continue
                 for _ in range(int(self.s["steps_per_turn"])):
-                    r = self.train_step(eligible)
+                    r = self.train_group_step(k, eligible)
+                per.append({"group": k, **r})
+            if per:
                 self.emit({"type": "train", "t": line.t, "n": len(self.replay),
-                           "steps": self.steps, **r})
+                           "steps": self.steps, "loss": sum(r["loss"] for r in per),
+                           "q": sum(r["q"] for r in per), "y": sum(r["y"] for r in per),
+                           "grad_norm": math.sqrt(sum(r["grad_norm"] ** 2 for r in per)),
+                           "groups": per})
+            return
+        eligible = self.eligible(final=False)
+        if eligible:
+            for _ in range(int(self.s["steps_per_turn"])):
+                r = self.train_step(eligible)
+            self.emit({"type": "train", "t": line.t, "n": len(self.replay),
+                       "steps": self.steps, **r})
 
     def step(self) -> None:
         self.ingest()
@@ -420,7 +535,8 @@ class TurnTrainer:
         self.emit({"type": "stop", "why": why, "lines": self.lines, "priced": self.priced,
                    "dropped": self.dropped, "transitions": len(self.replay),
                    "steps": self.steps, "version": self.version})
-        summary = {"arch": self.arch, "lines": self.lines, "priced": self.priced,
+        summary = {"arch": self.arch, "split": self.split, "lines": self.lines,
+                   "priced": self.priced,
                    "dropped": self.dropped, "transitions": len(self.replay),
                    "steps": self.steps, "weights_version": self.version,
                    "preq_rms_last50": rms, "why": why}
@@ -429,12 +545,38 @@ class TurnTrainer:
         return 0
 
 
+SHAPINGS = ("none", "own", "all")
+
+
+def check_split(split) -> None:
+    """The optional "split" key's form (the levels are checked against the
+    plugin's acting levels when the trainer starts)."""
+    if not isinstance(split, list) or len(split) < 2:
+        raise ValueError("split must be a list of at least two groups")
+    for g in split:
+        if not isinstance(g, dict):
+            raise ValueError(f"a split group must be an object: {g!r}")
+        unknown = set(g) - {"levels", "n_step", "shaping", "summary", "l0_inputs"}
+        if unknown:
+            raise ValueError(f"a split group has unknown keys {sorted(unknown)}")
+        n = g.get("n_step")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise ValueError(f"a split group needs n_step >= 1: {g!r}")
+        if g.get("shaping") not in SHAPINGS:
+            raise ValueError(f"a split group's shaping is one of {SHAPINGS}: {g!r}")
+        for flag in ("summary", "l0_inputs"):
+            if not isinstance(g.get(flag, False), bool):
+                raise ValueError(f"a split group's {flag} is true or false: {g!r}")
+
+
 def load_settings(path: str) -> dict:
     raw = json.loads(Path(path).read_text())
     s = raw.get("trainer", raw)
     missing = [k for k in SETTINGS_KEYS if k not in s]
     if missing:
         raise ValueError(f"turn trainer settings lack {missing}")
+    if s.get("split") is not None:
+        check_split(s["split"])
     return s
 
 

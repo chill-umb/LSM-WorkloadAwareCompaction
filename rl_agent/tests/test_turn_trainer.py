@@ -21,6 +21,7 @@ except ImportError:
     torch = None
 
 if torch is not None:
+    from learner import turn_model as TM  # noqa: E402
     from learner import turn_trainer as TT  # noqa: E402
 from learner import learned2 as L2  # noqa: E402
 from learner import turn_weights as TW  # noqa: E402
@@ -225,6 +226,110 @@ class RewardTest(unittest.TestCase):
             final = dict(tr.eligible(final=True))
             self.assertEqual(final[7], 1)
             tr.log.close()
+
+
+SPLIT = [{"levels": [0, 1], "n_step": 3, "shaping": "none", "summary": True},
+         {"levels": [2, 3, 4], "n_step": 2, "shaping": "own", "l0_inputs": True}]
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class SplitTrainerTest(unittest.TestCase):
+    def transition(self, t, d0, d1, J=0.0, changes=0, a=None):
+        names = TW.feature_names(ACTING)
+        x0 = [0.01 * ((i * 5 + t) % 11) for i in range(len(names))]
+        x1 = [0.01 * ((i * 5 + t + 1) % 11) for i in range(len(names))]
+        return TT.Transition(t=t, x0=x0, m0=[[True] * 4] * ACTING,
+                             a=a or [t % 4, (t + 1) % 4, t % 2, 3, 0], x1=x1,
+                             m1=[[True] * 4] * ACTING, d0=d0, d1=d1, J=J, changes=changes)
+
+    def test_end_to_end_the_file_is_vdn_with_the_split_views(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp, "vdn", split=SPLIT)
+            write(tr.args.host_log, host_log())
+            lines = [{"type": "turn_start", "arch": "vdn", "acting": ACTING,
+                      "features": TW.feature_names(ACTING)}]
+            lines += [turn_line(t, set_=1 if t % 4 == 0 else 0, action="compact" if t % 2 else "hold")
+                      for t in range(TURNS)]
+            lines.append({"type": "stop"})
+            write(tr.args.decisions, lines)
+            tr.step()
+            self.assertTrue(tr.done())
+            tr.finish("test")
+            log = [json.loads(line) for line in Path(tr.args.log).read_text().splitlines()]
+            turns = [r for r in log if r["type"] == "turn"]
+            self.assertEqual(len(turns), TURNS - 2)
+            for r in turns:
+                self.assertEqual(len(r["r_groups"]), 2)
+                self.assertTrue(all(math.isfinite(v) for v in r["r_groups"] + [r["r"], r["td"]]))
+            train = [r for r in log if r["type"] == "train"]
+            self.assertTrue(train)
+            self.assertEqual([g["group"] for g in train[-1]["groups"]], [0, 1])
+            w = TW.decode(Path(tr.args.weights).read_bytes())
+            self.assertEqual((w.arch, len(w.nets)), (TW.ARCHS["vdn"], ACTING))
+            self.assertEqual(w.nets[0].view, TM.split_view(0, ACTING, True, False))
+            self.assertEqual(w.nets[3].view, TM.split_view(3, ACTING, False, True))
+            self.assertEqual(json.loads(Path(tr.args.summary).read_text())["split"], SPLIT)
+
+    def test_each_groups_reward_has_its_own_shaping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            split = [dict(SPLIT[0]), dict(SPLIT[1])]
+            tr = make(tmp, "vdn", split=split)
+            tr.p = [2.0, 1.0, 0.5, 0.25, 0.1, 0.0]
+            tr.jbar, tr.spread, tr.gamma, tr.c_set = -10.0, 4.0, 0.9, 0.5
+            d0, d1 = [3, 1, 4, 2, 6, 0], [1, 2, 1, 5, 3, 0]
+            tran = self.transition(1, d0, d1, J=12.0, changes=2)
+            cost = (-12.0 - 0.5 * 2 + 10.0) / 4.0
+            phi = lambda d, ls: -sum(tr.p[i] * d[i] for i in ls)
+            self.assertAlmostEqual(tr.reward(tran, tr.groups[0]), cost, places=12)
+            own = cost + (0.9 * phi(d1, [2, 3, 4]) - phi(d0, [2, 3, 4])) / 4.0
+            self.assertAlmostEqual(tr.reward(tran, tr.groups[1]), own, places=12)
+            # The unsplit reward (logged "r") is unchanged, and "all" is it.
+            full = cost + (0.9 * phi(d1, range(6)) - phi(d0, range(6))) / 4.0
+            self.assertAlmostEqual(tr.reward(tran), full, places=12)
+            tr.log.close()
+            tr = make(tmp, "vdn", split=[dict(SPLIT[0], shaping="all"), SPLIT[1]])
+            tr.p, tr.jbar, tr.spread, tr.gamma, tr.c_set = [2.0, 1.0, 0.5, 0.25, 0.1, 0.0], -10.0, 4.0, 0.9, 0.5
+            self.assertAlmostEqual(tr.reward(tran, tr.groups[0]), full, places=12)
+            tr.log.close()
+
+    def test_a_groups_step_moves_only_its_own_nets_with_its_own_horizon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = make(tmp, "vdn", split=SPLIT)
+            tr.p, tr.jbar, tr.spread = [1e-6] * 6, -1.0, 1.0
+            d = [1e6, 0, 2e6, 0, 0, 0]
+            tr.replay = [self.transition(t, d, d, J=1.0 + 0.1 * t) for t in (1, 2, 3, 4, 5, 6, 8, 9)]
+            self.assertEqual(dict(tr.eligible(False, n_step=3))[0], 3)
+            self.assertEqual(dict(tr.eligible(False, n_step=2))[0], 2)
+            self.assertEqual(dict(tr.eligible(False, n_step=3))[4], 2)    # 5, 6, then the gap
+            before = [[p.clone() for p in g.parameters()] for g in tr.model.groups]
+            tr.train_group_step(1, tr.eligible(False, n_step=2))
+            after = [[p.clone() for p in g.parameters()] for g in tr.model.groups]
+            self.assertTrue(all(torch.equal(a, b) for a, b in zip(after[0], before[0])))
+            self.assertFalse(all(torch.equal(a, b) for a, b in zip(after[1], before[1])))
+            tr.train_group_step(0, tr.eligible(False, n_step=3))
+            self.assertFalse(all(torch.equal(p, b) for p, b in
+                                 zip(tr.model.groups[0].parameters(), before[0])))
+            tr.log.close()
+
+    def test_bad_split_settings_are_refused(self):
+        for bad in ([SPLIT[0]],
+                    [dict(SPLIT[0], shaping="some"), SPLIT[1]],
+                    [dict(SPLIT[0], n_step=0), SPLIT[1]],
+                    [dict(SPLIT[0], summary="yes"), SPLIT[1]],
+                    [dict(SPLIT[0], extra=1), SPLIT[1]]):
+            with self.assertRaises(ValueError, msg=bad):
+                TT.check_split(bad)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.json"
+            path.write_text(json.dumps({"trainer": settings(split=[dict(SPLIT[0], shaping="x"), SPLIT[1]])}))
+            with self.assertRaises(ValueError):
+                TT.load_settings(str(path))
+            path.write_text(json.dumps({"trainer": settings(split=SPLIT)}))
+            self.assertEqual(TT.load_settings(str(path))["split"], SPLIT)
+            with self.assertRaises(SystemExit):
+                make(tmp, "factored", split=SPLIT)
+            with self.assertRaises(ValueError):          # levels 0..4 not covered
+                make(tmp, "vdn", split=[dict(SPLIT[0], levels=[0]), SPLIT[1]])
 
 
 if __name__ == "__main__":
