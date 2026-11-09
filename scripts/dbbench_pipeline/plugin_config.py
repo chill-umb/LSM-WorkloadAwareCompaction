@@ -29,6 +29,8 @@ value, so no value is chosen when an arm starts.
                          TURN_SETTINGS_FILE's "plugin" part, every turn_*
                          key but turn_arch (the arm's), push_interval_ms and
                          weights_required; no explore
+  turn_decay             the turn arms: --decay (03's DECAY),
+                         the decay's feature flag; 0 in a diagnostic run only
 
 Every value missing, or null, in its file is listed and the arm is refused:
 the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
@@ -152,7 +154,8 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             q_bar_standin: float | None = None,
             apply_at_op: int | None = None, apply_m: str | None = None,
             apply_k0: int | None = None, apply_schedule: str | None = None,
-            hold_k0_cap: int | None = None) -> tuple[dict, list[str]]:
+            hold_k0_cap: int | None = None,
+            decay: int | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
@@ -165,9 +168,18 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     (apply_schedule, owner 2026-10-21), is for the hold arm in a diagnostic
     run only, and so is hold_k0_cap: the K bound the hold arm's scheduled
     triggers are checked against, in place of D-18's (hold-only never acts,
-    so the bound reaches nothing else)."""
+    so the bound reaches nothing else). decay, the turn arms' only and
+    required there: 1 the anchors decay toward native, 0 they stay where the
+    agent set them, which breaks ACT-5 and so is for a diagnostic run only."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
+    if decay is not None and arm not in TURN_ARMS:
+        raise ValueError(f"decay is for the turn arms, not {arm!r}")
+    if decay is not None and (isinstance(decay, bool) or decay not in (0, 1)):
+        raise ValueError(f"decay must be 0 or 1; got {decay!r}")
+    if decay == 0 and not diagnostic:
+        raise ValueError("decay 0 (no anchor decay) breaks ACT-5: a "
+                         "diagnostic run only")
     schedule = scheduled_change(arm, diagnostic, apply_at_op, apply_m,
                                 apply_k0, apply_schedule)
     missing: list[str] = []
@@ -270,6 +282,9 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             config["turn_arch"] = TURN_ARMS[arm]
             for key in TURN_KEYS:
                 config[key] = _value(learner, key, "turn settings", missing)
+            if decay is None:
+                missing.append("turn_decay (the arm's DECAY: 1 or 0)")
+            config["turn_decay"] = decay
 
     filled: list[str] = []
     if missing and placeholders:
@@ -433,6 +448,10 @@ def main() -> int:
     parser.add_argument("--hold-k0-cap", type=int,
                         help="hold arm, diagnostic only: k0_cap in place of "
                              "D-18's (the scheduled triggers' bound)")
+    parser.add_argument("--decay", type=int, choices=(0, 1),
+                        help="the turn arms only, required there: 1 the "
+                             "anchors decay toward native, 0 they stay where "
+                             "the agent set them (diagnostic only)")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
@@ -458,7 +477,7 @@ def main() -> int:
             beta_star=args.beta_star, q_bar_standin=args.q_bar_standin,
             apply_at_op=args.apply_at_op, apply_m=args.apply_m,
             apply_k0=args.apply_k0, apply_schedule=args.apply_schedule,
-            hold_k0_cap=args.hold_k0_cap)
+            hold_k0_cap=args.hold_k0_cap, decay=args.decay)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

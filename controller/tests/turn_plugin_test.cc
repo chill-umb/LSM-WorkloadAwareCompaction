@@ -37,7 +37,8 @@ const char* const kTurnKeys[] = {
     "turn_guard_l0_flushes", "turn_safety_l0_flushes",
     "turn_safety_pending_bytes", "turn_k_defer_max", "turn_renew_band",
     "turn_max_topups",   "turn_explore_start",    "turn_explore_end",
-    "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs"};
+    "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs",
+    "turn_decay"};
 
 // A net of one layer with zero weights: every score is a bias, 1 for
 // `action` at `level` and 0 elsewhere, so greedy picks it wherever allowed.
@@ -152,6 +153,7 @@ class TurnTest : public testing::Test {
     values["turn_acting"] = "5";
     values["turn_arch"] = "\"factored\"";
     values["turn_kappa"] = "50";
+    values["turn_decay"] = "1";
     values["turn_margin"] = "0.1";
     values["turn_sigma_max"] = "1.3333333333333333";
     values["turn_glide_share"] = "0.5";
@@ -228,6 +230,7 @@ TEST_F(TurnTest, TheConfigNeedsEveryTurnKeyAndOtherModesRefuseThem) {
   EXPECT_EQ(c.turn.acting, 5);
   EXPECT_EQ(c.turn.arch, 0);
   EXPECT_EQ(c.turn.max_topups, 2);
+  EXPECT_TRUE(c.turn.decay);
   EXPECT_DOUBLE_EQ(c.turn.guard_owed_bytes, 16.0 * (1ull << 30));
   EXPECT_EQ(c.turn.k_rungs, (std::vector<double>{2, 3, 4, 6, 8}));
   ASSERT_EQ(c.turn.m_rungs.size(), 5u);
@@ -235,6 +238,8 @@ TEST_F(TurnTest, TheConfigNeedsEveryTurnKeyAndOtherModesRefuseThem) {
   EXPECT_TRUE(CheckConfigAgainstHost(c, 4, 20, &error)) << error;
   ASSERT_TRUE(LoadConfig(Config({{"turn_arch", "\"vdn\""}}), &c, &error)) << error;
   EXPECT_EQ(c.turn.arch, 1);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_decay", "0"}}), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.decay);
 
   for (const char* key : kTurnKeys) {
     auto values = Values();
@@ -252,6 +257,9 @@ TEST_F(TurnTest, TheConfigNeedsEveryTurnKeyAndOtherModesRefuseThem) {
       {{"turn_glide_share", "0"}},
       {{"turn_forecast_turns", "0"}},
       {{"turn_renew_band", "1.5"}},
+      {{"turn_decay", "2"}},
+      {{"turn_decay", "-1"}},
+      {{"turn_decay", "0.5"}},
       {{"turn_explore_start", "1"}},
       {{"turn_k_rungs", "\"2:4:3\""}},
       {{"turn_k_rungs", "\"2:3.5:4\""}},
@@ -328,6 +336,45 @@ TEST_F(TurnTest, AReadOnlyStreamStillClosesTurnsAndDecays) {
   EXPECT_LT(Array(turns[0], "sent_m")[1], 0.97);
   EXPECT_EQ(Array(turns.back(), "applied_m")[1], 1.0);
   EXPECT_GE(host.Applies(), 2u);
+}
+
+TEST_F(TurnTest, WithTheDecayOffHoldKeepsTheSetting) {
+  // As above, with turn_decay 0 (DECAY=0): L1 compacts at turn 0, then holds.
+  WriteNet(weights(), BiasNet(1, 0, 1, Action::kCompact));
+  FakeHost host;
+  Tree(&host);
+  {
+    Controller controller(&host,
+                          Config({{"turn_kappa", "2"}, {"turn_decay", "0"}}),
+                          [this] { return clock_us_; });
+    ASSERT_FALSE(controller.fallback());
+    Run(&controller, &host, 4, /*writes=*/false);
+    WriteNet(weights(), BiasNet(2, 0, -1, Action::kHold));
+    Run(&controller, &host, 36, /*writes=*/false);
+    EXPECT_FALSE(controller.fallback());
+  }
+  const auto starts = Lines("turn_start");
+  ASSERT_EQ(starts.size(), 1u);
+  EXPECT_EQ(Number(starts[0], "decay"), 0);
+  const auto turns = Lines("turn");
+  ASSERT_EQ(turns.size(), 10u);
+  // One rung down at turn 0, and there it stays, bit for bit: no decay,
+  // never a wait.
+  const double pressed = Array(turns[0], "anchors_after")[1];
+  EXPECT_NEAR(pressed, -0.5, 1e-12);
+  EXPECT_EQ(Array(turns[0], "anchors")[1], 0.0);
+  for (size_t t = 0; t < turns.size(); ++t) {
+    const std::string& line = turns[t];
+    EXPECT_EQ(Names(line, "action")[1], t == 0 ? "compact" : "hold") << line;
+    if (t > 0) {
+      EXPECT_EQ(Array(line, "anchors")[1], pressed) << line;
+    }
+    EXPECT_EQ(Array(line, "anchors_after")[1], pressed) << line;
+    for (double w : Array(line, "decay_waited")) EXPECT_EQ(w, 0) << line;
+  }
+  // The glide takes L1 down to the lower rung, and holding keeps it there.
+  EXPECT_NEAR(Array(turns.back(), "applied_m")[1], std::sqrt(0.5), 1e-12);
+  EXPECT_NEAR(Array(turns.back(), "sent_m")[1], std::sqrt(0.5), 1e-12);
 }
 
 TEST_F(TurnTest, ARenewMakesNoApplyAndEachChangeIsOneApply) {

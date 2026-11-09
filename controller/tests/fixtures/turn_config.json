@@ -93,6 +93,7 @@
   "transition_log": "transitions.jsonl",
   "turn_acting": 5,
   "turn_arch": "factored",
+  "turn_decay": 1,
   "turn_explore_end": 0.05,
   "turn_explore_start": 0.5,
   "turn_explore_turns": 200,

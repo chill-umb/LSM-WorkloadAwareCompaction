@@ -670,6 +670,18 @@ preflight's turn smoke must have run. After that:
   whether the folder is this machine's (exit 0, 3 nothing sealed, 4 another
   machine's, 6 a file changed since the seal).
 
+### The turn arms' decay flag, DECAY
+
+`DECAY=1` (the default) keeps the anchors' decay: every level's setting
+drifts back toward its start (`controller/turn.cc` `DecayAnchors`,
+`turn_kappa` turns). `DECAY=0` turns it off: a level stays where the agent
+set it, so hold keeps the setting and every press moves one rung. 03 passes
+it to `plugin_config.py`, the turn arms' config carries it as `turn_decay`
+(so the config's hash, in the fingerprint, tells the two apart), and
+`metadata.env` records `turn_decay=`. `DECAY=0` breaks ACT-5, so it is
+refused outside a diagnostic run; 36's runs are diagnostic. Example:
+`env DECAY=0 RL_TAG=<tag> ... scripts/dbbench_pipeline/36_rl_batch.sh`.
+
 ### SSD TRIM before every run (owner, 2026-11-08)
 
 ext4 tells the drive which blocks are free only at the weekly `fstrim`; on

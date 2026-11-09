@@ -258,6 +258,42 @@ TEST(TurnDecay, StepsDownWaitForTheGuardsStepsUpNever) {
   EXPECT_EQ(RungIndex(l.m, an[3].a), 2);
 }
 
+TEST(TurnDecay, TheFlagDecaysOrKeepsEveryAnchor) {
+  // DECAY: DecayStep(true) is DecayAnchors; with false
+  // every anchor, above or below native, stays where the presses left it.
+  const TurnConfig c = Cfg();
+  const Ladders l = MakeLadders(c);
+  TurnTree t = Tree();
+  std::vector<AnchorState> set = Native(t.num_levels);
+  set[0].a = std::log2(8.0 / 4);  // K 8 from 4
+  set[1].a = -0.5;                // L1 one rung below native
+  set[2].a = 0.2501;              // one decay step from crossing down
+  set[3].a = 1.0;                 // L3 at the top rung
+  std::vector<AnchorState> on = set, off = set, ref = set;
+  EXPECT_EQ(DecayStep(true, t, c, l.k, l.m, &on),
+            DecayAnchors(t, c, l.k, l.m, &ref));
+  for (int i = 0; i < t.num_levels; ++i) {
+    EXPECT_DOUBLE_EQ(on[i].a, ref[i].a) << i;
+  }
+  EXPECT_LT(on[0].a, set[0].a);
+  EXPECT_GT(on[1].a, set[1].a);
+  for (int turn = 0; turn < 1000; ++turn) {
+    const std::vector<bool> w = DecayStep(false, t, c, l.k, l.m, &off);
+    EXPECT_EQ(w, std::vector<bool>(t.num_levels, false));
+  }
+  for (int i = 0; i < t.num_levels; ++i) {
+    EXPECT_EQ(off[i].a, set[i].a) << i;
+  }
+  // So with the decay off, a press always moves a rung (an anchor on its
+  // rung has nothing to renew), except at the ladder's end.
+  bool renew = false;
+  const double k6 = std::log2(6.0 / 4);
+  EXPECT_DOUBLE_EQ(Press(l.k, k6, true, c.renew_band, &renew), std::log2(8.0 / 4));
+  EXPECT_FALSE(renew);
+  EXPECT_DOUBLE_EQ(Press(l.k, off[0].a, true, c.renew_band, &renew), off[0].a);
+  EXPECT_TRUE(renew);
+}
+
 // --- Owed work and the glide ------------------------------------------------
 
 TEST(TurnOwed, SplitsRocksDBsEstimateByLevel) {

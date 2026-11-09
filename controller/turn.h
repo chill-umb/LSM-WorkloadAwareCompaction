@@ -69,6 +69,16 @@ struct TurnTree;
 std::vector<bool> DecayAnchors(const TurnTree& t, const TurnConfig& cfg,
                                const Ladder& k_ladder, const Ladder& m_ladder,
                                std::vector<AnchorState>* anchors);
+// The anchors' rule at each turn boundary, behind the decay's feature flag
+// (turn_decay; DECAY, set per run). decay true: the decay
+// rule, DecayAnchors. decay false: every anchor stays where the agent's
+// presses left it, so hold keeps the setting and a level moves only when the
+// agent presses it. Returns per level whether the decay waited (never, with
+// the decay off).
+std::vector<bool> DecayStep(bool decay, const TurnTree& t,
+                            const TurnConfig& cfg, const Ladder& k_ladder,
+                            const Ladder& m_ladder,
+                            std::vector<AnchorState>* anchors);
 
 // A press "up" (expand) or "down" (compact's anchor part) on an anchor.
 // Renew: when the anchor rounds to a rung r on the pressed side of native and

@@ -304,6 +304,11 @@ LEARNER2_SETTINGS_FILE="${LEARNER2_SETTINGS_FILE:-config/learner2_settings.json}
 # "plugin" (turn_arch comes from the arm: turn factored, turn_vdn vdn), the
 # turn trainer's under "trainer".
 TURN_SETTINGS_FILE="${TURN_SETTINGS_FILE:-config/turn_settings.json}"
+# The turn arms' decay feature flag, the plugin config's
+# turn_decay: 1 every level's setting drifts back toward its start
+# (controller/turn.cc DecayAnchors, turn_kappa); 0 a level stays where the
+# agent set it (hold keeps it). 0 breaks ACT-5, so a diagnostic run only.
+DECAY="${DECAY:-1}"
 # A diagnostic run may price with a stated q-bar while the contract's is open
 # (D-29 §6); empty: none, and a learner arm is refused.
 CONTROLLER_QBAR_STANDIN="${CONTROLLER_QBAR_STANDIN:-}"

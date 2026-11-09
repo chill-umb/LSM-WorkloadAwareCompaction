@@ -549,6 +549,9 @@ class TurnArmsTest(unittest.TestCase):
                 config = json.loads((cell / arm / "plugin_config.json").read_text())
                 self.assertEqual((config["mode"], config["turn_arch"]), ("turn", arch))
                 self.assertEqual(config["weights_path"], str(cell / arm / "weights.bin"))
+                self.assertEqual(config["turn_decay"], 1)   # DECAY's default
+                self.assertIn("turn_decay=1", (cell / arm / "metadata.env")
+                              .read_text().splitlines())
                 report = json.loads((cell / arm / "plugin_check.json").read_text())
                 self.assertEqual(report["verdict"], "passed", (arm, report))
                 self.assertEqual(report["checks"]["turn"]["turns"], 2)
@@ -557,6 +560,27 @@ class TurnArmsTest(unittest.TestCase):
                                      .read_text())
                 self.assertEqual((summary["arch"], summary["lines"]), (arch, 2))
                 self.assertEqual(summary["why"], "plugin stop")
+
+    def test_decay_off_reaches_the_plugin_and_a_bad_flag_is_refused(self):
+        """DECAY=0: the turn arms' configs carry
+        turn_decay 0 and the run records it; anything but 0 or 1 is refused
+        before any run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = self.run_turn(tmp, DECAY="0")
+            self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+            cell = Path(tmp) / "results" / "1M" / "T2"
+            for arm in ("turn", "turn_vdn"):
+                config = json.loads((cell / arm / "plugin_config.json").read_text())
+                self.assertEqual(config["turn_decay"], 0)
+                meta = (cell / arm / "metadata.env").read_text().splitlines()
+                self.assertIn("turn_decay=0", meta)
+                report = json.loads((cell / arm / "plugin_check.json").read_text())
+                self.assertEqual(report["verdict"], "passed", (arm, report))
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = self.run_turn(tmp, DECAY="2")
+            self.assertEqual(ran.returncode, 1, ran.stderr[-3000:])
+            self.assertIn("DECAY must be 0 or 1", ran.stderr)
+            self.assertFalse((Path(tmp) / "results" / "1M" / "T2" / "turn").exists())
 
     def test_a_masked_turn_action_fails_the_check(self):
         with tempfile.TemporaryDirectory() as tmp:

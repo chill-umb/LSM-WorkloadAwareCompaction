@@ -49,7 +49,8 @@ scored from the first mixgraph operation to the end of the drain:
                      over 64k-operation turns, the factored value function
                      (turn) or one agent per level (turn_vdn); settings in
                      TURN_SETTINGS_FILE; rl_agent/learner/turn_trainer.py
-                     learns while the arm runs. Cold every run.
+                     learns while the arm runs. Cold every run. DECAY=0
+                     (diagnostic only) turns the anchors' decay off.
 
 The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
 unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
@@ -545,6 +546,10 @@ if (( CONTROLLER_MATRIX )); then
     echo "PLUGIN_PLACEHOLDERS must be 0 or 1." >&2
     exit 1
   }
+  [[ "$DECAY" =~ ^[01]$ ]] || {
+    echo "DECAY must be 0 or 1 (the turn arms' anchor decay)." >&2
+    exit 1
+  }
   # A hold-only matrix may take them at any length (D-31's step runs): the
   # hold-only plugin never acts (controller/policy.cc), so the placeholders
   # reach only its logs; its one change is the scheduled one, checked
@@ -578,6 +583,8 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
                   --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
     (( ! LEARNER_FROZEN )) || learner_flag+=(--learner-phase evaluation)
   fi
+  # The turn arms' decay feature flag (config.sh DECAY).
+  ! is_turn_arm "$1" || learner_flag+=(--decay "$DECAY")
   # The hold arm's scheduled change (step-response runs, diagnostic only).
   if [[ "$1" == hold && -n "$HOLD_APPLY_AT_OP" ]]; then
     learner_flag+=(--apply-at-op "$HOLD_APPLY_AT_OP" --apply-m "$HOLD_APPLY_M")
@@ -1673,6 +1680,7 @@ PY
       printf 'controller_qbar_standin=%s\n' "${CONTROLLER_QBAR_STANDIN:-none}"
       printf 'learner_seed=%s\n' "$learner_seed"
       printf 'learner_frozen=%s\n' "$LEARNER_FROZEN"
+      ! is_turn_arm "$arm" || printf 'turn_decay=%s\n' "$DECAY"
       if [[ "$arm" == learned ]]; then
         printf 'learner_checkpoint_in=%s\n' "${LEARNER_LAST_CHECKPOINT:-none}"
         printf 'learner_weights_in=%s\n' "${LEARNER_WEIGHTS_SHA256:-none}"

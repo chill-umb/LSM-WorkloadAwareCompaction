@@ -221,6 +221,14 @@ std::vector<bool> DecayAnchors(const TurnTree& t, const TurnConfig& cfg,
   return waited;
 }
 
+std::vector<bool> DecayStep(bool decay, const TurnTree& t,
+                            const TurnConfig& cfg, const Ladder& k_ladder,
+                            const Ladder& m_ladder,
+                            std::vector<AnchorState>* anchors) {
+  if (!decay) return std::vector<bool>(anchors->size(), false);
+  return DecayAnchors(t, cfg, k_ladder, m_ladder, anchors);
+}
+
 double Press(const Ladder& ladder, double a, bool up, double renew_band,
              bool* renew) {
   const int idx = RungIndex(ladder, a);

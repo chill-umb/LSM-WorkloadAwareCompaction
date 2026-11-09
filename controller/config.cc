@@ -329,6 +329,7 @@ const std::set<std::string>& KnownKeys() {
                                                "turn_acting",
                                                "turn_arch",
                                                "turn_kappa",
+                                               "turn_decay",
                                                "turn_margin",
                                                "turn_sigma_max",
                                                "turn_glide_share",
@@ -570,7 +571,8 @@ static const char* const kTurnKeys[] = {
     "turn_guard_l0_flushes", "turn_safety_l0_flushes",
     "turn_safety_pending_bytes", "turn_k_defer_max", "turn_renew_band",
     "turn_max_topups",   "turn_explore_start",    "turn_explore_end",
-    "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs"};
+    "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs",
+    "turn_decay"};
 
 // A rung ladder: ":"-separated finite numbers, ascending, at most 16; K's
 // whole files.
@@ -613,6 +615,7 @@ static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
                         " <= " + std::to_string(hi));
   };
   std::string arch, k_rungs, m_rungs;
+  int decay = 1;
   if (!number("turn_ops", &t->turn_ops,
               [](double v) { return v >= 1000 && v < 1e15 && v == std::floor(v); },
               "turn_ops an integer >= 1000") ||
@@ -622,6 +625,7 @@ static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
                 "need turn_arch \"factored\" or \"vdn\"") ||
       !number("turn_kappa", &t->kappa, [](double v) { return v > 0; },
               "turn_kappa > 0") ||
+      !integer("turn_decay", &decay, 0, 1) ||
       !number("turn_margin", &t->margin,
               [](double v) { return v > 0 && v < 1; }, "0 < turn_margin < 1") ||
       !r->Number("turn_sigma_max", &t->sigma_max) ||
@@ -657,6 +661,7 @@ static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
     return false;
   }
   t->arch = arch == "vdn" ? 1 : 0;
+  t->decay = decay == 1;
   // The m ladder holds native (1); the K ladder's native is the host's
   // trigger, checked against it (CheckConfigAgainstHost).
   Ladder ladder;

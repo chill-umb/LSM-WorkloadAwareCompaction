@@ -36,6 +36,10 @@ struct TurnConfig {
   int acting = 0;           // acting levels, L0 included (n + 1 in the design)
   int arch = 0;             // 0: factored (one agent), 1: VDN (one per level)
   double kappa = 0;         // anchor decay constant, in turns
+  // The decay's feature flag (turn_decay; DECAY, set per run): on, anchors
+  // decay toward native (DecayAnchors); off, they stay where the agent's
+  // presses left them (DecayStep).
+  bool decay = true;
   double margin = 0;        // epsilon of the encoding
   double sigma_max = 0;     // compact's score cap (4/3)
   double glide_share = 0;   // R_i's share of the slot's merge bytes (1/2)

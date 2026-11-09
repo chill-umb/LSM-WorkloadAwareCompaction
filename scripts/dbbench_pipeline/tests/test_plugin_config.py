@@ -198,9 +198,10 @@ class ComposeTest(unittest.TestCase):
                                      learner=learner, weights_path="/w.bin", seed=4,
                                      q_bar_standin=50000.0,
                                      decision_log="decisions.jsonl",
-                                     transition_log="transitions.jsonl")
+                                     transition_log="transitions.jsonl", decay=1)
             self.assertEqual(filled, [])
             self.assertEqual((config["mode"], config["turn_arch"]), ("turn", arch))
+            self.assertEqual(config["turn_decay"], 1)
             self.assertEqual(config["cost_model"], 2)
             self.assertEqual(config["weights_path"], "/w.bin")
             self.assertEqual(config["seed"], 4)
@@ -219,11 +220,35 @@ class ComposeTest(unittest.TestCase):
         partial = {k: v for k, v in learner.items() if k != "turn_kappa"}
         with self.assertRaisesRegex(ValueError, "turn_kappa"):
             compose("turn", prices=PRICES6, diagnostic=True, learner=partial,
-                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0, decay=1)
         with self.assertRaisesRegex(ValueError, "turn_m_rungs must be a string"):
             compose("turn", prices=PRICES6, diagnostic=True,
                     learner={**learner, "turn_m_rungs": 1.0},
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0, decay=1)
+
+    def test_the_decay_flag(self):
+        """DECAY: the turn arms' turn_decay, required
+        there and nowhere else; 0, no decay, only in a diagnostic run."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        turn = dict(prices=PRICES6, learner=pc.learner_values(shipped, "training"),
                     weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        for arm in pc.TURN_ARMS:
+            on, _ = compose(arm, diagnostic=True, decay=1, **turn)
+            off, _ = compose(arm, diagnostic=True, decay=0, **turn)
+            self.assertEqual((on["turn_decay"], off["turn_decay"]), (1, 0))
+            # The flag is the only difference, so the config's identity (03's
+            # plugin_config_sha256, in the fingerprint) tells the runs apart.
+            self.assertEqual({k for k in on if on[k] != off[k]}, {"turn_decay"})
+            with self.assertRaisesRegex(ValueError, "turn_decay"):
+                compose(arm, diagnostic=True, **turn)
+            with self.assertRaisesRegex(ValueError, "diagnostic run only"):
+                compose(arm, decay=0, **turn)
+            for bad in (2, -1, True, 0.5):
+                with self.assertRaisesRegex(ValueError, "0 or 1"):
+                    compose(arm, diagnostic=True, decay=bad, **turn)
+        with self.assertRaisesRegex(ValueError, "turn arms"):
+            compose("rules", contract=with_qbar(61234.5), decay=1)
+        self.assertNotIn("turn_decay", compose("rules", contract=with_qbar(61234.5))[0])
 
     def test_the_hold_arms_scheduled_change(self):
         """The step-response arm (owner, 2026-10-07): hold only, diagnostic

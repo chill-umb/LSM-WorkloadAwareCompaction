@@ -321,6 +321,7 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
                          .Num("acting", t.acting)
                          .Str("arch", t.arch == 1 ? "vdn" : "factored")
                          .Num("kappa", t.kappa)
+                         .Num("decay", t.decay ? 1 : 0)
                          .Num("margin", t.margin)
                          .Num("sigma_max", t.sigma_max)
                          .Num("glide_share", t.glide_share)
@@ -1312,10 +1313,10 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   }
 
   // 3. The design's order (as ~/node_ops/diag/2026-11-07-turn-core/trace.cc):
-  // decay first, then the state, the shaping's owed work and the masks at
-  // the decayed anchors.
+  // decay first (unless the run turned it off, turn_decay 0), then the
+  // state, the shaping's owed work and the masks at the decayed anchors.
   std::vector<bool> waited(n_, false);
-  if (!final) waited = DecayAnchors(t, tc, kl, ml, &turn_anchors_);
+  if (!final) waited = DecayStep(tc.decay, t, tc, kl, ml, &turn_anchors_);
   const TurnSettings rungs = RungSettings(t, kl, ml, turn_anchors_);
   const std::vector<double> owed = OwedWork(t, rungs.m, rungs.K);
   const TurnSettings base = AnchorSettings(t, tc, kl, ml, turn_anchors_);
