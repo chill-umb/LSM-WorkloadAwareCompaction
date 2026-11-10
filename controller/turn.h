@@ -181,7 +181,8 @@ TurnSettings AnchorSettings(const TurnTree& t, const TurnConfig& cfg,
                             const std::vector<AnchorState>& anchors);
 
 // Allowed actions per level (num_levels entries; non-acting levels hold
-// only), at the anchor settings `base`.
+// only), at the anchor settings `base`. With cfg.compact_floor, L0's compact
+// is also blocked while its anchor rounds to the K ladder's lowest rung.
 std::vector<TurnMask> Masks(const TurnTree& t, const TurnConfig& cfg,
                             const Ladder& k_ladder, const Ladder& m_ladder,
                             const std::vector<AnchorState>& anchors,

@@ -698,6 +698,37 @@ Carried like DECAY: `turn_prior` in the config, `turn_prior=` in
 `metadata.env`; 1 only in a diagnostic run. Example:
 `env PRIOR=1 RL_TAG=<tag> ... scripts/dbbench_pipeline/36_rl_batch.sh`.
 
+### The turn arms' L0 bill flag, L0_BILL
+
+`L0_BILL=0` (the default): the reward's J is the whole turn's J, as before.
+`L0_BILL=1` (owner, 2026-11-09): the plugin adds `l0_read` to every turn
+line, L0's raw read counts over the turn it closes (the fork's eight
+per-level counters at L0, and L1's hidden steps, which the scan rule charges
+to L0), and the trainer's J for a turn is L0's own bill:
+beta_r (c_f probes + c_blk filter passes + c_sk seeks + c_open reopens +
+c_st hidden steps), at cost model 2's base prices, plus every L0 merge that
+finished in the turn at its whole price (`merge_prices`, interference
+included). There is no owed-work shaping; `merge_charge` does not apply
+(`rate` is refused); `c_set` per SetOptions change stays. L0 alone: the
+turn settings must have `turn_acting` 1, or `plugin_config.py` (and so 03)
+and the trainer refuse. The trainer's turn lines keep `J` (the evaluator's)
+and log `J_reward` (the bill), `bill_read` and `bill_merge`. Carried like
+PRIOR: `turn_l0_bill` in the config, `turn_l0_bill=` in `metadata.env`; 1
+only in a diagnostic run.
+
+### The turn arms' compact floor flag, COMPACT_FLOOR
+
+`COMPACT_FLOOR=0` (the default): L0 may compact whenever it has a file.
+`COMPACT_FLOOR=1` (owner, 2026-11-09): L0's mask blocks compact while L0's
+anchor rounds to the lowest K rung, where compact would send K = max(1, n0),
+below the ladder, with no rung change (`controller/turn.cc` Masks). Carried
+like PRIOR: `turn_compact_floor` in the config, `turn_compact_floor=` in
+`metadata.env`; 1 only in a diagnostic run. Example:
+`env L0_BILL=1 COMPACT_FLOOR=1 RL_TAG=<tag> ... scripts/dbbench_pipeline/36_rl_batch.sh`,
+with a turn settings file whose `turn_acting` is 1 (with `MACHINE_CAL=on`,
+36 runs on the machine's `turn_settings.machine.json`, so that is the file
+that needs it).
+
 ### SSD TRIM before every run (owner, 2026-11-08)
 
 ext4 tells the drive which blocks are free only at the weekly `fstrim`; on

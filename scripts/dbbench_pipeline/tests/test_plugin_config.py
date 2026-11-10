@@ -271,6 +271,49 @@ class ComposeTest(unittest.TestCase):
             compose("rules", contract=with_qbar(61234.5), diagnostic=True, prior=1)
         self.assertNotIn("turn_prior", compose("rules", contract=with_qbar(61234.5))[0])
 
+    def test_the_l0_bill_and_compact_floor_flags(self):
+        """L0_BILL and COMPACT_FLOOR: the turn arms' turn_l0_bill and
+        turn_compact_floor, 0 by default; 1 only in a diagnostic run and only
+        for a turn arm; the L0 bill only with turn_acting 1 and a trainer
+        whose merge_charge is not "rate"."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = pc.learner_values(shipped, "training")
+        alone = {**learner, "turn_acting": 1}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4,
+                    q_bar_standin=50000.0, decay=1)
+        for arm in pc.TURN_ARMS:
+            off, _ = compose(arm, diagnostic=True, learner=alone, **turn)
+            self.assertEqual((off["turn_l0_bill"], off["turn_compact_floor"]), (0, 0))
+            for key, flag in (("turn_l0_bill", "l0_bill"),
+                              ("turn_compact_floor", "compact_floor")):
+                on, _ = compose(arm, diagnostic=True, learner=alone, **{flag: 1}, **turn)
+                self.assertEqual(on[key], 1)
+                # The flag is the only difference (03's plugin_config_sha256).
+                self.assertEqual({k for k in on if on[k] != off[k]}, {key})
+                with self.assertRaisesRegex(ValueError, "diagnostic run only"):
+                    compose(arm, learner=alone, **{flag: 1}, **turn)
+                for bad in (2, -1, True, 0.5):
+                    with self.assertRaisesRegex(ValueError, "0 or 1"):
+                        compose(arm, diagnostic=True, learner=alone, **{flag: bad}, **turn)
+                with self.assertRaisesRegex(ValueError, "turn arms"):
+                    compose("rules", contract=with_qbar(61234.5), diagnostic=True,
+                            **{flag: 1})
+            # The L0 bill is L0's alone: the shipped five acting levels are refused.
+            with self.assertRaisesRegex(ValueError, "turn_acting 1"):
+                compose(arm, diagnostic=True, learner=learner, l0_bill=1, **turn)
+            both, _ = compose(arm, diagnostic=True, learner=learner, compact_floor=1, **turn)
+            self.assertEqual(both["turn_acting"], 5)    # the floor needs no single level
+            # merge_charge "rate" contradicts the whole-merge charge.
+            with self.assertRaisesRegex(ValueError, "rate"):
+                compose(arm, diagnostic=True, learner=alone, l0_bill=1,
+                        trainer={**shipped["trainer"], "merge_charge": "rate"}, **turn)
+            compose(arm, diagnostic=True, learner=alone, l0_bill=1,
+                    trainer={**shipped["trainer"], "merge_charge": "done"}, **turn)
+            compose(arm, diagnostic=True, learner=alone, l0_bill=0,
+                    trainer={**shipped["trainer"], "merge_charge": "rate"}, **turn)
+        for key in ("turn_l0_bill", "turn_compact_floor"):
+            self.assertNotIn(key, compose("rules", contract=with_qbar(61234.5))[0])
+
     def test_the_hold_arms_scheduled_change(self):
         """The step-response arm (owner, 2026-10-07): hold only, diagnostic
         only, apply_at_op with apply_m, apply_k0 optional; none by default."""

@@ -21,6 +21,13 @@ push_every_turns transitions they are refrozen and the weights are written
 atomically (RLTW0001, turn_weights.py). Cold start: nothing is read from
 another run.
 
+With the plugin config's turn_l0_bill 1 (L0_BILL; L0 alone, turn_acting 1),
+J_t in the reward is L0's own bill instead: beta_r times L0's read counts of
+the turn (the plugin's "l0_read") at cost model 2's base prices, plus each
+L0 merge that finished in the turn at its whole price (merge_prices), with
+no shaping. The "turn" lines keep "J", the evaluator's, and add the bill's
+parts "bill_read" and "bill_merge".
+
   python -m learner.turn_trainer --plugin-config CFG --decisions D.jsonl \\
       --host-log H.jsonl --weights W.bin --settings S.json \\
       --log turn_trainer.jsonl --summary turn_trainer_summary.json \\
@@ -54,7 +61,7 @@ from learner import learned2 as L2  # noqa: E402
 from learner import turn_model as TM  # noqa: E402
 from learner import turn_weights as TW  # noqa: E402
 from learner.logs import LogTail  # noqa: E402
-from learner.prices import from_plugin_config  # noqa: E402
+from learner.prices import from_plugin_config, l0_read_cost  # noqa: E402
 
 cm = L2.cm
 
@@ -149,6 +156,9 @@ class Turn:
     # Bytes landed per level over the turn ("inflow"; empty in older logs):
     # merge_charge "rate" charges each level's merges per byte landed there.
     inflow: list = field(default_factory=list)
+    # L0's raw read counts over the turn (turn_l0_bill's "l0_read"; None
+    # when the plugin logged none).
+    l0_read: dict | None = None
 
 
 @dataclass
@@ -184,7 +194,9 @@ def parse_turn(r: dict, names: list, acting: int) -> Turn:
                 set=int(r.get("set", 0)), mid_applies=int(r.get("mid_applies", 0)),
                 explored=int(r.get("explored", -1)), eps=float(r.get("eps", 0)),
                 prior=parse_prior(r.get("prior")),
-                inflow=[float(v) for v in r.get("inflow", [])])
+                inflow=[float(v) for v in r.get("inflow", [])],
+                l0_read=r["l0_read"] if isinstance(r.get("l0_read"), dict) else None)
+
 
 
 class TurnTrainer:
@@ -222,6 +234,21 @@ class TurnTrainer:
         if self.rate_turns < 1:
             raise ValueError("rate_turns must be >= 1")
         self.rate_hist = []          # (merge price per level, inflow per level), last rate_turns
+        # The L0 bill (plugin config turn_l0_bill; absent in older configs: 0):
+        # the reward's J is L0's own bill (l0_bill). L0 alone: deeper levels'
+        # bills are not built. Each merge is charged whole as it finishes,
+        # so merge_charge does not apply ("rate" would contradict it), and
+        # there is no owed-work shaping. With turn_prior 1 too, the prior
+        # (J per turn) forecasts this same L0 bill's change per move.
+        self.l0_bill = int(plugin_cfg.get("turn_l0_bill", 0)) == 1
+        if self.l0_bill:
+            if self.acting != 1:
+                raise ValueError(f"turn_l0_bill 1 is L0's bill alone: it needs turn_acting 1, "
+                                 f"not {self.acting}")
+            if self.merge_charge == "rate":
+                raise ValueError(f"turn_l0_bill 1 charges each L0 merge whole as it finishes; "
+                                 f"merge_charge {self.merge_charge!r} contradicts it")
+            self.shaping = False
         n = len(self.names)
         self.x_stats = Running(n)
         self.j_stats = Running(1)
@@ -331,6 +358,19 @@ class TurnTrainer:
         self.rate_hist.append(({lv: v[0] for lv, v in merges.items()}, list(line.inflow)))
         del self.rate_hist[:-self.rate_turns]
         return J - done + charge
+
+    def l0_bill_parts(self, line: Turn, price: dict) -> tuple:
+        """(read part, merge part) of L0's bill over the turn `line` closes,
+        in J: beta_r times L0's read counts of the turn at cost model 2's
+        base prices (L0's slice of C_R's quiet reads), and the L0 merges that
+        finished in the turn, each at its whole price (merge_prices: beta_w
+        (job price + write interference) + beta_r read interference)."""
+        if line.l0_read is None:
+            raise SystemExit(f"turn {line.t} has no l0_read: the plugin ran without turn_l0_bill")
+        p = self.pricer.p
+        read = p.beta_r * l0_read_cost(p.v2.base, line.l0_read)
+        merge = float(price.get("merges", {}).get(0, [0.0, 0.0])[0])
+        return read, merge
 
     def freeze(self) -> None:
         """The scaling, the reward's centre and spread, and the merge prices
@@ -446,7 +486,8 @@ class TurnTrainer:
                    "jbar": self.jbar, "spread": self.spread, "p": self.p})
 
     def learn(self, prev: Turn, line: Turn, price: dict) -> None:
-        J = self.charged_j(line, price)
+        bill = self.l0_bill_parts(line, price) if self.l0_bill else None
+        J = sum(bill) if bill is not None else self.charged_j(line, price)
         tr = Transition(t=line.t, x0=prev.x, m0=prev.masks, a=prev.actions,
                         x1=line.x, m1=line.masks, d0=prev.owed, d1=line.owed,
                         J=J, changes=prev.set + line.mid_applies,
@@ -455,13 +496,16 @@ class TurnTrainer:
         if len(tr.a) != self.acting:     # the earlier line chose nothing
             return
         td = self.td_error(tr)
-        self.emit({"type": "turn", "t": line.t, "op0": line.op0, "op1": line.op1,
-                   "ops": price["ops"], "secs": price["secs"], "J": price["J"], "J_reward": J,
-                   "C_W": price["C_W"], "C_R": price["C_R"], "C_S": price["C_S"],
-                   "jobs": price["jobs"], "changes": tr.changes,
-                   "phi0": self.phi(tr.d0), "phi1": self.phi(tr.d1),
-                   "r": self.reward(tr), "td": td, "actions": tr.a,
-                   "explored": prev.explored, "eps": prev.eps, "final": int(line.final)})
+        record = {"type": "turn", "t": line.t, "op0": line.op0, "op1": line.op1,
+                  "ops": price["ops"], "secs": price["secs"], "J": price["J"], "J_reward": J,
+                  "C_W": price["C_W"], "C_R": price["C_R"], "C_S": price["C_S"],
+                  "jobs": price["jobs"], "changes": tr.changes,
+                  "phi0": self.phi(tr.d0), "phi1": self.phi(tr.d1),
+                  "r": self.reward(tr), "td": td, "actions": tr.a,
+                  "explored": prev.explored, "eps": prev.eps, "final": int(line.final)}
+        if bill is not None:
+            record.update(bill_read=bill[0], bill_merge=bill[1])
+        self.emit(record)
         if math.isfinite(td):
             self.preq.append(td)
         self.replay.append(tr)

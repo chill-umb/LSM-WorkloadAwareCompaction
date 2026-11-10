@@ -46,6 +46,16 @@ struct TurnConfig {
   // reward's units (the weights file's spread); the trainer learns the net
   // as that correction. Off, the net's scores alone.
   bool prior = false;
+  // The L0 bill's feature flag (turn_l0_bill; L0_BILL, set per run): on,
+  // every turn line also carries L0's raw read counts over the turn it
+  // closes ("l0_read"), which the trainer prices as L0's own bill. Off, no
+  // such block: the line is as before.
+  bool l0_bill = false;
+  // The compact floor's feature flag (turn_compact_floor; COMPACT_FLOOR, set
+  // per run): on, L0's mask blocks compact while L0's anchor rounds to the
+  // lowest K rung (compact there sends K = max(1, n0), below the ladder,
+  // with no rung change). Off, compact is allowed whenever L0 has a file.
+  bool compact_floor = false;
   double margin = 0;        // epsilon of the encoding
   double sigma_max = 0;     // compact's score cap (4/3)
   double glide_share = 0;   // R_i's share of the slot's merge bytes (1/2)

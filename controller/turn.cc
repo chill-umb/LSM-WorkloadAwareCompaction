@@ -384,7 +384,11 @@ std::vector<TurnMask> Masks(const TurnTree& t, const TurnConfig& cfg,
     if (i == 0) {
       const bool near_slow = t.n0_all >= t.K_slow - cfg.safety_l0_flushes;
       const int limit = std::min(LiveCap(t), cfg.k_defer_max);
-      mask[static_cast<int>(Action::kCompact)] = t.n0 >= 1;
+      // The compact floor (turn_compact_floor): at the lowest rung compact
+      // would only send K = max(1, n0), below the ladder, so it is blocked.
+      const bool at_floor = RungIndex(k_ladder, anchors[0].a) == 0;
+      mask[static_cast<int>(Action::kCompact)] =
+          t.n0 >= 1 && !(cfg.compact_floor && at_floor);
       mask[static_cast<int>(Action::kDefer)] =
           !near_slow && t.n0 + t.f_hat >= base.K && DeferL0(t) <= limit;
       const double up = Press(k_ladder, anchors[0].a, true, cfg.renew_band, &renew);

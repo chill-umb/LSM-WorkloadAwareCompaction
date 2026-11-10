@@ -26,7 +26,9 @@
 //   drain, fallback, stop
 //   turn        mode "turn" (turn.h, plugin.cc): one per turn boundary, the
 //               turn [op0, op1) just closed and the state, masks and actions
-//               for the next; "final": 1 at the drain (state only)
+//               for the next; "final": 1 at the drain (state only); with
+//               turn_l0_bill, "l0_read": L0's raw read counts over the
+//               closed turn (plugin.cc JsonL0Read), for L0's own bill
 //   turn_topup, defer_broken  mode "turn": a defer's raise within a turn,
 //               or a raise the bounds refuse (RocksDB then compacts)
 //   turn_weights, turn_weights_missing  mode "turn": a weights version

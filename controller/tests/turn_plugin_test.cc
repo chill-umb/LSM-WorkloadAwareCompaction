@@ -5,6 +5,7 @@
 // weights file of the other arch, the drain's final line, and the scores of
 // the Python trainer's weights (rl_agent/tests/test_turn_weights.py writes
 // the golden files).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -38,7 +39,8 @@ const char* const kTurnKeys[] = {
     "turn_safety_pending_bytes", "turn_k_defer_max", "turn_renew_band",
     "turn_max_topups",   "turn_explore_start",    "turn_explore_end",
     "turn_explore_turns", "turn_k_rungs",         "turn_m_rungs",
-    "turn_decay",        "turn_prior"};
+    "turn_decay",        "turn_prior",            "turn_l0_bill",
+    "turn_compact_floor"};
 
 // A net of one layer with zero weights: every score is a bias, 1 for
 // `action` at `level` and 0 elsewhere, so greedy picks it wherever allowed.
@@ -121,6 +123,25 @@ std::string Text(const std::string& line, const std::string& key) {
   const size_t start = at + key.size() + 4;
   return line.substr(start, line.find('"', start) - start);
 }
+// A flat object's text, braces included ("" when absent).
+std::string Object(const std::string& line, const std::string& key) {
+  const size_t at = line.find("\"" + key + "\":{");
+  if (at == std::string::npos) return "";
+  const size_t start = at + key.size() + 3;
+  return line.substr(start, line.find('}', start) - start + 1);
+}
+// L0's four mask flags (the first list of "masks").
+std::vector<double> L0Mask(const std::string& line) {
+  std::vector<double> out;
+  const size_t at = line.find("\"masks\":[[");
+  if (at == std::string::npos) return out;
+  const size_t start = at + 10;
+  std::stringstream in(line.substr(start, line.find(']', start) - start));
+  for (std::string item; std::getline(in, item, ',');) {
+    out.push_back(std::strtod(item.c_str(), nullptr));
+  }
+  return out;
+}
 
 class TurnTest : public testing::Test {
  protected:
@@ -155,6 +176,8 @@ class TurnTest : public testing::Test {
     values["turn_kappa"] = "50";
     values["turn_decay"] = "1";
     values["turn_prior"] = "0";
+    values["turn_l0_bill"] = "0";
+    values["turn_compact_floor"] = "0";
     values["turn_margin"] = "0.1";
     values["turn_sigma_max"] = "1.3333333333333333";
     values["turn_glide_share"] = "0.5";
@@ -603,6 +626,133 @@ TEST_F(TurnTest, TheL0PriorStartsL0FromTheFormula) {
   for (const std::string& line : turns) {
     EXPECT_NE(line.find("\"prior\":null"), std::string::npos) << line;
     EXPECT_EQ(Names(line, "greedy")[0], "hold") << line;
+  }
+}
+
+// The L0 bill's and the compact floor's flags: off unless set, each 0 or 1.
+TEST_F(TurnTest, TheL0BillAndCompactFloorFlagsParse) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.l0_bill);
+  EXPECT_FALSE(c.turn.compact_floor);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_l0_bill", "1"}}), &c, &error)) << error;
+  EXPECT_TRUE(c.turn.l0_bill);
+  EXPECT_FALSE(c.turn.compact_floor);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_compact_floor", "1"}}), &c, &error))
+      << error;
+  EXPECT_FALSE(c.turn.l0_bill);
+  EXPECT_TRUE(c.turn.compact_floor);
+  for (const char* key : {"turn_l0_bill", "turn_compact_floor"}) {
+    for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+      EXPECT_FALSE(LoadConfig(Config({{key, bad}}), &c, &error))
+          << key << " = " << bad;
+    }
+  }
+}
+
+// turn_l0_bill 1: every turn line, the drain's too, carries "l0_read", L0's
+// raw read counts over the turn it closes: the fork's eight counters at L0
+// and L1's hidden steps; no deeper count. Off, no line carries it, and the
+// lines are otherwise the same byte for byte.
+TEST_F(TurnTest, TheL0ReadBlockRidesOnTurnLinesOnlyUnderItsFlag) {
+  const auto reads = [](FakeHost* host) {
+    std::lock_guard<std::mutex> lock(host->mu);
+    RLLevelReadCounts& l0 = host->reads[0];
+    l0.probes += 7;
+    l0.filter_passes += 3;
+    l0.filter_hits += 1;
+    l0.seeks += 5;
+    l0.get_reopens += 2;
+    l0.iter_reopens += 1;
+    l0.reopen_nanos += 100;
+    l0.hidden_steps += 4;
+    host->reads[1].hidden_steps += 6;
+    host->reads[1].probes += 1000;        // L1's own: not in L0's block
+    host->reads[2].hidden_steps += 1000;  // charged to L1: not L0's
+  };
+  const auto run = [&](const std::string& config) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    clock_us_ = 1000000;
+    next_job_ = 10;
+    FakeHost host;
+    Tree(&host);
+    {
+      Controller controller(&host, config, [this] { return clock_us_; });
+      for (int i = 0; i < 12; ++i) {
+        if (i == 9) host.SetDraining();
+        Ops(&host, true);
+        reads(&host);
+        controller.Step();
+        clock_us_ += 200000;
+      }
+    }
+    return Lines("turn");
+  };
+  const auto on = run(Config({{"turn_l0_bill", "1"}}));
+  ASSERT_EQ(on.size(), 3u);
+  EXPECT_EQ(Number(on.back(), "final"), 1);
+  const std::pair<const char*, double> per_step[] = {
+      {"probes", 7},       {"filter_passes", 3}, {"filter_hits", 1},
+      {"seeks", 5},        {"get_reopens", 2},   {"iter_reopens", 1},
+      {"reopen_nanos", 100}, {"hidden_steps", 4}, {"l1_hidden_steps", 6}};
+  for (const std::string& line : on) {
+    const std::string block = Object(line, "l0_read");
+    ASSERT_FALSE(block.empty()) << line;
+    const double steps = (Number(line, "op1") - Number(line, "op0")) / 2500;
+    EXPECT_GT(steps, 0) << line;
+    int keys = 0;
+    for (const auto& c : per_step) {
+      EXPECT_EQ(Number(block, c.first), c.second * steps) << c.first << ": " << block;
+      ++keys;
+    }
+    EXPECT_EQ(std::count(block.begin(), block.end(), ':'), keys) << block;
+  }
+  const auto off = run(Config());
+  ASSERT_EQ(off.size(), on.size());
+  for (size_t t = 0; t < off.size(); ++t) {
+    EXPECT_FALSE(Has(off[t], "l0_read")) << off[t];
+    std::string stripped = on[t];
+    const std::string block = ",\"l0_read\":" + Object(on[t], "l0_read");
+    stripped.erase(stripped.find(block), block.size());
+    EXPECT_EQ(stripped, off[t]);
+  }
+}
+
+// turn_compact_floor 1: L0 pressing compact at every boundary (decay off, so
+// the anchor stays where the presses leave it) walks down from K = 4 to the
+// lowest rung, K = 2, where compact is then masked and L0 holds. Off,
+// compact stays allowed there and is taken (it sends K = max(1, n0)).
+TEST_F(TurnTest, TheCompactFloorMasksL0CompactAtTheLowestRung) {
+  WriteNet(weights(), BiasNet(1, 0, 0, Action::kCompact));
+  const auto run = [&](const std::string& config) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    FakeHost host;
+    Tree(&host);
+    {
+      Controller controller(&host, config, [this] { return clock_us_; });
+      Run(&controller, &host, 24, /*writes=*/true);
+    }
+    return Lines("turn");
+  };
+  for (const bool floor : {true, false}) {
+    const auto turns = run(Config({{"turn_decay", "0"},
+                                   {"turn_compact_floor", floor ? "1" : "0"}}));
+    ASSERT_EQ(turns.size(), 6u);
+    int at_floor = 0;
+    for (const std::string& line : turns) {
+      const std::vector<double> mask = L0Mask(line);
+      ASSERT_EQ(mask.size(), 4u) << line;
+      const bool lowest = Number(line, "rung_k") == 2;
+      EXPECT_EQ(mask[1], floor && lowest ? 0 : 1) << line;
+      EXPECT_EQ(Names(line, "action")[0], floor && lowest ? "hold" : "compact")
+          << line;
+      at_floor += lowest;
+    }
+    // 4 -> 3 -> 2: the last four boundaries are at the floor.
+    EXPECT_EQ(Number(turns[0], "rung_k"), 4);
+    EXPECT_EQ(Number(turns[1], "rung_k"), 3);
+    EXPECT_EQ(at_floor, 4) << floor;
   }
 }
 

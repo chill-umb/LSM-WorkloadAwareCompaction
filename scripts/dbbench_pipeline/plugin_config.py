@@ -33,6 +33,13 @@ value, so no value is chosen when an arm starts.
                          the decay's feature flag; 0 in a diagnostic run only
   turn_prior             the turn arms: --prior (03's PRIOR, default 0), the
                          L0 prior's feature flag; 1 in a diagnostic run only
+  turn_l0_bill           the turn arms: --l0-bill (03's L0_BILL, default 0),
+                         the L0 bill's feature flag; 1 in a diagnostic run
+                         only, with turn_acting 1 and a trainer whose
+                         merge_charge is not "rate"
+  turn_compact_floor     the turn arms: --compact-floor (03's COMPACT_FLOOR,
+                         default 0), the compact floor's feature flag; 1 in a
+                         diagnostic run only
 
 Every value missing, or null, in its file is listed and the arm is refused:
 the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
@@ -158,7 +165,8 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             apply_k0: int | None = None, apply_schedule: str | None = None,
             hold_k0_cap: int | None = None,
             decay: int | None = None,
-            prior: int = 0) -> tuple[dict, list[str]]:
+            prior: int = 0, l0_bill: int = 0, compact_floor: int = 0,
+            trainer: dict | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
@@ -176,7 +184,13 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     agent set them, which breaks ACT-5 and so is for a diagnostic run only.
     prior, the turn arms' only: 1 L0's choice starts from the October L0
     formula (controller/prior.h L0TurnPrior), not yet preregistered, so a
-    diagnostic run only; 0 (the default) the net's scores alone."""
+    diagnostic run only; 0 (the default) the net's scores alone. l0_bill,
+    the turn arms' only: 1 each turn line logs L0's read counts and the
+    trainer's reward is L0's own bill, for L0 alone (turn_acting 1) and with
+    the trainer settings' merge_charge not "rate" (trainer: the settings
+    file's "trainer" part); compact_floor, the turn arms' only: 1 L0's mask
+    blocks compact at the lowest K rung. Both are not yet preregistered: 1
+    in a diagnostic run only; 0 (the default) as before."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
     if decay is not None and arm not in TURN_ARMS:
@@ -193,6 +207,19 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     if prior == 1 and not diagnostic:
         raise ValueError("prior 1 (the L0 prior) is not preregistered: a "
                          "diagnostic run only")
+    for name, flag, what in (("l0_bill", l0_bill, "the L0 bill"),
+                             ("compact_floor", compact_floor, "the compact floor")):
+        if isinstance(flag, bool) or flag not in (0, 1):
+            raise ValueError(f"{name} must be 0 or 1; got {flag!r}")
+        if flag == 1 and arm not in TURN_ARMS:
+            raise ValueError(f"{name} is for the turn arms, not {arm!r}")
+        if flag == 1 and not diagnostic:
+            raise ValueError(f"{name} 1 ({what}) is not preregistered: a "
+                             "diagnostic run only")
+    if l0_bill == 1 and (trainer or {}).get("merge_charge") == "rate":
+        raise ValueError("l0_bill 1 charges each L0 merge whole as it "
+                         "finishes; the trainer settings' merge_charge "
+                         "\"rate\" contradicts it")
     schedule = scheduled_change(arm, diagnostic, apply_at_op, apply_m,
                                 apply_k0, apply_schedule)
     missing: list[str] = []
@@ -299,6 +326,14 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
                 missing.append("turn_decay (the arm's DECAY: 1 or 0)")
             config["turn_decay"] = decay
             config["turn_prior"] = prior
+            config["turn_l0_bill"] = l0_bill
+            config["turn_compact_floor"] = compact_floor
+            # The L0 bill is L0's alone: deeper levels' bills are not built.
+            if l0_bill == 1 and config.get("turn_acting") is not None \
+                    and config["turn_acting"] != 1:
+                raise ValueError("l0_bill 1 (the L0 bill) needs turn_acting "
+                                 f"1 (L0 alone); the turn settings have "
+                                 f"{config['turn_acting']!r}")
 
     filled: list[str] = []
     if missing and placeholders:
@@ -470,12 +505,21 @@ def main() -> int:
                         help="the turn arms only: 1 L0's choice starts from "
                              "the October L0 formula (diagnostic only); "
                              "0 (default) the net's scores alone")
+    parser.add_argument("--l0-bill", type=int, choices=(0, 1), default=0,
+                        help="the turn arms only: 1 the reward is L0's own "
+                             "bill, L0 alone (turn_acting 1; diagnostic "
+                             "only); 0 (default) the whole turn's J")
+    parser.add_argument("--compact-floor", type=int, choices=(0, 1), default=0,
+                        help="the turn arms only: 1 L0's compact is masked "
+                             "at the lowest K rung (diagnostic only); 0 "
+                             "(default) as before")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
                              "values over its \"plugin\" ones (a frozen arm)")
     args = parser.parse_args()
     try:
+        learner_file = _load(args.learner_settings, "learner settings")
         contract, _ = research_objective.load_contract()
         prices = (json.loads(args.prices.read_text())
                   if args.prices.exists() else None)
@@ -488,14 +532,14 @@ def main() -> int:
             decision_log=args.decision_log,
             transition_log=args.transition_log,
             placeholders=args.placeholders, diagnostic=args.diagnostic,
-            learner=learner_values(_load(args.learner_settings,
-                                         "learner settings"),
-                                   args.learner_phase),
+            learner=learner_values(learner_file, args.learner_phase),
             weights_path=args.weights_path, seed=args.seed,
             beta_star=args.beta_star, q_bar_standin=args.q_bar_standin,
             apply_at_op=args.apply_at_op, apply_m=args.apply_m,
             apply_k0=args.apply_k0, apply_schedule=args.apply_schedule,
-            hold_k0_cap=args.hold_k0_cap, decay=args.decay, prior=args.prior)
+            hold_k0_cap=args.hold_k0_cap, decay=args.decay, prior=args.prior,
+            l0_bill=args.l0_bill, compact_floor=args.compact_floor,
+            trainer=learner_file.get("trainer", learner_file))
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

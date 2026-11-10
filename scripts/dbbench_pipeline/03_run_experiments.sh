@@ -52,7 +52,10 @@ scored from the first mixgraph operation to the end of the drain:
                      learns while the arm runs. Cold every run. DECAY=0
                      (diagnostic only) turns the anchors' decay off; PRIOR=1
                      (diagnostic only) starts L0's choice from the October
-                     L0 formula.
+                     L0 formula; L0_BILL=1 (diagnostic only, turn_acting 1)
+                     rewards L0 with its own bill; COMPACT_FLOOR=1
+                     (diagnostic only) masks L0's compact at the lowest K
+                     rung.
 
 The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
 unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
@@ -556,6 +559,14 @@ if (( CONTROLLER_MATRIX )); then
     echo "PRIOR must be 0 or 1 (the turn arms' L0 prior)." >&2
     exit 1
   }
+  [[ "$L0_BILL" =~ ^[01]$ ]] || {
+    echo "L0_BILL must be 0 or 1 (the turn arms' L0 bill)." >&2
+    exit 1
+  }
+  [[ "$COMPACT_FLOOR" =~ ^[01]$ ]] || {
+    echo "COMPACT_FLOOR must be 0 or 1 (the turn arms' compact floor)." >&2
+    exit 1
+  }
   # A hold-only matrix may take them at any length (D-31's step runs): the
   # hold-only plugin never acts (controller/policy.cc), so the placeholders
   # reach only its logs; its one change is the scheduled one, checked
@@ -589,8 +600,11 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
                   --seed "${3:-1}" --weights-path "$(dirname "$2")/weights.bin")
     (( ! LEARNER_FROZEN )) || learner_flag+=(--learner-phase evaluation)
   fi
-  # The turn arms' decay and L0 prior feature flags (config.sh DECAY, PRIOR).
-  ! is_turn_arm "$1" || learner_flag+=(--decay "$DECAY" --prior "$PRIOR")
+  # The turn arms' decay, L0 prior, L0 bill and compact floor feature flags
+  # (config.sh DECAY, PRIOR, L0_BILL, COMPACT_FLOOR).
+  ! is_turn_arm "$1" || learner_flag+=(--decay "$DECAY" --prior "$PRIOR"
+                                       --l0-bill "$L0_BILL"
+                                       --compact-floor "$COMPACT_FLOOR")
   # The hold arm's scheduled change (step-response runs, diagnostic only).
   if [[ "$1" == hold && -n "$HOLD_APPLY_AT_OP" ]]; then
     learner_flag+=(--apply-at-op "$HOLD_APPLY_AT_OP" --apply-m "$HOLD_APPLY_M")
@@ -1688,6 +1702,8 @@ PY
       printf 'learner_frozen=%s\n' "$LEARNER_FROZEN"
       ! is_turn_arm "$arm" || printf 'turn_decay=%s\n' "$DECAY"
       ! is_turn_arm "$arm" || printf 'turn_prior=%s\n' "$PRIOR"
+      ! is_turn_arm "$arm" || printf 'turn_l0_bill=%s\n' "$L0_BILL"
+      ! is_turn_arm "$arm" || printf 'turn_compact_floor=%s\n' "$COMPACT_FLOOR"
       if [[ "$arm" == learned ]]; then
         printf 'learner_checkpoint_in=%s\n' "${LEARNER_LAST_CHECKPOINT:-none}"
         printf 'learner_weights_in=%s\n' "${LEARNER_WEIGHTS_SHA256:-none}"

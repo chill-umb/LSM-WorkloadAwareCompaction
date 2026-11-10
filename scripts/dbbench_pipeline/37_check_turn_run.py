@@ -14,12 +14,18 @@ from its result directory:
           (with the L0 prior on, turn_prior, of L0's scores less the logged
           prior over the weights' spread, which must be the logged
           prior_spread)
+  l0_bill the L0 bill's records (turn_l0_bill): on, every turn line carries
+          "l0_read" with each count a whole number >= 0, and every trainer
+          turn line's J_reward is its bill_read plus bill_merge (>= 0),
+          bill_read being beta_r times its turn's L0 read counts at the
+          config's prices (rl_agent/learner/prices.py l0_read_cost); off, no
+          turn line carries the block and no trainer line a bill
   c_set   the SetOptions call's price, measured (the turn reward's change
           price): the accepted apply lines' wall time (apply_us) at the
           price per core-second, plus, with --options-bytes, the OPTIONS
           file RocksDB writes at c_w per byte; reported, not judged
 
---strict (the preflight) exits 1 when pushes, ARCH-1 or ARCH-6 fails.
+--strict (the preflight) exits 1 when pushes, ARCH-1, ARCH-6 or l0_bill fails.
 
   37_check_turn_run.py --result <arm dir> --prices <schema-6 prices> \\
       [--options-bytes N] [--min-pushes 3] [--strict] [--output report.json]
@@ -38,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "rl_agent"))
 
 from learner import turn_weights as TW  # noqa: E402
+from learner.prices import L0_READ_KEYS, from_plugin_config, l0_read_cost  # noqa: E402
 
 TOLERANCE = 1e-9
 
@@ -105,6 +112,66 @@ def arch6(decisions: list, archive: Path, acting: int) -> dict:
             "turns_with_weights": len(turns)}
 
 
+def l0_bill(decisions: list, trainer: list, config: dict) -> dict:
+    turns = [r for r in decisions if r["type"] == "turn"]
+    billed = [r for r in trainer if r["type"] == "turn"]
+    on = int(config.get("turn_l0_bill", 0)) == 1
+    problems = []
+    if not on:
+        carried = [r["t"] for r in turns if "l0_read" in r]
+        stray = [r["t"] for r in billed if "bill_read" in r or "bill_merge" in r]
+        if carried:
+            problems.append(f"turn lines with l0_read, turn_l0_bill off: {carried[:10]}")
+        if stray:
+            problems.append(f"trainer lines with a bill, turn_l0_bill off: {stray[:10]}")
+        return {"passed": not problems, "problems": problems, "on": False}
+
+    def whole(v):
+        return (isinstance(v, (int, float)) and not isinstance(v, bool) and
+                math.isfinite(v) and v >= 0 and v == math.floor(v))
+
+    blocks = {}
+    bad_block = []
+    for r in turns:
+        block = r.get("l0_read")
+        if isinstance(block, dict) and set(block) == set(L0_READ_KEYS) and \
+                all(whole(v) for v in block.values()):
+            blocks[r["t"]] = block
+        else:
+            bad_block.append(r["t"])
+    try:
+        pricing = from_plugin_config(config)
+    except ValueError as error:
+        return {"passed": False, "on": True,
+                "problems": [f"the config does not price the bill: {error}"]}
+    bad_sum, bad_read, unmatched = [], [], []
+    for r in billed:
+        read, merge, total = r.get("bill_read"), r.get("bill_merge"), r.get("J_reward")
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (read, merge, total)) \
+                or merge < 0 or not math.isclose(total, read + merge, rel_tol=TOLERANCE,
+                                                 abs_tol=1e-300):
+            bad_sum.append(r["t"])
+            continue
+        if r["t"] not in blocks:
+            unmatched.append(r["t"])
+            continue
+        want = pricing.beta_r * l0_read_cost(pricing.v2.base, blocks[r["t"]])
+        if not math.isclose(read, want, rel_tol=TOLERANCE, abs_tol=1e-300):
+            bad_read.append(r["t"])
+    if bad_block:
+        problems.append(f"turn lines without a whole l0_read block: {bad_block[:10]}")
+    if bad_sum:
+        problems.append(f"trainer lines whose J_reward is not bill_read + bill_merge: {bad_sum[:10]}")
+    if unmatched:
+        problems.append(f"trainer lines with no l0_read of their turn: {unmatched[:10]}")
+    if bad_read:
+        problems.append(f"trainer lines whose bill_read is not their turn's priced reads: {bad_read[:10]}")
+    if not billed:
+        problems.append("no trainer turn line")
+    return {"passed": not problems, "problems": problems, "on": True,
+            "turn_lines": len(turns), "billed": len(billed)}
+
+
 def c_set(decisions: list, prices: dict, options_bytes: float | None) -> dict:
     calls = [r for r in decisions if r["type"] == "apply" and r.get("ok") == 1
              and isinstance(r.get("apply_us"), (int, float))]
@@ -159,8 +226,10 @@ def check(result: Path, prices: dict, options_bytes: float | None,
     checks["arch1"] = {"passed": not problems, "problems": problems,
                        "train_lines": sum(1 for r in trainer if r["type"] == "train")}
     checks["arch6"] = arch6(decisions, result / "weights", acting)
+    checks["l0_bill"] = l0_bill(decisions, trainer, config)
     checks["c_set"] = c_set(decisions, prices, options_bytes)
-    failed = sorted(k for k in ("pushes", "arch1", "arch6") if not checks[k]["passed"])
+    failed = sorted(k for k in ("pushes", "arch1", "arch6", "l0_bill")
+                    if not checks[k]["passed"])
     return {"arch": config["turn_arch"], "verdict": "failed" if failed else "passed",
             "failed_checks": failed, "checks": checks}
 

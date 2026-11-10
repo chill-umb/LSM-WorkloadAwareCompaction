@@ -674,6 +674,62 @@ TEST(TurnMasks, FollowTheDesign) {
   EXPECT_FALSE(mk[3][1] || mk[3][2] || mk[3][3]);
 }
 
+// COMPACT_FLOOR (turn_compact_floor): off, L0 compact is allowed whenever L0
+// has a file, at the lowest rung too, where it sends K = max(1, n0) with no
+// rung change; on, it is masked while the anchor rounds to the lowest rung
+// (decayed from it too) and allowed one rung up. Other levels are unchanged.
+TEST(TurnMasks, CompactFloorBlocksL0CompactAtTheLowestRung) {
+  TurnConfig c = Cfg();
+  const Ladders l = MakeLadders(c);
+  TurnTree t = Tree();
+  t.n0 = t.n0_all = 1;
+  std::vector<AnchorState> an = Native(t.num_levels);
+  const auto compact_ok = [&](const TurnConfig& cfg, double a) {
+    an[0].a = a;
+    return Masks(t, cfg, l.k, l.m, an, AnchorSettings(t, cfg, l.k, l.m, an))[0][1];
+  };
+  const double k2 = std::log2(2.0 / 4), k3 = std::log2(3.0 / 4);
+  EXPECT_TRUE(compact_ok(c, k2));
+  EXPECT_TRUE(compact_ok(c, k3));
+  EXPECT_TRUE(compact_ok(c, 0));
+  // Off: compact at the lowest rung sends K = 1, below the ladder.
+  {
+    std::vector<AnchorState> low = Native(t.num_levels);
+    low[0].a = k2;
+    std::vector<Action> acts = Holds(t.num_levels);
+    acts[0] = Action::kCompact;
+    std::vector<TurnNote> notes;
+    const TurnSettings s = Encode(t, c, l.k, l.m, acts, &low, &notes);
+    EXPECT_EQ(s.K, 1);
+    EXPECT_EQ(RungIndex(l.k, low[0].a), 0);
+    EXPECT_FALSE(notes[0].moved);
+  }
+  TurnConfig f = c;
+  f.compact_floor = true;
+  EXPECT_FALSE(compact_ok(f, k2));
+  EXPECT_FALSE(compact_ok(f, k2 + 0.25));  // decayed, still rounds to K = 2
+  EXPECT_TRUE(compact_ok(f, k3));
+  EXPECT_TRUE(compact_ok(f, 0));
+  // No file: masked either way.
+  t.n0 = t.n0_all = 0;
+  EXPECT_FALSE(compact_ok(c, k3));
+  EXPECT_FALSE(compact_ok(f, k3));
+  // Only L0's mask moves.
+  t = Tree();
+  an = Native(t.num_levels);
+  an[0].a = k2;
+  const auto off = Masks(t, c, l.k, l.m, an, AnchorSettings(t, c, l.k, l.m, an));
+  const auto on = Masks(t, f, l.k, l.m, an, AnchorSettings(t, f, l.k, l.m, an));
+  for (int i = 0; i < t.num_levels; ++i) {
+    for (int a = 0; a < kNumActions; ++a) {
+      if (i == 0 && a == static_cast<int>(Action::kCompact)) continue;
+      EXPECT_EQ(off[i][a], on[i][a]) << i << " " << a;
+    }
+  }
+  EXPECT_TRUE(off[0][1]);
+  EXPECT_FALSE(on[0][1]);
+}
+
 // R4: with only reads there is no inflow; defer and expand are masked, compact
 // still acts, and the anchors still decay.
 TEST(TurnMasks, ReadOnlyPhase) {

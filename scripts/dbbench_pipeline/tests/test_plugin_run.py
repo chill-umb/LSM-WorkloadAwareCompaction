@@ -336,7 +336,8 @@ TURN_NAMES = (["put_share", "get_share", "scan_share", "pending_soft",
 # The stub db_bench of test_run_experiments, plus the plugin's part: with
 # --rl_plugin_config it writes the logs the config names. STUB_PLUGIN_MASKED=1
 # makes its one decision (or, in mode turn, its one expand) take a masked
-# action.
+# action. In mode turn its lines follow the config's turn_acting (the inputs
+# of that many levels) and, with turn_l0_bill 1, carry an l0_read block.
 PLUGIN_STUB = STUB.replace(
     "cat " + shlex.quote(str(FIXTURE / "run.log")), f"""
 for a in "$@"; do
@@ -358,13 +359,19 @@ if mode == "rules":
                 "m": [1, 0.9, 1, 1], "k0": 4, "ok": 1, "seen": 1}}]
 if mode == "turn":
     lines[0].update({{"m": [1, 1, 1, 1], "k0": 4}})
-    names = {json.dumps(TURN_NAMES)}
+    acting = int(config["turn_acting"])
+    names = {json.dumps(TURN_NAMES)}[:11 + 6 * (acting - 1)]
     up = [1, 1.4142135623730951, 1, 1]
     turn = {{"masks": [[1, 1, 1, 1], [1, 1, 1, mask[2]], [1, 0, 0, 0],
                        [1, 0, 0, 0]],
              "x": {{n: 0.5 for n in names}}, "owed": [0, 0, 0, 0],
              "mid_applies": 0}}
-    lines += [{{"type": "turn_start", "arch": config["turn_arch"], "acting": 5,
+    if config.get("turn_l0_bill") == 1:
+        turn["l0_read"] = {{"probes": 70, "filter_passes": 3, "filter_hits": 1,
+                            "seeks": 5, "get_reopens": 2, "iter_reopens": 1,
+                            "reopen_nanos": 100, "hidden_steps": 4,
+                            "l1_hidden_steps": 6}}
+    lines += [{{"type": "turn_start", "arch": config["turn_arch"], "acting": acting,
                 "features": names}},
               {{"type": "apply", "op": 600, "first_id": 0, "last_id": 0,
                 "m": up, "k0": 4, "ok": 1, "seen": 1}},
@@ -603,6 +610,55 @@ class TurnArmsTest(unittest.TestCase):
             self.assertEqual(ran.returncode, 1, ran.stderr[-3000:])
             self.assertIn("PRIOR must be 0 or 1", ran.stderr)
             self.assertFalse((Path(tmp) / "results" / "1M" / "T2" / "turn").exists())
+
+    def test_the_l0_bill_and_compact_floor_reach_the_plugin_and_bad_flags_are_refused(self):
+        """L0_BILL=1 (with an L0-only turn settings file) and COMPACT_FLOOR=1:
+        the turn arms' configs carry turn_l0_bill 1 and turn_compact_floor 1,
+        the run records both, and the trainer takes the bill (0 by default);
+        L0_BILL=1 with the shipped five acting levels, or a flag other than 0
+        or 1, is refused before any run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = self.run_turn(tmp)
+            self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+            for arm in ("turn", "turn_vdn"):
+                arm_dir = Path(tmp) / "results" / "1M" / "T2" / arm
+                config = json.loads((arm_dir / "plugin_config.json").read_text())
+                self.assertEqual((config["turn_l0_bill"], config["turn_compact_floor"]), (0, 0))
+                meta = (arm_dir / "metadata.env").read_text().splitlines()
+                self.assertIn("turn_l0_bill=0", meta)
+                self.assertIn("turn_compact_floor=0", meta)
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        shipped["plugin"]["turn_acting"] = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "turn_settings_l0.json"
+            settings.write_text(json.dumps(shipped))
+            ran = self.run_turn(tmp, L0_BILL="1", COMPACT_FLOOR="1",
+                                TURN_SETTINGS_FILE=str(settings))
+            self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+            for arm in ("turn", "turn_vdn"):
+                arm_dir = Path(tmp) / "results" / "1M" / "T2" / arm
+                config = json.loads((arm_dir / "plugin_config.json").read_text())
+                self.assertEqual((config["turn_l0_bill"], config["turn_compact_floor"],
+                                  config["turn_acting"]), (1, 1, 1))
+                meta = (arm_dir / "metadata.env").read_text().splitlines()
+                self.assertIn("turn_l0_bill=1", meta)
+                self.assertIn("turn_compact_floor=1", meta)
+                report = json.loads((arm_dir / "plugin_check.json").read_text())
+                self.assertEqual(report["verdict"], "passed", (arm, report))
+                # The trainer took the L0-only config and ran to the plugin's stop
+                # (the stub's one later line ends past the drain, so none is priced).
+                summary = json.loads((arm_dir / "turn_trainer_summary.json").read_text())
+                self.assertEqual((summary["why"], summary["lines"]), ("plugin stop", 2))
+        cases =[({"L0_BILL": "1"}, "turn_acting 1"),
+                 ({"L0_BILL": "2"}, "L0_BILL must be 0 or 1"),
+                 ({"COMPACT_FLOOR": "yes"}, "COMPACT_FLOOR must be 0 or 1")]
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ran = self.run_turn(tmp, **overrides)
+                    self.assertEqual(ran.returncode, 1, ran.stderr[-3000:])
+                    self.assertIn(message, ran.stderr)
+                    self.assertFalse((Path(tmp) / "results" / "1M" / "T2" / "turn").exists())
 
     def test_a_masked_turn_action_fails_the_check(self):
         with tempfile.TemporaryDirectory() as tmp:

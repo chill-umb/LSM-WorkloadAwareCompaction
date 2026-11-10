@@ -63,3 +63,24 @@ def from_plugin_config(cfg: dict) -> Pricing:
     return Pricing(v2=v2, c_w=v2.c_w, c_s=float(cfg["c_s"]),
                    q_bar=float(cfg["q_bar"]), beta_w=float(cfg["beta_w"]),
                    beta_r=float(cfg["beta_r"]), beta_s=float(cfg["beta_s"]))
+
+
+# The L0 read counts of a turn line's "l0_read" (turn_l0_bill;
+# controller/plugin.cc JsonL0Read) by the cost model 2 step type each is
+# priced as (cost_model_v2.BASE_PRICE): an SST probe at c_f, a filter pass
+# (the block read it costs, true or false positive) at c_blk, a sorted-run
+# seek at c_sk, a reopen for a Get or an iterator at c_open, and a hidden
+# step at L0 or at L1 (both charged to L0, controller/attribution.cc) at
+# c_st. filter_hits and reopen_nanos are logged, not priced: the hits are
+# among the passes, and reopens are priced by count.
+L0_READ_TYPES = {"probes": "probe", "filter_passes": "block", "seeks": "seek",
+                 "get_reopens": "reopen", "iter_reopens": "reopen",
+                 "hidden_steps": "step", "l1_hidden_steps": "step"}
+L0_READ_KEYS = (*L0_READ_TYPES, "filter_hits", "reopen_nanos")
+
+
+def l0_read_cost(base: dict, counts: dict) -> float:
+    """L0's quiet read cost of one turn, in money (beta_r not applied): each
+    count of L0_READ_TYPES at its type's base price (Pricing.v2.base). A
+    missing count raises KeyError: a block without it is not this format."""
+    return sum(base[x] * float(counts[name]) for name, x in L0_READ_TYPES.items())

@@ -394,3 +394,149 @@ class OneActingLevelTest(unittest.TestCase):
                 self.assertTrue(any(r["type"] == "train" for r in log), arch)
                 self.assertTrue(any(r["type"] == "push" for r in log), arch)
                 self.assertTrue(Path(args.weights).stat().st_size > 0)
+
+
+def l0_read(t):
+    """A turn line's "l0_read" (controller/plugin.cc JsonL0Read), varying by turn."""
+    return {"probes": 700 + 10 * t, "filter_passes": 30 + t, "filter_hits": 9, "seeks": 50 + 2 * t,
+            "get_reopens": 2, "iter_reopens": t % 3, "reopen_nanos": 12345, "hidden_steps": 40 + t,
+            "l1_hidden_steps": 60}
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class L0BillTest(unittest.TestCase):
+    """turn_l0_bill 1 (L0_BILL; L0 alone): the reward's J is L0's own bill, beta_r times the line's
+    L0 read counts at cost model 2's base prices plus the L0 merges that finished in the turn, each at
+    its whole price (merge_prices), with no shaping; "J" stays the evaluator's. 0 (or absent) leaves
+    everything as it was, l0_read blocks or not; acting other than 1, or merge_charge "rate", is
+    refused, and a line without the block under the flag stops the trainer."""
+    BETA_R = 2.5
+
+    def config(self, bill=None, acting=1, prior=0):
+        cfg = fx.plugin_config()
+        cfg.update({"mode": "turn", "turn_arch": "vdn", "turn_acting": acting, "beta_r": self.BETA_R,
+                    "turn_prior": prior})
+        if bill is not None:
+            cfg["turn_l0_bill"] = bill
+        return cfg
+
+    def trainer(self, tmp, cfg, **changes):
+        args = type("A", (), {})()
+        for name in ("decisions", "host_log", "log", "summary", "weights"):
+            setattr(args, name, str(Path(tmp) / f"{name}.out"))
+        return TT.TurnTrainer(args, settings(**changes), cfg)
+
+    def run_trainer(self, tmp, cfg, blocks=True, prior=False, **changes):
+        tr = self.trainer(tmp, cfg, **changes)
+        write(tr.args.host_log, host_log())
+        lines = [{"type": "turn_start", "arch": "vdn", "acting": 1, "features": TW.feature_names(1)}]
+        for t in range(TURNS):
+            line = turn_line(t, set_=1 if t % 4 == 0 else 0, mid=1 if t % 6 == 0 else 0,
+                             action="compact" if t % 2 else "expand")
+            if blocks:
+                line["l0_read"] = l0_read(t)
+            if prior:
+                line["prior"] = [0.0, 3.0 * (t % 2), 0.0, -2.0]
+            lines.append(line)
+        lines.append({"type": "stop"})
+        write(tr.args.decisions, lines)
+        tr.step()
+        self.assertTrue(tr.done())
+        tr.finish("test")
+        log = [json.loads(x) for x in Path(tr.args.log).read_text().splitlines()]
+        return tr, log
+
+    def test_the_bill_follows_its_formula(self):
+        cfg = self.config(bill=1)
+        pricer = L2.HostLogPricer(from_plugin_config(cfg))
+        for r in host_log():
+            pricer.add(r)
+        c = cfg
+        for prior in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                tr, log = self.run_trainer(tmp, cfg, prior=prior, shaping=1)
+                self.assertFalse(tr.shaping)              # the flag drops the shaping
+                turns = [r for r in log if r["type"] == "turn"]
+                self.assertEqual([r["t"] for r in turns], list(range(1, TURNS - 1)))
+                for r in turns:
+                    n = l0_read(r["t"])
+                    read = self.BETA_R * (c["c_f"] * n["probes"] + c["c_blk"] * n["filter_passes"] +
+                                          c["c_sk"] * n["seeks"] +
+                                          c["c_open"] * (n["get_reopens"] + n["iter_reopens"]) +
+                                          c["c_st"] * (n["hidden_steps"] + n["l1_hidden_steps"]))
+                    self.assertAlmostEqual(r["bill_read"], read, delta=1e-12 * read)
+                    b = pricer.bounds(r["op0"], r["op1"])
+                    merge = TT.merge_prices(pricer, *b)[0][0]   # this turn's one L0 merge, whole
+                    self.assertGreater(merge, 0)
+                    self.assertAlmostEqual(r["bill_merge"], merge, delta=1e-12 * merge)
+                    self.assertAlmostEqual(r["J_reward"], read + merge, delta=1e-12 * (read + merge))
+                    want = pricer.price(*b)["J"]               # "J" stays the evaluator's
+                    self.assertAlmostEqual(r["J"], want, delta=1e-12 * abs(want))
+                    self.assertTrue(math.isfinite(r["r"]) and math.isfinite(r["td"]))
+                # The centring and the spread are the bill's.
+                bills = [-r["J_reward"] for r in turns[:5]]
+                push = next(r for r in log if r["type"] == "push")
+                self.assertAlmostEqual(push["jbar"], sum(bills) / 5, delta=1e-9 * abs(push["jbar"]))
+                self.assertTrue(any(r["type"] == "train" for r in log))
+
+    def test_the_reward_has_no_shaping_under_the_flag(self):
+        names = TW.feature_names(1)
+        with tempfile.TemporaryDirectory() as tmp:
+            tr = self.trainer(tmp, self.config(bill=1), shaping=1)
+            tr.p = [2.0, 1.0, 0, 0, 0, 0]
+            tr.jbar, tr.spread, tr.gamma, tr.c_set = -10.0, 4.0, 0.9, 0.5
+            t = TT.Transition(t=1, x0=[0.0] * len(names), m0=[[True] * 4], a=[0],
+                              x1=[0.0] * len(names), m1=[[True] * 4], d0=[3, 1, 0, 0, 0, 0],
+                              d1=[1, 2, 0, 0, 0, 0], J=12.0, changes=2)
+            self.assertAlmostEqual(tr.reward(t), (-12.0 - 0.5 * 2 + 10.0) / 4.0, places=12)
+            tr.log.close()
+
+    def test_flag_0_leaves_the_reward_identical(self):
+        """No key, key 0, and key 0 with l0_read blocks on the lines: the same log, record for record,
+        and no bill fields."""
+        logs = []
+        for bill, blocks in ((None, False), (0, False), (0, True)):
+            with tempfile.TemporaryDirectory() as tmp:
+                tr, log = self.run_trainer(tmp, self.config(bill=bill), blocks=blocks)
+                self.assertFalse(tr.l0_bill)
+                self.assertTrue(tr.shaping)
+                logs.append(log)
+        self.assertTrue(any(r["type"] == "train" for r in logs[0]))
+        for log in logs:
+            for r in log:
+                self.assertNotIn("bill_read", r)
+                self.assertNotIn("bill_merge", r)
+            turns = [r for r in log if r["type"] == "turn"]
+            self.assertTrue(all(r["J_reward"] == r["J"] for r in turns))
+        self.assertEqual(logs[1], logs[0])
+        self.assertEqual(logs[2], logs[0])
+
+    def test_acting_other_than_1_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for acting in (2, 5):
+                with self.assertRaisesRegex(ValueError, "turn_acting 1"):
+                    self.trainer(tmp, self.config(bill=1, acting=acting))
+            self.trainer(tmp, self.config(bill=0, acting=5)).log.close()
+
+    def test_rate_with_the_flag_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "rate"):
+                self.trainer(tmp, self.config(bill=1), merge_charge="rate")
+            tr = self.trainer(tmp, self.config(bill=1), merge_charge="done")
+            self.assertTrue(tr.l0_bill)
+            tr.log.close()
+            self.trainer(tmp, self.config(bill=0), merge_charge="rate").log.close()
+
+    def test_a_line_without_the_block_stops_the_trainer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                self.run_trainer(tmp, self.config(bill=1), blocks=False)
+
+    def test_the_read_cost_prices_each_count(self):
+        base = {"probe": 1.0, "block": 10.0, "seek": 100.0, "reopen": 1000.0, "step": 1e4}
+        counts = {"probes": 1, "filter_passes": 2, "filter_hits": 99, "seeks": 3, "get_reopens": 4,
+                  "iter_reopens": 5, "reopen_nanos": 999, "hidden_steps": 6, "l1_hidden_steps": 7}
+        self.assertEqual(TT.l0_read_cost(base, counts), 1 + 20 + 300 + 9000 + 130000)
+        del counts["seeks"]
+        with self.assertRaises(KeyError):
+            TT.l0_read_cost(base, counts)

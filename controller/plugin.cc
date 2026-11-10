@@ -6,6 +6,7 @@
 #include <limits>
 #include <cstdio>
 #include <exception>
+#include <utility>
 
 #include "learned2.h"
 #include "policy.h"
@@ -158,6 +159,31 @@ std::string JsonScores(
     out += "]";
   }
   return out + "]";
+}
+
+// L0's raw read counts over one turn (turn_l0_bill; log.h "turn"), from the
+// per-level counter differences `d`: the fork's eight counters at L0, and
+// L1's hidden steps, which the scan rule charges to L0 as attribution.cc
+// does. Unpriced: the trainer prices them.
+std::string JsonL0Read(const std::vector<RLLevelReadCounts>& d) {
+  const RLLevelReadCounts l0 = d.empty() ? RLLevelReadCounts() : d[0];
+  const uint64_t l1_hidden = d.size() > 1 ? d[1].hidden_steps : 0;
+  const std::pair<const char*, uint64_t> counts[] = {
+      {"probes", l0.probes},
+      {"filter_passes", l0.filter_passes},
+      {"filter_hits", l0.filter_hits},
+      {"seeks", l0.seeks},
+      {"get_reopens", l0.get_reopens},
+      {"iter_reopens", l0.iter_reopens},
+      {"reopen_nanos", l0.reopen_nanos},
+      {"hidden_steps", l0.hidden_steps},
+      {"l1_hidden_steps", l1_hidden}};
+  std::string out = "{";
+  for (const auto& c : counts) {
+    out += (out.size() > 1 ? ",\"" : "\"") + std::string(c.first) +
+           "\":" + std::to_string(c.second);
+  }
+  return out + "}";
 }
 
 std::string JsonBools(const std::vector<bool>& values) {
@@ -1287,6 +1313,9 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   }
   done.user_bytes =
       static_cast<double>(Minus(ops.bytes_written, turn_ops0_.bytes_written));
+  // L0's read counts of the closed turn, for its bill (turn_l0_bill only).
+  const std::string l0_read =
+      tc.l0_bill ? JsonL0Read(Delta(reads, turn_reads0_)) : std::string();
   turn_ring_.push_back(done);
   while (turn_ring_.size() > static_cast<size_t>(std::max(1, tc.forecast_turns))) {
     turn_ring_.pop_front();
@@ -1416,6 +1445,7 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
       .Num("polls", done.polls)
       .Uint("mid_applies", mid_applies)
       .Raw("decay_waited", JsonBools(waited));
+  if (tc.l0_bill) line.Raw("l0_read", l0_read);
   if (final) {
     decisions_.Write(line.Num("applied_k", k0_applied_)
                          .Nums("applied_m", m_applied_)

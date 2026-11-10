@@ -316,6 +316,20 @@ DECAY="${DECAY:-1}"
 # correction; 0 the net's scores alone. 1 is not preregistered: a diagnostic
 # run only.
 PRIOR="${PRIOR:-0}"
+# The turn arms' L0 bill feature flag, the plugin config's turn_l0_bill
+# (owner, 2026-11-09): 1 each turn line also logs L0's read counts over the
+# turn, and the trainer's reward is L0's own bill (those reads at cost model
+# 2's prices plus the L0 merges that finished in the turn, each charged
+# whole) with no shaping; L0 alone (the turn settings' turn_acting 1) and
+# merge_charge not "rate". 0 the whole turn's J, as before. 1 is not
+# preregistered: a diagnostic run only.
+L0_BILL="${L0_BILL:-0}"
+# The turn arms' compact floor feature flag, the plugin config's
+# turn_compact_floor (owner, 2026-11-09): 1 L0's mask blocks compact while
+# L0's anchor is at the lowest K rung (compact there sends K = max(1, n0),
+# below the ladder, with no rung change); 0 the mask as before. 1 is not
+# preregistered: a diagnostic run only.
+COMPACT_FLOOR="${COMPACT_FLOOR:-0}"
 # A diagnostic run may price with a stated q-bar while the contract's is open
 # (D-29 §6); empty: none, and a learner arm is refused.
 CONTROLLER_QBAR_STANDIN="${CONTROLLER_QBAR_STANDIN:-}"
