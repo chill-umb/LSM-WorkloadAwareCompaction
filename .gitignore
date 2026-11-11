@@ -87,6 +87,8 @@ gate1
 /docs/PATHWAYS.pdf
 /docs/PATHWAYS_FOR_REVIEW.pdf
 /docs/PROGRAMME1_HISTORY.pdf
+# The MARL literature review is a local reading copy.
+/docs/marl_architectures_review.pdf
 *.tgz
 
 # Generated text and JSON outputs; configs are re-included one by one.
