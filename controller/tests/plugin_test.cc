@@ -3,9 +3,11 @@
 // the logs covering every level from start to stop (OBJ-1).
 #include "plugin.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <new>
+#include <sstream>
 
 #include "gtest/gtest.h"
 #include "test_util.h"
@@ -757,6 +759,167 @@ TEST_F(PluginTest, HoldOnlyHoldsAScheduledTriggerAboveTheLiveCap) {
   const std::vector<double> requested = L0Requested(Decisions());
   ASSERT_GE(requested.size(), 2u);
   EXPECT_EQ(requested.back(), 8);  // after the change, as it holds it
+}
+
+// A number after "key": in a log line (NaN when absent).
+double Value(const std::string& line, const std::string& key) {
+  const size_t at = line.find("\"" + key + "\":");
+  if (at == std::string::npos) return NAN;
+  return std::strtod(line.c_str() + at + key.size() + 3, nullptr);
+}
+// The list after "key":[ in a log line.
+std::vector<double> List(const std::string& line, const std::string& key) {
+  std::vector<double> out;
+  const size_t at = line.find("\"" + key + "\":[");
+  if (at == std::string::npos) return out;
+  const size_t start = at + key.size() + 4;
+  std::stringstream in(line.substr(start, line.find(']', start) - start));
+  for (std::string item; std::getline(in, item, ',');) {
+    out.push_back(std::strtod(item.c_str(), nullptr));
+  }
+  return out;
+}
+std::vector<std::string> OfType(const std::vector<std::string>& lines,
+                                const std::string& type, bool keep) {
+  std::vector<std::string> out;
+  for (const std::string& line : lines) {
+    if ((line.find("{\"type\":\"" + type + "\"") == 0) == keep) {
+      out.push_back(line);
+    }
+  }
+  return out;
+}
+
+// The fork's eight read counters, as the log names them, and the amount
+// FeedReads adds to each per poll at level i: (i + 1) times the factor.
+const std::pair<const char*, uint64_t> kReadFactors[] = {
+    {"probes", 1},       {"filter_passes", 2}, {"filter_hits", 3},
+    {"seeks", 4},        {"get_reopens", 5},   {"iter_reopens", 6},
+    {"reopen_nanos", 7000}, {"hidden_steps", 8}};
+void FeedReads(FakeHost* host) {
+  std::lock_guard<std::mutex> lock(host->mu);
+  for (size_t i = 0; i < host->reads.size(); ++i) {
+    RLLevelReadCounts& r = host->reads[i];
+    const uint64_t n = i + 1;
+    r.probes += n * 1;
+    r.filter_passes += n * 2;
+    r.filter_hits += n * 3;
+    r.seeks += n * 4;
+    r.get_reopens += n * 5;
+    r.iter_reopens += n * 6;
+    r.reopen_nanos += n * 7000;
+    r.hidden_steps += n * 8;
+  }
+}
+
+// level_reads (owner, 2026-11-10): hold-only closes a "level_reads" window
+// at the first poll past every level_reads_ops operations from its start
+// (boundaries on the start's grid: 150k, 300k, 450k), and a last, shorter
+// one at the drain; the windows join without a gap and carry every level's
+// counter changes over them. Logging only: off there is no such line, and
+// the log is otherwise the same byte for byte, the scheduled change's call
+// and every hold decision included.
+TEST_F(PluginTest, HoldOnlyLevelReadWindowsTileTheRunToTheDrain) {
+  const auto run = [&](std::map<std::string, std::string> changes) {
+    dir_ = TempDir();
+    next_job_ = 10;
+    FakeHost host;
+    FakeClock clock;
+    changes["apply_at_op"] = "250000";
+    changes["apply_m"] = "\"1:1:2:1:1\"";
+    {
+      Controller controller(&host, Config(changes), clock.Fn());
+      host.SetL0(3);
+      host.SetLevel(1, 0.97);
+      host.SetLevel(2, 0.97);
+      host.SetLevel(3, 0.5);
+      host.SetLevel(4, 0.3);
+      for (int poll = 1; poll <= 7; ++poll) {
+        if (poll == 6) host.SetDraining();
+        if (poll <= 6) {
+          Turnover(&host);  // 100k operations a poll
+          FeedReads(&host);
+        }
+        clock.now += 200000;
+        controller.Step();
+      }
+      EXPECT_FALSE(controller.fallback());
+      EXPECT_EQ(host.applied.size(), 1u);  // the scheduled change only
+    }
+    return Decisions();
+  };
+  const auto off = run({});
+  const auto on = run({{"level_reads", "1"}, {"level_reads_ops", "150000"}});
+  EXPECT_TRUE(OfType(off, "level_reads", true).empty());
+  for (const std::string& line : off) {
+    EXPECT_EQ(line.find("level_reads"), std::string::npos) << line;
+  }
+  EXPECT_EQ(OfType(on, "level_reads", false), off);
+  EXPECT_GT(CountType(off, "decision"), 0);
+  EXPECT_EQ(CountType(off, "apply"), 1);
+
+  const auto windows = OfType(on, "level_reads", true);
+  ASSERT_EQ(windows.size(), 4u);
+  // [0, 200k) 2 polls, [200k, 300k) 1, [300k, 500k) 2, [500k, 600k) the drain's.
+  const double ends[] = {200000, 300000, 500000, 600000};
+  double op0 = 0;
+  for (size_t w = 0; w < windows.size(); ++w) {
+    const std::string& line = windows[w];
+    EXPECT_EQ(Value(line, "w"), static_cast<double>(w)) << line;
+    EXPECT_EQ(Value(line, "op0"), op0) << line;
+    EXPECT_EQ(Value(line, "op1"), ends[w]) << line;
+    EXPECT_EQ(Value(line, "final"), w + 1 == windows.size() ? 1 : 0) << line;
+    EXPECT_TRUE(std::isfinite(Value(line, "t_us"))) << line;
+    const double polls = (ends[w] - op0) / 100000;
+    for (const auto& [name, factor] : kReadFactors) {
+      const std::vector<double> counts = List(line, name);
+      ASSERT_EQ(counts.size(), 5u) << name << ": " << line;
+      for (size_t i = 0; i < counts.size(); ++i) {
+        EXPECT_EQ(counts[i], polls * factor * (i + 1)) << name << " " << i;
+      }
+    }
+    op0 = ends[w];
+  }
+  // The drain's line comes right after the drain's, before the stop.
+  const auto drain = std::find_if(on.begin(), on.end(), [](const std::string& l) {
+    return l.find("{\"type\":\"drain\"") == 0;
+  });
+  ASSERT_NE(drain, on.end());
+  ASSERT_NE(drain + 1, on.end());
+  EXPECT_EQ(*(drain + 1), windows.back());
+}
+
+// The windows decide nothing, so they go on through a fallback (here a
+// refused scheduled change) and still end at the drain.
+TEST_F(PluginTest, HoldOnlyLevelReadWindowsGoOnThroughAFallback) {
+  FakeHost host;
+  FakeClock clock;
+  {
+    Controller controller(&host,
+                          Config({{"level_reads", "1"},
+                                  {"level_reads_ops", "100000"},
+                                  {"apply_at_op", "150000"},
+                                  {"apply_m", "\"1:1:2:1:1\""}}),
+                          clock.Fn());
+    host.fail_apply = true;
+    for (int poll = 1; poll <= 4; ++poll) {
+      if (poll == 4) host.SetDraining();
+      host.AddOps(50000, 50000);
+      FeedReads(&host);
+      clock.now += 200000;
+      controller.Step();
+    }
+    EXPECT_TRUE(controller.fallback());
+  }
+  const auto windows = OfType(Decisions(), "level_reads", true);
+  ASSERT_EQ(windows.size(), 4u);
+  for (size_t w = 0; w < windows.size(); ++w) {
+    EXPECT_EQ(Value(windows[w], "op0"), 100000.0 * w) << windows[w];
+    EXPECT_EQ(Value(windows[w], "op1"), 100000.0 * (w + 1)) << windows[w];
+    EXPECT_EQ(List(windows[w], "probes"), (std::vector<double>{1, 2, 3, 4, 5}));
+  }
+  EXPECT_EQ(Value(windows.back(), "final"), 1);
+  EXPECT_EQ(CountType(Decisions(), "fallback"), 1);
 }
 
 }  // namespace

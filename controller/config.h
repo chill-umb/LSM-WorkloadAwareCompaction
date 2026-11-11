@@ -221,6 +221,16 @@ struct Config {
   // ops, each applied once at the first poll at or after its op. The
   // apply_at_op form above is a schedule of one; the two are exclusive.
   std::vector<ScheduledChange> schedule;
+  // The per-level read log's flag (level_reads; LEVEL_READS, set per run;
+  // owner, 2026-11-10), optional in every mode (absent: 0) and 1 only in
+  // hold-only and turn. On, every turn line carries "level_reads", each level's eight read
+  // counters over the turn it closes; hold-only writes a "level_reads" line
+  // per level_reads_ops operations from its start (cut as turns are, at the
+  // first poll past each boundary) and a last, shorter one at the drain.
+  // Logging only: no decision reads it. level_reads_ops is required in
+  // hold-only with level_reads 1 and refused anywhere else.
+  bool level_reads = false;
+  uint64_t level_reads_ops = 0;
   std::string decision_log;
   std::string transition_log;
 

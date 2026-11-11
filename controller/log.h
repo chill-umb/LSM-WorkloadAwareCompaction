@@ -28,7 +28,16 @@
 //               turn [op0, op1) just closed and the state, masks and actions
 //               for the next; "final": 1 at the drain (state only); with
 //               turn_l0_bill, "l0_read": L0's raw read counts over the
-//               closed turn (plugin.cc JsonL0Read), for L0's own bill
+//               closed turn (plugin.cc JsonL0Read), for L0's own bill; with
+//               level_reads, "level_reads": every level's raw read counts
+//               over the closed turn (plugin.cc JsonLevelReads: per counter
+//               a list with one whole number per level; L0's entries are
+//               l0_read's, hidden_steps[1] its l1_hidden_steps)
+//   level_reads hold-only with level_reads: one per level_reads_ops
+//               operations, the window [op0, op1) just closed ("w" numbers
+//               them from 0) with "level_reads" as on a turn line; the lines
+//               join without a gap from the start, and "final": 1 marks the
+//               drain's, which ends the last window however short
 //   turn_topup, defer_broken  mode "turn": a defer's raise within a turn,
 //               or a raise the bounds refuse (RocksDB then compacts)
 //   turn_weights, turn_weights_missing  mode "turn": a weights version

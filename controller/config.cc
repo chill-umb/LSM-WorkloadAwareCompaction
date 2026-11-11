@@ -325,6 +325,8 @@ const std::set<std::string>& KnownKeys() {
                                                "apply_m",
                                                "apply_k0",
                                                "apply_schedule",
+                                               "level_reads",
+                                               "level_reads_ops",
                                                "turn_ops",
                                                "turn_acting",
                                                "turn_arch",
@@ -848,6 +850,32 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       return false;
     }
     c->schedule = {{c->apply_at_op, c->apply_m, c->apply_k0}};
+  }
+  // The per-level read log (config.h level_reads): optional in every mode,
+  // absent meaning 0 (a config written before the flag stays valid, the
+  // fork's own test configs among them); 1 only where its lines are built.
+  int level_reads = 0;
+  if (r.Has("level_reads") &&
+      (!r.Integer("level_reads", &level_reads) ||
+       !r.Check(level_reads == 0 || level_reads == 1,
+                "need level_reads 0 or 1") ||
+       !r.Check(level_reads == 0 || c->mode == Mode::kHoldOnly ||
+                    c->mode == Mode::kTurn,
+                "level_reads 1 is for hold-only and turn"))) {
+    return false;
+  }
+  c->level_reads = level_reads == 1;
+  if (c->level_reads && c->mode == Mode::kHoldOnly) {
+    double ops = 0;
+    if (!r.Number("level_reads_ops", &ops) ||
+        !r.Check(ops >= 1000 && ops < 1e15 && ops == std::floor(ops),
+                 "need level_reads_ops an integer >= 1000")) {
+      return false;
+    }
+    c->level_reads_ops = static_cast<uint64_t>(ops);
+  } else if (r.Has("level_reads_ops")) {
+    return r.Fail("\"level_reads_ops\" needs level_reads 1 in mode hold-only"
+                  " (turn mode's window is its turn)");
   }
   if (c->mode == Mode::kLearned || c->mode == Mode::kLearned2 ||
       c->mode == Mode::kTurn) {

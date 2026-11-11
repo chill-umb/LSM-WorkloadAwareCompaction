@@ -26,6 +26,12 @@
 // closing during a write stop; at the drain a final "turn" line carries the
 // state only.
 //
+// The per-level read log (level_reads, logging only): in turn mode every turn
+// line carries each level's read counts over the turn; in hold-only a
+// "level_reads" line closes every level_reads_ops operations, and a last one
+// at the drain, so the lines tile the run from the start to the drain. Both
+// read the counters the poll already reads, on this thread.
+//
 // Fallback (A-Impl-8): an invalid config or host options, a failed Apply, a
 // failed log write, an invalid weights file (or a missing one when
 // weights_required) or an exception applies m = 1 and the configured
@@ -195,6 +201,11 @@ class Controller {
   bool Flush(uint64_t op, uint64_t now, bool new_changes, std::string* error);
   // Hold-only's next scheduled change (Config::schedule), once each.
   void ApplyScheduled(uint64_t op, uint64_t now);
+  // Hold-only with level_reads (config.h): closes the open window
+  // [lr_op0_, op) with its "level_reads" line and opens the next at op.
+  void LevelReadsWindow(uint64_t op,
+                        const std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts>& reads,
+                        uint64_t now, bool final);
   // Writes the level's transition and opens its next interval.
   void CloseInterval(int level, const View& v, const Opening& next,
                      uint64_t op);
@@ -336,6 +347,16 @@ class Controller {
   uint64_t applies_ok_ = 0;          // accepted Flush calls
   uint64_t turn_applies_at_line_ = 0;
   bool turn_final_written_ = false;
+
+  // Hold-only's per-level read windows (level_reads): on only when the config
+  // parsed with them, then through any fallback (they decide nothing); the
+  // open window's first operation and counters, its boundary (the start plus
+  // whole windows), and the windows closed.
+  bool lr_windows_ = false;
+  uint64_t lr_op0_ = 0;
+  uint64_t lr_next_op_ = 0;
+  uint64_t lr_index_ = 0;
+  std::vector<ROCKSDB_NAMESPACE::RLLevelReadCounts> lr_reads0_;
 
   // The learner modes.
   std::mt19937_64 rng_;

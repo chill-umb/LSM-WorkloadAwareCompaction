@@ -36,6 +36,18 @@ db_bench's output and the plugin's decision and transition logs.
              the one in effect before it reached RocksDB at its own poll
              (set 1, the snapshot read after it carried it), or, held by the
              SetOptions cap, in an accepted apply before the next line
+  level_reads  with --config (03 passes it, and --host-log): the per-level
+             read log (the config's level_reads, 03's LEVEL_READS;
+             level_reads.py). On: in mode turn every turn line's
+             "level_reads" block, in hold-only the "level_reads" lines
+             numbered 0, 1, ...; either way a list of one whole number >= 0
+             per level for each of the eight counters, windows that tile the
+             run from the plugin's start (measure_start, exactly) to the
+             drain with only the last final, and per level and counter totals
+             equal to the host log's measure_start..drain_start counters
+             within level_reads.REL_TOL (0.1%) or ABS_TOL counts. Off: no line
+             may carry it, and with none the check is not reported (the
+             report is as before)
 
 Exit 0 when every check passes, 1 otherwise; the report says which failed.
 """
@@ -47,6 +59,9 @@ import json
 import math
 import re
 from pathlib import Path
+
+import host_log
+import level_reads
 
 ACTIONS = ("hold", "compact", "defer", "expand")  # the mask's order (log.h)
 # learned2's names for the same slots (controller/learned2.h): 0 hold, 1 down,
@@ -200,7 +215,8 @@ def turn_changes(decisions: list[dict]) -> tuple[list[str], dict]:
 
 def check(stdout: str, decisions: list[dict], transitions: list[dict],
           log_problems: list[str], mode: str, expect_fallback: bool,
-          min_changes: int) -> dict:
+          min_changes: int, config: dict | None = None,
+          host_records: list[dict] | None = None) -> dict:
     checks: dict[str, dict] = {}
 
     def record(name, problems, **details):
@@ -304,6 +320,13 @@ def check(stdout: str, decisions: list[dict], transitions: list[dict],
             problems.append("a scheduled apply without an apply_scheduled line")
         record("hold_only", problems, scheduled_applies=len(scheduled))
 
+    # The per-level read log, judged only with the run's config (03's).
+    if config is not None:
+        judge = level_reads.check_turn if mode == "turn" else level_reads.check_hold
+        judged = judge(decisions, config, host_records or [])
+        if judged is not None:
+            checks["level_reads"] = judged
+
     fallbacks = types.count("fallback")
     stop_fallback = decisions[-1].get("fallback") if types[-1:] == ["stop"] else None
     if expect_fallback:
@@ -332,13 +355,24 @@ def main() -> int:
     parser.add_argument("--expect-fallback", action="store_true")
     parser.add_argument("--min-changes", type=int, default=0,
                         help="judged ACT-3 changes the run must contain")
+    parser.add_argument("--config", type=Path,
+                        help="the run's plugin_config.json: judges the "
+                             "per-level read log (level_reads) by it")
+    parser.add_argument("--host-log", type=Path,
+                        help="the run's host_log.jsonl, read only when the "
+                             "config's level_reads is 1")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     decisions, decision_problems = read_lines(args.decisions)
     transitions, transition_problems = read_lines(args.transitions)
+    config = json.loads(args.config.read_text()) if args.config else None
+    host_records = (host_log.load(args.host_log)
+                    if level_reads.on(config) and args.host_log
+                    and args.host_log.exists() else [])
     report = check(args.stdout.read_text(errors="replace"), decisions,
                    transitions, decision_problems + transition_problems,
-                   args.mode, args.expect_fallback, args.min_changes)
+                   args.mode, args.expect_fallback, args.min_changes,
+                   config=config, host_records=host_records)
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(rendered)

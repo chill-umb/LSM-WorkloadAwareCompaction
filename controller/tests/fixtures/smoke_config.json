@@ -18,6 +18,7 @@
   "k0_min": 2,
   "kappa_a": 1.0,
   "kappa_d": 0.25,
+  "level_reads": 0,
   "m_max": 2.0,
   "m_min": 0.5,
   "mode": "rules",

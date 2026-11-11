@@ -37,12 +37,13 @@ PRICES = {"schema": 5, "kind": "final",
           "c_w": 2e-15, "c_f": 3e-13, "c_blk": 4e-12, "c_sk": 5e-12,
           "c_open": 6e-11, "reopen_timer": {"seconds_per_reopen": 8.3e-6}}
 # controller/config.cc's keys: every one required, rule thresholds by rule.
-# c_open is one since D-21: the controller prices each level's reopens.
+# c_open is one since D-21: the controller prices each level's reopens;
+# level_reads since 2026-11-10 (the per-level read log, 0 unless set).
 ALWAYS = {"mode", "decision_log", "transition_log", "m_min", "m_max",
           "k0_min", "k0_cap", "epsilon", "phi_min", "alpha", "kappa_d",
           "kappa_a", "setoptions_min_interval_ms", "k", "b_max", "beta_w",
           "beta_r", "beta_s", "c_w", "c_f", "c_blk", "c_sk", "c_open", "c_s",
-          "q_bar", "cost_model"}
+          "q_bar", "cost_model", "level_reads"}
 # A schema-6 (cost model 2) record for the learner arms (D-23, D-24 §2).
 KINDS = ("flush", "l0", "deep", "move")
 TYPES = ("probe", "block", "seek", "reopen", "step", "iblock", "memtable",
@@ -313,6 +314,51 @@ class ComposeTest(unittest.TestCase):
                     trainer={**shipped["trainer"], "merge_charge": "rate"}, **turn)
         for key in ("turn_l0_bill", "turn_compact_floor"):
             self.assertNotIn(key, compose("rules", contract=with_qbar(61234.5))[0])
+
+    def test_the_level_reads_flag(self):
+        """LEVEL_READS: every arm's level_reads, 0 by default; 1 only for the
+        hold and turn arms, in any run (logging only); the hold arm's window,
+        level_reads_ops, required with it and refused anywhere else. The
+        flag (and the window) is the only difference it makes."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        turn = dict(prices=PRICES6, learner=pc.learner_values(shipped, "training"),
+                    weights_path="/w.bin", seed=4, q_bar_standin=50000.0, decay=1,
+                    diagnostic=True)
+        common = dict(contract=with_qbar(61234.5))
+        learner = dict(prices=PRICES6, diagnostic=True, learner=LEARNER,
+                       weights_path="/w.bin", seed=4, **common)
+        for arm, sources in (("rules", common), ("hold", common), ("learned", learner),
+                             ("turn", turn), ("turn_vdn", turn)):
+            self.assertEqual(compose(arm, **sources)[0]["level_reads"], 0, arm)
+        hold_off, _ = compose("hold", **common)
+        hold_on, _ = compose("hold", level_reads=1, level_reads_ops=64000, **common)
+        self.assertEqual({k for k in hold_on if hold_on.get(k) != hold_off.get(k)},
+                         {"level_reads", "level_reads_ops"})
+        self.assertEqual((hold_on["level_reads"], hold_on["level_reads_ops"]), (1, 64000))
+        self.assertNotIn("level_reads_ops", hold_off)
+        # With a scheduled change too (the step-response arm).
+        hold_step, _ = compose("hold", diagnostic=True, apply_at_op=2900000,
+                               apply_m="1:1:2:1", level_reads=1, level_reads_ops=64000,
+                               **common)
+        self.assertEqual((hold_step["apply_at_op"], hold_step["level_reads"]), (2900000, 1))
+        for arm in pc.TURN_ARMS:
+            off, _ = compose(arm, **turn)
+            on, _ = compose(arm, level_reads=1, **turn)
+            self.assertEqual({k for k in on if on[k] != off[k]}, {"level_reads"})
+            self.assertNotIn("level_reads_ops", on)
+            with self.assertRaisesRegex(ValueError, "a turn arm's window is its turn"):
+                compose(arm, level_reads=1, level_reads_ops=64000, **turn)
+        for arm, sources in (("rules", common), ("learned", learner)):
+            with self.assertRaisesRegex(ValueError, "the hold and turn arms"):
+                compose(arm, level_reads=1, **sources)
+        for bad in (2, -1, True, 0.5):
+            with self.assertRaisesRegex(ValueError, "level_reads must be 0 or 1"):
+                compose("hold", level_reads=bad, **common)
+        for bad in (None, 999, 0, True, 64000.0):
+            with self.assertRaisesRegex(ValueError, "needs level_reads_ops"):
+                compose("hold", level_reads=1, level_reads_ops=bad, **common)
+        with self.assertRaisesRegex(ValueError, "the hold arm with level_reads 1"):
+            compose("hold", level_reads_ops=64000, **common)
 
     def test_the_hold_arms_scheduled_change(self):
         """The step-response arm (owner, 2026-10-07): hold only, diagnostic

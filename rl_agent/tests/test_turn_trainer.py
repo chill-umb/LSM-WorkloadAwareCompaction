@@ -396,6 +396,78 @@ class OneActingLevelTest(unittest.TestCase):
                 self.assertTrue(Path(args.weights).stat().st_size > 0)
 
 
+def level_reads(t):
+    """A turn line's "level_reads" (controller/plugin.cc JsonLevelReads): per
+    counter a list of LEVELS whole numbers, varying by turn."""
+    keys = ("probes", "filter_passes", "filter_hits", "seeks", "get_reopens",
+            "iter_reopens", "reopen_nanos", "hidden_steps")
+    return {key: [(k + 1) * (i + 1) * (t + 3) for i in range(LEVELS)]
+            for k, key in enumerate(keys)}
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class LevelReadsTest(unittest.TestCase):
+    """The per-level read log (plugin config level_reads; logging only): the
+    trainer does not use it yet. Turn lines that carry "level_reads", the
+    config's key at 0 or 1, and hold-only's own "level_reads" lines in the
+    log (which a turn run never has) leave its log record for record as it
+    was, for both value functions and with the L0 bill too."""
+
+    def run_trainer(self, tmp, arch="factored", key=None, blocks=False, own=False,
+                    bill=False):
+        cfg = plugin_config(arch)
+        if key is not None:
+            cfg["level_reads"] = key
+        if bill:
+            cfg.update(turn_acting=1, turn_l0_bill=1)
+        acting = 1 if bill else ACTING
+        args = type("A", (), {})()
+        for name in ("decisions", "host_log", "log", "summary", "weights"):
+            setattr(args, name, str(Path(tmp) / f"{name}.out"))
+        tr = TT.TurnTrainer(args, settings(), cfg)
+        write(tr.args.host_log, host_log())
+        lines = [{"type": "turn_start", "arch": arch, "acting": acting,
+                  "features": TW.feature_names(acting)}]
+        for t in range(TURNS):
+            line = turn_line(t, set_=1 if t % 4 == 0 else 0, mid=1 if t % 6 == 0 else 0,
+                             action="compact" if t % 2 else "hold")
+            if bill:
+                line["l0_read"] = l0_read(t)
+            if blocks:
+                line["level_reads"] = level_reads(t)
+            if own:
+                lines.append({"type": "level_reads", "w": t, "op0": t * TURN,
+                              "op1": (t + 1) * TURN, "t_us": t, "final": 0,
+                              "level_reads": level_reads(t)})
+            lines.append(line)
+        lines.append({"type": "stop"})
+        write(tr.args.decisions, lines)
+        tr.step()
+        self.assertTrue(tr.done())
+        tr.finish("test")
+        return [json.loads(x) for x in Path(tr.args.log).read_text().splitlines()]
+
+    def test_the_field_and_its_lines_change_nothing(self):
+        for arch in ("factored", "vdn"):
+            for bill in (False, True):
+                with tempfile.TemporaryDirectory() as tmp:
+                    plain = self.run_trainer(tmp, arch, bill=bill)
+                self.assertTrue(any(r["type"] == "train" for r in plain), arch)
+                for key, blocks, own in ((0, False, False), (1, True, False),
+                                         (1, True, True), (None, False, True)):
+                    with self.subTest(arch=arch, bill=bill, key=key, own=own), \
+                            tempfile.TemporaryDirectory() as tmp:
+                        log = self.run_trainer(tmp, arch, key, blocks, own, bill)
+                        self.assertEqual(log, plain)
+
+    def test_a_turn_line_with_the_field_parses_as_without_it(self):
+        names = TW.feature_names(ACTING)
+        line = turn_line(3)
+        with_field = {**line, "level_reads": level_reads(3)}
+        self.assertEqual(TT.parse_turn(with_field, names, ACTING),
+                         TT.parse_turn(line, names, ACTING))
+
+
 def l0_read(t):
     """A turn line's "l0_read" (controller/plugin.cc JsonL0Read), varying by turn."""
     return {"probes": 700 + 10 * t, "filter_passes": 30 + t, "filter_hits": 9, "seeks": 50 + 2 * t,

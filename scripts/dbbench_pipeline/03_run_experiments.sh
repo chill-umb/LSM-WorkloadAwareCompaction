@@ -56,6 +56,11 @@ scored from the first mixgraph operation to the end of the drain:
                      rewards L0 with its own bill; COMPACT_FLOOR=1
                      (diagnostic only) masks L0's compact at the lowest K
                      rung.
+  LEVEL_READS=1      hold and turn arms (logging only, any run): every turn
+                     line carries every level's read counts over the turn;
+                     the hold arm logs them per LEVEL_READS_OPS operations.
+                     28 checks them against the host log; not in the
+                     fingerprint.
 
 The old stack's arms: regular, oracle, prior_only, rl, unconstrained_rl, and
 unconstrained_prior_only. LEVEL_TARGET_MULTIPLIERS applies to regular only:
@@ -567,6 +572,14 @@ if (( CONTROLLER_MATRIX )); then
     echo "COMPACT_FLOOR must be 0 or 1 (the turn arms' compact floor)." >&2
     exit 1
   }
+  [[ "$LEVEL_READS" =~ ^[01]$ ]] || {
+    echo "LEVEL_READS must be 0 or 1 (the hold and turn arms' per-level read log)." >&2
+    exit 1
+  }
+  [[ "$LEVEL_READS_OPS" =~ ^[1-9][0-9]*$ ]] && (( LEVEL_READS_OPS >= 1000 )) || {
+    echo "LEVEL_READS_OPS must be a whole number >= 1000 (the hold arm's read window)." >&2
+    exit 1
+  }
   # A hold-only matrix may take them at any length (D-31's step runs): the
   # hold-only plugin never acts (controller/policy.cc), so the placeholders
   # reach only its logs; its one change is the scheduled one, checked
@@ -605,6 +618,13 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
   ! is_turn_arm "$1" || learner_flag+=(--decay "$DECAY" --prior "$PRIOR"
                                        --l0-bill "$L0_BILL"
                                        --compact-floor "$COMPACT_FLOOR")
+  # The per-level read log (config.sh LEVEL_READS; logging only): the hold
+  # and turn arms, the hold arm with its window.
+  if [[ "$1" == hold ]] || is_turn_arm "$1"; then
+    learner_flag+=(--level-reads "$LEVEL_READS")
+    [[ "$1" != hold || "$LEVEL_READS" != 1 ]] ||
+      learner_flag+=(--level-reads-ops "$LEVEL_READS_OPS")
+  fi
   # The hold arm's scheduled change (step-response runs, diagnostic only).
   if [[ "$1" == hold && -n "$HOLD_APPLY_AT_OP" ]]; then
     learner_flag+=(--apply-at-op "$HOLD_APPLY_AT_OP" --apply-m "$HOLD_APPLY_M")
@@ -625,13 +645,16 @@ compose_plugin_config() {  # $1=arm, $2=output, $3=learner seed
     --output "$2" ${placeholder_flag[@]+"${placeholder_flag[@]}"} \
     ${learner_flag[@]+"${learner_flag[@]}"}
 }
-# The config's identity: every value except where its logs and weights go
-# and the learner's seed, which varies by repeat as db_bench's does.
+# The config's identity: every value except where its logs and weights go,
+# the learner's seed, which varies by repeat as db_bench's does, and the
+# per-level read log's keys, which only add log lines (LEVEL_READS: a run
+# with it on pools with one without).
 plugin_config_sha256() {  # $1=config
   "$PYTHON" - "$1" <<'PY'
 import hashlib, json, sys
 config = json.load(open(sys.argv[1]))
-for key in ("decision_log", "transition_log", "weights_path", "seed"):
+for key in ("decision_log", "transition_log", "weights_path", "seed",
+            "level_reads", "level_reads_ops"):
     config.pop(key, None)
 print(hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest())
 PY
@@ -1709,6 +1732,11 @@ PY
         printf 'learner_weights_in=%s\n' "${LEARNER_WEIGHTS_SHA256:-none}"
       fi
     fi
+    if [[ "$arm" == hold ]] || is_turn_arm "$arm"; then
+      printf 'level_reads=%s\n' "$LEVEL_READS"
+      [[ "$arm" != hold || "$LEVEL_READS" != 1 ]] ||
+        printf 'level_reads_ops=%s\n' "$LEVEL_READS_OPS"
+    fi
     if [[ "$arm" == hold ]]; then
       # The scheduled change the composed config carries (none: empty).
       printf 'hold_apply=%s\n' "$("$PYTHON" -c 'import json, sys; c = json.load(open(sys.argv[1])); print(c["apply_schedule"] if "apply_schedule" in c else "" if "apply_at_op" not in c else "|".join(str(c.get(k, "")) for k in ("apply_at_op", "apply_m", "apply_k0")))' "$result_dir/plugin_config.json")"
@@ -1912,6 +1940,8 @@ PY
       --stdout "$result_dir/run.log" \
       --decisions "$result_dir/decisions.jsonl" \
       --transitions "$result_dir/transitions.jsonl" --mode "$plugin_mode" \
+      --config "$result_dir/plugin_config.json" \
+      --host-log "$result_dir/host_log.jsonl" \
       --output "$result_dir/plugin_check.json" || {
         touch "$result_dir/FAILED_PLUGIN_CHECK"
         echo "The plugin check failed; keeping the result and DB: $result_dir" >&2

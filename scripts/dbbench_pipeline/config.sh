@@ -330,6 +330,17 @@ L0_BILL="${L0_BILL:-0}"
 # below the ladder, with no rung change); 0 the mask as before. 1 is not
 # preregistered: a diagnostic run only.
 COMPACT_FLOOR="${COMPACT_FLOOR:-0}"
+# The per-level read log's flag, the plugin config's level_reads (owner,
+# 2026-11-10): 1 the turn arms' every turn line carries "level_reads", every
+# level's read counts over the turn, and the hold arm writes a "level_reads"
+# line per LEVEL_READS_OPS operations (and a last one at the drain), so the
+# per-level bills can be built and judged offline; 0 neither. Logging only:
+# no decision, action, reward or price reads it, it is not diagnostic only,
+# and it stays out of the fingerprint (03's plugin_config_sha256 drops it).
+LEVEL_READS="${LEVEL_READS:-0}"
+# The hold arm's window under LEVEL_READS=1: the turn length
+# (config/turn_settings.json turn_ops), so its lines line up with turns.
+LEVEL_READS_OPS="${LEVEL_READS_OPS:-64000}"
 # A diagnostic run may price with a stated q-bar while the contract's is open
 # (D-29 §6); empty: none, and a learner arm is refused.
 CONTROLLER_QBAR_STANDIN="${CONTROLLER_QBAR_STANDIN:-}"

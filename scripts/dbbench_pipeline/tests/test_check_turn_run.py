@@ -2,7 +2,8 @@
 plugin's logged scores recomputed from the archived weights of their version
 (ARCH-6), a changed score or greedy choice failing it, a score that is not
 finite failing ARCH-1, the L0 bill's records (turn_l0_bill) checked both
-ways, and the SetOptions price measured from the calls' wall time."""
+ways, the per-level read log (level_reads) checked against the host log,
+and the SetOptions price measured from the calls' wall time."""
 import importlib.util
 import json
 import math
@@ -64,12 +65,32 @@ def bill_read(t):
                             10.0 * (n["hidden_steps"] + n["l1_hidden_steps"]))
 
 
-def write_arm(root: Path, tamper=None, prior=None, bill=None):
+LR_KEYS = check37.level_reads.KEYS
+LEVELS = 3
+
+
+def reads_block(t, bill=False):
+    """Turn t's level_reads block over LEVELS levels; with the L0 bill, its
+    L0 entries and L1's hidden steps are l0_read(t)'s, as the plugin's are."""
+    block = {key: [(k + 1) * (i + 1) * (t + 2) for i in range(LEVELS)]
+             for k, key in enumerate(LR_KEYS)}
+    if bill:
+        for key in LR_KEYS:
+            block[key][0] = l0_read(t)[key]
+        block["hidden_steps"][1] = l0_read(t)["l1_hidden_steps"]
+    return block
+
+
+def write_arm(root: Path, tamper=None, prior=None, bill=None, reads=None):
     """prior: the L0 prior's four values (J per turn) on every line, with
     the weights' spread 2, as the plugin logs them with turn_prior 1. bill:
     an L0-only arm (turn_acting 1) with turn_l0_bill `bill`; with 1, its
     turn lines carry l0_read and the trainer's lines the bill, as the plugin
-    and the trainer log them."""
+    and the trainer log them. reads: the config's level_reads; with it set,
+    the lines are turns [1000 t, 1000 (t + 1)) from the start (op 0) and a
+    final line at the drain (6000-6500), and with 1 each carries its
+    reads_block and host_log.jsonl's measure_start..drain_start counters
+    are their totals."""
     acting = ACTING if bill is None else 1
     n_in = len(TW.feature_names(acting))
     (root / "weights").mkdir(parents=True)
@@ -80,6 +101,8 @@ def write_arm(root: Path, tamper=None, prior=None, bill=None):
     config = {"mode": "turn", "turn_arch": "factored", "turn_acting": acting}
     if bill is not None:
         config.update(CM2, turn_l0_bill=bill)
+    if reads is not None:
+        config["level_reads"] = reads
     (root / "plugin_config.json").write_text(json.dumps(config))
     names = TW.feature_names(acting)
     lines = [{"type": "start", "mode": "turn"},
@@ -101,6 +124,10 @@ def write_arm(root: Path, tamper=None, prior=None, bill=None):
             line.update(prior=list(prior), prior_spread=spread if v else 1.0)
         if bill:
             line["l0_read"] = l0_read(t)
+        if reads is not None:
+            line.update(op0=1000 * t, op1=1000 * (t + 1))
+        if reads:
+            line["level_reads"] = reads_block(t, bool(bill))
         if t and bill is not None:
             record = {"type": "turn", "t": t, "J": 1e6, "J_reward": 1e6}
             if bill:
@@ -111,6 +138,23 @@ def write_arm(root: Path, tamper=None, prior=None, bill=None):
             tamper(line)
         lines.append(line)
         lines.append({"type": "apply", "ok": 1, "apply_us": 1000 + 100 * t})
+    if reads is not None:
+        lines[0].update(op=0, num_levels=LEVELS)
+        final = {"type": "turn", "t": 6, "final": 1, "op0": 6000, "op1": 6500,
+                 "x": dict(zip(names, [0.0] * n_in)), "masks": masks}
+        if bill:
+            final["l0_read"] = l0_read(6)
+        if reads:
+            final["level_reads"] = reads_block(6, bool(bill))
+        lines += [{"type": "drain", "op": 6500}, final]
+        blocks = [r["level_reads"] for r in lines if "level_reads" in r]
+        start = [[11] * len(LR_KEYS) for _ in range(LEVELS)]
+        end = [[11 + sum(b[key][i] for b in blocks) for key in LR_KEYS]
+               for i in range(LEVELS)]
+        (root / "host_log.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
+            {"type": "header", "schema": 3},
+            {"type": "stamp", "name": "measure_start", "op": 0, "levels": start},
+            {"type": "stamp", "name": "drain_start", "op": 6500, "levels": end})))
     lines.append({"type": "stop"})
     (root / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
     (root / "turn_trainer.jsonl").write_text("".join(json.dumps(r) + "\n" for r in trainer))
@@ -122,9 +166,12 @@ PRICES = {"price_per_core_second": 2e-5, "c_w": 3e-14}
 
 
 class CheckTurnRunTest(unittest.TestCase):
-    def run_check(self, tamper=None, options_bytes=None, prior=None, bill=None, trainer=None):
+    def run_check(self, tamper=None, options_bytes=None, prior=None, bill=None, trainer=None,
+                  reads=None, host=None):
         with tempfile.TemporaryDirectory() as tmp:
-            write_arm(Path(tmp), tamper, prior, bill)
+            write_arm(Path(tmp), tamper, prior, bill, reads)
+            if host:
+                host(Path(tmp) / "host_log.jsonl")
             if trainer:
                 path = Path(tmp) / "turn_trainer.jsonl"
                 records = [json.loads(x) for x in path.read_text().splitlines()]
@@ -232,6 +279,56 @@ class CheckTurnRunTest(unittest.TestCase):
             line["l0_read"] = l0_read(line["t"])
         self.assertEqual(self.run_check(stray, bill=0)["failed_checks"], ["l0_bill"])
         self.assertEqual(self.run_check(stray)["failed_checks"], ["l0_bill"])
+
+    def test_the_level_reads_are_checked_against_the_host_log(self):
+        """level_reads 1: every turn line, the drain's too, carries a whole
+        block of LEVELS levels; the turns tile the run from the start to the
+        drain; their totals are the host log's; with the L0 bill too, the
+        L0 entries are l0_read's. A missing block, a wrong total, no host
+        log, or L0 entries that are not l0_read's fail level_reads. Off: the
+        report is as before; a block anyway fails."""
+        report = self.run_check(reads=1)
+        self.assertEqual(report["verdict"], "passed", report)
+        c = report["checks"]["level_reads"]
+        self.assertEqual((c["windows"], c["gaps"], c["compared"]),
+                         (7, {"start": 0, "end": 0}, list(LR_KEYS)))
+        self.assertEqual(report["checks"]["arch6"]["judged"], 5)   # the final line is not judged
+        report = self.run_check(reads=1, bill=1)
+        self.assertEqual(report["verdict"], "passed", report)
+        self.assertTrue(report["checks"]["l0_bill"]["on"])
+
+        def no_block(line):
+            if line["t"] == 3:
+                del line["level_reads"]
+        self.assertEqual(self.run_check(no_block, reads=1)["failed_checks"], ["level_reads"])
+
+        def other_l0(line):
+            if line["t"] == 2:
+                line["l0_read"]["probes"] += 1
+        # The bill's own check takes the changed count; level_reads sees the
+        # disagreement (and the totals still match the blocks).
+        report = self.run_check(other_l0, reads=1, bill=1)
+        self.assertIn("level_reads", report["failed_checks"])
+        self.assertIn("not l0_read's", " ".join(report["checks"]["level_reads"]["problems"]))
+
+        def more_probes(path):
+            records = [json.loads(x) for x in path.read_text().splitlines()]
+            records[2]["levels"][1][0] += 500
+            path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        report = self.run_check(reads=1, host=more_probes)
+        self.assertEqual(report["failed_checks"], ["level_reads"])
+        self.assertEqual(report["checks"]["level_reads"]["max_deviation"]["probes"], -500)
+        self.assertEqual(self.run_check(reads=1, host=lambda p: p.unlink())["failed_checks"],
+                         ["level_reads"])
+
+        off = self.run_check(reads=0)
+        self.assertEqual(off["verdict"], "passed", off)
+        self.assertNotIn("level_reads", off["checks"])
+
+        def stray(line):
+            line["level_reads"] = reads_block(line["t"])
+        self.assertEqual(self.run_check(stray, reads=0)["failed_checks"], ["level_reads"])
+        self.assertEqual(self.run_check(stray)["failed_checks"], ["level_reads"])
 
 
 if __name__ == "__main__":

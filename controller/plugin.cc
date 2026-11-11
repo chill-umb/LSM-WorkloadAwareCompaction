@@ -161,6 +161,18 @@ std::string JsonScores(
   return out + "]";
 }
 
+// The fork's eight per-level read counters by their log names, in
+// RLLevelReadCounts' (and the host log's levels rows') order.
+const std::pair<const char*, uint64_t RLLevelReadCounts::*> kReadCounters[] = {
+    {"probes", &RLLevelReadCounts::probes},
+    {"filter_passes", &RLLevelReadCounts::filter_passes},
+    {"filter_hits", &RLLevelReadCounts::filter_hits},
+    {"seeks", &RLLevelReadCounts::seeks},
+    {"get_reopens", &RLLevelReadCounts::get_reopens},
+    {"iter_reopens", &RLLevelReadCounts::iter_reopens},
+    {"reopen_nanos", &RLLevelReadCounts::reopen_nanos},
+    {"hidden_steps", &RLLevelReadCounts::hidden_steps}};
+
 // L0's raw read counts over one turn (turn_l0_bill; log.h "turn"), from the
 // per-level counter differences `d`: the fork's eight counters at L0, and
 // L1's hidden steps, which the scan rule charges to L0 as attribution.cc
@@ -168,20 +180,26 @@ std::string JsonScores(
 std::string JsonL0Read(const std::vector<RLLevelReadCounts>& d) {
   const RLLevelReadCounts l0 = d.empty() ? RLLevelReadCounts() : d[0];
   const uint64_t l1_hidden = d.size() > 1 ? d[1].hidden_steps : 0;
-  const std::pair<const char*, uint64_t> counts[] = {
-      {"probes", l0.probes},
-      {"filter_passes", l0.filter_passes},
-      {"filter_hits", l0.filter_hits},
-      {"seeks", l0.seeks},
-      {"get_reopens", l0.get_reopens},
-      {"iter_reopens", l0.iter_reopens},
-      {"reopen_nanos", l0.reopen_nanos},
-      {"hidden_steps", l0.hidden_steps},
-      {"l1_hidden_steps", l1_hidden}};
   std::string out = "{";
-  for (const auto& c : counts) {
+  for (const auto& c : kReadCounters) {
     out += (out.size() > 1 ? ",\"" : "\"") + std::string(c.first) +
-           "\":" + std::to_string(c.second);
+           "\":" + std::to_string(l0.*c.second);
+  }
+  return out + ",\"l1_hidden_steps\":" + std::to_string(l1_hidden) + "}";
+}
+
+// Every level's raw read counts over one window (level_reads; log.h "turn"
+// and "level_reads"), from the per-level counter differences `d`: one list
+// per counter, one whole number per level, each counted at the level where
+// the read happened (hidden steps too: unshifted). Unpriced.
+std::string JsonLevelReads(const std::vector<RLLevelReadCounts>& d) {
+  std::string out = "{";
+  for (const auto& c : kReadCounters) {
+    out += (out.size() > 1 ? ",\"" : "\"") + std::string(c.first) + "\":[";
+    for (size_t i = 0; i < d.size(); ++i) {
+      out += (i ? "," : "") + std::to_string(d[i].*c.second);
+    }
+    out += "]";
   }
   return out + "}";
 }
@@ -219,6 +237,7 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   n_ = std::max(options_.num_levels, 1);
   std::string error;
   bool ok = LoadConfig(config_path, &cfg_, &error);
+  const bool parsed = ok;
   // The input set every learned2 feature vector and weights check follows
   // (learned2.h), before any weights are read.
   SetF2Inputs(ok ? cfg_.f2_inputs : 1);
@@ -295,6 +314,13 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
       turn_start_op_ + static_cast<uint64_t>(std::max(1.0, cfg_.turn.turn_ops));
   turn_ops0_ = ops;
   turn_reads0_ = reads;
+  // Hold-only's read windows (level_reads), the first open from here: only
+  // from a config that parsed, so the window length is its own.
+  lr_windows_ = parsed && cfg_.level_reads && cfg_.mode == Mode::kHoldOnly &&
+                cfg_.level_reads_ops > 0;
+  lr_op0_ = ops.total();
+  lr_next_op_ = lr_op0_ + cfg_.level_reads_ops;
+  lr_reads0_ = reads;
 
   // Start from the values in effect, so the first Apply is not a jump.
   m_applied_.assign(n_, 1.0);
@@ -547,6 +573,11 @@ void Controller::Poll(bool decide) {
   }
 
   if (!draining_ && host_->Draining()) EnterDrain(ops, reads, now);
+  // Hold-only's read windows (level_reads): the first poll past a boundary
+  // closes the window, as a turn closes; through a fallback too.
+  if (lr_windows_ && !draining_ && ops.total() >= lr_next_op_) {
+    LevelReadsWindow(ops.total(), reads, now, /*final=*/false);
+  }
   if (next_scheduled_ < cfg_.schedule.size() && !fallback_ && !draining_ &&
       ops.total() >= cfg_.schedule[next_scheduled_].at_op) {
     ApplyScheduled(ops.total(), now);
@@ -596,6 +627,8 @@ void Controller::EnterDrain(const RLOpCounts& ops,
   draining_ = true;
   decisions_.Write(
       JsonLine("drain").Uint("op", ops.total()).Uint("t_us", now).str());
+  // Hold-only's last read window, however short: the lines end at the drain.
+  if (lr_windows_) LevelReadsWindow(ops.total(), reads, now, /*final=*/true);
   Invalidate("drain");
   // The last turn's line: the state where the run's turns end.
   if (cfg_.mode == Mode::kTurn && !fallback_ && !turn_final_written_ &&
@@ -1313,9 +1346,13 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   }
   done.user_bytes =
       static_cast<double>(Minus(ops.bytes_written, turn_ops0_.bytes_written));
-  // L0's read counts of the closed turn, for its bill (turn_l0_bill only).
-  const std::string l0_read =
-      tc.l0_bill ? JsonL0Read(Delta(reads, turn_reads0_)) : std::string();
+  // The closed turn's read counts: L0's for its bill (turn_l0_bill), every
+  // level's for the per-level read log (level_reads); the same differences.
+  std::vector<RLLevelReadCounts> turn_reads;
+  if (tc.l0_bill || cfg_.level_reads) turn_reads = Delta(reads, turn_reads0_);
+  const std::string l0_read = tc.l0_bill ? JsonL0Read(turn_reads) : std::string();
+  const std::string level_reads =
+      cfg_.level_reads ? JsonLevelReads(turn_reads) : std::string();
   turn_ring_.push_back(done);
   while (turn_ring_.size() > static_cast<size_t>(std::max(1, tc.forecast_turns))) {
     turn_ring_.pop_front();
@@ -1446,6 +1483,7 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
       .Uint("mid_applies", mid_applies)
       .Raw("decay_waited", JsonBools(waited));
   if (tc.l0_bill) line.Raw("l0_read", l0_read);
+  if (cfg_.level_reads) line.Raw("level_reads", level_reads);
   if (final) {
     decisions_.Write(line.Num("applied_k", k0_applied_)
                          .Nums("applied_m", m_applied_)
@@ -1900,6 +1938,28 @@ void Controller::ApplyScheduled(uint64_t op, uint64_t now) {
   k0_applied_ = k0_target_ = k0;
   for (int i = 1; i < n_; ++i) controls_[i].timing = m_applied_[i];
   l0_.offset = k0_applied_ - options_.l0_trigger;
+}
+
+// Hold-only's per-level read windows (level_reads; log.h "level_reads"): the
+// window [lr_op0_, op) closes with every level's counter differences since
+// its start, and the next opens at op, so the lines join without a gap; the
+// boundaries stay on the start's grid of level_reads_ops (as turns do), and
+// the drain's line ("final": 1) ends the last window wherever it stands.
+void Controller::LevelReadsWindow(uint64_t op,
+                                  const std::vector<RLLevelReadCounts>& reads,
+                                  uint64_t now, bool final) {
+  decisions_.Write(JsonLine("level_reads")
+                       .Uint("w", lr_index_)
+                       .Uint("op0", lr_op0_)
+                       .Uint("op1", op)
+                       .Uint("t_us", now)
+                       .Uint("final", final ? 1 : 0)
+                       .Raw("level_reads", JsonLevelReads(Delta(reads, lr_reads0_)))
+                       .str());
+  ++lr_index_;
+  lr_op0_ = op;
+  lr_reads0_ = reads;
+  while (lr_next_op_ <= op) lr_next_op_ += cfg_.level_reads_ops;
 }
 
 void Controller::CloseInterval(int level, const View& v, const Opening& next,

@@ -40,6 +40,14 @@ value, so no value is chosen when an arm starts.
   turn_compact_floor     the turn arms: --compact-floor (03's COMPACT_FLOOR,
                          default 0), the compact floor's feature flag; 1 in a
                          diagnostic run only
+  level_reads            every arm: --level-reads (03's LEVEL_READS, default
+                         0), the per-level read log's flag; 1 for the hold
+                         and turn arms only. Logging only, so not diagnostic
+                         only, and 03 leaves it out of the config's identity
+                         (plugin_config_sha256, the fingerprint's pcfg)
+  level_reads_ops        the hold arm with level_reads 1 only:
+                         --level-reads-ops (03's LEVEL_READS_OPS, config.sh's
+                         default 64000, the turn length), its window
 
 Every value missing, or null, in its file is listed and the arm is refused:
 the D-18 bounds and the Gate N3 settings are the owner's to preregister, and
@@ -166,7 +174,8 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             hold_k0_cap: int | None = None,
             decay: int | None = None,
             prior: int = 0, l0_bill: int = 0, compact_floor: int = 0,
-            trainer: dict | None = None) -> tuple[dict, list[str]]:
+            trainer: dict | None = None, level_reads: int = 0,
+            level_reads_ops: int | None = None) -> tuple[dict, list[str]]:
     """The config, and the keys filled from PLACEHOLDERS (only when asked;
     otherwise a missing value raises ValueError naming every one).
     Provisional prices only for a diagnostic run (D-22 j). A learner arm
@@ -190,7 +199,11 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
     the trainer settings' merge_charge not "rate" (trainer: the settings
     file's "trainer" part); compact_floor, the turn arms' only: 1 L0's mask
     blocks compact at the lowest K rung. Both are not yet preregistered: 1
-    in a diagnostic run only; 0 (the default) as before."""
+    in a diagnostic run only; 0 (the default) as before. level_reads, every
+    arm's key: 1 (the hold and turn arms only) the plugin logs every level's
+    read counts per turn, or for the hold arm per level_reads_ops operations
+    (required then, and refused anywhere else); logging only, so any run may
+    set it; 0 (the default) as before."""
     if arm not in PLUGIN_MODES:
         raise ValueError(f"no plugin mode for arm {arm!r}")
     if decay is not None and arm not in TURN_ARMS:
@@ -220,13 +233,28 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
         raise ValueError("l0_bill 1 charges each L0 merge whole as it "
                          "finishes; the trainer settings' merge_charge "
                          "\"rate\" contradicts it")
+    if isinstance(level_reads, bool) or level_reads not in (0, 1):
+        raise ValueError(f"level_reads must be 0 or 1; got {level_reads!r}")
+    if level_reads == 1 and arm != "hold" and arm not in TURN_ARMS:
+        raise ValueError(f"level_reads is for the hold and turn arms, not {arm!r}")
+    windowed = arm == "hold" and level_reads == 1
+    if level_reads_ops is not None and not windowed:
+        raise ValueError("level_reads_ops is for the hold arm with level_reads 1 "
+                         "(a turn arm's window is its turn)")
+    if windowed and (isinstance(level_reads_ops, bool) or
+                     not isinstance(level_reads_ops, int) or level_reads_ops < 1000):
+        raise ValueError("the hold arm's level_reads 1 needs level_reads_ops, a "
+                         f"whole number >= 1000; got {level_reads_ops!r}")
     schedule = scheduled_change(arm, diagnostic, apply_at_op, apply_m,
                                 apply_k0, apply_schedule)
     missing: list[str] = []
     config: dict = {"mode": PLUGIN_MODES[arm],
                     "decision_log": decision_log,
                     "transition_log": transition_log,
-                    "cost_model": 2 if arm in LEARNER_ARMS else 1}
+                    "cost_model": 2 if arm in LEARNER_ARMS else 1,
+                    "level_reads": level_reads}
+    if windowed:
+        config["level_reads_ops"] = level_reads_ops
     for key in BOUND_KEYS:
         config[key] = _value(bounds, key, "D-18 action bounds", missing)
     if hold_k0_cap is not None:
@@ -513,6 +541,14 @@ def main() -> int:
                         help="the turn arms only: 1 L0's compact is masked "
                              "at the lowest K rung (diagnostic only); 0 "
                              "(default) as before")
+    parser.add_argument("--level-reads", type=int, choices=(0, 1), default=0,
+                        help="the hold and turn arms only: 1 the plugin logs "
+                             "every level's read counts per window (logging "
+                             "only); 0 (default) as before")
+    parser.add_argument("--level-reads-ops", type=int,
+                        help="the hold arm with --level-reads 1, required "
+                             "there: its window in operations (03's "
+                             "LEVEL_READS_OPS)")
     parser.add_argument("--learner-phase", choices=("training", "evaluation"),
                         default="training",
                         help="evaluation: the settings file's \"evaluation\" "
@@ -539,7 +575,8 @@ def main() -> int:
             apply_k0=args.apply_k0, apply_schedule=args.apply_schedule,
             hold_k0_cap=args.hold_k0_cap, decay=args.decay, prior=args.prior,
             l0_bill=args.l0_bill, compact_floor=args.compact_floor,
-            trainer=learner_file.get("trainer", learner_file))
+            trainer=learner_file.get("trainer", learner_file),
+            level_reads=args.level_reads, level_reads_ops=args.level_reads_ops)
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"[plugin_config] refused: {error}", file=sys.stderr)
         return 1

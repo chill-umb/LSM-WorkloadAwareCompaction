@@ -324,6 +324,205 @@ class CheckPluginRunTest(unittest.TestCase):
                              ["none missing"])
 
 
+KEYS = check28.level_reads.KEYS
+
+
+def read_block(scale, levels=3):
+    """A level_reads block: counter k at level i is scale (k + 1) (i + 1)."""
+    return {key: [scale * (k + 1) * (i + 1) for i in range(levels)]
+            for k, key in enumerate(KEYS)}
+
+
+def stamp(name, op, rows):
+    return {"type": "stamp", "name": name, "op": op, "levels": rows}
+
+
+def host(windows, levels=3, width=8, extra=None):
+    """A host log whose measure_start..drain_start counters are the windows'
+    totals (plus `extra`, {(key, level): n}), from a non-zero base."""
+    base = [[7 * (i + 1)] * width for i in range(levels)]
+    end = [row[:] for row in base]
+    for _, _, _, block in windows:
+        for k, key in enumerate(KEYS[:width]):
+            for i, n in enumerate(block[key][:levels]):
+                end[i][k] += n
+    for (key, level), n in (extra or {}).items():
+        end[level][KEYS.index(key)] += n
+    return [{"type": "header", "schema": 3}, stamp("measure_start", 1000, base),
+            stamp("drain_start", windows[-1][1], end), stamp("drain_end", windows[-1][1], end)]
+
+
+# Three windows, [1000, 2000), [2000, 3500), [3500, 4000) the drain's.
+WINDOWS = [(1000, 2000, 0, read_block(10)), (2000, 3500, 0, read_block(15)),
+           (3500, 4000, 1, read_block(5))]
+
+
+class LevelReadsCheckTest(unittest.TestCase):
+    """28's level_reads check (level_reads.py) on synthetic logs: hold-only's
+    lines and a turn run's blocks against the host log's stamps."""
+
+    def hold(self, windows=WINDOWS, config=None, host_records=None, levels=3, extra=()):
+        body = [{"type": "level_reads", "w": w, "op0": op0, "op1": op1, "t_us": 0,
+                 "final": final, "level_reads": block}
+                for w, (op0, op1, final, block) in enumerate(windows)]
+        lines = [{"type": "start", "mode": "hold-only", "num_levels": levels, "op": 1000},
+                 *extra, {"type": "drain", "op": 4000}, *body, {"type": "stop", "fallback": 0}]
+        transitions = [{"type": "transition", "level": i} for i in range(levels)]
+        config = {"level_reads": 1, "level_reads_ops": 1000} if config is None else config
+        return check28.check(STARTED, lines, transitions, [], "hold-only", False, 0,
+                             config=config,
+                             host_records=host(WINDOWS) if host_records is None else host_records)
+
+    def test_a_whole_hold_run_passes(self):
+        report = self.hold()
+        self.assertEqual(report["verdict"], "passed", report["checks"].get("level_reads"))
+        lr = report["checks"]["level_reads"]
+        self.assertEqual((lr["windows"], lr["compared"], lr["gaps"]),
+                         (3, list(KEYS), {"start": 0, "end": 0}))
+        self.assertEqual(set(lr["max_deviation"].values()), {0})
+        # A scheduled change rides along, judged as before.
+        plan = {"type": "apply_scheduled", "op": 1000, "apply_at_op": 1500,
+                "m": [1, 1, 2], "k0": 0}
+        made = {**apply(2000, 0, 0, m=(1, 1, 2)), "scheduled": 1}
+        report = self.hold(extra=[plan, made])
+        self.assertEqual(report["verdict"], "passed", report)
+        self.assertEqual(report["checks"]["hold_only"]["scheduled_applies"], 1)
+
+    def test_off_the_report_is_as_before(self):
+        plain = verdict(mode="hold-only")
+        decisions, transitions = logs(mode="hold-only")
+        for config in ({"level_reads": 0}, {}):
+            report = check28.check(STARTED, decisions, transitions, [], "hold-only",
+                                   False, 0, config=config, host_records=[])
+            self.assertEqual(report, plain)
+        # A line that carries it anyway fails.
+        decisions.insert(1, {"type": "level_reads", "w": 0})
+        report = check28.check(STARTED, decisions, transitions, [], "hold-only", False, 0,
+                               config={"level_reads": 0}, host_records=[])
+        self.assertEqual(report["failed_checks"], ["level_reads"])
+        # Without --config the check is not run at all (22's and 13's calls).
+        self.assertNotIn("level_reads", check28.check(
+            STARTED, decisions, transitions, [], "hold-only", False, 0)["checks"])
+
+    def test_each_defect_fails_the_check(self):
+        w = WINDOWS
+        short = {**read_block(15), "probes": [1, 2]}
+        negative = {**read_block(15), "seeks": [-1, 0, 0]}
+        fraction = {**read_block(15), "seeks": [0.5, 0, 0]}
+        missing = {k: v for k, v in read_block(15).items() if k != "hidden_steps"}
+        cases = {
+            "a gap": [w[0], (2100, 3500, 0, w[1][3]), w[2]],
+            "an overlap": [w[0], (1900, 3500, 0, w[1][3]), w[2]],
+            "a late start": [(1100, 2000, 0, w[0][3]), w[1], w[2]],
+            "no final": [w[0], w[1], (3500, 4000, 0, w[2][3])],
+            "a final not last": [(1000, 2000, 1, w[0][3]), w[1], w[2]],
+            "a level short": [w[0], (2000, 3500, 0, short), w[2]],
+            "a negative count": [w[0], (2000, 3500, 0, negative), w[2]],
+            "a fraction": [w[0], (2000, 3500, 0, fraction), w[2]],
+            "a counter missing": [w[0], (2000, 3500, 0, missing), w[2]],
+            "a lost window": [w[0], (2000, 4000, 1, w[2][3])],
+            "no window": [],
+        }
+        for name, windows in cases.items():
+            with self.subTest(name):
+                report = self.hold(windows=windows)
+                self.assertEqual(report["failed_checks"], ["level_reads"], report)
+        # Another line carrying a block; lines numbered out of order.
+        report = self.hold(extra=[{"type": "decision_x", "level_reads": {}}])
+        self.assertEqual(report["failed_checks"], ["level_reads"])
+        lines = [{"type": "start", "mode": "hold-only", "num_levels": 3, "op": 1000}] + [
+            {"type": "level_reads", "w": w, "op0": op0, "op1": op1, "final": final,
+             "level_reads": block} for w, (op0, op1, final, block) in zip((0, 2, 1), WINDOWS)]
+        report = check28.level_reads.check_hold(lines, {"level_reads": 1}, host(WINDOWS))
+        self.assertEqual(report["problems"], ["level_reads lines not numbered 0, 1, ..."])
+
+    def test_the_totals_must_be_the_host_logs_within_the_tolerance(self):
+        tol = check28.level_reads
+        # Probes at L2: the windows' total is (10 + 15 + 5) * 3 = 90, so 100
+        # counts (ABS_TOL) is the bound; reopen time is bounded by 1 ms.
+        for extra, passes in ((("probes", 2, 100), True), (("probes", 2, 101), False),
+                              (("probes", 2, -100), True), (("hidden_steps", 0, 250), False),
+                              (("reopen_nanos", 1, tol.ABS_TOL_NANOS), True),
+                              (("reopen_nanos", 1, tol.ABS_TOL_NANOS + 1), False)):
+            with self.subTest(extra=extra):
+                key, level, n = extra
+                report = self.hold(host_records=host(WINDOWS, extra={(key, level): n}))
+                self.assertEqual(report["verdict"] == "passed", passes, report)
+        # Above ABS_TOL / REL_TOL counts the relative bound governs.
+        big = [(op0, op1, final, read_block(100000)) for op0, op1, final, _ in WINDOWS]
+        bound = tol.REL_TOL * 3 * 100000                  # probes at L0: 300
+        for n, passes in ((bound, True), (bound + 1, False)):
+            report = self.hold(windows=big, host_records=host(big, extra={("probes", 0): n}))
+            self.assertEqual(report["verdict"] == "passed", passes, n)
+        # The last window may end short of drain_start only within the bound.
+        records = host(WINDOWS)
+        for r in records[2:]:
+            r["op"] = 4000 + 101
+        self.assertEqual(self.hold(host_records=records)["failed_checks"], ["level_reads"])
+        for r in records[2:]:
+            r["op"] = 4000 + 100
+        self.assertEqual(self.hold(host_records=records)["verdict"], "passed")
+        # No stamps, other levels, or rows of an unknown width: refused.
+        self.assertEqual(self.hold(host_records=[])["failed_checks"], ["level_reads"])
+        self.assertEqual(self.hold(host_records=host(WINDOWS, levels=4))["failed_checks"],
+                         ["level_reads"])
+        odd = host(WINDOWS)
+        odd[1]["levels"] = [row[:5] for row in odd[1]["levels"]]
+        self.assertEqual(self.hold(host_records=odd)["failed_checks"], ["level_reads"])
+        # A schema 2 host log (no hidden steps) compares the seven it has.
+        report = self.hold(host_records=host(WINDOWS, width=7))
+        self.assertEqual(report["verdict"], "passed", report)
+        self.assertEqual(report["checks"]["level_reads"]["compared"], list(KEYS[:7]))
+
+    def test_turn_lines_carry_it_and_l0_reads_agree(self):
+        def turn_lines(windows, l0=None, extra=()):
+            lines = [{"type": "start", "mode": "turn", "num_levels": 3, "op": 1000,
+                      "m": [1, 1, 1], "k0": 4}, *extra]
+            for t, (op0, op1, final, block) in enumerate(windows):
+                line = {"type": "turn", "t": t, "op0": op0, "op1": op1, "final": final,
+                        "masks": [[1, 0, 0, 0]] * 3, "action": ["hold"] * 3,
+                        "sent_m": [1, 1, 1], "sent_k": 4, "set": 0, "level_reads": block}
+                if l0 is not None:
+                    line["l0_read"] = l0(block)
+                lines.append(line)
+            return lines + [{"type": "stop", "fallback": 0}]
+
+        def judged(lines, config):
+            transitions = [{"type": "transition", "level": i} for i in range(3)]
+            return check28.check(STARTED, lines, transitions, [], "turn", False, 0,
+                                 config=config, host_records=host(WINDOWS))
+
+        def agreeing(block):
+            return {**{k: v[0] for k, v in block.items()},
+                    "l1_hidden_steps": block["hidden_steps"][1]}
+
+        report = judged(turn_lines(WINDOWS), {"level_reads": 1})
+        self.assertEqual(report["verdict"], "passed", report)
+        self.assertEqual(report["checks"]["level_reads"]["windows"], 3)
+        both = {"level_reads": 1, "turn_l0_bill": 1}
+        self.assertEqual(judged(turn_lines(WINDOWS, agreeing), both)["verdict"], "passed")
+        for bad in (lambda b: {**agreeing(b), "probes": agreeing(b)["probes"] + 1},
+                    lambda b: {**agreeing(b), "l1_hidden_steps": 0}):
+            report = judged(turn_lines(WINDOWS, bad), both)
+            self.assertEqual(report["failed_checks"], ["level_reads"], report)
+        # A hold-only line in mode turn, a missing block, a gap: each fails.
+        stray_line = [{"type": "level_reads", "w": 0}]
+        self.assertEqual(judged(turn_lines(WINDOWS, extra=stray_line),
+                                {"level_reads": 1})["failed_checks"], ["level_reads"])
+        lines = turn_lines(WINDOWS)
+        del lines[2]["level_reads"]
+        self.assertEqual(judged(lines, {"level_reads": 1})["failed_checks"], ["level_reads"])
+        # Off: blocks on the lines fail; none, and the report is as before.
+        self.assertEqual(judged(turn_lines(WINDOWS), {"level_reads": 0})["failed_checks"],
+                         ["level_reads"])
+        lines = turn_lines(WINDOWS)
+        for line in lines:
+            line.pop("level_reads", None)
+        transitions = [{"type": "transition", "level": i} for i in range(3)]
+        self.assertEqual(judged(lines, {"level_reads": 0}),
+                         check28.check(STARTED, lines, transitions, [], "turn", False, 0))
+
+
 # The turn mode's 35 input names (rl_agent/learner/turn_weights.py at five
 # acting levels), for the stub's turn lines.
 TURN_NAMES = (["put_share", "get_share", "scan_share", "pending_soft",
@@ -338,6 +537,11 @@ TURN_NAMES = (["put_share", "get_share", "scan_share", "pending_soft",
 # makes its one decision (or, in mode turn, its one expand) take a masked
 # action. In mode turn its lines follow the config's turn_acting (the inputs
 # of that many levels) and, with turn_l0_bill 1, carry an l0_read block.
+# With level_reads 1 it logs the host log's per-level counts from
+# measure_start to drain_start in two windows (290-600, 600-1000; the start
+# line then has the host log's op and levels): on the two turn lines, or in
+# hold-only as two "level_reads" lines after a drain line;
+# STUB_LEVEL_READS_BAD=1 adds 5000 probes at L0 to the first.
 PLUGIN_STUB = STUB.replace(
     "cat " + shlex.quote(str(FIXTURE / "run.log")), f"""
 for a in "$@"; do
@@ -345,12 +549,29 @@ for a in "$@"; do
 done
 cat {shlex.quote(str(FIXTURE / "run.log"))}
 if [[ -n "${{config:-}}" ]]; then
-  python3 - "$config" "${{STUB_PLUGIN_MASKED:-0}}" <<'PY'
+  python3 - "$config" "${{STUB_PLUGIN_MASKED:-0}}" "${{log:-}}" \
+      "${{STUB_LEVEL_READS_BAD:-0}}" <<'PY'
 import json, sys
 config = json.load(open(sys.argv[1]))
 mask = [1, 0, 0, 1] if sys.argv[2] == "1" else [1, 0, 1, 1]
 mode = config["mode"]
 lines = [{{"type": "start", "mode": mode, "num_levels": 4}}]
+blocks = None
+if config.get("level_reads") == 1:
+    keys = ["probes", "filter_passes", "filter_hits", "seeks", "get_reopens",
+            "iter_reopens", "reopen_nanos", "hidden_steps"]
+    stamps = {{r["name"]: r for r in map(json.loads, open(sys.argv[3]))
+              if r.get("type") == "stamp"}}
+    a, b = stamps["measure_start"], stamps["drain_start"]
+    n = len(a["levels"])
+    total = {{k: [b["levels"][i][j] - a["levels"][i][j] if j < len(a["levels"][i])
+                  else 0 for i in range(n)] for j, k in enumerate(keys)}}
+    first = {{k: [v // 3 for v in total[k]] for k in keys}}
+    second = {{k: [v - f for v, f in zip(total[k], first[k])] for k in keys}}
+    if sys.argv[4] == "1":
+        first["probes"][0] += 5000
+    blocks = (first, second)
+    lines[0].update({{"op": a["op"], "num_levels": n}})
 if mode == "rules":
     lines += [{{"type": "decision", "id": 1, "level": 1, "op": 10,
                 "mode": mode, "action": "defer", "mask": mask, "old": 1,
@@ -371,15 +592,28 @@ if mode == "turn":
                             "seeks": 5, "get_reopens": 2, "iter_reopens": 1,
                             "reopen_nanos": 100, "hidden_steps": 4,
                             "l1_hidden_steps": 6}}
+    own = [{{}}, {{}}]
+    for t, block in enumerate(blocks or ()):
+        own[t]["level_reads"] = block
+        if config.get("turn_l0_bill") == 1:
+            own[t]["l0_read"] = {{**{{k: v[0] for k, v in block.items()}},
+                                 "l1_hidden_steps": block["hidden_steps"][1]}}
     lines += [{{"type": "turn_start", "arch": config["turn_arch"], "acting": acting,
                 "features": names}},
               {{"type": "apply", "op": 600, "first_id": 0, "last_id": 0,
                 "m": up, "k0": 4, "ok": 1, "seen": 1}},
               {{"type": "turn", "t": 0, "op0": 290, "op1": 600, "final": 0,
                 "action": ["hold", "expand", "hold", "hold"], "sent_m": up,
-                "sent_k": 4, "applied_m": up, "applied_k": 4, "set": 1, **turn}},
+                "sent_k": 4, "applied_m": up, "applied_k": 4, "set": 1, **turn,
+                **own[0]}},
               {{"type": "turn", "t": 1, "op0": 600, "op1": 1000, "final": 1,
-                **turn}}]
+                **turn, **own[1]}}]
+if mode == "hold-only" and blocks:
+    lines += [{{"type": "drain", "op": 1000}}] + [
+        {{"type": "level_reads", "w": w, "op0": op0, "op1": op1, "t_us": 0,
+          "final": int(w == 1), "level_reads": block}}
+        for w, (op0, op1, block) in enumerate(((290, 600, blocks[0]),
+                                                (600, 1000, blocks[1])))]
 lines.append({{"type": "stop", "fallback": 0}})
 with open(config["decision_log"], "w") as out:
     out.writelines(json.dumps(line) + "\\n" for line in lines)
@@ -470,6 +704,56 @@ class ControllerArmsTest(unittest.TestCase):
             self.assertEqual(ran.returncode, 8, ran.stderr)
             arm = Path(tmp) / "results" / "1M" / "T2" / "rules"
             self.assertTrue((arm / "FAILED_PLUGIN_CHECK").exists())
+
+    def test_level_reads_reach_the_hold_arm_and_stay_out_of_the_fingerprint(self):
+        """LEVEL_READS=1: the hold arm's config carries level_reads 1 and its
+        window (LEVEL_READS_OPS, config.sh's 64000), the run records both,
+        28 judges the plugin's lines against the host log, and the
+        fingerprint is the run's without it (logging only). Off, the config
+        has level_reads 0 and the check is not reported. A bad value is
+        refused before any run; a wrong total fails the plugin check."""
+        runs = {}
+        for flag in ("0", "1"):
+            with tempfile.TemporaryDirectory() as tmp:
+                ran = run03_plugin(Path(tmp), EXPERIMENT_ARMS="hold",
+                                   PLUGIN_PLACEHOLDERS="1", LEVEL_READS=flag)
+                self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+                arm = Path(tmp) / "results" / "1M" / "T2" / "hold"
+                runs[flag] = (json.loads((arm / "plugin_config.json").read_text()),
+                              dict(line.split("=", 1) for line in
+                                   (arm / "metadata.env").read_text().splitlines()),
+                              json.loads((arm / "plugin_check.json").read_text()))
+        (off, off_meta, off_check), (on, on_meta, on_check) = runs["0"], runs["1"]
+        self.assertEqual(off["level_reads"], 0)
+        self.assertNotIn("level_reads_ops", off)
+        self.assertEqual((on["level_reads"], on["level_reads_ops"]), (1, 64000))
+        self.assertEqual((off_meta["level_reads"], on_meta["level_reads"]), ("0", "1"))
+        self.assertNotIn("level_reads_ops", off_meta)
+        self.assertEqual(on_meta["level_reads_ops"], "64000")
+        self.assertEqual((off_check["verdict"], on_check["verdict"]), ("passed", "passed"),
+                         on_check)
+        self.assertNotIn("level_reads", off_check["checks"])
+        judged = on_check["checks"]["level_reads"]
+        self.assertEqual((judged["windows"], len(judged["compared"])), (2, 7))  # schema 2 log
+        for key in ("experiment_fingerprint", "plugin_config_sha256"):
+            self.assertEqual(on_meta[key], off_meta[key], key)
+        for overrides, message in (({"LEVEL_READS": "2"}, "LEVEL_READS must be 0 or 1"),
+                                   ({"LEVEL_READS": "1", "LEVEL_READS_OPS": "999"},
+                                    "LEVEL_READS_OPS must be")):
+            with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as tmp:
+                ran = run03_plugin(Path(tmp), EXPERIMENT_ARMS="hold",
+                                   PLUGIN_PLACEHOLDERS="1", **overrides)
+                self.assertEqual(ran.returncode, 1, ran.stdout)
+                self.assertIn(message, ran.stderr)
+                self.assertFalse((Path(tmp) / "results" / "1M" / "T2" / "hold").exists())
+        with tempfile.TemporaryDirectory() as tmp:
+            ran = run03_plugin(Path(tmp), EXPERIMENT_ARMS="hold", PLUGIN_PLACEHOLDERS="1",
+                               LEVEL_READS="1", STUB_LEVEL_READS_BAD="1")
+            self.assertEqual(ran.returncode, 8, ran.stderr[-3000:])
+            arm = Path(tmp) / "results" / "1M" / "T2" / "hold"
+            self.assertTrue((arm / "FAILED_PLUGIN_CHECK").exists())
+            report = json.loads((arm / "plugin_check.json").read_text())
+            self.assertEqual(report["failed_checks"], ["level_reads"])
 
     def test_refusals_before_any_run(self):
         cases = [
@@ -659,6 +943,42 @@ class TurnArmsTest(unittest.TestCase):
                     self.assertEqual(ran.returncode, 1, ran.stderr[-3000:])
                     self.assertIn(message, ran.stderr)
                     self.assertFalse((Path(tmp) / "results" / "1M" / "T2" / "turn").exists())
+
+    def test_level_reads_reach_the_turn_arms(self):
+        """LEVEL_READS=1: the turn arms' configs carry level_reads 1 and no
+        window (the turn is it), the run records it, 28 judges the turn
+        lines' blocks against the host log, the trainer runs as before, and
+        the fingerprint is the run's without it; with L0_BILL=1 too, the
+        blocks' L0 entries are checked against l0_read."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        shipped["plugin"]["turn_acting"] = 1
+        meta = {}
+        for flags in ({"LEVEL_READS": "0"}, {"LEVEL_READS": "1"},
+                      {"LEVEL_READS": "1", "L0_BILL": "1"}):
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = Path(tmp) / "turn_settings_l0.json"
+                settings.write_text(json.dumps(shipped))
+                ran = self.run_turn(tmp, TURN_SETTINGS_FILE=str(settings), **flags)
+                self.assertEqual(ran.returncode, 0, ran.stderr[-3000:])
+                for arm in ("turn", "turn_vdn"):
+                    arm_dir = Path(tmp) / "results" / "1M" / "T2" / arm
+                    config = json.loads((arm_dir / "plugin_config.json").read_text())
+                    self.assertEqual(config["level_reads"], int(flags["LEVEL_READS"]))
+                    self.assertNotIn("level_reads_ops", config)
+                    lines = dict(line.split("=", 1) for line in
+                                 (arm_dir / "metadata.env").read_text().splitlines())
+                    self.assertEqual(lines["level_reads"], flags["LEVEL_READS"])
+                    self.assertNotIn("level_reads_ops", lines)
+                    report = json.loads((arm_dir / "plugin_check.json").read_text())
+                    self.assertEqual(report["verdict"], "passed", (arm, flags, report))
+                    self.assertEqual("level_reads" in report["checks"],
+                                     flags["LEVEL_READS"] == "1")
+                    summary = json.loads((arm_dir / "turn_trainer_summary.json").read_text())
+                    self.assertEqual((summary["why"], summary["lines"]), ("plugin stop", 2))
+                    meta[(arm, tuple(flags.items()))] = lines
+        for arm in ("turn", "turn_vdn"):
+            self.assertEqual(meta[(arm, (("LEVEL_READS", "0"),))]["experiment_fingerprint"],
+                             meta[(arm, (("LEVEL_READS", "1"),))]["experiment_fingerprint"])
 
     def test_a_masked_turn_action_fails_the_check(self):
         with tempfile.TemporaryDirectory() as tmp:

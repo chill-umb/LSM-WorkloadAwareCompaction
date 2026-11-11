@@ -499,5 +499,76 @@ TEST(Config, AScheduleIsCheckedAndForHoldOnlyOnly) {
   EXPECT_TRUE(Contains(Error(with("\"1000|1:3:1|4\"")), "[m_min, m_max]"));
 }
 
+// The per-level read log (owner, 2026-11-10): level_reads is optional in
+// every mode (absent: 0), 0 or 1, and 1 only in hold-only and turn (turn mode's own
+// checks are turn_plugin_test.cc's); hold-only with it on needs its window,
+// level_reads_ops, which every other config refuses. A schedule rides along.
+TEST(Config, TheLevelReadsFlagAndItsWindow) {
+  const auto with = [](std::map<std::string, std::string> changes) {
+    auto values = BaseConfig("/tmp/x");
+    for (const auto& change : changes) {
+      if (change.second.empty()) {
+        values.erase(change.first);
+      } else {
+        values[change.first] = change.second;
+      }
+    }
+    return values;
+  };
+  Config c;
+  std::string error;
+  ASSERT_TRUE(ParseConfig(ToJson(with({})), &c, &error)) << error;
+  EXPECT_FALSE(c.level_reads);
+  EXPECT_EQ(c.level_reads_ops, 0u);
+  ASSERT_TRUE(ParseConfig(ToJson(with({{"level_reads", "1"},
+                                       {"level_reads_ops", "64000"}})),
+                          &c, &error))
+      << error;
+  EXPECT_TRUE(c.level_reads);
+  EXPECT_EQ(c.level_reads_ops, 64000u);
+  ASSERT_TRUE(ParseConfig(ToJson(with({{"level_reads", "1"},
+                                       {"level_reads_ops", "64000"},
+                                       {"apply_at_op", "1000"},
+                                       {"apply_m", "\"1:1:2:1:1\""}})),
+                          &c, &error))
+      << error;
+  EXPECT_EQ(c.schedule.size(), 1u);
+  EXPECT_TRUE(c.level_reads);
+
+  // Absent means 0 in any mode: a config written before the flag (the
+  // fork's own test configs among them) stays valid.
+  ASSERT_TRUE(ParseConfig(ToJson(with({{"level_reads", ""}})), &c, &error))
+      << error;
+  EXPECT_FALSE(c.level_reads);
+  Config rules;  // its own Config: a second rules parse into c would list the rule twice
+  ASSERT_TRUE(ParseConfig(ToJson(with({{"level_reads", ""},
+                                       {"mode", "\"rules\""},
+                                       {"rules", "\"yield_slot\""}})),
+                          &rules, &error))
+      << error;
+  EXPECT_FALSE(rules.level_reads);
+  for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+    EXPECT_FALSE(Error(with({{"level_reads", bad}})).empty()) << bad;
+  }
+  EXPECT_TRUE(Contains(Error(with({{"level_reads", "1"}})),
+                       "missing \"level_reads_ops\""));
+  for (const char* bad : {"999", "64000.5", "0", "-64000", "\"64000\""}) {
+    EXPECT_FALSE(Error(with({{"level_reads", "1"}, {"level_reads_ops", bad}}))
+                     .empty())
+        << bad;
+  }
+  EXPECT_TRUE(Contains(Error(with({{"level_reads_ops", "64000"}})),
+                       "\"level_reads_ops\" needs level_reads 1"));
+  EXPECT_TRUE(Contains(Error(with({{"level_reads", "1"},
+                                   {"mode", "\"rules\""},
+                                   {"rules", "\"yield_slot\""}})),
+                       "level_reads 1 is for hold-only and turn"));
+  ASSERT_TRUE(ParseConfig(ToJson(with({{"mode", "\"rules\""},
+                                       {"rules", "\"yield_slot\""}})),
+                          &c, &error))
+      << error;
+  EXPECT_FALSE(c.level_reads);
+}
+
 }  // namespace
 }  // namespace rlc

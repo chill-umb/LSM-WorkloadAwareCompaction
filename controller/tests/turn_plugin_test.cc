@@ -719,6 +719,143 @@ TEST_F(TurnTest, TheL0ReadBlockRidesOnTurnLinesOnlyUnderItsFlag) {
   }
 }
 
+// level_reads (owner, 2026-11-10): required in turn mode as in every other
+// (BaseConfig's 0), 1 accepted; turn mode refuses level_reads_ops (its
+// window is the turn).
+TEST_F(TurnTest, TheLevelReadsFlagParsesAndTurnModeRefusesAWindowLength) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_FALSE(c.level_reads);
+  ASSERT_TRUE(LoadConfig(Config({{"level_reads", "1"}}), &c, &error)) << error;
+  EXPECT_TRUE(c.level_reads);
+  EXPECT_FALSE(LoadConfig(Config({{"level_reads", "1"}, {"level_reads_ops", "64000"}}),
+                          &c, &error));
+  EXPECT_NE(error.find("needs level_reads 1 in mode hold-only"), std::string::npos)
+      << error;
+  auto values = Values();
+  values.erase("level_reads");
+  ASSERT_TRUE(LoadConfig(WriteConfig(dir_, values), &c, &error)) << error;
+  EXPECT_FALSE(c.level_reads);
+}
+
+// level_reads 1: every turn line, the drain's too, carries "level_reads",
+// each level's eight read counters over the turn it closes, the window
+// l0_read uses (with turn_l0_bill on too, L0's entries are l0_read's and
+// L1's hidden steps its l1_hidden_steps). Logging only: the choices and the
+// rest of every line are the same byte for byte with it on or off, and turn
+// mode writes no line of its own for it.
+TEST_F(TurnTest, TheLevelReadsBlockRidesOnTurnLinesOnlyUnderItsFlag) {
+  // L1 compacts at every boundary, so the turns act and apply.
+  WriteNet(weights(), BiasNet(1, 0, 1, Action::kCompact));
+  const std::pair<const char*, uint64_t> factors[] = {
+      {"probes", 1},       {"filter_passes", 2}, {"filter_hits", 3},
+      {"seeks", 4},        {"get_reopens", 5},   {"iter_reopens", 6},
+      {"reopen_nanos", 7000}, {"hidden_steps", 8}};
+  const auto reads = [&](FakeHost* host) {
+    std::lock_guard<std::mutex> lock(host->mu);
+    for (size_t i = 0; i < host->reads.size(); ++i) {
+      RLLevelReadCounts& r = host->reads[i];
+      const uint64_t n = i + 1;
+      r.probes += n * 1;
+      r.filter_passes += n * 2;
+      r.filter_hits += n * 3;
+      r.seeks += n * 4;
+      r.get_reopens += n * 5;
+      r.iter_reopens += n * 6;
+      r.reopen_nanos += n * 7000;
+      r.hidden_steps += n * 8;
+    }
+  };
+  const auto run = [&](const std::string& config) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    clock_us_ = 1000000;
+    next_job_ = 10;
+    FakeHost host;
+    Tree(&host);
+    {
+      Controller controller(&host, config, [this] { return clock_us_; });
+      for (int i = 0; i < 12; ++i) {
+        if (i == 9) host.SetDraining();
+        Ops(&host, true);
+        reads(&host);
+        controller.Step();
+        clock_us_ += 200000;
+      }
+      EXPECT_FALSE(controller.fallback());
+    }
+    EXPECT_TRUE(Lines("level_reads").empty());
+    return ReadLines(dir_ + "/decisions.jsonl");
+  };
+  const auto turns = [](const std::vector<std::string>& lines) {
+    std::vector<std::string> out;
+    for (const std::string& l : lines) {
+      if (l.find("{\"type\":\"turn\"") == 0) out.push_back(l);
+    }
+    return out;
+  };
+  // A line less `key`'s block, with an apply's wall time (apply_us, the
+  // real clock's) blanked, so two runs compare byte for byte.
+  const auto strip = [](std::string line, const std::string& key) {
+    const std::string block = ",\"" + key + "\":" + Object(line, key);
+    const size_t at = line.find(block);
+    if (!key.empty() && at != std::string::npos) line.erase(at, block.size());
+    const size_t us = line.find("\"apply_us\":");
+    if (us != std::string::npos) {
+      const size_t start = us + 11;
+      line.erase(start, line.find_first_not_of("0123456789", start) - start);
+    }
+    return line;
+  };
+  const auto off = run(Config());
+  const auto on = run(Config({{"level_reads", "1"}}));
+  const auto both = run(Config({{"level_reads", "1"}, {"turn_l0_bill", "1"}}));
+  const auto bill = run(Config({{"turn_l0_bill", "1"}}));
+  ASSERT_EQ(turns(on).size(), 3u);
+  EXPECT_EQ(Number(turns(on).back(), "final"), 1);
+  for (const std::string& line : turns(on)) {
+    const std::string block = Object(line, "level_reads");
+    ASSERT_FALSE(block.empty()) << line;
+    const double steps = (Number(line, "op1") - Number(line, "op0")) / 2500;
+    EXPECT_GT(steps, 0) << line;
+    for (const auto& [name, factor] : factors) {
+      const std::vector<double> counts = Array(block, name);
+      ASSERT_EQ(counts.size(), 5u) << name << ": " << block;
+      for (size_t i = 0; i < counts.size(); ++i) {
+        EXPECT_EQ(counts[i], steps * factor * (i + 1)) << name << " " << i;
+      }
+    }
+    EXPECT_EQ(std::count(block.begin(), block.end(), ':'), 8) << block;
+  }
+  // Off: no block, and on's lines less the block are off's, every other
+  // line too (the applies, the weights' line), so the choices are the same.
+  const auto stripped = [&](const std::vector<std::string>& lines,
+                            const std::string& key) {
+    std::vector<std::string> out;
+    for (const std::string& l : lines) out.push_back(strip(l, key));
+    return out;
+  };
+  for (const std::string& line : off) EXPECT_FALSE(Has(line, "level_reads")) << line;
+  EXPECT_EQ(stripped(on, "level_reads"), stripped(off, ""));
+  EXPECT_GT(std::count_if(off.begin(), off.end(), [](const std::string& l) {
+              return l.find("{\"type\":\"apply\"") == 0;
+            }),
+            0);
+  // With the L0 bill: L0's entries are l0_read's, L1's hidden steps its
+  // l1_hidden_steps; less the block, the lines are the bill run's.
+  EXPECT_EQ(stripped(both, "level_reads"), stripped(bill, ""));
+  ASSERT_EQ(turns(both).size(), 3u);
+  for (const std::string& line : turns(both)) {
+    const std::string block = Object(line, "level_reads");
+    const std::string l0 = Object(line, "l0_read");
+    ASSERT_FALSE(l0.empty()) << line;
+    for (const auto& c : factors) {
+      EXPECT_EQ(Array(block, c.first).at(0), Number(l0, c.first)) << c.first;
+    }
+    EXPECT_EQ(Array(block, "hidden_steps").at(1), Number(l0, "l1_hidden_steps"));
+  }
+}
+
 // turn_compact_floor 1: L0 pressing compact at every boundary (decay off, so
 // the anchor stays where the presses leave it) walks down from K = 4 to the
 // lowest rung, K = 2, where compact is then masked and L0 holds. Off,

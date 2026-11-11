@@ -20,12 +20,24 @@ from its result directory:
           bill_read being beta_r times its turn's L0 read counts at the
           config's prices (rl_agent/learner/prices.py l0_read_cost); off, no
           turn line carries the block and no trainer line a bill
+  level_reads  the per-level read log (the config's level_reads; 03's
+          LEVEL_READS; level_reads.py): on, every turn line, the drain's
+          too, carries "level_reads", a list of one whole number >= 0 per
+          level for each of the eight counters; the turns tile the run from
+          the plugin's start (measure_start, exactly) to the final line at
+          the drain; per level and counter the turns' totals are the host
+          log's measure_start..drain_start counters within
+          level_reads.REL_TOL (0.1%) or ABS_TOL counts; with turn_l0_bill on
+          too, every line's L0 entries are its l0_read and hidden_steps[1]
+          its l1_hidden_steps. Off: no line carries it, and with none the
+          check is not reported (the report is as before)
   c_set   the SetOptions call's price, measured (the turn reward's change
           price): the accepted apply lines' wall time (apply_us) at the
           price per core-second, plus, with --options-bytes, the OPTIONS
           file RocksDB writes at c_w per byte; reported, not judged
 
---strict (the preflight) exits 1 when pushes, ARCH-1, ARCH-6 or l0_bill fails.
+--strict (the preflight) exits 1 when pushes, ARCH-1, ARCH-6, l0_bill or
+level_reads fails.
 
   37_check_turn_run.py --result <arm dir> --prices <schema-6 prices> \\
       [--options-bytes N] [--min-pushes 3] [--strict] [--output report.json]
@@ -45,6 +57,9 @@ sys.path.insert(0, str(ROOT / "rl_agent"))
 
 from learner import turn_weights as TW  # noqa: E402
 from learner.prices import L0_READ_KEYS, from_plugin_config, l0_read_cost  # noqa: E402
+
+import host_log  # noqa: E402
+import level_reads  # noqa: E402
 
 TOLERANCE = 1e-9
 
@@ -227,9 +242,15 @@ def check(result: Path, prices: dict, options_bytes: float | None,
                        "train_lines": sum(1 for r in trainer if r["type"] == "train")}
     checks["arch6"] = arch6(decisions, result / "weights", acting)
     checks["l0_bill"] = l0_bill(decisions, trainer, config)
+    host = result / host_log.FILE_NAME
+    reads = level_reads.check_turn(
+        decisions, config,
+        host_log.load(host) if level_reads.on(config) and host.exists() else [])
+    if reads is not None:
+        checks["level_reads"] = reads
     checks["c_set"] = c_set(decisions, prices, options_bytes)
-    failed = sorted(k for k in ("pushes", "arch1", "arch6", "l0_bill")
-                    if not checks[k]["passed"])
+    failed = sorted(k for k in ("pushes", "arch1", "arch6", "l0_bill", "level_reads")
+                    if k in checks and not checks[k]["passed"])
     return {"arch": config["turn_arch"], "verdict": "failed" if failed else "passed",
             "failed_checks": failed, "checks": checks}
 

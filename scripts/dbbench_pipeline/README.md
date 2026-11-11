@@ -67,7 +67,8 @@ refuses the matrix while any of them is missing or null.
 started and stopped, its logs are complete, no masked action was taken, no
 fallback, hold-only made no `SetOptions` call, and ACT-3 (at least 99% of
 the requested changes in the published score within one control interval,
-the level's next decision). A run that fails is kept with
+the level's next decision), and, with `LEVEL_READS=1`, the per-level read
+log against the host log (below). A run that fails is kept with
 `FAILED_PLUGIN_CHECK`, and `03` exits 8. `PLUGIN_PLACEHOLDERS=1` fills missing
 values with smoke values for the preflight's own runs (at most 2M
 operations).
@@ -728,6 +729,45 @@ like PRIOR: `turn_compact_floor` in the config, `turn_compact_floor=` in
 with a turn settings file whose `turn_acting` is 1 (with `MACHINE_CAL=on`,
 36 runs on the machine's `turn_settings.machine.json`, so that is the file
 that needs it).
+
+### The per-level read log flag, LEVEL_READS
+
+`LEVEL_READS=0` (the default): the logs are as before. `LEVEL_READS=1`
+(owner, 2026-11-10): the plugin logs every level's read counts, so the
+per-level bills of L1 and deeper can be built and judged offline. Logging
+only: no decision, action, reward or price reads it (the trainer ignores
+it), so it is not diagnostic only, and 03's `plugin_config_sha256` drops it,
+so it stays out of the fingerprint and a run with it pools with one without.
+It applies to the hold and turn arms; 03 passes it to no other arm.
+
+- **Turn arms:** every turn line, the drain's final one too, carries
+  `"level_reads": {"probes": [...], "filter_passes": [...],
+  "filter_hits": [...], "seeks": [...], "get_reopens": [...],
+  "iter_reopens": [...], "reopen_nanos": [...], "hidden_steps": [...]}`,
+  one whole number per level, each the change over the turn the line closes
+  (the window `l0_read` uses: with `L0_BILL=1` too, entry 0 of each list is
+  `l0_read`'s count and `hidden_steps[1]` its `l1_hidden_steps`). Hidden
+  steps are counted at the level where the hidden entry lives (unshifted).
+- **Hold arm:** a line of its own,
+  `{"type":"level_reads","w":0,"op0":...,"op1":...,"t_us":...,"final":0,"level_reads":{...}}`,
+  per `LEVEL_READS_OPS` operations (default 64000, the turn length, so the
+  windows line up with turns offline), cut as turns are cut: at the first poll
+  past each boundary of the start's grid. The drain writes the last, shorter
+  one with `"final": 1`. The lines join without a gap from the plugin's start
+  (the host log's `measure_start`) to the drain; they continue through a
+  fallback, and a scheduled change (`HOLD_APPLY_*`) works as before.
+
+Carried like L0_BILL: `level_reads` in every arm's config (0 unless set; 1
+only in modes hold-only and turn), `level_reads_ops` in the hold arm's with
+the flag on; `level_reads=` (and the hold arm's `level_reads_ops=`) in
+`metadata.env`; passed through by 36. 03 runs 28 with `--config` and
+`--host-log`, so with the flag on 28 checks every window (37 does too, for
+the preflight's turn arms): a whole block per window, windows that tile the
+run from `measure_start` exactly to the drain, and per level and counter
+totals equal to the host log's `measure_start` to `drain_start` counters
+within 0.1% or 100 counts (1 ms of reopen time); a run that fails is kept
+and marked `FAILED_PLUGIN_CHECK`, as for any plugin check. Example:
+`env LEVEL_READS=1 RL_TAG=<tag> ... scripts/dbbench_pipeline/36_rl_batch.sh`.
 
 ### SSD TRIM before every run (owner, 2026-11-08)
 
