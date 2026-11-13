@@ -404,6 +404,11 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
                          .Nums("k_rungs", t.k_rungs)
                          .Nums("m_rungs", t.m_rungs)
                          .Num("k_cfg", options_.l0_trigger)
+                         .Nums("periods", std::vector<double>(t.periods.begin(),
+                                                              t.periods.end()))
+                         .Num("slow_explore_decisions",
+                              t.slow_explore_decisions)
+                         .Num("compact_step", t.compact_step ? 1 : 0)
                          .Raw("features", names + "]")
                          .str());
   }
@@ -1450,8 +1455,12 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   const TurnSettings base = AnchorSettings(t, tc, kl, ml, turn_anchors_);
   const std::vector<double> x =
       TurnInputs(t, tc, turn_anchors_, base, rungs, owed);
-  const std::vector<TurnMask> masks =
-      Masks(t, tc, kl, ml, turn_anchors_, base);
+  std::vector<TurnMask> masks = Masks(t, tc, kl, ml, turn_anchors_, base);
+  // The level clock (turn_periods): a level between its decision turns holds
+  // only, so the logged masks, the greedy choice and the exploration all see
+  // it. No periods: nothing changes.
+  const bool clocked = !tc.periods.empty();
+  const std::vector<bool> decided = ClockMasks(tc, closed, &masks);
   std::vector<double> anchors(n_, 0.0);
   for (int i = 0; i < n_; ++i) anchors[i] = turn_anchors_[i].a;
 
@@ -1484,6 +1493,7 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
       .Raw("decay_waited", JsonBools(waited));
   if (tc.l0_bill) line.Raw("l0_read", l0_read);
   if (cfg_.level_reads) line.Raw("level_reads", level_reads);
+  if (clocked) line.Raw("decided", JsonBools(decided));
   if (final) {
     decisions_.Write(line.Num("applied_k", k0_applied_)
                          .Nums("applied_m", m_applied_)
@@ -1513,7 +1523,15 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   }
   const std::vector<Action> greedy = Greedy(acted, masks);
   std::vector<Action> actions = greedy;
-  const int explored = Explore(eps, masks, &actions, &rng_);
+  // The fast levels' exploration never draws a slow level; each slow level
+  // explores by itself at its own decision turns (ExploreSlow).
+  const int explored =
+      Explore(eps, clocked ? FastMasks(tc, masks) : masks, &actions, &rng_);
+  if (clocked) {
+    line.Raw("explored_slow",
+             JsonBools(ExploreSlow(tc, masks, decided, &turn_slow_decisions_,
+                                   &actions, &rng_)));
+  }
 
   // 5. Encode, the defers' top-up state, and one Apply if the vector changed.
   std::vector<TurnNote> notes;

@@ -28,6 +28,11 @@ L0 merge that finished in the turn at its whole price (merge_prices), with
 no shaping. The "turn" lines keep "J", the evaluator's, and add the bill's
 parts "bill_read" and "bill_merge".
 
+With the trainer settings' l0_bill_written 1 (needs turn_l0_bill 1) the bill
+also holds the three merge steps below L0, charged when the bytes are written
+(written_bill.py; ratios over the last written_turns turns, default 32): the
+"turn" lines add "bill_written" (their sum) and "bill_cells" (steps 0..3).
+
   python -m learner.turn_trainer --plugin-config CFG --decisions D.jsonl \\
       --host-log H.jsonl --weights W.bin --settings S.json \\
       --log turn_trainer.jsonl --summary turn_trainer_summary.json \\
@@ -60,6 +65,7 @@ import torch  # noqa: E402
 from learner import learned2 as L2  # noqa: E402
 from learner import turn_model as TM  # noqa: E402
 from learner import turn_weights as TW  # noqa: E402
+from learner import written_bill as WB  # noqa: E402
 from learner.logs import LogTail  # noqa: E402
 from learner.prices import from_plugin_config, l0_read_cost  # noqa: E402
 
@@ -249,6 +255,13 @@ class TurnTrainer:
                 raise ValueError(f"turn_l0_bill 1 charges each L0 merge whole as it finishes; "
                                  f"merge_charge {self.merge_charge!r} contradicts it")
             self.shaping = False
+        # The deep steps charged when written (written_bill.py), added to the
+        # L0 bill: optional keys l0_bill_written (0) and written_turns (32).
+        self.written = None
+        if int(settings.get("l0_bill_written", 0)) == 1:
+            if not self.l0_bill:
+                raise ValueError("l0_bill_written 1 adds to L0's bill: it needs turn_l0_bill 1")
+            self.written = WB.WrittenCells(int(settings.get("written_turns", 32)))
         n = len(self.names)
         self.x_stats = Running(n)
         self.j_stats = Running(1)
@@ -283,9 +296,15 @@ class TurnTrainer:
                 self.started = True
             elif t == "turn":
                 self.pending.append(parse_turn(r, self.names, self.acting))
+                self.on_turn_record(r)
                 self.lines += 1
             elif t == "stop":
                 self.stop_seen = True
+
+    def on_turn_record(self, record: dict) -> None:
+        """A "turn" line's raw record as it is read, for a subclass that
+        needs more of it than the Turn keeps (level_bills.py: the read
+        counts per level and the level clock's flags). Nothing here."""
 
     def take_pending(self) -> list:
         """The turn lines whose turn the host log can price now, in order;
@@ -320,7 +339,7 @@ class TurnTrainer:
                 acc = self.merge.setdefault(level, [0.0, 0.0])
                 acc[0] += cost
                 acc[1] += nbytes
-            new.append((self.prev, line, dict(price, merges=merges)))
+            new.append((self.prev, line, dict(price, merges=merges, bounds=b)))
             self.prev = self.pending.pop(0)
         return new
 
@@ -371,6 +390,17 @@ class TurnTrainer:
         read = p.beta_r * l0_read_cost(p.v2.base, line.l0_read)
         merge = float(price.get("merges", {}).get(0, [0.0, 0.0])[0])
         return read, merge
+
+    def written_cells(self, line: Turn, price: dict) -> list:
+        """[cell_0 .. cell_3] of the turn `line` closes (written_bill.py): each
+        merge step charged for the bytes written in the turn. "No room" at a
+        level = the line's owed work there is above 0."""
+        lo, hi = price["bounds"]
+        pr = self.pricer
+        puts = (cm._counts(pr.recs[hi], pr.names)["put"] -
+                cm._counts(pr.recs[lo], pr.names)["put"])
+        row = WB.turn_row(pr.recs, pr.job_idx, lo, hi, price.get("merges", {}), puts)
+        return self.written.add(row, [v > 0 for v in line.owed])
 
     def freeze(self) -> None:
         """The scaling, the reward's centre and spread, and the merge prices
@@ -488,6 +518,9 @@ class TurnTrainer:
     def learn(self, prev: Turn, line: Turn, price: dict) -> None:
         bill = self.l0_bill_parts(line, price) if self.l0_bill else None
         J = sum(bill) if bill is not None else self.charged_j(line, price)
+        cells = self.written_cells(line, price) if self.written is not None else None
+        if cells is not None:
+            J += sum(cells[k] for k in WB.DEEP)
         tr = Transition(t=line.t, x0=prev.x, m0=prev.masks, a=prev.actions,
                         x1=line.x, m1=line.masks, d0=prev.owed, d1=line.owed,
                         J=J, changes=prev.set + line.mid_applies,
@@ -505,6 +538,8 @@ class TurnTrainer:
                   "explored": prev.explored, "eps": prev.eps, "final": int(line.final)}
         if bill is not None:
             record.update(bill_read=bill[0], bill_merge=bill[1])
+        if cells is not None:
+            record.update(bill_written=sum(cells[k] for k in WB.DEEP), bill_cells=cells)
         self.emit(record)
         if math.isfinite(td):
             self.preq.append(td)
@@ -569,7 +604,12 @@ def main(argv=None) -> int:
     plugin_cfg = json.loads(Path(args.plugin_config).read_text())
     if plugin_cfg.get("mode") != "turn":
         raise SystemExit("turn_trainer needs a turn plugin config")
-    tr = TurnTrainer(args, settings, plugin_cfg)
+    if plugin_cfg.get("turn_periods") is not None:
+        # The level clock is on: one learner and one bill per level.
+        from learner.level_bills import LevelBillsTrainer
+        tr = LevelBillsTrainer(args, settings, plugin_cfg)
+    else:
+        tr = TurnTrainer(args, settings, plugin_cfg)
     stopping = {"why": None}
 
     def stop(signum, frame):  # noqa: ARG001

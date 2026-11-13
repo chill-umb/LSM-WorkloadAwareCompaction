@@ -16,7 +16,8 @@ from its result directory:
           prior_spread)
   l0_bill the L0 bill's records (turn_l0_bill): on, every turn line carries
           "l0_read" with each count a whole number >= 0, and every trainer
-          turn line's J_reward is its bill_read plus bill_merge (>= 0),
+          turn line's J_reward is its bill_read plus bill_merge (>= 0) plus
+          its bill_written (>= 0; the trainer's l0_bill_written, absent: 0),
           bill_read being beta_r times its turn's L0 read counts at the
           config's prices (rl_agent/learner/prices.py l0_read_cost); off, no
           turn line carries the block and no trainer line a bill
@@ -162,9 +163,11 @@ def l0_bill(decisions: list, trainer: list, config: dict) -> dict:
     bad_sum, bad_read, unmatched = [], [], []
     for r in billed:
         read, merge, total = r.get("bill_read"), r.get("bill_merge"), r.get("J_reward")
-        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (read, merge, total)) \
-                or merge < 0 or not math.isclose(total, read + merge, rel_tol=TOLERANCE,
-                                                 abs_tol=1e-300):
+        # The trainer's l0_bill_written adds the deep steps charged when written (absent: 0).
+        deep = r.get("bill_written", 0.0)
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (read, merge, total, deep)) \
+                or merge < 0 or deep < 0 or not math.isclose(total, read + merge + deep, rel_tol=TOLERANCE,
+                                                             abs_tol=1e-300):
             bad_sum.append(r["t"])
             continue
         if r["t"] not in blocks:
@@ -176,7 +179,7 @@ def l0_bill(decisions: list, trainer: list, config: dict) -> dict:
     if bad_block:
         problems.append(f"turn lines without a whole l0_read block: {bad_block[:10]}")
     if bad_sum:
-        problems.append(f"trainer lines whose J_reward is not bill_read + bill_merge: {bad_sum[:10]}")
+        problems.append(f"trainer lines whose J_reward is not bill_read + bill_merge (+ bill_written): {bad_sum[:10]}")
     if unmatched:
         problems.append(f"trainer lines with no l0_read of their turn: {unmatched[:10]}")
     if bad_read:

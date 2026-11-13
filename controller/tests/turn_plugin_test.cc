@@ -893,6 +893,167 @@ TEST_F(TurnTest, TheCompactFloorMasksL0CompactAtTheLowestRung) {
   }
 }
 
+// turn_compact_step (optional): off unless set, 0 or 1,
+// and for the turn mode only.
+TEST_F(TurnTest, TheCompactStepFlagParses) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.compact_step);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_compact_step", "0"}}), &c, &error))
+      << error;
+  EXPECT_FALSE(c.turn.compact_step);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_compact_step", "1"}}), &c, &error))
+      << error;
+  EXPECT_TRUE(c.turn.compact_step);
+  EXPECT_FALSE(c.turn.compact_floor);
+  for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+    EXPECT_FALSE(LoadConfig(Config({{"turn_compact_step", bad}}), &c, &error))
+        << bad;
+  }
+}
+
+// turn_compact_step 1: L0 pressing compact at every boundary walks down from
+// K = 4 one rung a turn, 4 -> 3 -> 2, and every K sent is the rung's own: no
+// one-turn K = max(1, n0), so K never leaves the ladder. At the lowest rung
+// compact is masked and L0 holds. The start line records the flag. Off, the
+// same presses send K = max(1, n0) (the compact-now override).
+TEST_F(TurnTest, TheCompactStepMovesTheRungAndSendsNoOverride) {
+  WriteNet(weights(), BiasNet(1, 0, 0, Action::kCompact));
+  const auto run = [&](const std::string& config) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    FakeHost host;
+    Tree(&host);
+    {
+      Controller controller(&host, config, [this] { return clock_us_; });
+      Run(&controller, &host, 24, /*writes=*/true);
+    }
+    return Lines("turn");
+  };
+  const auto turns = run(Config({{"turn_decay", "0"}, {"turn_compact_step", "1"}}));
+  ASSERT_EQ(turns.size(), 6u);
+  const auto start = Lines("turn_start");
+  ASSERT_EQ(start.size(), 1u);
+  EXPECT_EQ(Number(start[0], "compact_step"), 1);
+  const double want_rung[] = {4, 3, 2, 2, 2, 2};
+  const double want_sent[] = {3, 2, 2, 2, 2, 2};
+  for (size_t i = 0; i < turns.size(); ++i) {
+    const std::string& line = turns[i];
+    const std::vector<double> mask = L0Mask(line);
+    ASSERT_EQ(mask.size(), 4u) << line;
+    const bool lowest = want_rung[i] == 2;
+    EXPECT_EQ(Number(line, "rung_k"), want_rung[i]) << line;
+    EXPECT_EQ(mask[1], lowest ? 0 : 1) << line;
+    EXPECT_EQ(Names(line, "action")[0], lowest ? "hold" : "compact") << line;
+    EXPECT_EQ(Number(line, "sent_k"), want_sent[i]) << line;
+  }
+  // Off: the first press sends K = max(1, n0), which the rung's K = 3 is not
+  // unless L0 holds exactly three files.
+  const auto off = run(Config({{"turn_decay", "0"}}));
+  ASSERT_EQ(off.size(), 6u);
+  EXPECT_EQ(Number(Lines("turn_start")[0], "compact_step"), 0);
+  EXPECT_EQ(Names(off[0], "action")[0], "compact");
+}
+
+// turn_periods (the level clock): optional; one whole period per acting
+// level, L0's 1; needs turn_decay 0 and turn_slow_explore_decisions.
+TEST_F(TurnTest, TurnPeriodsAreParsedAndChecked) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_TRUE(c.turn.periods.empty());
+  EXPECT_EQ(c.turn.slow_explore_decisions, 0);
+  const std::map<std::string, std::string> good = {
+      {"turn_decay", "0"}, {"turn_acting", "3"},
+      {"turn_periods", "\"1:16:64\""}, {"turn_slow_explore_decisions", "12"}};
+  ASSERT_TRUE(LoadConfig(Config(good), &c, &error)) << error;
+  EXPECT_EQ(c.turn.periods, (std::vector<int>{1, 16, 64}));
+  EXPECT_EQ(c.turn.slow_explore_decisions, 12);
+  auto with = [&](std::map<std::string, std::string> changes) {
+    std::map<std::string, std::string> all = good;
+    for (const auto& kv : changes) all[kv.first] = kv.second;
+    return Config(all);
+  };
+  ASSERT_TRUE(LoadConfig(with({{"turn_periods", "\"1:0:64\""}}), &c, &error))
+      << error;  // 0: the level never decides
+  EXPECT_EQ(c.turn.periods, (std::vector<int>{1, 0, 64}));
+  for (const char* bad : {"\"1:16\"", "\"1:16:64:64\"", "\"2:16:64\"",
+                          "\"1:x:64\"", "\"1:-4:64\"", "\"1:1.5:64\"", "\"\"",
+                          "16"}) {
+    EXPECT_FALSE(LoadConfig(with({{"turn_periods", bad}}), &c, &error)) << bad;
+  }
+  EXPECT_FALSE(LoadConfig(with({{"turn_decay", "1"}}), &c, &error));
+  EXPECT_FALSE(LoadConfig(with({{"turn_slow_explore_decisions", "0"}}), &c, &error));
+  // Each key needs the other.
+  EXPECT_FALSE(LoadConfig(Config({{"turn_decay", "0"}, {"turn_acting", "3"},
+                                  {"turn_periods", "\"1:16:64\""}}),
+                          &c, &error));
+  EXPECT_FALSE(LoadConfig(Config({{"turn_slow_explore_decisions", "12"}}), &c,
+                          &error));
+}
+
+// A clocked run: every turn line carries "decided" and, unless it is the
+// drain's, "explored_slow"; a level that does not decide logs the hold-only
+// mask and holds. Without turn_periods no line carries either.
+TEST_F(TurnTest, TheLevelClockHoldsSlowLevelsBetweenDecisions) {
+  const auto run = [&](const std::string& config) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    FakeHost host;
+    Tree(&host);
+    {
+      Controller controller(&host, config, [this] { return clock_us_; });
+      Run(&controller, &host, 48, /*writes=*/true);
+    }
+    return Lines("turn");
+  };
+  const auto plain = run(Config({{"turn_decay", "0"}}));
+  ASSERT_FALSE(plain.empty());
+  for (const std::string& line : plain) {
+    EXPECT_EQ(line.find("\"decided\""), std::string::npos) << line;
+    EXPECT_EQ(line.find("\"explored_slow\""), std::string::npos) << line;
+  }
+  const auto turns = run(Config({{"turn_decay", "0"},
+                                 {"turn_acting", "3"},
+                                 {"turn_periods", "\"1:2:4\""},
+                                 {"turn_slow_explore_decisions", "4"}}));
+  ASSERT_GE(turns.size(), 8u);
+  int l1_decisions = 0, l2_decisions = 0;
+  for (const std::string& line : turns) {
+    const uint64_t t = static_cast<uint64_t>(Number(line, "t"));
+    const bool d1 = t % 2 == 1, d2 = t % 4 == 3;  // phases 3/4 of the period
+    const std::string want = std::string("\"decided\":[1,") + (d1 ? "1" : "0") +
+                             "," + (d2 ? "1" : "0");
+    EXPECT_NE(line.find(want), std::string::npos) << line;
+    l1_decisions += d1;
+    l2_decisions += d2;
+    const size_t at = line.find("\"masks\":[[");
+    ASSERT_NE(at, std::string::npos) << line;
+    const size_t l1 = line.find("],[", at) + 3;
+    const size_t l2 = line.find("],[", l1) + 3;
+    if (!d1) {
+      EXPECT_EQ(line.compare(l1, 7, "1,0,0,0"), 0) << line;
+    }
+    if (!d2) {
+      EXPECT_EQ(line.compare(l2, 7, "1,0,0,0"), 0) << line;
+    }
+    // A slow level never has defer (the third flag).
+    EXPECT_EQ(line[l1 + 4], '0') << line;
+    EXPECT_EQ(line[l2 + 4], '0') << line;
+    if (Number(line, "final") == 1) continue;
+    EXPECT_NE(line.find("\"explored_slow\":["), std::string::npos) << line;
+    const std::vector<std::string> action = Names(line, "action");
+    ASSERT_GE(action.size(), 3u) << line;
+    if (!d1) {
+      EXPECT_EQ(action[1], "hold") << line;
+    }
+    if (!d2) {
+      EXPECT_EQ(action[2], "hold") << line;
+    }
+  }
+  EXPECT_GT(l1_decisions, 2);
+  EXPECT_GT(l2_decisions, 1);
+}
+
 // The turn arm's config as plugin_config.py composes it from the shipped
 // settings (scripts/dbbench_pipeline/tests/test_plugin_config.py writes it):
 // the composer and the plugin stay in lockstep.

@@ -340,6 +340,7 @@ class Controller {
   TurnActivity turn_act_;
   std::deque<TurnActivity> turn_ring_;  // the last turn_forecast_turns
   std::vector<TurnDefer> turn_defer_;
+  std::vector<uint64_t> turn_slow_decisions_;  // per level (turn_periods)
   TurnNet turn_net_;
   bool turn_have_net_ = false;
   bool turn_weights_checked_ = false;

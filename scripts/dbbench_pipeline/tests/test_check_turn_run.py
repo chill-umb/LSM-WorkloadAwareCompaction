@@ -271,6 +271,24 @@ class CheckTurnRunTest(unittest.TestCase):
                 r["J_reward"] += 1.0
         self.assertEqual(self.run_check(bill=1, trainer=sum_off)["failed_checks"], ["l0_bill"])
 
+        # The trainer's l0_bill_written: the written part belongs to the sum; a negative one fails.
+        def written(r):
+            if r["type"] == "turn":
+                r["bill_written"] = 2e5
+                r["J_reward"] = r["bill_read"] + r["bill_merge"] + 2e5
+        self.assertEqual(self.run_check(bill=1, trainer=written)["verdict"], "passed")
+
+        def written_left_out(r):
+            if r["type"] == "turn":
+                r["bill_written"] = 2e5
+        self.assertEqual(self.run_check(bill=1, trainer=written_left_out)["failed_checks"], ["l0_bill"])
+
+        def written_negative(r):
+            if r["type"] == "turn":
+                r["bill_written"] = -1.0
+                r["J_reward"] = r["bill_read"] + r["bill_merge"] - 1.0
+        self.assertEqual(self.run_check(bill=1, trainer=written_negative)["failed_checks"], ["l0_bill"])
+
         report = self.run_check(bill=0)
         self.assertEqual(report["verdict"], "passed", report)
         self.assertFalse(report["checks"]["l0_bill"]["on"])

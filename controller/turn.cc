@@ -386,9 +386,12 @@ std::vector<TurnMask> Masks(const TurnTree& t, const TurnConfig& cfg,
       const int limit = std::min(LiveCap(t), cfg.k_defer_max);
       // The compact floor (turn_compact_floor): at the lowest rung compact
       // would only send K = max(1, n0), below the ladder, so it is blocked.
+      // The compact step (turn_compact_step): compact only steps the anchor
+      // down, so it needs a rung below and no file in L0.
       const bool at_floor = RungIndex(k_ladder, anchors[0].a) == 0;
       mask[static_cast<int>(Action::kCompact)] =
-          t.n0 >= 1 && !(cfg.compact_floor && at_floor);
+          cfg.compact_step ? !at_floor
+                           : t.n0 >= 1 && !(cfg.compact_floor && at_floor);
       mask[static_cast<int>(Action::kDefer)] =
           !near_slow && t.n0 + t.f_hat >= base.K && DeferL0(t) <= limit;
       const double up = Press(k_ladder, anchors[0].a, true, cfg.renew_band, &renew);
@@ -493,8 +496,11 @@ TurnSettings Encode(const TurnTree& t, const TurnConfig& cfg,
     if (!Acting(t, cfg.acting, i)) continue;
     if (i == 0) {
       if (act == Action::kCompact) {
-        s.K = std::max(1, t.n0);
-        (*notes)[0].overridden = true;
+        // The compact step: the anchor's move (step 1) is all compact does.
+        if (!cfg.compact_step) {
+          s.K = std::max(1, t.n0);
+          (*notes)[0].overridden = true;
+        }
       } else if (act == Action::kDefer) {
         s.K = std::max(s.K, DeferL0(t));
         (*notes)[0].overridden = true;
@@ -820,6 +826,87 @@ double ExploreRate(const TurnConfig& cfg, double turn) {
   if (cfg.explore_turns <= 0 || turn >= cfg.explore_turns) return cfg.explore_end;
   return cfg.explore_start +
          (cfg.explore_end - cfg.explore_start) * turn / cfg.explore_turns;
+}
+
+int LevelPhase(int period) { return period > 1 ? (3 * period) / 4 : 0; }
+
+bool SlowLevel(const TurnConfig& cfg, int level) {
+  return level >= 0 && level < static_cast<int>(cfg.periods.size()) &&
+         cfg.periods[level] != 1;
+}
+
+bool Decides(const TurnConfig& cfg, int level, uint64_t turn) {
+  if (level < 0 || level >= static_cast<int>(cfg.periods.size())) return true;
+  const int period = cfg.periods[level];
+  if (period == 1) return true;
+  if (period <= 0) return false;
+  return turn % static_cast<uint64_t>(period) ==
+         static_cast<uint64_t>(LevelPhase(period));
+}
+
+std::vector<bool> ClockMasks(const TurnConfig& cfg, uint64_t turn,
+                             std::vector<TurnMask>* masks) {
+  std::vector<bool> decided(masks->size(), true);
+  for (size_t i = 0; i < masks->size(); ++i) {
+    const int level = static_cast<int>(i);
+    if (!Decides(cfg, level, turn)) {
+      decided[i] = false;
+      (*masks)[i] = TurnMask{};
+      (*masks)[i][static_cast<int>(Action::kHold)] = true;
+    } else if (SlowLevel(cfg, level)) {
+      (*masks)[i][static_cast<int>(Action::kDefer)] = false;
+    }
+  }
+  return decided;
+}
+
+std::vector<TurnMask> FastMasks(const TurnConfig& cfg,
+                                std::vector<TurnMask> masks) {
+  for (size_t i = 0; i < masks.size(); ++i) {
+    if (!SlowLevel(cfg, static_cast<int>(i))) continue;
+    masks[i] = TurnMask{};
+    masks[i][static_cast<int>(Action::kHold)] = true;
+  }
+  return masks;
+}
+
+double SlowExploreRate(const TurnConfig& cfg, double decision) {
+  if (cfg.slow_explore_decisions <= 0 ||
+      decision >= cfg.slow_explore_decisions) {
+    return cfg.explore_end;
+  }
+  return cfg.explore_start + (cfg.explore_end - cfg.explore_start) * decision /
+                                 cfg.slow_explore_decisions;
+}
+
+std::vector<bool> ExploreSlow(const TurnConfig& cfg,
+                              const std::vector<TurnMask>& masks,
+                              const std::vector<bool>& decided,
+                              std::vector<uint64_t>* decisions,
+                              std::vector<Action>* actions,
+                              std::mt19937_64* rng) {
+  std::vector<bool> explored(masks.size(), false);
+  if (decisions->size() < masks.size()) decisions->resize(masks.size(), 0);
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  for (size_t i = 0; i < masks.size(); ++i) {
+    if (!SlowLevel(cfg, static_cast<int>(i)) || i >= decided.size() ||
+        !decided[i]) {
+      continue;
+    }
+    std::vector<int> allowed;
+    for (int a = 0; a < kNumActions; ++a) {
+      if (masks[i][a]) allowed.push_back(a);
+    }
+    if (allowed.size() < 2) continue;
+    const double eps =
+        SlowExploreRate(cfg, static_cast<double>((*decisions)[i]));
+    ++(*decisions)[i];
+    if (!(unit(*rng) < eps)) continue;
+    std::uniform_int_distribution<size_t> pick(0, allowed.size() - 1);
+    (*actions)[i] = static_cast<Action>(allowed[pick(*rng)]);
+    explored[i] = true;
+  }
+  return explored;
 }
 
 }  // namespace rlc

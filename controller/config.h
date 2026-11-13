@@ -56,6 +56,28 @@ struct TurnConfig {
   // lowest K rung (compact there sends K = max(1, n0), below the ladder,
   // with no rung change). Off, compact is allowed whenever L0 has a file.
   bool compact_floor = false;
+  // The compact step's feature flag (turn_compact_step; optional, 0 or 1;
+  // absent: 0, as before). On, L0's compact only steps
+  // the K anchor one rung down: it sends no one-turn K = max(1, n0), so
+  // RocksDB merges by the new rung's trigger and K never leaves the ladder.
+  // L0's compact is then allowed whenever its anchor is above the lowest
+  // rung, with or without a file in L0 (as expand needs none). Off, compact
+  // also merges at once (K = max(1, n0) for the turn) and needs a file.
+  // Levels below L0 are unchanged.
+  bool compact_step = false;
+  // The level clock (turn_periods; optional, ":"-separated, one whole number
+  // per acting level; absent: empty, every level decides every turn, as
+  // before). Level i decides only at the turns t with t % periods[i] ==
+  // LevelPhase(periods[i]); at every other turn its mask is hold alone, so
+  // it keeps its setting for the whole period (a hold). 0: the level never
+  // decides. A level whose period is not 1 is "slow": it has no defer (a
+  // one-turn override cannot be judged over a hold), and it explores by
+  // itself at its decision turns, linear from explore_start to explore_end
+  // over its first slow_explore_decisions decisions
+  // (turn_slow_explore_decisions, required with turn_periods). L0's period
+  // is 1. Needs turn_decay 0, so that hold keeps the setting.
+  std::vector<int> periods;
+  int slow_explore_decisions = 0;
   double margin = 0;        // epsilon of the encoding
   double sigma_max = 0;     // compact's score cap (4/3)
   double glide_share = 0;   // R_i's share of the slot's merge bytes (1/2)

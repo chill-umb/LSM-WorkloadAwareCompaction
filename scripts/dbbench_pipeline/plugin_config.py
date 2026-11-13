@@ -86,7 +86,14 @@ TURN_KEYS = ("turn_ops", "turn_acting", "turn_kappa", "turn_margin",
              "turn_k_defer_max", "turn_renew_band", "turn_max_topups",
              "turn_explore_start", "turn_explore_end", "turn_explore_turns",
              "turn_k_rungs", "turn_m_rungs")
-TURN_STRING_KEYS = ("turn_arch", "turn_k_rungs", "turn_m_rungs")
+TURN_STRING_KEYS = ("turn_arch", "turn_k_rungs", "turn_m_rungs", "turn_periods")
+# The level clock's keys (controller/config.h turn_periods): optional, copied
+# from the turn settings' "plugin" part when it has them; both or neither.
+TURN_OPTIONAL_KEYS = ("turn_periods", "turn_slow_explore_decisions")
+# The compact step (controller/config.h turn_compact_step):
+# optional, 0 or 1, copied from the turn settings' "plugin" part when it has
+# it. 1: L0's compact only steps K one rung down, with no forced merge.
+TURN_OPTIONAL_FLAGS = ("turn_compact_step",)
 # learned2's own keys (controller/learned2.h; owner, 2026-11-05), from the
 # "plugin" part of its settings file (config/learner2_settings.json).
 LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",
@@ -350,6 +357,22 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
             config["turn_arch"] = TURN_ARMS[arm]
             for key in TURN_KEYS:
                 config[key] = _value(learner, key, "turn settings", missing)
+            clock = [key for key in TURN_OPTIONAL_KEYS if (learner or {}).get(key) is not None]
+            if clock and len(clock) != len(TURN_OPTIONAL_KEYS):
+                raise ValueError("the turn settings need both or neither of "
+                                 f"{', '.join(TURN_OPTIONAL_KEYS)}; got {', '.join(clock)}")
+            for key in clock:
+                config[key] = learner[key]
+            for key in TURN_OPTIONAL_FLAGS:
+                flag = (learner or {}).get(key)
+                if flag is None:
+                    continue
+                if isinstance(flag, bool) or flag not in (0, 1):
+                    raise ValueError(f"the turn settings' {key} must be 0 or 1, got {flag!r}")
+                config[key] = int(flag)
+            if clock and decay != 0:
+                raise ValueError("turn_periods (the level clock) needs decay 0: "
+                                 "a held level keeps its setting")
             if decay is None:
                 missing.append("turn_decay (the arm's DECAY: 1 or 0)")
             config["turn_decay"] = decay

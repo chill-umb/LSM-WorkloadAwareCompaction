@@ -183,6 +183,8 @@ TurnSettings AnchorSettings(const TurnTree& t, const TurnConfig& cfg,
 // Allowed actions per level (num_levels entries; non-acting levels hold
 // only), at the anchor settings `base`. With cfg.compact_floor, L0's compact
 // is also blocked while its anchor rounds to the K ladder's lowest rung.
+// With cfg.compact_step, L0's compact is allowed exactly when its anchor
+// rounds to a rung above the lowest (no file in L0 needed).
 std::vector<TurnMask> Masks(const TurnTree& t, const TurnConfig& cfg,
                             const Ladder& k_ladder, const Ladder& m_ladder,
                             const std::vector<AnchorState>& anchors,
@@ -200,6 +202,8 @@ struct TurnNote {
 // (already decayed for this turn) and returns the settings to send, with
 // compact-now and defer overrides for this turn and every downward target
 // through the glide. `actions` has num_levels entries (hold elsewhere).
+// With cfg.compact_step, L0's compact moves its anchor only: no compact-now
+// override, so the K sent is the new rung's.
 // Updates anchors (their glide state too) and fills `notes`.
 TurnSettings Encode(const TurnTree& t, const TurnConfig& cfg,
                     const Ladder& k_ladder, const Ladder& m_ladder,
@@ -299,5 +303,39 @@ int Explore(double eps, const std::vector<TurnMask>& masks,
             std::vector<Action>* actions, std::mt19937_64* rng);
 // eps at turn t: linear from explore_start to explore_end over explore_turns.
 double ExploreRate(const TurnConfig& cfg, double turn);
+
+// --- The level clock (turn_periods; config.h) --------------------------------
+
+// The turn of its period at which a level decides: 3/4 of the period (0 for
+// a period of 1 or less), so two levels whose periods are powers of two apart
+// never decide at the same turn.
+int LevelPhase(int period);
+// Level `level` has a period other than 1.
+bool SlowLevel(const TurnConfig& cfg, int level);
+// Level `level` may decide at the boundary that closes turn `turn`: always
+// with no periods configured or a period of 1; never with a period of 0;
+// otherwise when turn % period == LevelPhase(period).
+bool Decides(const TurnConfig& cfg, int level, uint64_t turn);
+// Applies the clock to the masks: a level that does not decide this turn
+// holds only; a slow level that decides loses defer. Returns, per mask,
+// whether its level decides.
+std::vector<bool> ClockMasks(const TurnConfig& cfg, uint64_t turn,
+                             std::vector<TurnMask>* masks);
+// The masks the fast levels' Explore draws from: every slow level holds only.
+std::vector<TurnMask> FastMasks(const TurnConfig& cfg,
+                                std::vector<TurnMask> masks);
+// A slow level's exploration rate at its d-th decision (from 0): linear from
+// explore_start to explore_end over slow_explore_decisions decisions.
+double SlowExploreRate(const TurnConfig& cfg, double decision);
+// Each slow level that decides this turn and has more than one allowed
+// action counts one decision, and with its own rate takes an allowed action
+// drawn uniformly. `decisions` (resized to the masks) counts them per level.
+// Returns, per level, whether it explored.
+std::vector<bool> ExploreSlow(const TurnConfig& cfg,
+                              const std::vector<TurnMask>& masks,
+                              const std::vector<bool>& decided,
+                              std::vector<uint64_t>* decisions,
+                              std::vector<Action>* actions,
+                              std::mt19937_64* rng);
 
 }  // namespace rlc

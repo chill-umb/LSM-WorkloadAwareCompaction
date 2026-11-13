@@ -335,6 +335,9 @@ const std::set<std::string>& KnownKeys() {
                                                "turn_prior",
                                                "turn_l0_bill",
                                                "turn_compact_floor",
+                                               "turn_compact_step",
+                                               "turn_periods",
+                                               "turn_slow_explore_decisions",
                                                "turn_margin",
                                                "turn_sigma_max",
                                                "turn_glide_share",
@@ -580,6 +583,33 @@ static const char* const kTurnKeys[] = {
     "turn_decay",        "turn_prior",            "turn_l0_bill",
     "turn_compact_floor"};
 
+// The level clock's periods (turn_periods): ":"-separated whole numbers in
+// [0, 1000000], one per acting level, the first (L0's) 1.
+static bool ParsePeriods(const std::string& text, int acting,
+                         std::vector<int>* out, Reader* r) {
+  out->clear();
+  size_t start = 0;
+  for (;;) {
+    const size_t colon = text.find(':', start);
+    const std::string item = text.substr(
+        start, colon == std::string::npos ? std::string::npos : colon - start);
+    char* end = nullptr;
+    const double value = std::strtod(item.c_str(), &end);
+    if (item.empty() || end != item.c_str() + item.size() ||
+        !std::isfinite(value) || value < 0 || value > 1000000 ||
+        value != std::floor(value)) {
+      return r->Fail("turn_periods: \"" + item +
+                     "\" is not a whole number in [0, 1000000]");
+    }
+    out->push_back(static_cast<int>(value));
+    if (colon == std::string::npos) break;
+    start = colon + 1;
+  }
+  return r->Check(static_cast<int>(out->size()) == acting,
+                  "turn_periods needs one period per acting level") &&
+         r->Check(out->front() == 1, "turn_periods: L0's period is 1");
+}
+
 // A rung ladder: ":"-separated finite numbers, ascending, at most 16; K's
 // whole files.
 static bool ParseRungs(const char* key, const std::string& text, bool whole,
@@ -674,6 +704,28 @@ static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
   t->prior = prior == 1;
   t->l0_bill = l0_bill == 1;
   t->compact_floor = compact_floor == 1;
+  // The compact step (turn_compact_step): optional; absent means off.
+  int compact_step = 0;
+  if (r->Has("turn_compact_step") &&
+      !integer("turn_compact_step", &compact_step, 0, 1)) {
+    return false;
+  }
+  t->compact_step = compact_step == 1;
+  t->periods.clear();
+  t->slow_explore_decisions = 0;
+  if (r->Has("turn_periods")) {
+    std::string periods;
+    if (!r->String("turn_periods", &periods) ||
+        !ParsePeriods(periods, t->acting, &t->periods, r) ||
+        !r->Check(!t->decay, "turn_periods needs turn_decay 0 (a held level "
+                             "keeps its setting)") ||
+        !integer("turn_slow_explore_decisions", &t->slow_explore_decisions, 1,
+                 1000000)) {
+      return false;
+    }
+  } else if (r->Has("turn_slow_explore_decisions")) {
+    return r->Fail("\"turn_slow_explore_decisions\" needs turn_periods");
+  }
   // The m ladder holds native (1); the K ladder's native is the host's
   // trigger, checked against it (CheckConfigAgainstHost).
   Ladder ladder;
@@ -813,6 +865,10 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
   }
   if (c->mode != Mode::kTurn) {
     for (const char* key : kTurnKeys) {
+      if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
+    }
+    for (const char* key : {"turn_periods", "turn_slow_explore_decisions",
+                            "turn_compact_step"}) {
       if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
     }
   }

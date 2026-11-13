@@ -730,6 +730,110 @@ TEST(TurnMasks, CompactFloorBlocksL0CompactAtTheLowestRung) {
   EXPECT_FALSE(on[0][1]);
 }
 
+// COMPACT_STEP (turn_compact_step): on, L0's compact only
+// steps the K anchor one rung down. It is allowed at every rung above the
+// lowest, with or without a file in L0, and masked at the lowest; Encode
+// sends the new rung's K with no one-turn override, so K never leaves the
+// ladder. Off, compact also sends K = max(1, n0) for the turn. Other levels
+// and L0's other actions are unchanged.
+TEST(TurnMasks, CompactStepMovesTheRungOnly) {
+  const TurnConfig c = Cfg();
+  TurnConfig step = c;
+  step.compact_step = true;
+  const Ladders l = MakeLadders(c);
+  TurnTree t = Tree();
+  t.n0 = t.n0_all = 1;
+  std::vector<AnchorState> an = Native(t.num_levels);
+  const auto compact_ok = [&](const TurnConfig& cfg, double a) {
+    an[0].a = a;
+    return Masks(t, cfg, l.k, l.m, an, AnchorSettings(t, cfg, l.k, l.m, an))[0][1];
+  };
+  const double k2 = std::log2(2.0 / 4), k3 = std::log2(3.0 / 4);
+  // Masked at the lowest rung (decayed from it too), allowed above it.
+  EXPECT_FALSE(compact_ok(step, k2));
+  EXPECT_FALSE(compact_ok(step, k2 + 0.25));
+  EXPECT_TRUE(compact_ok(step, k3));
+  EXPECT_TRUE(compact_ok(step, 0));
+  EXPECT_TRUE(compact_ok(step, 1));  // K = 8, the top rung
+  // No file in L0: still allowed above the lowest rung (off: masked).
+  t.n0 = t.n0_all = 0;
+  EXPECT_TRUE(compact_ok(step, k3));
+  EXPECT_TRUE(compact_ok(step, 1));
+  EXPECT_FALSE(compact_ok(step, k2));
+  EXPECT_FALSE(compact_ok(c, k3));
+  // The floor flag changes nothing once the step is on.
+  TurnConfig both = step;
+  both.compact_floor = true;
+  EXPECT_FALSE(compact_ok(both, k2));
+  EXPECT_TRUE(compact_ok(both, k3));
+
+  // Encode: one rung down, the K sent is that rung's, no override, whatever
+  // L0 holds.
+  for (int n0 : {0, 1, 3}) {
+    t.n0 = t.n0_all = n0;
+    std::vector<AnchorState> a = Native(t.num_levels);  // K = 4
+    std::vector<Action> acts = Holds(t.num_levels);
+    acts[0] = Action::kCompact;
+    std::vector<TurnNote> notes;
+    const TurnSettings s = Encode(t, step, l.k, l.m, acts, &a, &notes);
+    EXPECT_EQ(s.K, 3) << n0;
+    EXPECT_DOUBLE_EQ(a[0].a, k3) << n0;
+    EXPECT_TRUE(notes[0].moved) << n0;
+    EXPECT_FALSE(notes[0].overridden) << n0;
+  }
+  // Four presses from the top rung walk the whole ladder, 8 -> 6 -> 4 -> 3
+  // -> 2, never below it.
+  {
+    t.n0 = t.n0_all = 1;
+    std::vector<AnchorState> a = Native(t.num_levels);
+    a[0].a = 1;
+    std::vector<Action> acts = Holds(t.num_levels);
+    acts[0] = Action::kCompact;
+    std::vector<TurnNote> notes;
+    for (int want : {6, 4, 3, 2}) {
+      const TurnSettings s = Encode(t, step, l.k, l.m, acts, &a, &notes);
+      EXPECT_EQ(s.K, want);
+    }
+    EXPECT_FALSE(Masks(t, step, l.k, l.m, a,
+                       AnchorSettings(t, step, l.k, l.m, a))[0][1]);
+  }
+  // Off, the same press also merges at once: K = max(1, n0) for the turn.
+  {
+    t.n0 = t.n0_all = 1;
+    std::vector<AnchorState> a = Native(t.num_levels);
+    std::vector<Action> acts = Holds(t.num_levels);
+    acts[0] = Action::kCompact;
+    std::vector<TurnNote> notes;
+    const TurnSettings s = Encode(t, c, l.k, l.m, acts, &a, &notes);
+    EXPECT_EQ(s.K, 1);
+    EXPECT_DOUBLE_EQ(a[0].a, k3);
+    EXPECT_TRUE(notes[0].overridden);
+  }
+  // Only L0's compact moves in the masks.
+  t = Tree();
+  an = Native(t.num_levels);
+  const auto off = Masks(t, c, l.k, l.m, an, AnchorSettings(t, c, l.k, l.m, an));
+  const auto on = Masks(t, step, l.k, l.m, an, AnchorSettings(t, step, l.k, l.m, an));
+  for (int i = 0; i < t.num_levels; ++i) {
+    for (int a = 0; a < kNumActions; ++a) {
+      if (i == 0 && a == static_cast<int>(Action::kCompact)) continue;
+      EXPECT_EQ(off[i][a], on[i][a]) << i << " " << a;
+    }
+  }
+  // A deeper level's compact keeps its compact-now override.
+  {
+    std::vector<AnchorState> a0 = Native(t.num_levels), a1 = a0;
+    std::vector<Action> acts = Holds(t.num_levels);
+    acts[2] = Action::kCompact;
+    std::vector<TurnNote> n0, n1;
+    const TurnSettings s0 = Encode(t, c, l.k, l.m, acts, &a0, &n0);
+    const TurnSettings s1 = Encode(t, step, l.k, l.m, acts, &a1, &n1);
+    EXPECT_EQ(s0.K, s1.K);
+    EXPECT_EQ(s0.m, s1.m);
+    EXPECT_EQ(n0[2].overridden, n1[2].overridden);
+  }
+}
+
 // R4: with only reads there is no inflow; defer and expand are masked, compact
 // still acts, and the anchors still decay.
 TEST(TurnMasks, ReadOnlyPhase) {
@@ -941,6 +1045,125 @@ TEST(TurnChoice, ExploreOneLevelOnly) {
   EXPECT_NEAR(ExploreRate(c, 100), 0.275, 1e-12);
   EXPECT_DOUBLE_EQ(ExploreRate(c, 200), 0.05);
   EXPECT_DOUBLE_EQ(ExploreRate(c, 5000), 0.05);
+}
+
+// The level clock (turn_periods): phases, who decides, the masks, and the
+// slow levels' own exploration.
+TEST(TurnClock, PhasesAndDecisionTurns) {
+  EXPECT_EQ(LevelPhase(1), 0);
+  EXPECT_EQ(LevelPhase(16), 12);
+  EXPECT_EQ(LevelPhase(64), 48);
+  TurnConfig c = Cfg();
+  // No periods: every level decides every turn, and none is slow.
+  for (int level = 0; level < 5; ++level) {
+    EXPECT_TRUE(Decides(c, level, 7));
+    EXPECT_FALSE(SlowLevel(c, level));
+  }
+  c.acting = 4;
+  c.periods = {1, 16, 64, 0};
+  EXPECT_FALSE(SlowLevel(c, 0));
+  EXPECT_TRUE(SlowLevel(c, 1));
+  EXPECT_TRUE(SlowLevel(c, 3));
+  EXPECT_FALSE(SlowLevel(c, 4));  // beyond the acting levels
+  int both = 0, l1 = 0, l2 = 0;
+  for (uint64_t t = 0; t < 640; ++t) {
+    EXPECT_TRUE(Decides(c, 0, t));
+    EXPECT_FALSE(Decides(c, 3, t));  // period 0: never
+    EXPECT_TRUE(Decides(c, 4, t));
+    EXPECT_EQ(Decides(c, 1, t), t % 16 == 12) << t;
+    EXPECT_EQ(Decides(c, 2, t), t % 64 == 48) << t;
+    l1 += Decides(c, 1, t);
+    l2 += Decides(c, 2, t);
+    both += Decides(c, 1, t) && Decides(c, 2, t);
+  }
+  EXPECT_EQ(l1, 40);
+  EXPECT_EQ(l2, 10);
+  EXPECT_EQ(both, 0);  // staggered
+}
+
+TEST(TurnClock, MasksHoldBetweenDecisionsAndDropDefer) {
+  TurnConfig c = Cfg();
+  c.acting = 3;
+  c.periods = {1, 16, 64};
+  const TurnMask all{true, true, true, true};
+  const TurnMask hold{true, false, false, false};
+  const TurnMask no_defer{true, true, false, true};
+  std::vector<TurnMask> masks(4, all);  // one level beyond the acting ones
+  std::vector<bool> decided = ClockMasks(c, 5, &masks);
+  EXPECT_EQ(decided, (std::vector<bool>{true, false, false, true}));
+  EXPECT_EQ(masks[0], all);
+  EXPECT_EQ(masks[1], hold);
+  EXPECT_EQ(masks[2], hold);
+  EXPECT_EQ(masks[3], all);
+  masks.assign(4, all);
+  decided = ClockMasks(c, 12, &masks);
+  EXPECT_EQ(decided, (std::vector<bool>{true, true, false, true}));
+  EXPECT_EQ(masks[1], no_defer);
+  EXPECT_EQ(masks[2], hold);
+  masks.assign(4, all);
+  decided = ClockMasks(c, 48, &masks);
+  EXPECT_EQ(decided, (std::vector<bool>{true, false, true, true}));
+  EXPECT_EQ(masks[2], no_defer);
+  // The fast levels' exploration never sees a slow level.
+  const std::vector<TurnMask> fast = FastMasks(c, std::vector<TurnMask>(4, all));
+  EXPECT_EQ(fast[0], all);
+  EXPECT_EQ(fast[1], hold);
+  EXPECT_EQ(fast[2], hold);
+  EXPECT_EQ(fast[3], all);
+  // No periods: the masks are untouched.
+  TurnConfig plain = Cfg();
+  masks.assign(4, all);
+  decided = ClockMasks(plain, 5, &masks);
+  EXPECT_EQ(decided, (std::vector<bool>(4, true)));
+  for (const TurnMask& m : masks) EXPECT_EQ(m, all);
+  EXPECT_EQ(FastMasks(plain, masks), masks);
+}
+
+TEST(TurnClock, SlowLevelsExploreAtTheirOwnDecisionsOnly) {
+  TurnConfig c = Cfg();
+  c.acting = 3;
+  c.periods = {1, 16, 64};
+  c.slow_explore_decisions = 10;
+  EXPECT_DOUBLE_EQ(SlowExploreRate(c, 0), 0.5);
+  EXPECT_DOUBLE_EQ(SlowExploreRate(c, 5), 0.275);
+  EXPECT_DOUBLE_EQ(SlowExploreRate(c, 10), 0.05);
+  EXPECT_DOUBLE_EQ(SlowExploreRate(c, 99), 0.05);
+  const TurnMask open{true, true, false, true};
+  const TurnMask hold{true, false, false, false};
+  std::mt19937_64 rng(7);
+  std::vector<uint64_t> decisions;
+  int explored1 = 0, moved0 = 0;
+  for (int n = 0; n < 4000; ++n) {
+    // L1 decides (three allowed actions), L2 does not, L0 is fast.
+    const std::vector<TurnMask> masks = {open, open, hold};
+    const std::vector<bool> decided = {true, true, false};
+    std::vector<Action> actions(3, Action::kHold);
+    if (n % 10 == 0) decisions.assign(3, 0);  // rate 0.5 .. 0.095 again
+    const std::vector<bool> ex =
+        ExploreSlow(c, masks, decided, &decisions, &actions, &rng);
+    ASSERT_EQ(ex.size(), 3u);
+    EXPECT_FALSE(ex[0]);
+    EXPECT_FALSE(ex[2]);
+    moved0 += actions[0] != Action::kHold;
+    EXPECT_EQ(actions[2], Action::kHold);
+    EXPECT_NE(actions[1], Action::kDefer);
+    if (!ex[1]) {
+      EXPECT_EQ(actions[1], Action::kHold);
+    }
+    explored1 += ex[1];
+  }
+  EXPECT_EQ(moved0, 0);            // the fast level is never touched here
+  EXPECT_EQ(decisions[1], 10u);    // one decision counted per deciding turn
+  EXPECT_EQ(decisions[2], 0u);
+  // Mean rate over decisions 0..9 is 0.2975: 4000 draws give about 1190.
+  EXPECT_GT(explored1, 1050);
+  EXPECT_LT(explored1, 1330);
+  // A deciding slow level with one allowed action counts no decision.
+  decisions.assign(3, 0);
+  std::vector<Action> actions(3, Action::kHold);
+  ExploreSlow(c, {open, hold, hold}, {true, true, true}, &decisions, &actions,
+              &rng);
+  EXPECT_EQ(decisions[1], 0u);
 }
 
 }  // namespace

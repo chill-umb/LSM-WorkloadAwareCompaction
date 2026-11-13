@@ -315,6 +315,54 @@ class ComposeTest(unittest.TestCase):
         for key in ("turn_l0_bill", "turn_compact_floor"):
             self.assertNotIn(key, compose("rules", contract=with_qbar(61234.5))[0])
 
+    def test_the_level_clock_keys(self):
+        """turn_periods and turn_slow_explore_decisions (the level clock):
+        optional, copied from the turn settings' "plugin" part; both or
+        neither; only with decay 0. Without them the config is as before."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = {**pc.learner_values(shipped, "training"), "turn_acting": 3}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        clock = {"turn_periods": "1:16:64", "turn_slow_explore_decisions": 12}
+        for arm in pc.TURN_ARMS:
+            plain, _ = compose(arm, diagnostic=True, learner=learner, decay=0, **turn)
+            for key in clock:
+                self.assertNotIn(key, plain)
+            on, _ = compose(arm, diagnostic=True, learner={**learner, **clock}, decay=0, **turn)
+            self.assertEqual({key: on[key] for key in clock}, clock)
+            self.assertEqual({k: v for k, v in on.items() if k not in clock}, plain)
+            with self.assertRaisesRegex(ValueError, "decay 0"):
+                compose(arm, diagnostic=True, learner={**learner, **clock}, decay=1, **turn)
+            for key in clock:
+                with self.assertRaisesRegex(ValueError, "both or neither"):
+                    compose(arm, diagnostic=True, learner={**learner, key: clock[key]},
+                            decay=0, **turn)
+
+    def test_the_compact_step_flag(self):
+        """turn_compact_step (the compact step): optional, 0 or 1, copied from
+        the turn settings' "plugin" part; with any decay; alone or with the
+        L0 bill and the compact floor. Without it the config is as before."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = {**pc.learner_values(shipped, "training"), "turn_acting": 1}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        for arm in pc.TURN_ARMS:
+            for decay in (0, 1):
+                plain, _ = compose(arm, diagnostic=True, learner=learner, decay=decay, **turn)
+                self.assertNotIn("turn_compact_step", plain)
+                for value in (0, 1):
+                    on, _ = compose(arm, diagnostic=True, decay=decay,
+                                    learner={**learner, "turn_compact_step": value}, **turn)
+                    self.assertEqual(on["turn_compact_step"], value)
+                    self.assertEqual({k: v for k, v in on.items() if k != "turn_compact_step"},
+                                     plain)
+            for bad in (2, -1, True, 0.5, "1"):
+                with self.assertRaisesRegex(ValueError, "turn_compact_step must be 0 or 1"):
+                    compose(arm, diagnostic=True, decay=0,
+                            learner={**learner, "turn_compact_step": bad}, **turn)
+            both, _ = compose(arm, diagnostic=True, decay=0, l0_bill=1, compact_floor=1,
+                              learner={**learner, "turn_compact_step": 1}, **turn)
+            self.assertEqual((both["turn_l0_bill"], both["turn_compact_floor"],
+                              both["turn_compact_step"]), (1, 1, 1))
+
     def test_the_level_reads_flag(self):
         """LEVEL_READS: every arm's level_reads, 0 by default; 1 only for the
         hold and turn arms, in any run (logging only); the hold arm's window,
