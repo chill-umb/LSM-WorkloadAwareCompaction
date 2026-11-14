@@ -717,6 +717,22 @@ and log `J_reward` (the bill), `bill_read` and `bill_merge`. Carried like
 PRIOR: `turn_l0_bill` in the config, `turn_l0_bill=` in `metadata.env`; 1
 only in a diagnostic run.
 
+Two optional keys in the turn settings' `"trainer"` part widen the bill to
+the merges L0's K pushes below L1 (each needs `L0_BILL=1`; at most one of
+them is 1):
+
+- `l0_bill_written` 1 (2026-11-13; `written_turns`, default 32): the three
+  merge steps below L0 charged when the bytes are written
+  (`rl_agent/learner/written_bill.py`); the turn lines add `bill_written`
+  and `bill_cells`.
+- `l0_bill_deep` 1 (owner, 2026-11-14): every merge out of L1, L2 and L3
+  that finished in the turn, at its whole price, as L0's own merges are
+  charged (`merge_prices`); the turn lines add `bill_deep` and
+  `bill_deep_levels` (L1, L2, L3). 0, 1 or absent; anything else is
+  refused.
+
+37's `l0_bill` check takes both parts into the sum.
+
 ### The turn arms' compact floor flag, COMPACT_FLOOR
 
 `COMPACT_FLOOR=0` (the default): L0 may compact whenever it has a file.

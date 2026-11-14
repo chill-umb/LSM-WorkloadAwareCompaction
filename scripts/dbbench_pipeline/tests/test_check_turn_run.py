@@ -289,6 +289,35 @@ class CheckTurnRunTest(unittest.TestCase):
                 r["J_reward"] = r["bill_read"] + r["bill_merge"] - 1.0
         self.assertEqual(self.run_check(bill=1, trainer=written_negative)["failed_checks"], ["l0_bill"])
 
+        # The trainer's l0_bill_deep: the merges out of L1-L3 belong to the sum, with their parts.
+        def deep(parts):
+            def change(r):
+                if r["type"] == "turn":
+                    r["bill_deep"] = sum(parts)
+                    r["bill_deep_levels"] = list(parts)
+                    r["J_reward"] = r["bill_read"] + r["bill_merge"] + sum(parts)
+            return change
+        self.assertEqual(self.run_check(bill=1, trainer=deep([1e5, 3e5, 0.0]))["verdict"], "passed")
+        self.assertEqual(self.run_check(bill=1, trainer=deep([0.0, 0.0, 0.0]))["verdict"], "passed")
+        self.assertEqual(self.run_check(bill=1, trainer=deep([2e5, -1.0, 0.0]))["failed_checks"], ["l0_bill"])
+
+        def deep_left_out(r):
+            if r["type"] == "turn":
+                r["bill_deep"], r["bill_deep_levels"] = 4e5, [4e5, 0.0, 0.0]
+        self.assertEqual(self.run_check(bill=1, trainer=deep_left_out)["failed_checks"], ["l0_bill"])
+
+        def parts_off(r):
+            if r["type"] == "turn":
+                r["bill_deep"], r["bill_deep_levels"] = 4e5, [1e5, 0.0, 0.0]
+                r["J_reward"] = r["bill_read"] + r["bill_merge"] + 4e5
+        self.assertEqual(self.run_check(bill=1, trainer=parts_off)["failed_checks"], ["l0_bill"])
+
+        def parts_missing(r):
+            if r["type"] == "turn":
+                r["bill_deep"] = 4e5
+                r["J_reward"] = r["bill_read"] + r["bill_merge"] + 4e5
+        self.assertEqual(self.run_check(bill=1, trainer=parts_missing)["failed_checks"], ["l0_bill"])
+
         report = self.run_check(bill=0)
         self.assertEqual(report["verdict"], "passed", report)
         self.assertFalse(report["checks"]["l0_bill"]["on"])

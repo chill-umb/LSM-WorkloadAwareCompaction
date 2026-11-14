@@ -33,6 +33,13 @@ also holds the three merge steps below L0, charged when the bytes are written
 (written_bill.py; ratios over the last written_turns turns, default 32): the
 "turn" lines add "bill_written" (their sum) and "bill_cells" (steps 0..3).
 
+With the trainer settings' l0_bill_deep 1 (needs turn_l0_bill 1; not with
+l0_bill_written 1, which charges the same merges another way) the bill also
+holds every merge out of L1, L2 and L3 that finished in the turn, each at its
+whole price, as L0's own merges are (merge_prices): the work K pushes below
+L1 is billed to L0 as it is paid. The "turn" lines add "bill_deep" (the sum)
+and "bill_deep_levels" (L1, L2, L3).
+
   python -m learner.turn_trainer --plugin-config CFG --decisions D.jsonl \\
       --host-log H.jsonl --weights W.bin --settings S.json \\
       --log turn_trainer.jsonl --summary turn_trainer_summary.json \\
@@ -75,6 +82,8 @@ SETTINGS_KEYS = ("gamma", "n_step", "batch", "steps_per_turn", "min_replay",
                  "lr", "grad_clip", "huber", "tau", "push_every_turns", "clip",
                  "hidden_factored", "hidden_vdn", "layers", "c_set", "seed",
                  "torch_threads")
+# The start levels whose finished merges l0_bill_deep adds to L0's bill.
+DEEP_LEVELS = (1, 2, 3)
 
 
 # --------------------------------------------------------------- statistics
@@ -262,6 +271,17 @@ class TurnTrainer:
             if not self.l0_bill:
                 raise ValueError("l0_bill_written 1 adds to L0's bill: it needs turn_l0_bill 1")
             self.written = WB.WrittenCells(int(settings.get("written_turns", 32)))
+        # The merges below L1 as paid, added to the L0 bill: optional key
+        # l0_bill_deep (0 or 1, absent 0).
+        deep = settings.get("l0_bill_deep", 0)
+        if type(deep) is not int or deep not in (0, 1):
+            raise ValueError(f"l0_bill_deep is 0 or 1, not {deep!r}")
+        self.deep_bill = deep == 1
+        if self.deep_bill:
+            if not self.l0_bill:
+                raise ValueError("l0_bill_deep 1 adds to L0's bill: it needs turn_l0_bill 1")
+            if self.written is not None:
+                raise ValueError("l0_bill_deep 1 and l0_bill_written 1 charge the same deep merges twice")
         n = len(self.names)
         self.x_stats = Running(n)
         self.j_stats = Running(1)
@@ -390,6 +410,12 @@ class TurnTrainer:
         read = p.beta_r * l0_read_cost(p.v2.base, line.l0_read)
         merge = float(price.get("merges", {}).get(0, [0.0, 0.0])[0])
         return read, merge
+
+    def deep_merges(self, price: dict) -> list:
+        """[L1, L2, L3]: the merges out of each that finished in the turn, each
+        at its whole price, as L0's own in l0_bill_parts (l0_bill_deep)."""
+        merges = price.get("merges", {})
+        return [float(merges.get(lv, [0.0, 0.0])[0]) for lv in DEEP_LEVELS]
 
     def written_cells(self, line: Turn, price: dict) -> list:
         """[cell_0 .. cell_3] of the turn `line` closes (written_bill.py): each
@@ -521,6 +547,9 @@ class TurnTrainer:
         cells = self.written_cells(line, price) if self.written is not None else None
         if cells is not None:
             J += sum(cells[k] for k in WB.DEEP)
+        deep = self.deep_merges(price) if self.deep_bill else None
+        if deep is not None:
+            J += sum(deep)
         tr = Transition(t=line.t, x0=prev.x, m0=prev.masks, a=prev.actions,
                         x1=line.x, m1=line.masks, d0=prev.owed, d1=line.owed,
                         J=J, changes=prev.set + line.mid_applies,
@@ -540,6 +569,8 @@ class TurnTrainer:
             record.update(bill_read=bill[0], bill_merge=bill[1])
         if cells is not None:
             record.update(bill_written=sum(cells[k] for k in WB.DEEP), bill_cells=cells)
+        if deep is not None:
+            record.update(bill_deep=sum(deep), bill_deep_levels=deep)
         self.emit(record)
         if math.isfinite(td):
             self.preq.append(td)
