@@ -116,7 +116,10 @@ class Reader {
 // the new anchor. For the decay's it is RocksDB's pending estimate now: the
 // glide already paces the new debt, and a level's own debt at the lower rung
 // can pass the guard by itself (L3 full at 2x at T = 10 owes ~44 GiB), which
-// would hold it above native for good (owner, 2026-11-07).
+// would hold it above native for good (owner, 2026-11-07). With
+// cfg.guard_added (turn_guard_added), compact's drop counts only the work it
+// adds: the owed work at the new anchor minus the owed work at the current
+// rungs, so debt the tree already owes does not block the step.
 bool DropBlocked(const TurnTree& t, const TurnConfig& cfg,
                  const Ladder& k_ladder, const Ladder& m_ladder,
                  const std::vector<AnchorState>& an, int level, double new_a,
@@ -129,6 +132,10 @@ bool DropBlocked(const TurnTree& t, const TurnConfig& cfg,
     const TurnSettings at = RungSettings(t, k_ladder, m_ladder, trial);
     double owed = 0;
     for (double d : OwedWork(t, at.m, at.K)) owed += d;
+    if (cfg.guard_added) {
+      const TurnSettings now = RungSettings(t, k_ladder, m_ladder, an);
+      for (double d : OwedWork(t, now.m, now.K)) owed -= d;
+    }
     if (owed > cfg.guard_owed_bytes) return true;
   }
   return level >= 1 && (t.n0_all >= t.K_slow - cfg.guard_l0_flushes ||

@@ -93,7 +93,10 @@ TURN_OPTIONAL_KEYS = ("turn_periods", "turn_slow_explore_decisions")
 # The compact step (controller/config.h turn_compact_step):
 # optional, 0 or 1, copied from the turn settings' "plugin" part when it has
 # it. 1: L0's compact only steps K one rung down, with no forced merge.
-TURN_OPTIONAL_FLAGS = ("turn_compact_step",)
+# The guard on added work only (controller/config.h turn_guard_added): the
+# same way. 1: compact's drop waits on the owed-work guard only for the work
+# the drop itself makes due, not for debt the tree already owes.
+TURN_OPTIONAL_FLAGS = ("turn_compact_step", "turn_guard_added")
 # learned2's own keys (controller/learned2.h; owner, 2026-11-05), from the
 # "plugin" part of its settings file (config/learner2_settings.json).
 LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",

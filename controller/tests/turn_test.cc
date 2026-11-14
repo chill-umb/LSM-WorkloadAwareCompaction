@@ -557,6 +557,72 @@ TEST(TurnEncode, GuardsBlockTheDropButNotCompactNow) {
   EXPECT_DOUBLE_EQ(an[3].a, -0.5);
 }
 
+// turn_guard_added: compact's drop waits on the owed-work guard only for the
+// work the drop itself makes due. A tree that already owes far past the guard
+// (L2 at 20 GiB against 768 MiB: ~57 GiB owed at native) blocks L0's step
+// down from K = 8 with the flag off. On, the step adds nothing while L0 holds
+// fewer files than the new trigger, and only the L0->L1 merge and what it
+// pushes down (~4 GiB here) when it holds more, so the step goes ahead. A
+// drop whose own work passes the guard still waits.
+TEST(TurnEncode, GuardOnAddedWorkIgnoresDebtTheTreeAlreadyOwes) {
+  TurnConfig c = Cfg();
+  c.compact_step = true;
+  const Ladders l = MakeLadders(c);
+  TurnTree t = Tree();
+  t.B[2] = t.B_all[2] = 20 * kGiB;
+  t.score[2] = t.B[2] / t.C[2];
+  const auto owed = [&](const TurnSettings& s) {
+    double o = 0;
+    for (double d : OwedWork(t, s.m, s.K)) o += d;
+    return o;
+  };
+  for (int n0 : {2, 7}) {
+    t.n0 = t.n0_all = n0;
+    t.B[0] = t.B_all[0] = n0 * 8 * kMiB;
+    for (bool added : {false, true}) {
+      TurnConfig cfg = c;
+      cfg.guard_added = added;
+      std::vector<AnchorState> an = Native(t.num_levels);
+      an[0].a = 1;  // K = 8, the top rung
+      const TurnSettings before = RungSettings(t, l.k, l.m, an);
+      ASSERT_EQ(before.K, 8);
+      ASSERT_GT(owed(before), c.guard_owed_bytes) << n0;
+      std::vector<Action> acts = Holds(t.num_levels);
+      acts[0] = Action::kCompact;
+      std::vector<TurnNote> notes;
+      const TurnSettings s = Encode(t, cfg, l.k, l.m, acts, &an, &notes);
+      EXPECT_EQ(notes[0].guard_blocked, !added) << n0 << " " << added;
+      EXPECT_EQ(s.K, added ? 6 : 8) << n0 << " " << added;
+      EXPECT_EQ(notes[0].moved, added) << n0 << " " << added;
+      if (added) {
+        const double step = owed(s) - owed(before);
+        EXPECT_LT(step, c.guard_owed_bytes) << n0;
+        if (n0 == 2) {
+          EXPECT_DOUBLE_EQ(step, 0) << n0;
+        } else {
+          EXPECT_GT(step, 0) << n0;
+        }
+      }
+    }
+  }
+  // A drop whose own work passes the guard still waits with the flag on: L3
+  // at 4,500 MiB dropped to 0.71x makes ~6.8 GiB due, against a 1 GiB guard,
+  // on a tree that owes nothing now.
+  TurnConfig cfg = Cfg();
+  cfg.guard_added = true;
+  cfg.guard_owed_bytes = 1 * kGiB;
+  TurnTree u = Tree();
+  u.B[3] = u.B_all[3] = 4500 * kMiB;
+  u.score = {0.5, 0.78, 0.91, 4500.0 / 4608, 0.72, 0};
+  std::vector<AnchorState> an = Native(u.num_levels);
+  std::vector<Action> acts = Holds(u.num_levels);
+  acts[3] = Action::kCompact;
+  std::vector<TurnNote> notes;
+  Encode(u, cfg, l.k, l.m, acts, &an, &notes);
+  EXPECT_TRUE(notes[3].guard_blocked);
+  EXPECT_EQ(an[3].a, 0);
+}
+
 // After compact-now the glide carries the anchor's drop on, at most R_i a
 // turn, down to the new rung; after a defer the postponed work is paid the
 // same way.

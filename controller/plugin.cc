@@ -409,6 +409,7 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
                          .Num("slow_explore_decisions",
                               t.slow_explore_decisions)
                          .Num("compact_step", t.compact_step ? 1 : 0)
+                         .Num("guard_added", t.guard_added ? 1 : 0)
                          .Raw("features", names + "]")
                          .str());
   }

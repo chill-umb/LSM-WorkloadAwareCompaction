@@ -65,6 +65,15 @@ struct TurnConfig {
   // also merges at once (K = max(1, n0) for the turn) and needs a file.
   // Levels below L0 are unchanged.
   bool compact_step = false;
+  // The guard on added work only (turn_guard_added; optional, 0 or 1;
+  // absent: 0, as before). On, compact's drop waits on guard_owed_bytes only
+  // for the work the drop itself makes due: the owed work at the new rungs
+  // minus the owed work at the current rungs. Debt the tree already owes no
+  // longer blocks a step down (in W3-W5 it owes 17-51 GiB the whole run, so
+  // every L0 step down was refused). Off, the guard tests all the owed work at
+  // the new rungs. The other guards (L0 near its slowdown, a glide still
+  // running, below L0) and the decay's guard are unchanged.
+  bool guard_added = false;
   // The level clock (turn_periods; optional, ":"-separated, one whole number
   // per acting level; absent: empty, every level decides every turn, as
   // before). Level i decides only at the turns t with t % periods[i] ==

@@ -363,6 +363,34 @@ class ComposeTest(unittest.TestCase):
             self.assertEqual((both["turn_l0_bill"], both["turn_compact_floor"],
                               both["turn_compact_step"]), (1, 1, 1))
 
+    def test_the_guard_added_flag(self):
+        """turn_guard_added (the guard on added work only): optional, 0 or 1,
+        copied from the turn settings' "plugin" part; with any decay; alone or
+        with the compact step and the L0 bill. Without it the config is as
+        before."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = {**pc.learner_values(shipped, "training"), "turn_acting": 1}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        for arm in pc.TURN_ARMS:
+            for decay in (0, 1):
+                plain, _ = compose(arm, diagnostic=True, learner=learner, decay=decay, **turn)
+                self.assertNotIn("turn_guard_added", plain)
+                for value in (0, 1):
+                    on, _ = compose(arm, diagnostic=True, decay=decay,
+                                    learner={**learner, "turn_guard_added": value}, **turn)
+                    self.assertEqual(on["turn_guard_added"], value)
+                    self.assertEqual({k: v for k, v in on.items() if k != "turn_guard_added"},
+                                     plain)
+            for bad in (2, -1, True, 0.5, "1"):
+                with self.assertRaisesRegex(ValueError, "turn_guard_added must be 0 or 1"):
+                    compose(arm, diagnostic=True, decay=0,
+                            learner={**learner, "turn_guard_added": bad}, **turn)
+            both, _ = compose(arm, diagnostic=True, decay=0, l0_bill=1,
+                              learner={**learner, "turn_compact_step": 1,
+                                       "turn_guard_added": 1}, **turn)
+            self.assertEqual((both["turn_l0_bill"], both["turn_compact_step"],
+                              both["turn_guard_added"]), (1, 1, 1))
+
     def test_the_level_reads_flag(self):
         """LEVEL_READS: every arm's level_reads, 0 by default; 1 only for the
         hold and turn arms, in any run (logging only); the hold arm's window,

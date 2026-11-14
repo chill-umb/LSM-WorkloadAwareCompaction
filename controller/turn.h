@@ -61,7 +61,8 @@ struct TurnTree;
 // goes through the guards: it waits this turn while RocksDB's pending
 // estimate now passes guard_owed_bytes, or, below L0, while L0 is within
 // guard_l0_flushes of its slowdown or the level's previous drop is still
-// gliding. (Compact's drop tests the owed work at the new anchor instead;
+// gliding. (Compact's drop tests the owed work at the new anchor instead, or
+// with turn_guard_added only the work the drop adds;
 // for the decay that could hold a deep level above native for good.) The
 // step itself is then glided by Encode. A step that raises a target (an
 // anchor below native) never waits: it makes no merge due. Returns per level

@@ -955,6 +955,73 @@ TEST_F(TurnTest, TheCompactStepMovesTheRungAndSendsNoOverride) {
   EXPECT_EQ(Names(off[0], "action")[0], "compact");
 }
 
+// turn_guard_added (optional): off unless set, 0 or 1, and for the turn mode
+// only.
+TEST_F(TurnTest, TheGuardAddedFlagParses) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.guard_added);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_guard_added", "0"}}), &c, &error))
+      << error;
+  EXPECT_FALSE(c.turn.guard_added);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_guard_added", "1"}}), &c, &error))
+      << error;
+  EXPECT_TRUE(c.turn.guard_added);
+  EXPECT_FALSE(c.turn.compact_step);
+  for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+    EXPECT_FALSE(LoadConfig(Config({{"turn_guard_added", bad}}), &c, &error))
+        << bad;
+  }
+}
+
+// turn_guard_added 1 on a tree deep in debt: L2 at 10x its target owes
+// ~300 MiB, past a 64 MiB guard. Off, every compact press of L0 is blocked
+// (the rung stays at K = 4, guard_blocked true). On, L0's step adds only the
+// L0->L1 merge (~8 MiB) and K walks 4 -> 3 -> 2 as with a calm tree. The
+// start line records the flag.
+TEST_F(TurnTest, TheGuardOnAddedWorkLetsL0StepDownInADeepBacklog) {
+  WriteNet(weights(), BiasNet(1, 0, 0, Action::kCompact));
+  const auto run = [&](const char* added) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    FakeHost host;
+    Tree(&host);
+    host.SetLevel(2, 10.0);
+    {
+      Controller controller(&host,
+                            Config({{"turn_decay", "0"},
+                                    {"turn_compact_step", "1"},
+                                    {"turn_guard_owed_bytes", "67108864"},
+                                    {"turn_guard_added", added}}),
+                            [this] { return clock_us_; });
+      Run(&controller, &host, 24, /*writes=*/true);
+    }
+    return Lines("turn");
+  };
+  const auto blocked0 = [](const std::string& line) {
+    return line.find("\"guard_blocked\":[1") != std::string::npos;  // JsonBools writes 1/0
+  };
+  const auto off = run("0");
+  ASSERT_EQ(off.size(), 6u);
+  EXPECT_EQ(Number(Lines("turn_start")[0], "guard_added"), 0);
+  for (const std::string& line : off) {
+    EXPECT_EQ(Names(line, "action")[0], "compact") << line;
+    EXPECT_TRUE(blocked0(line)) << line;
+    EXPECT_EQ(Number(line, "rung_k"), 4) << line;
+    EXPECT_EQ(Number(line, "sent_k"), 4) << line;
+  }
+  const auto on = run("1");
+  ASSERT_EQ(on.size(), 6u);
+  EXPECT_EQ(Number(Lines("turn_start")[0], "guard_added"), 1);
+  const double want_rung[] = {4, 3, 2, 2, 2, 2};
+  const double want_sent[] = {3, 2, 2, 2, 2, 2};
+  for (size_t i = 0; i < on.size(); ++i) {
+    EXPECT_FALSE(blocked0(on[i])) << on[i];
+    EXPECT_EQ(Number(on[i], "rung_k"), want_rung[i]) << on[i];
+    EXPECT_EQ(Number(on[i], "sent_k"), want_sent[i]) << on[i];
+  }
+}
+
 // turn_periods (the level clock): optional; one whole period per acting
 // level, L0's 1; needs turn_decay 0 and turn_slow_explore_decisions.
 TEST_F(TurnTest, TurnPeriodsAreParsedAndChecked) {

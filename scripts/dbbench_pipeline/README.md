@@ -730,6 +730,22 @@ with a turn settings file whose `turn_acting` is 1 (with `MACHINE_CAL=on`,
 36 runs on the machine's `turn_settings.machine.json`, so that is the file
 that needs it).
 
+### The turn arms' guard on added work, turn_guard_added
+
+Absent or 0 (the default): compact's drop of a level's rung waits while the
+owed work at the new rungs (`controller/turn.cc` OwedWork, every level)
+passes `turn_guard_owed_bytes` (16 GiB). In W3-W5 the tree owes 17-51 GiB
+for the whole run, so every step down of L0's K was refused (batch cs4,
+2026-11-13). 1 (owner, 2026-11-14): the guard counts only the work the drop
+itself makes due, the owed work at the new rungs minus the owed work at the
+current rungs, so debt the tree already owes no longer blocks a step. The
+other guards (below L0: L0 near its slowdown, a glide still running) and the
+decay's guard are unchanged. Set it like `turn_compact_step`, in the turn
+settings' `"plugin"` part (with `MACHINE_CAL=on`, the machine's
+`turn_settings.machine.json`); `plugin_config.py` copies it into the config,
+so the config's hash in the fingerprint tells the two apart, and the
+decision log's `turn_start` line records `guard_added`.
+
 ### The per-level read log flag, LEVEL_READS
 
 `LEVEL_READS=0` (the default): the logs are as before. `LEVEL_READS=1`

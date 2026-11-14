@@ -336,6 +336,7 @@ const std::set<std::string>& KnownKeys() {
                                                "turn_l0_bill",
                                                "turn_compact_floor",
                                                "turn_compact_step",
+                                               "turn_guard_added",
                                                "turn_periods",
                                                "turn_slow_explore_decisions",
                                                "turn_margin",
@@ -711,6 +712,14 @@ static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
     return false;
   }
   t->compact_step = compact_step == 1;
+  // The guard on added work only (turn_guard_added): optional; absent means
+  // off.
+  int guard_added = 0;
+  if (r->Has("turn_guard_added") &&
+      !integer("turn_guard_added", &guard_added, 0, 1)) {
+    return false;
+  }
+  t->guard_added = guard_added == 1;
   t->periods.clear();
   t->slow_explore_decisions = 0;
   if (r->Has("turn_periods")) {
@@ -868,7 +877,7 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
     }
     for (const char* key : {"turn_periods", "turn_slow_explore_decisions",
-                            "turn_compact_step"}) {
+                            "turn_compact_step", "turn_guard_added"}) {
       if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
     }
   }
