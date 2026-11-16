@@ -40,6 +40,30 @@ whole price, as L0's own merges are (merge_prices): the work K pushes below
 L1 is billed to L0 as it is paid. The "turn" lines add "bill_deep" (the sum)
 and "bill_deep_levels" (L1, L2, L3).
 
+With the trainer settings' l0_bill_z 1 (bill Z; needs turn_l0_bill 1; not
+with l0_bill_written 1, nor with l0_bill_deep 1, whose merges it already
+holds) the bill is l0_bill_deep's plus the change over the turn of three
+debt ledgers (debt_bill.py): money owed for the bytes L1 and L2 must still
+pass down and for the merge input L3 owes, booked at the day's price per
+byte as what is owed grows and released at the booked average as it
+shrinks, so the bill can be negative. The ledgers start from the first turn
+line's tree ("B", "C"; what it owes is never booked) and take each priced
+turn in order. The level sizes after a turn are rebuilt from that tree and
+every flush and finished job of the host log up to the turn's end (the
+pricer's job set, records applied once each in order, a dropped line's
+too), not read from the line's "B", which leaves out the bytes of merges in
+flight: bytes then move between levels when a job ends, in the turn whose
+bill prices it, not when it starts. The targets are each line's "C". The
+"turn" lines add, beside "bill_deep" and "bill_deep_levels", "bill_debt"
+(the change), "bill_debt_levels" (L1, L2, L3), "debt" (the three balances)
+and "tree" (the rebuilt sizes of L0..L4, bytes).
+
+With l0_bill_z_carry 0 too (needs l0_bill_z 1; absent or 1: as above) the
+ledgers leave L0's bytes out of what is owed (debt_bill.py, option 1): a
+flush books nothing while its bytes wait in L0, and the growth of L1 that
+L0's merge causes is booked in the turn that merge finishes. The "turn"
+lines then also carry "debt_carry": 0.
+
   python -m learner.turn_trainer --plugin-config CFG --decisions D.jsonl \\
       --host-log H.jsonl --weights W.bin --settings S.json \\
       --log turn_trainer.jsonl --summary turn_trainer_summary.json \\
@@ -69,6 +93,7 @@ if __package__ in (None, ""):
 
 import torch  # noqa: E402
 
+from learner import debt_bill as DB  # noqa: E402
 from learner import learned2 as L2  # noqa: E402
 from learner import turn_model as TM  # noqa: E402
 from learner import turn_weights as TW  # noqa: E402
@@ -174,6 +199,10 @@ class Turn:
     # L0's raw read counts over the turn (turn_l0_bill's "l0_read"; None
     # when the plugin logged none).
     l0_read: dict | None = None
+    # The tree at the line's boundary: bytes per level not being compacted
+    # ("B") and the levels' targets ("C"); None when absent (l0_bill_z).
+    B: list | None = None
+    C: list | None = None
 
 
 @dataclass
@@ -199,6 +228,15 @@ def parse_prior(value) -> list:
     return [0.0] * TW.N_ACTIONS
 
 
+def parse_sizes(value) -> list | None:
+    """A turn line's "B" or "C": its numbers, or None (absent, or not all
+    numbers)."""
+    if isinstance(value, list) and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                       for v in value):
+        return [float(v) for v in value]
+    return None
+
+
 def parse_turn(r: dict, names: list, acting: int) -> Turn:
     x = [float(r["x"][n]) for n in names]
     masks = [[bool(v) for v in m] for m in r["masks"][:acting]]
@@ -210,7 +248,8 @@ def parse_turn(r: dict, names: list, acting: int) -> Turn:
                 explored=int(r.get("explored", -1)), eps=float(r.get("eps", 0)),
                 prior=parse_prior(r.get("prior")),
                 inflow=[float(v) for v in r.get("inflow", [])],
-                l0_read=r["l0_read"] if isinstance(r.get("l0_read"), dict) else None)
+                l0_read=r["l0_read"] if isinstance(r.get("l0_read"), dict) else None,
+                B=parse_sizes(r.get("B")), C=parse_sizes(r.get("C")))
 
 
 
@@ -282,6 +321,32 @@ class TurnTrainer:
                 raise ValueError("l0_bill_deep 1 adds to L0's bill: it needs turn_l0_bill 1")
             if self.written is not None:
                 raise ValueError("l0_bill_deep 1 and l0_bill_written 1 charge the same deep merges twice")
+        # Bill Z, the merges below L1 as paid plus the debt ledgers' change
+        # (debt_bill.py), added to the L0 bill: optional key l0_bill_z (0 or
+        # 1, absent 0); one DebtLedger per run.
+        z = settings.get("l0_bill_z", 0)
+        if type(z) is not int or z not in (0, 1):
+            raise ValueError(f"l0_bill_z is 0 or 1, not {z!r}")
+        # Option 1: L0's bytes left out of the ledgers; optional key
+        # l0_bill_z_carry (0 or 1, absent 1 = L0's bytes carried into L1's).
+        carry = settings.get("l0_bill_z_carry", 1)
+        if type(carry) is not int or carry not in (0, 1):
+            raise ValueError(f"l0_bill_z_carry is 0 or 1, not {carry!r}")
+        if carry == 0 and z != 1:
+            raise ValueError("l0_bill_z_carry 0 changes bill Z's ledgers: it needs l0_bill_z 1")
+        self.debt = None
+        if z == 1:
+            if not self.l0_bill:
+                raise ValueError("l0_bill_z 1 adds to L0's bill: it needs turn_l0_bill 1")
+            if self.written is not None:
+                raise ValueError("l0_bill_z 1 and l0_bill_written 1 charge the same deep merges twice")
+            if self.deep_bill:
+                raise ValueError("l0_bill_z 1 already holds l0_bill_deep's merges out of L1-L3: "
+                                 "set l0_bill_deep 0")
+            self.debt = DB.DebtLedger(carry_l0=carry == 1)
+        self.sizes = None           # bill Z's level sizes (DB.TreeSizes), from the first line
+        self.sizes_from = None       # the first line's boundary op: the sizes' start
+        self.sizes_upto = None       # the host-log record the sizes have reached
         n = len(self.names)
         self.x_stats = Running(n)
         self.j_stats = Running(1)
@@ -336,6 +401,8 @@ class TurnTrainer:
             if self.prev is None:          # the first line closes turn 0 (native)
                 self.prev = self.pending.pop(0)
                 self.observe(self.prev.x)
+                if self.debt is not None:  # bill Z's starting tree, never booked
+                    self.start_tree(self.prev)
                 continue
             if line.op1 <= line.op0:
                 self.dropped += 1
@@ -416,6 +483,56 @@ class TurnTrainer:
         at its whole price, as L0's own in l0_bill_parts (l0_bill_deep)."""
         merges = price.get("merges", {})
         return [float(merges.get(lv, [0.0, 0.0])[0]) for lv in DEEP_LEVELS]
+
+    def start_tree(self, line: Turn) -> None:
+        """Bill Z's start (l0_bill_z): the first line's "B" and "C" start the
+        ledgers and the rebuilt sizes, at the line's boundary."""
+        if line.B is None or line.C is None:
+            raise SystemExit(f"turn {line.t} has no B and C: bill Z (l0_bill_z 1) starts from the tree")
+        self.debt.start(line.B, line.C)
+        self.sizes = DB.TreeSizes(line.B)
+        self.sizes_from = line.op1
+
+    def boundary(self, op: int) -> int:
+        """The host-log record at which a turn starting at `op` begins, by
+        HostLogPricer.bounds' rule for lo: the measure_start stamp when op is
+        at or before it, else the first snap after op (the record that
+        closes the turn ending at op)."""
+        pr = self.pricer
+        if op <= pr.recs[pr.ms]["op"]:
+            return pr.ms
+        k = bisect.bisect_right(pr.snap_ops, op)
+        return pr.snap_idx[k] if k < len(pr.snap_idx) else len(pr.recs)
+
+    def debt_change(self, line: Turn, price: dict) -> list:
+        """[dD_1, dD_2, dD_3] of the turn `line` closes (debt_bill.py). The
+        sizes take every flush and finished job the pricer indexes from the
+        last record they reached (at the first priced turn: the first line's
+        boundary) up to the turn's end, so a dropped line's jobs are taken
+        too; the targets are the line's "C". Per start level 0..3 the merges
+        that finished in the turn: their whole price (merge_prices), the
+        bytes they took out of the level (written_bill.turn_row's, moves
+        without rewriting included) and the bytes fed into them
+        (merge_prices': source + overlap, moves left out). Called once per
+        priced turn, in order."""
+        lo, hi = price["bounds"]
+        merges = price.get("merges", {})
+        pr = self.pricer
+        if line.C is None:
+            raise SystemExit(f"turn {line.t} has no C: bill Z (l0_bill_z 1) needs the levels' targets")
+        if self.sizes_upto is None:
+            self.sizes_upto = self.boundary(self.sizes_from)
+        self.sizes.apply(*DB.finished(pr.recs, pr.job_idx, self.sizes_upto, hi))
+        self.sizes_upto = max(self.sizes_upto, hi)
+        moved = WB.turn_row(pr.recs, pr.job_idx, lo, hi, merges, 0.0).src
+        paid = [float(merges.get(i, [0.0, 0.0])[0]) for i in range(DB.STEPS)]
+        fed = [float(merges.get(i, [0.0, 0.0])[1]) for i in range(DB.STEPS)]
+        return self.debt.add(self.sizes.sizes, line.C, paid, moved, fed)
+
+    def tree_record(self) -> list:
+        """The rebuilt sizes of L0..L4 (bytes; a missing level 0), for the
+        "turn" line's "tree"."""
+        return (list(self.sizes.sizes) + [0.0] * DB.TREE_LEVELS)[:DB.TREE_LEVELS]
 
     def written_cells(self, line: Turn, price: dict) -> list:
         """[cell_0 .. cell_3] of the turn `line` closes (written_bill.py): each
@@ -547,9 +664,12 @@ class TurnTrainer:
         cells = self.written_cells(line, price) if self.written is not None else None
         if cells is not None:
             J += sum(cells[k] for k in WB.DEEP)
-        deep = self.deep_merges(price) if self.deep_bill else None
+        deep = self.deep_merges(price) if self.deep_bill or self.debt is not None else None
         if deep is not None:
             J += sum(deep)
+        debt = self.debt_change(line, price) if self.debt is not None else None
+        if debt is not None:
+            J += sum(debt)
         tr = Transition(t=line.t, x0=prev.x, m0=prev.masks, a=prev.actions,
                         x1=line.x, m1=line.masks, d0=prev.owed, d1=line.owed,
                         J=J, changes=prev.set + line.mid_applies,
@@ -571,6 +691,11 @@ class TurnTrainer:
             record.update(bill_written=sum(cells[k] for k in WB.DEEP), bill_cells=cells)
         if deep is not None:
             record.update(bill_deep=sum(deep), bill_deep_levels=deep)
+        if debt is not None:
+            record.update(bill_debt=sum(debt), bill_debt_levels=debt, debt=list(self.debt.balances),
+                          tree=self.tree_record())
+            if not self.debt.carry_l0:
+                record["debt_carry"] = 0
         self.emit(record)
         if math.isfinite(td):
             self.preq.append(td)

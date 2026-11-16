@@ -717,8 +717,8 @@ and log `J_reward` (the bill), `bill_read` and `bill_merge`. Carried like
 PRIOR: `turn_l0_bill` in the config, `turn_l0_bill=` in `metadata.env`; 1
 only in a diagnostic run.
 
-Two optional keys in the turn settings' `"trainer"` part widen the bill to
-the merges L0's K pushes below L1 (each needs `L0_BILL=1`; at most one of
+Three optional keys in the turn settings' `"trainer"` part widen the bill
+to the merges L0's K pushes below L1 (each needs `L0_BILL=1`; at most one of
 them is 1):
 
 - `l0_bill_written` 1 (2026-11-13; `written_turns`, default 32): the three
@@ -730,8 +730,31 @@ them is 1):
   charged (`merge_prices`); the turn lines add `bill_deep` and
   `bill_deep_levels` (L1, L2, L3). 0, 1 or absent; anything else is
   refused.
+- `l0_bill_z` 1 (bill Z, 2026-11-15): `l0_bill_deep`'s merges plus the
+  turn's change of three debt ledgers (`rl_agent/learner/debt_bill.py`):
+  money owed for the bytes L1 and L2 must still pass down and for the merge
+  input L3 owes, booked at the day's price per byte as what is owed grows
+  and released at the booked average as it shrinks, so a turn's bill can
+  be negative. The level sizes start from the first turn line's `B` and
+  are then rebuilt from the host log's flushes and finished jobs (the
+  plugin's `B` leaves out the bytes of merges in flight, so bytes would
+  leave a level when its merge starts while the bill pays for it when it
+  finishes); the targets are each line's `C`. What the first line's tree
+  owes is never booked. The turn lines add, beside `bill_deep` and
+  `bill_deep_levels`, `bill_debt`, `bill_debt_levels` (L1, L2, L3), `debt`
+  (the balances) and `tree` (the rebuilt sizes of L0-L4). 0, 1 or absent;
+  anything else is refused, and so is `l0_bill_deep` 1 beside it.
+  With `l0_bill_z_carry` 0 too (2026-11-16, "option 1"; needs `l0_bill_z`
+  1; 1 or absent: as before) L0's bytes are left out of what the ledgers
+  owe: a flush books nothing while its bytes wait in L0, and the growth of
+  L1 that L0's merge causes is booked in the turn that merge finishes. The
+  turn lines then also carry `debt_carry` 0.
 
-37's `l0_bill` check takes both parts into the sum.
+37's `l0_bill` check takes every part into the sum (`bill_debt` of either
+sign, the sum's error judged against the parts' size), checks that the
+`debt` balances move by `bill_debt_levels` from one turn to the next,
+that `tree` is five finite numbers where present, and that `debt_carry`,
+where present, is 0 and stands beside the debt parts.
 
 ### The turn arms' compact floor flag, COMPACT_FLOOR
 

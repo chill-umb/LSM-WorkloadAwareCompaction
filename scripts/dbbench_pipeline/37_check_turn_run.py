@@ -20,7 +20,15 @@ from its result directory:
           its bill_written (>= 0; the trainer's l0_bill_written, absent: 0)
           plus its bill_deep (>= 0; the trainer's l0_bill_deep, absent: 0;
           present exactly when bill_deep_levels is, whose parts are each
-          >= 0 and sum to it),
+          >= 0 and sum to it) plus its bill_debt (any sign; bill Z, the
+          trainer's l0_bill_z, absent: 0; present exactly when
+          bill_debt_levels and debt are, and only beside bill_deep: three
+          ledger changes that sum to it and the three balances after the
+          turn, which differ from the turn before's by those changes
+          wherever both turns have a line; its "tree", the rebuilt sizes of
+          L0..L4, is five finite numbers wherever it is present; its
+          "debt_carry", the trainer's l0_bill_z_carry 0, is 0 and only
+          beside those changes),
           bill_read being beta_r times its turn's L0 read counts at the
           config's prices (rl_agent/learner/prices.py l0_read_cost); off, no
           turn line carries the block and no trainer line a bill
@@ -131,6 +139,38 @@ def arch6(decisions: list, archive: Path, acting: int) -> dict:
             "turns_with_weights": len(turns)}
 
 
+DEBT_KEYS = ("bill_debt", "bill_debt_levels", "debt")
+
+
+def debt_parts(r: dict) -> bool:
+    """A trainer line's bill Z parts (the trainer's l0_bill_z): none of
+    DEBT_KEYS, or all of them beside bill_deep, with three finite ledger
+    changes that sum to bill_debt and three finite balances; "tree", where
+    present, five finite sizes (L0..L4); and "debt_carry" (the trainer's
+    l0_bill_z_carry 0: L0's bytes left out of the ledgers), where present,
+    the whole number 0 beside DEBT_KEYS."""
+    def finite(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if "tree" in r and not (isinstance(r["tree"], list) and len(r["tree"]) == 5 and
+                            all(finite(v) for v in r["tree"])):
+        return False
+    present = [k in r for k in DEBT_KEYS]
+    if "debt_carry" in r and (type(r["debt_carry"]) is not int or r["debt_carry"] != 0 or not any(present)):
+        return False
+    if not any(present):
+        return True
+    if not all(present) or "bill_deep" not in r:
+        return False
+    total, changes, balances = (r[k] for k in DEBT_KEYS)
+    if not (isinstance(changes, list) and isinstance(balances, list) and
+            len(changes) == 3 and len(balances) == 3):
+        return False
+    if not all(finite(v) for v in [total] + changes + balances):
+        return False
+    return math.isclose(sum(changes), total, rel_tol=TOLERANCE,
+                        abs_tol=max(1e-300, TOLERANCE * sum(abs(v) for v in changes)))
+
+
 def l0_bill(decisions: list, trainer: list, config: dict) -> dict:
     turns = [r for r in decisions if r["type"] == "turn"]
     billed = [r for r in trainer if r["type"] == "turn"]
@@ -163,23 +203,35 @@ def l0_bill(decisions: list, trainer: list, config: dict) -> dict:
     except ValueError as error:
         return {"passed": False, "on": True,
                 "problems": [f"the config does not price the bill: {error}"]}
-    bad_sum, bad_read, unmatched = [], [], []
+    bad_sum, bad_read, unmatched, bad_step = [], [], [], []
+    ledgers = {}                  # t -> (debt, bill_debt_levels) of the lines with bill Z
     for r in billed:
         read, merge, total = r.get("bill_read"), r.get("bill_merge"), r.get("J_reward")
         # The trainer's l0_bill_written adds the deep steps charged when written, its l0_bill_deep
-        # the merges out of L1-L3 as paid, with their per-level parts (each absent: 0).
+        # the merges out of L1-L3 as paid, with their per-level parts (each absent: 0); its
+        # l0_bill_z (bill Z) those merges plus the debt ledgers' change, of either sign.
         deep = r.get("bill_written", 0.0)
         paid = r.get("bill_deep", 0.0)
         levels = r.get("bill_deep_levels", [])
-        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (read, merge, total, deep, paid)) \
+        owed = r.get("bill_debt", 0.0)
+        parts = (read, merge, deep, paid, owed)
+        # A part below zero can cancel: bill Z's sum is judged against the parts' size.
+        slack = 1e-300
+        if "bill_debt" in r and all(isinstance(v, (int, float)) and math.isfinite(v) for v in parts):
+            slack = max(slack, TOLERANCE * sum(abs(v) for v in parts))
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (total,) + parts) \
                 or merge < 0 or deep < 0 or paid < 0 \
-                or not math.isclose(total, read + merge + deep + paid, rel_tol=TOLERANCE, abs_tol=1e-300) \
+                or not math.isclose(total, read + merge + deep + paid + owed, rel_tol=TOLERANCE,
+                                    abs_tol=slack) \
                 or not isinstance(levels, list) \
                 or not all(isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 for v in levels) \
                 or ("bill_deep" in r) != bool(levels) \
-                or (levels and not math.isclose(sum(levels), paid, rel_tol=TOLERANCE, abs_tol=1e-300)):
+                or (levels and not math.isclose(sum(levels), paid, rel_tol=TOLERANCE, abs_tol=1e-300)) \
+                or not debt_parts(r):
             bad_sum.append(r["t"])
             continue
+        if "debt" in r:
+            ledgers[r["t"]] = (r["debt"], r["bill_debt_levels"])
         if r["t"] not in blocks:
             unmatched.append(r["t"])
             continue
@@ -188,9 +240,19 @@ def l0_bill(decisions: list, trainer: list, config: dict) -> dict:
             bad_read.append(r["t"])
     if bad_block:
         problems.append(f"turn lines without a whole l0_read block: {bad_block[:10]}")
+    # Bill Z's balances move by exactly the changes its lines report.
+    for t, (balances, changes) in sorted(ledgers.items()):
+        before = ledgers.get(t - 1)
+        if before is not None and not all(
+                math.isclose(b - a, c, rel_tol=TOLERANCE, abs_tol=max(1e-300, TOLERANCE * max(abs(a), abs(b))))
+                for a, b, c in zip(before[0], balances, changes)):
+            bad_step.append(t)
     if bad_sum:
-        problems.append(f"trainer lines whose J_reward is not bill_read + bill_merge (+ bill_written, + bill_deep): "
-                        f"{bad_sum[:10]}")
+        problems.append(f"trainer lines whose J_reward is not bill_read + bill_merge (+ bill_written, + bill_deep, "
+                        f"+ bill_debt): {bad_sum[:10]}")
+    if bad_step:
+        problems.append(f"trainer lines whose debt balances are not the turn before's plus their "
+                        f"bill_debt_levels: {bad_step[:10]}")
     if unmatched:
         problems.append(f"trainer lines with no l0_read of their turn: {unmatched[:10]}")
     if bad_read:

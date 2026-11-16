@@ -318,6 +318,109 @@ class CheckTurnRunTest(unittest.TestCase):
                 r["J_reward"] = r["bill_read"] + r["bill_merge"] + 4e5
         self.assertEqual(self.run_check(bill=1, trainer=parts_missing)["failed_checks"], ["l0_bill"])
 
+        # The trainer's l0_bill_z (bill Z): bill_deep's merges plus the debt ledgers' change, of
+        # either sign, with the three changes and the balances after the turn.
+        def debt_change(t):
+            return [-4e6, 2e5, 0.0] if t == 3 else [3e5, -1e5, 5e4 * t]
+
+        def balances(t):
+            return [b + sum(debt_change(u)[k] for u in range(1, t + 1))
+                    for k, b in enumerate((5e6, 1e6, 0.0))]
+
+        def debt(edit=None):
+            def change(r):
+                if r["type"] == "turn":
+                    t, paid = r["t"], [1e5, 3e5, 0.0]
+                    r.update(bill_deep=sum(paid), bill_deep_levels=paid, bill_debt=sum(debt_change(t)),
+                             bill_debt_levels=debt_change(t), debt=balances(t))
+                    r["J_reward"] = r["bill_read"] + r["bill_merge"] + sum(paid) + r["bill_debt"]
+                    if edit:
+                        edit(r)
+            return change
+        report = self.run_check(bill=1, trainer=debt())
+        self.assertEqual(report["verdict"], "passed", report)
+        records = []
+        self.run_check(bill=1, trainer=debt(records.append))
+        self.assertTrue(any(r["J_reward"] < 0 for r in records))          # a negative bill passes
+
+        def cancelling(error):      # the last turn's parts nearly cancel (J_reward about 1, parts about 1e6):
+            def edit(r):            # an error is judged against the parts' size, not J_reward's
+                if r["t"] == 5:
+                    r["bill_debt_levels"] = [-(r["bill_read"] + r["bill_merge"] + r["bill_deep"]) + 1.0, 0.0, 0.0]
+                    r["bill_debt"] = sum(r["bill_debt_levels"])
+                    r["debt"] = [a + b for a, b in zip(balances(4), r["bill_debt_levels"])]
+                    r["J_reward"] = r["bill_read"] + r["bill_merge"] + r["bill_deep"] + r["bill_debt"] + error
+            return edit
+        self.assertEqual(self.run_check(bill=1, trainer=debt(cancelling(1e-6)))["verdict"], "passed")
+        self.assertEqual(self.run_check(bill=1, trainer=debt(cancelling(1e-2)))["failed_checks"], ["l0_bill"])
+
+        def left_out(r):
+            r["J_reward"] -= r["bill_debt"]
+        self.assertEqual(self.run_check(bill=1, trainer=debt(left_out))["failed_checks"], ["l0_bill"])
+
+        def changes_off(r):
+            if r["t"] == 2:
+                r["bill_debt_levels"][0] += 1.0
+        self.assertEqual(self.run_check(bill=1, trainer=debt(changes_off))["failed_checks"], ["l0_bill"])
+
+        for key in ("bill_debt_levels", "debt", "bill_deep"):
+            def without(r, key=key):
+                del r[key]
+                if key == "bill_deep":
+                    del r["bill_deep_levels"]
+                    r["J_reward"] -= 4e5
+            with self.subTest(without=key):
+                self.assertEqual(self.run_check(bill=1, trainer=debt(without))["failed_checks"], ["l0_bill"])
+
+        def two_ledgers(r):
+            r["debt"] = r["debt"][:2]
+        self.assertEqual(self.run_check(bill=1, trainer=debt(two_ledgers))["failed_checks"], ["l0_bill"])
+
+        def balance_off(r):
+            if r["t"] == 4:
+                r["debt"][1] += 1e3
+        report = self.run_check(bill=1, trainer=debt(balance_off))
+        self.assertEqual(report["failed_checks"], ["l0_bill"])
+        self.assertIn("debt balances", " ".join(report["checks"]["l0_bill"]["problems"]))
+
+        def gap(r):                 # no line for turn 3 (its earlier line chose nothing)
+            if r["t"] == 3:
+                r["type"] = "not a turn"
+        self.assertEqual(self.run_check(bill=1, trainer=debt(gap))["verdict"], "passed")
+
+        def deep_negative(r):       # bill_deep stays >= 0 under bill Z
+            r["bill_deep_levels"][2] = -1.0
+            r["bill_deep"] -= 1.0
+            r["J_reward"] -= 1.0
+        self.assertEqual(self.run_check(bill=1, trainer=debt(deep_negative))["failed_checks"], ["l0_bill"])
+
+        # Bill Z's "tree" (the rebuilt sizes of L0..L4): five finite numbers wherever present.
+        def tree(sizes):
+            def edit(r):
+                r["tree"] = sizes
+            return edit
+        self.assertEqual(self.run_check(bill=1, trainer=debt(tree([2e7, 1.1e8, 3e8, -5.0, 0])))["verdict"],
+                         "passed")
+        for bad in ([2e7, 1.1e8, 3e8, 9e8], [2e7, 1.1e8, None, 9e8, 0.0], [0.0] * 4 + [math.inf], "1,2,3,4,5"):
+            with self.subTest(tree=bad):
+                self.assertEqual(self.run_check(bill=1, trainer=debt(tree(bad)))["failed_checks"], ["l0_bill"])
+
+        # The trainer's l0_bill_z_carry 0 (L0's bytes left out of the ledgers): "debt_carry" 0 beside
+        # the debt parts; any other value, or the field on a line without them, fails.
+        def carry(value):
+            def edit(r):
+                r["debt_carry"] = value
+            return edit
+        self.assertEqual(self.run_check(bill=1, trainer=debt(carry(0)))["verdict"], "passed")
+        for bad in (1, 0.0, False, "0", None):
+            with self.subTest(debt_carry=bad):
+                self.assertEqual(self.run_check(bill=1, trainer=debt(carry(bad)))["failed_checks"], ["l0_bill"])
+
+        def carry_alone(r):         # no bill Z on the line, but the field
+            if r["type"] == "turn":
+                r["debt_carry"] = 0
+        self.assertEqual(self.run_check(bill=1, trainer=carry_alone)["failed_checks"], ["l0_bill"])
+
         report = self.run_check(bill=0)
         self.assertEqual(report["verdict"], "passed", report)
         self.assertFalse(report["checks"]["l0_bill"]["on"])
