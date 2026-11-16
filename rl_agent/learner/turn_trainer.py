@@ -64,6 +64,11 @@ flush books nothing while its bytes wait in L0, and the growth of L1 that
 L0's merge causes is booked in the turn that merge finishes. The "turn"
 lines then also carry "debt_carry": 0.
 
+With l0_bill_z_l3 0 (needs l0_bill_z 1; absent or 1: as above) there is no
+ledger for the merges out of L3: what is owed is E_1 and E_2 only, the third
+ledger stays 0, and the merges out of L3 are still charged as paid. The
+"turn" lines then also carry "debt_l3": 0.
+
   python -m learner.turn_trainer --plugin-config CFG --decisions D.jsonl \\
       --host-log H.jsonl --weights W.bin --settings S.json \\
       --log turn_trainer.jsonl --summary turn_trainer_summary.json \\
@@ -334,6 +339,13 @@ class TurnTrainer:
             raise ValueError(f"l0_bill_z_carry is 0 or 1, not {carry!r}")
         if carry == 0 and z != 1:
             raise ValueError("l0_bill_z_carry 0 changes bill Z's ledgers: it needs l0_bill_z 1")
+        # No ledger for the merges out of L3; optional key l0_bill_z_l3 (0 or 1,
+        # absent 1 = the three ledgers as built).
+        l3 = settings.get("l0_bill_z_l3", 1)
+        if type(l3) is not int or l3 not in (0, 1):
+            raise ValueError(f"l0_bill_z_l3 is 0 or 1, not {l3!r}")
+        if l3 == 0 and z != 1:
+            raise ValueError("l0_bill_z_l3 0 changes bill Z's ledgers: it needs l0_bill_z 1")
         self.debt = None
         if z == 1:
             if not self.l0_bill:
@@ -343,7 +355,7 @@ class TurnTrainer:
             if self.deep_bill:
                 raise ValueError("l0_bill_z 1 already holds l0_bill_deep's merges out of L1-L3: "
                                  "set l0_bill_deep 0")
-            self.debt = DB.DebtLedger(carry_l0=carry == 1)
+            self.debt = DB.DebtLedger(carry_l0=carry == 1, l3=l3 == 1)
         self.sizes = None           # bill Z's level sizes (DB.TreeSizes), from the first line
         self.sizes_from = None       # the first line's boundary op: the sizes' start
         self.sizes_upto = None       # the host-log record the sizes have reached
@@ -696,6 +708,8 @@ class TurnTrainer:
                           tree=self.tree_record())
             if not self.debt.carry_l0:
                 record["debt_carry"] = 0
+            if not self.debt.l3:
+                record["debt_l3"] = 0
         self.emit(record)
         if math.isfinite(td):
             self.preq.append(td)

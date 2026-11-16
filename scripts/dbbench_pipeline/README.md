@@ -749,12 +749,16 @@ them is 1):
   owe: a flush books nothing while its bytes wait in L0, and the growth of
   L1 that L0's merge causes is booked in the turn that merge finishes. The
   turn lines then also carry `debt_carry` 0.
+  With `l0_bill_z_l3` 0 (2026-11-16; needs `l0_bill_z` 1; 1 or absent: as
+  before) there is no ledger for the merges out of L3: the debt is E_1 and
+  E_2 only, the third ledger stays 0, and those merges are still charged
+  as paid. The turn lines then also carry `debt_l3` 0.
 
 37's `l0_bill` check takes every part into the sum (`bill_debt` of either
 sign, the sum's error judged against the parts' size), checks that the
 `debt` balances move by `bill_debt_levels` from one turn to the next,
-that `tree` is five finite numbers where present, and that `debt_carry`,
-where present, is 0 and stands beside the debt parts.
+that `tree` is five finite numbers where present, and that `debt_carry`
+and `debt_l3`, where present, are 0 and stand beside the debt parts.
 
 ### The turn arms' compact floor flag, COMPACT_FLOOR
 

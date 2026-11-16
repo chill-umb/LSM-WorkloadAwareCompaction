@@ -27,8 +27,8 @@ from its result directory:
           turn, which differ from the turn before's by those changes
           wherever both turns have a line; its "tree", the rebuilt sizes of
           L0..L4, is five finite numbers wherever it is present; its
-          "debt_carry", the trainer's l0_bill_z_carry 0, is 0 and only
-          beside those changes),
+          "debt_carry", the trainer's l0_bill_z_carry 0, and its "debt_l3",
+          the trainer's l0_bill_z_l3 0, are 0 and only beside those changes),
           bill_read being beta_r times its turn's L0 read counts at the
           config's prices (rl_agent/learner/prices.py l0_read_cost); off, no
           turn line carries the block and no trainer line a bill
@@ -148,15 +148,17 @@ def debt_parts(r: dict) -> bool:
     changes that sum to bill_debt and three finite balances; "tree", where
     present, five finite sizes (L0..L4); and "debt_carry" (the trainer's
     l0_bill_z_carry 0: L0's bytes left out of the ledgers), where present,
-    the whole number 0 beside DEBT_KEYS."""
+    the whole number 0 beside DEBT_KEYS; "debt_l3" (the trainer's
+    l0_bill_z_l3 0: no ledger for the merges out of L3) likewise."""
     def finite(v):
         return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
     if "tree" in r and not (isinstance(r["tree"], list) and len(r["tree"]) == 5 and
                             all(finite(v) for v in r["tree"])):
         return False
     present = [k in r for k in DEBT_KEYS]
-    if "debt_carry" in r and (type(r["debt_carry"]) is not int or r["debt_carry"] != 0 or not any(present)):
-        return False
+    for flag in ("debt_carry", "debt_l3"):
+        if flag in r and (type(r[flag]) is not int or r[flag] != 0 or not any(present)):
+            return False
     if not any(present):
         return True
     if not all(present) or "bill_deep" not in r:

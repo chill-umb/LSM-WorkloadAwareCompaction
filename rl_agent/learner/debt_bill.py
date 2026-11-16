@@ -51,6 +51,15 @@ as paid when it finishes, and the growth of L1 (and below) it causes is
 booked in that same turn. Prices and the ledger rule are unchanged. Its
 offline replay is ~/node_ops/diag/2026-11-16-billz-opt1/ (RULES.md).
 
+Without the L3 ledger (l3 False; the trainer settings' l0_bill_z_l3 0, the
+form adopted on 2026-11-16) W_3 is 0 at every turn:
+
+    owed = [E_1, E_2, 0]
+
+so D_3 stays 0 and the merges out of L3 are charged only as paid; E_1, E_2,
+the prices and the ledger rule are unchanged. Its offline replay is
+~/node_ops/diag/2026-11-16-form3/ (RULES.md, mode nol3).
+
 The sizes B are rebuilt from the host log's finished jobs (TreeSizes), from
 the first turn line's "B" on: each flush adds its bytes to L0, and each job
 that ends takes its source bytes out of its start level and puts its output
@@ -95,10 +104,11 @@ def _flows(values, what: str) -> list:
     return _numbers(values, STEPS, what)
 
 
-def owed(B, C, carry_l0: bool = True) -> list:
+def owed(B, C, carry_l0: bool = True, l3: bool = True) -> list:
     """[E_1, E_2, W_3] of the tree with level sizes B and targets C (bytes;
     index = level, levels 0..4 used, missing levels empty). carry_l0 False:
-    L0's bytes carry nothing into level 1 (option 1)."""
+    L0's bytes carry nothing into level 1 (option 1). l3 False: W_3 is 0
+    (no ledger for the merges out of L3; E_1 and E_2 as before)."""
     b = [max(0.0, v) for v in _numbers(B, 5, "B")]
     c = _numbers(C, 4, "C")
     E = [0.0] * 4
@@ -108,7 +118,7 @@ def owed(B, C, carry_l0: bool = True) -> list:
         carry = e
         E[i] = e if b[i + 1] > 0 else 0.0
     size3 = b[3] + E[2]
-    w3 = E[3] * (1.0 + b[4] / size3) if size3 > 0 else 0.0
+    w3 = E[3] * (1.0 + b[4] / size3) if size3 > 0 and l3 else 0.0
     return [E[1], E[2], w3]
 
 
@@ -175,14 +185,17 @@ class DebtLedger:
     books: the next add() books the change of what is owed since the last
     tree it saw, at that turn's prices."""
 
-    def __init__(self, half_life: int = 64, carry_l0: bool = True):
+    def __init__(self, half_life: int = 64, carry_l0: bool = True, l3: bool = True):
         if isinstance(half_life, bool) or not isinstance(half_life, (int, float)) \
                 or not math.isfinite(half_life) or half_life <= 0:
             raise ValueError(f"half_life must be a number above 0, not {half_life!r}")
         if type(carry_l0) is not bool:
             raise ValueError(f"carry_l0 is True or False, not {carry_l0!r}")
+        if type(l3) is not bool:
+            raise ValueError(f"l3 is True or False, not {l3!r}")
         self.half_life = half_life
         self.carry_l0 = carry_l0        # False: L0's bytes owe nothing (option 1)
+        self.l3 = l3                    # False: no ledger for the merges out of L3 (D_3 stays 0)
         self.lam = 0.5 ** (1.0 / half_life)
         self.P = [0.0] * STEPS          # price as paid of the merges out of L_i, running
         self.M = [0.0] * STEPS          # bytes those merges took out of L_i, running
@@ -198,7 +211,7 @@ class DebtLedger:
     def start(self, B, C) -> None:
         """The tree before the first billed turn: what it owes becomes the
         previous amounts; nothing is booked."""
-        self.prev = owed(B, C, self.carry_l0)
+        self.prev = owed(B, C, self.carry_l0, self.l3)
 
     def add(self, B, C, paid, moved, fed) -> list:
         """One turn: B, C the tree at its end; per start level 0..3 the merges
@@ -209,7 +222,7 @@ class DebtLedger:
         if self.prev is None:
             raise RuntimeError("DebtLedger.add before start: the starting tree is not known")
         paid, moved, fed = _flows(paid, "paid"), _flows(moved, "moved"), _flows(fed, "fed")
-        now = owed(B, C, self.carry_l0)
+        now = owed(B, C, self.carry_l0, self.l3)
         lam = self.lam
         for i in range(STEPS):
             self.P[i] = lam * self.P[i] + paid[i]

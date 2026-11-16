@@ -416,6 +416,15 @@ class CheckTurnRunTest(unittest.TestCase):
             with self.subTest(debt_carry=bad):
                 self.assertEqual(self.run_check(bill=1, trainer=debt(carry(bad)))["failed_checks"], ["l0_bill"])
 
+        def l3(value):              # the trainer's l0_bill_z_l3 0: "debt_l3" 0, the same rule
+            def edit(r):
+                r["debt_l3"] = value
+            return edit
+        self.assertEqual(self.run_check(bill=1, trainer=debt(l3(0)))["verdict"], "passed")
+        for bad in (1, 0.0, False, "0", None):
+            with self.subTest(debt_l3=bad):
+                self.assertEqual(self.run_check(bill=1, trainer=debt(l3(bad)))["failed_checks"], ["l0_bill"])
+
         def carry_alone(r):         # no bill Z on the line, but the field
             if r["type"] == "turn":
                 r["debt_carry"] = 0

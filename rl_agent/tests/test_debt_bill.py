@@ -56,6 +56,15 @@ class OwedTest(unittest.TestCase):
         C = [0.0, 10 * MB, 18 * MB, 25 * MB, BIG]
         self.assertEqual(DB.owed(tree(0, 10 * MB, 20 * MB, 30 * MB, 0), C)[2], 0.0)
 
+    def test_without_l3_only_e1_and_e2_are_owed(self):
+        """l3 False: W_3 is 0 whatever the tree; E_1 and E_2 as built."""
+        C = [0.0, 10 * MB, 18 * MB, 25 * MB, BIG]
+        B = tree(1 * MB, 10 * MB, 20 * MB, 30 * MB, 300 * MB)
+        built = DB.owed(B, C)
+        self.assertGreater(built[2], 0.0)
+        self.assertEqual(DB.owed(B, C, l3=False), [built[0], built[1], 0.0])
+        self.assertEqual(DB.owed(B, C, carry_l0=False, l3=False), DB.owed(B, C, carry_l0=False)[:2] + [0.0])
+
     def test_without_l0s_carry_l0_owes_nothing(self):
         """Option 1 (carry_l0 False): the carry into L1 is 0, the rest as before."""
         C = [0.0, 10 * MB, 18 * MB, 25 * MB, BIG]
@@ -238,6 +247,8 @@ class LedgerTest(unittest.TestCase):
         for bad in (0, 1, None, "False"):
             with self.subTest(carry_l0=bad), self.assertRaisesRegex(ValueError, "carry_l0"):
                 DB.DebtLedger(64, carry_l0=bad)
+            with self.subTest(l3=bad), self.assertRaisesRegex(ValueError, "l3 is True or False"):
+                DB.DebtLedger(64, l3=bad)
         led = DB.DebtLedger()
         led.start(tree(), self.C)
         with self.assertRaises(ValueError):
@@ -620,6 +631,46 @@ class BillZTrainerTest(base.L0BillTest):
             self.assertEqual((r["J"], r["bill_deep_levels"], r["bill_merge"], r["tree"]),
                              (o["J"], o["bill_deep_levels"], o["bill_merge"], o["tree"]))
         self.assertTrue(any(abs(r["bill_debt"] - old[r["t"]]["bill_debt"]) > 1e-9 for r in turns))
+
+    def test_without_l3_the_third_ledger_stays_zero(self):
+        """l0_bill_z_l3 0: the L1 and L2 ledgers as built, the third always 0; the merges as paid and the
+        evaluator's J are unchanged, and every line says debt_l3 0."""
+        cfg = self.config(bill=1)
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            tr, log = self.run_z(a, cfg, l0_bill_z=1, l0_bill_z_l3=0)
+            _, built = self.run_z(b, cfg, l0_bill_z=1)
+        self.assertFalse(tr.debt.l3)
+        turns = [r for r in log if r["type"] == "turn"]
+        old = {r["t"]: r for r in built if r["type"] == "turn"}
+        self.assertEqual([r["t"] for r in turns], list(range(1, base.TURNS - 1)))
+        self.assertTrue(all(r["debt_l3"] == 0 for r in turns))
+        self.assertFalse(any("debt_l3" in r or "debt_carry" in r for r in old.values()))
+        self.assertFalse(any("debt_carry" in r for r in turns))
+        for r in turns:
+            o = old[r["t"]]
+            self.assertEqual((r["J"], r["bill_deep_levels"], r["bill_merge"], r["tree"]),
+                             (o["J"], o["bill_deep_levels"], o["bill_merge"], o["tree"]))
+            self.assertEqual(r["bill_debt_levels"][:2], o["bill_debt_levels"][:2])
+            self.assertEqual((r["bill_debt_levels"][2], r["debt"][2]), (0.0, 0.0))
+            self.assertEqual(r["debt"][:2], o["debt"][:2])
+            self.assertAlmostEqual(r["bill_debt"], sum(o["bill_debt_levels"][:2]), delta=1e-18)
+        self.assertTrue(any(o["bill_debt_levels"][2] != 0.0 for o in old.values()))
+
+    def test_l3_1_or_absent_is_bill_z_as_built_and_bad_values_are_refused(self):
+        cfg = self.config(bill=1)
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            tr, one = self.run_z(a, cfg, l0_bill_z=1, l0_bill_z_l3=1)
+            _, absent = self.run_z(b, cfg, l0_bill_z=1)
+        self.assertTrue(tr.debt.l3)
+        self.assertEqual(one, absent)
+        for changes in ({}, {"l0_bill_z": 0}):
+            with self.subTest(**changes), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(ValueError, "needs l0_bill_z 1"):
+                    self.trainer(tmp, self.config(bill=1), l0_bill_z_l3=0, **changes)
+        for bad in (2, -1, 0.0, 1.0, "0", True, False, None):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(ValueError, "l0_bill_z_l3 is 0 or 1"):
+                    self.trainer(tmp, self.config(bill=1), l0_bill_z=1, l0_bill_z_l3=bad)
 
     def test_carry_1_or_absent_is_bill_z_as_built(self):
         cfg = self.config(bill=1)
