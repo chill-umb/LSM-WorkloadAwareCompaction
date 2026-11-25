@@ -96,7 +96,19 @@ TURN_OPTIONAL_KEYS = ("turn_periods", "turn_slow_explore_decisions")
 # The guard on added work only (controller/config.h turn_guard_added): the
 # same way. 1: compact's drop waits on the owed-work guard only for the work
 # the drop itself makes due, not for debt the tree already owes.
-TURN_OPTIONAL_FLAGS = ("turn_compact_step", "turn_guard_added")
+# L0's own exploration (controller/config.h turn_l0_explore_own): the same
+# way. 1: L0 flips its own coin every turn and the deeper levels share one
+# draw among themselves; the plugin refuses it with turn_acting 1.
+# No random tries for an untrained deep level (controller/config.h
+# turn_deep_explore_trained): the same way. 1: a level from 1 on keeps its
+# greedy action (hold) until its own net has trained; only the VDN arm
+# (turn_vdn) has a net per level, and it needs turn_acting >= 2.
+# Moves scored against hold (controller/config.h turn_hold_ref): the same
+# way. 1: each level's net reads output 0 as hold's value and the others as
+# each move's difference from hold, in the plugin and the trainer alike, so a
+# move never stepped scores hold's value; only the VDN arm (turn_vdn).
+TURN_OPTIONAL_FLAGS = ("turn_compact_step", "turn_guard_added", "turn_l0_explore_own",
+                       "turn_deep_explore_trained", "turn_hold_ref")
 # learned2's own keys (controller/learned2.h; owner, 2026-11-05), from the
 # "plugin" part of its settings file (config/learner2_settings.json).
 LEARNED2_KEYS = ("window_ops", "ensemble", "vote_share", "settle_turnovers",
@@ -373,6 +385,17 @@ def compose(arm: str, objective_mode: str, family: str, *, bounds: dict,
                 if isinstance(flag, bool) or flag not in (0, 1):
                     raise ValueError(f"the turn settings' {key} must be 0 or 1, got {flag!r}")
                 config[key] = int(flag)
+            if config.get("turn_l0_explore_own") == 1 and config.get("turn_acting") == 1:
+                raise ValueError("turn_l0_explore_own 1 (L0's own exploration) needs "
+                                 "turn_acting >= 2: with L0 alone there is no deep draw")
+            if config.get("turn_deep_explore_trained") == 1 and (
+                    config.get("turn_acting") == 1 or config["turn_arch"] != "vdn"):
+                raise ValueError("turn_deep_explore_trained 1 (no random tries for an untrained "
+                                 "deep level) needs turn_acting >= 2 and the turn_vdn arm: "
+                                 "only it has a net per level")
+            if config.get("turn_hold_ref") == 1 and config["turn_arch"] != "vdn":
+                raise ValueError("turn_hold_ref 1 (moves scored against hold) needs the "
+                                 "turn_vdn arm: only its outputs are per-level values")
             if clock and decay != 0:
                 raise ValueError("turn_periods (the level clock) needs decay 0: "
                                  "a held level keeps its setting")

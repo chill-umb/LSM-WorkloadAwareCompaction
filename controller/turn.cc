@@ -750,7 +750,8 @@ TurnLoad LoadTurnNet(const std::string& path, int arch, int acting,
 }
 
 std::vector<std::array<double, kNumActions>> TurnScores(
-    const TurnNet* net, const std::vector<double>& inputs, int acting) {
+    const TurnNet* net, const std::vector<double>& inputs, int acting,
+    bool hold_ref) {
   std::vector<std::array<double, kNumActions>> scores(
       acting, std::array<double, kNumActions>{0, 0, 0, 0});
   if (net == nullptr || net->nets.empty()) return scores;
@@ -786,7 +787,9 @@ std::vector<std::array<double, kNumActions>> TurnScores(
   } else {
     for (int i = 0; i < acting && i < static_cast<int>(net->nets.size()); ++i) {
       const std::vector<double> o = forward(net->nets[i]);
-      for (int a = 0; a < kNumActions; ++a) scores[i][a] = o[a];
+      for (int a = 0; a < kNumActions; ++a) {
+        scores[i][a] = hold_ref && a > 0 ? o[0] + o[a] : o[a];
+      }
     }
   }
   return scores;
@@ -829,10 +832,63 @@ int Explore(double eps, const std::vector<TurnMask>& masks,
   return level;
 }
 
+int ExploreL0Own(double eps, const std::vector<TurnMask>& masks,
+                 std::vector<Action>* actions, std::mt19937_64* l0_rng,
+                 std::mt19937_64* deep_rng, bool* l0) {
+  TurnMask hold{};
+  hold[static_cast<int>(Action::kHold)] = true;
+  std::vector<TurnMask> top(masks.size(), hold);
+  std::vector<TurnMask> deep = masks;
+  if (!masks.empty()) {
+    top[0] = masks[0];
+    deep[0] = hold;
+  }
+  *l0 = Explore(eps, top, actions, l0_rng) == 0;
+  return Explore(eps, deep, actions, deep_rng);
+}
+
 double ExploreRate(const TurnConfig& cfg, double turn) {
   if (cfg.explore_turns <= 0 || turn >= cfg.explore_turns) return cfg.explore_end;
   return cfg.explore_start +
          (cfg.explore_end - cfg.explore_start) * turn / cfg.explore_turns;
+}
+
+bool TurnLevelTrained(const TurnNet* net, int level) {
+  if (net == nullptr || net->arch != 1 || level < 0 ||
+      level >= static_cast<int>(net->nets.size()) ||
+      net->nets[level].layers.empty()) {
+    return false;
+  }
+  const TurnNet::Layer& out = net->nets[level].layers.back();
+  for (double w : out.w) {
+    if (w != 0) return true;
+  }
+  for (double b : out.b) {
+    if (b != 0) return true;
+  }
+  return false;
+}
+
+std::vector<bool> DropUntrainedTries(const TurnNet* net,
+                                     const std::vector<Action>& greedy,
+                                     std::vector<Action>* actions,
+                                     int* explored,
+                                     std::vector<bool>* explored_slow) {
+  std::vector<bool> dropped(actions->size(), false);
+  for (size_t i = 1; i < actions->size() && i < greedy.size(); ++i) {
+    const int level = static_cast<int>(i);
+    if (TurnLevelTrained(net, level)) continue;
+    (*actions)[i] = greedy[i];
+    if (*explored == level) {
+      *explored = -1;
+      dropped[i] = true;
+    }
+    if (i < explored_slow->size() && (*explored_slow)[i]) {
+      (*explored_slow)[i] = false;
+      dropped[i] = true;
+    }
+  }
+  return dropped;
 }
 
 int LevelPhase(int period) { return period > 1 ? (3 * period) / 4 : 0; }

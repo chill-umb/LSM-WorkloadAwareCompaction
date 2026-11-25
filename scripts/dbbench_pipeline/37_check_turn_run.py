@@ -95,7 +95,7 @@ def greedy(scores: list, masks: list) -> list:
     return out
 
 
-def arch6(decisions: list, archive: Path, acting: int) -> dict:
+def arch6(decisions: list, archive: Path, acting: int, hold_ref: bool = False) -> dict:
     turns = [r for r in decisions if r["type"] == "turn" and r.get("final") != 1
              and int(r.get("weights", 0)) > 0]
     cache, missing, score_bad, greedy_bad, judged = {}, set(), [], [], 0
@@ -111,7 +111,7 @@ def arch6(decisions: list, archive: Path, acting: int) -> dict:
             missing.add(v)
             continue
         judged += 1
-        ours = TW.forward(w, [float(r["x"][n]) for n in names])
+        ours = TW.forward(w, [float(r["x"][n]) for n in names], hold_ref)
         theirs = r["scores"]
         if any(not (isinstance(b, (int, float)) and
                     math.isclose(a, b, rel_tol=TOLERANCE, abs_tol=TOLERANCE))
@@ -318,7 +318,8 @@ def check(result: Path, prices: dict, options_bytes: float | None,
                ([f"training losses not finite at turns {bad_loss[:10]}"] if bad_loss else [])
     checks["arch1"] = {"passed": not problems, "problems": problems,
                        "train_lines": sum(1 for r in trainer if r["type"] == "train")}
-    checks["arch6"] = arch6(decisions, result / "weights", acting)
+    checks["arch6"] = arch6(decisions, result / "weights", acting,
+                            int(config.get("turn_hold_ref", 0)) == 1)
     checks["l0_bill"] = l0_bill(decisions, trainer, config)
     host = result / host_log.FILE_NAME
     reads = level_reads.check_turn(

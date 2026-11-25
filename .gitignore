@@ -47,6 +47,7 @@ workload.txt
 /build-dbbench/*
 # 01c's stock source and build trees (config.sh STOCK_*)
 /build-dbbench-*/
+/build-controller-*/
 
 # venv
 .venv

@@ -1022,6 +1022,327 @@ TEST_F(TurnTest, TheGuardOnAddedWorkLetsL0StepDownInADeepBacklog) {
   }
 }
 
+// turn_l0_explore_own (optional): off unless set, 0 or 1, 1 only with more
+// than one acting level, and for the turn mode only.
+TEST_F(TurnTest, TheL0ExploreOwnFlagParses) {
+  rlc::Config c;
+  std::string error;
+  ASSERT_TRUE(LoadConfig(Config(), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.l0_explore_own);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_l0_explore_own", "0"}}), &c, &error))
+      << error;
+  EXPECT_FALSE(c.turn.l0_explore_own);
+  ASSERT_TRUE(LoadConfig(Config({{"turn_l0_explore_own", "1"}}), &c, &error))
+      << error;
+  EXPECT_TRUE(c.turn.l0_explore_own);
+  EXPECT_FALSE(c.turn.guard_added);
+  for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+    EXPECT_FALSE(LoadConfig(Config({{"turn_l0_explore_own", bad}}), &c, &error))
+        << bad;
+  }
+  ASSERT_TRUE(LoadConfig(Config({{"turn_acting", "1"}, {"turn_l0_explore_own", "0"}}),
+                         &c, &error))
+      << error;
+  EXPECT_FALSE(LoadConfig(Config({{"turn_acting", "1"}, {"turn_l0_explore_own", "1"}}),
+                          &c, &error));
+  EXPECT_NE(error.find("turn_l0_explore_own 1 needs turn_acting >= 2"),
+            std::string::npos)
+      << error;
+  auto hold = BaseConfig(dir_);
+  hold["turn_l0_explore_own"] = "1";
+  EXPECT_FALSE(LoadConfig(WriteConfig(dir_, hold), &c, &error));
+  EXPECT_NE(error.find("is for turn"), std::string::npos) << error;
+}
+
+// turn_l0_explore_own 1 in a run: on the same seed, L0 explores on the same
+// turns and takes the same actions as a run where L0 is the only acting
+// level, whatever the deeper levels draw; "explored" is the deep draw's
+// level (never L0), "explored_l0" L0's coin, and the start line records the
+// flag. Off, no line carries "explored_l0".
+TEST_F(TurnTest, L0sOwnCoinMatchesAnL0OnlyRunBesideTheDeepDraw) {
+  const auto run = [&](const char* acting, const char* own) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    FakeHost host;
+    Tree(&host);
+    std::map<std::string, std::string> changes = {
+        {"turn_decay", "0"},
+        {"turn_acting", acting},
+        {"turn_explore_start", "0.4"},
+        {"turn_explore_end", "0.4"}};
+    if (own) changes["turn_l0_explore_own"] = own;
+    {
+      Controller controller(&host, Config(changes), [this] { return clock_us_; });
+      Run(&controller, &host, 400, /*writes=*/true);
+    }
+    return std::make_pair(Lines("turn_start"), Lines("turn"));
+  };
+  const auto alone = run("1", nullptr);
+  const auto own = run("5", "1");
+  const auto shared = run("5", "0");
+  ASSERT_EQ(alone.first.size(), 1u);
+  EXPECT_EQ(Number(alone.first[0], "l0_explore_own"), 0);
+  EXPECT_EQ(Number(own.first[0], "l0_explore_own"), 1);
+  EXPECT_EQ(Number(shared.first[0], "l0_explore_own"), 0);
+  ASSERT_EQ(own.second.size(), alone.second.size());
+  ASSERT_GE(own.second.size(), 90u);
+  int l0_n = 0, deep_n = 0, both = 0, shared_l0 = 0, shared_deep = 0;
+  for (size_t i = 0; i < own.second.size(); ++i) {
+    const std::string& a = alone.second[i];
+    const std::string& o = own.second[i];
+    const std::string& s = shared.second[i];
+    EXPECT_FALSE(Has(a, "explored_l0")) << a;
+    EXPECT_FALSE(Has(s, "explored_l0")) << s;
+    if (Number(o, "final") == 1) continue;
+    ASSERT_TRUE(Has(o, "explored_l0")) << o;
+    const bool l0x = Number(o, "explored_l0") == 1;
+    const int deep = static_cast<int>(Number(o, "explored"));
+    EXPECT_EQ(l0x, Number(a, "explored") == 0) << i << "\n" << a << "\n" << o;
+    EXPECT_EQ(Names(o, "action")[0], Names(a, "action")[0]) << i;
+    EXPECT_EQ(L0Mask(o), L0Mask(a)) << i;
+    EXPECT_NE(deep, 0) << o;
+    EXPECT_GE(deep, -1) << o;
+    EXPECT_LE(deep, 4) << o;
+    l0_n += l0x;
+    deep_n += deep > 0;
+    both += l0x && deep > 0;
+    shared_l0 += Number(s, "explored") == 0;
+    shared_deep += Number(s, "explored") > 0;
+  }
+  // At 0.4 per coin over about 100 turns: L0 explores about 40 times on its
+  // own coin, the deep levels about as often, and both on the same turn
+  // about 16; the shared draw splits about 40 between L0 and the rest.
+  EXPECT_GT(l0_n, 25);
+  EXPECT_GT(deep_n, 25);
+  EXPECT_GT(both, 5);
+  EXPECT_LT(shared_l0, l0_n);
+  EXPECT_GT(shared_deep, 0);
+}
+
+// turn_deep_explore_trained (optional): off unless set, 0 or 1, 1 only with
+// more than one acting level and the VDN arm, and for the turn mode only.
+TEST_F(TurnTest, TheDeepExploreTrainedFlagParses) {
+  rlc::Config c;
+  std::string error;
+  const auto vdn = [&](std::map<std::string, std::string> changes) {
+    changes["turn_arch"] = "\"vdn\"";
+    return Config(changes);
+  };
+  ASSERT_TRUE(LoadConfig(vdn({}), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.deep_explore_trained);
+  ASSERT_TRUE(LoadConfig(vdn({{"turn_deep_explore_trained", "0"}}), &c, &error))
+      << error;
+  EXPECT_FALSE(c.turn.deep_explore_trained);
+  ASSERT_TRUE(LoadConfig(vdn({{"turn_deep_explore_trained", "1"}}), &c, &error))
+      << error;
+  EXPECT_TRUE(c.turn.deep_explore_trained);
+  EXPECT_FALSE(c.turn.l0_explore_own);
+  for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+    EXPECT_FALSE(
+        LoadConfig(vdn({{"turn_deep_explore_trained", bad}}), &c, &error))
+        << bad;
+  }
+  const char* why =
+      "turn_deep_explore_trained 1 needs turn_acting >= 2 and turn_arch vdn";
+  EXPECT_FALSE(
+      LoadConfig(Config({{"turn_deep_explore_trained", "1"}}), &c, &error));
+  EXPECT_NE(error.find(why), std::string::npos) << error;
+  ASSERT_TRUE(LoadConfig(vdn({{"turn_acting", "1"},
+                              {"turn_deep_explore_trained", "0"}}),
+                         &c, &error))
+      << error;
+  EXPECT_FALSE(LoadConfig(vdn({{"turn_acting", "1"},
+                               {"turn_deep_explore_trained", "1"}}),
+                          &c, &error));
+  EXPECT_NE(error.find(why), std::string::npos) << error;
+  auto hold = BaseConfig(dir_);
+  hold["turn_deep_explore_trained"] = "1";
+  EXPECT_FALSE(LoadConfig(WriteConfig(dir_, hold), &c, &error));
+  EXPECT_NE(error.find("is for turn"), std::string::npos) << error;
+}
+
+// turn_hold_ref (optional): off unless set, 0 or 1, 1 only with the VDN arm
+// (any number of acting levels, L0 alone included), and for the turn mode
+// only.
+TEST_F(TurnTest, TheHoldRefFlagParses) {
+  rlc::Config c;
+  std::string error;
+  const auto vdn = [&](std::map<std::string, std::string> changes) {
+    changes["turn_arch"] = "\"vdn\"";
+    return Config(changes);
+  };
+  ASSERT_TRUE(LoadConfig(vdn({}), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.hold_ref);
+  ASSERT_TRUE(LoadConfig(vdn({{"turn_hold_ref", "0"}}), &c, &error)) << error;
+  EXPECT_FALSE(c.turn.hold_ref);
+  ASSERT_TRUE(LoadConfig(vdn({{"turn_hold_ref", "1"}}), &c, &error)) << error;
+  EXPECT_TRUE(c.turn.hold_ref);
+  EXPECT_FALSE(c.turn.deep_explore_trained);
+  ASSERT_TRUE(LoadConfig(vdn({{"turn_acting", "1"}, {"turn_hold_ref", "1"}}),
+                         &c, &error))
+      << error;
+  EXPECT_TRUE(c.turn.hold_ref);
+  for (const char* bad : {"2", "-1", "0.5", "\"1\""}) {
+    EXPECT_FALSE(LoadConfig(vdn({{"turn_hold_ref", bad}}), &c, &error)) << bad;
+  }
+  ASSERT_TRUE(LoadConfig(Config({{"turn_hold_ref", "0"}}), &c, &error)) << error;
+  EXPECT_FALSE(LoadConfig(Config({{"turn_hold_ref", "1"}}), &c, &error));
+  EXPECT_NE(error.find("turn_hold_ref 1 needs turn_arch vdn"), std::string::npos)
+      << error;
+  auto hold = BaseConfig(dir_);
+  hold["turn_hold_ref"] = "1";
+  EXPECT_FALSE(LoadConfig(WriteConfig(dir_, hold), &c, &error));
+  EXPECT_NE(error.find("is for turn"), std::string::npos) << error;
+}
+
+// turn_hold_ref 1 in a run (VDN, no random tries): a net whose hold is a hair
+// below 0 at every level and whose other moves were never trained (output 0).
+// Off, every logged untried move scores 0 and the greedy picks go to the first
+// allowed move; on, every untried move scores hold's value, every level holds
+// at every turn, and the start line says so.
+TEST_F(TurnTest, HoldRefKeepsUntriedMovesAtHoldsValueInARun) {
+  TurnNet net = BiasNet(1, /*arch=*/1, -1, Action::kHold);
+  for (TurnNet::Net& n : net.nets) n.layers.back().b[0] = -0.004;
+  const auto run = [&](const char* flag) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    std::remove(weights().c_str());
+    WriteNet(weights(), net);
+    FakeHost host;
+    Tree(&host);
+    std::map<std::string, std::string> changes = {
+        {"turn_decay", "0"},
+        {"turn_arch", "\"vdn\""},
+        {"turn_explore_start", "0"},
+        {"turn_explore_end", "0"}};
+    if (flag != nullptr) changes["turn_hold_ref"] = flag;
+    {
+      Controller controller(&host, Config(changes), [this] { return clock_us_; });
+      Run(&controller, &host, 400, /*writes=*/true);
+      EXPECT_FALSE(controller.fallback());
+    }
+    return std::make_pair(Lines("turn_start"), Lines("turn"));
+  };
+  const auto on = run("1");
+  const auto off = run(nullptr);
+  ASSERT_EQ(on.first.size(), 1u);
+  EXPECT_EQ(Number(on.first[0], "hold_ref"), 1);
+  EXPECT_EQ(Number(off.first[0], "hold_ref"), 0);
+  int judged = 0, off_moves = 0;
+  for (const std::string& line : on.second) {
+    if (Number(line, "final") == 1 || Number(line, "weights") < 1) continue;
+    ++judged;
+    for (const std::string& a : Names(line, "greedy")) EXPECT_EQ(a, "hold") << line;
+    for (const std::string& a : Names(line, "action")) EXPECT_EQ(a, "hold") << line;
+  }
+  for (const std::string& line : off.second) {
+    if (Number(line, "final") == 1 || Number(line, "weights") < 1) continue;
+    for (const std::string& a : Names(line, "greedy")) off_moves += a != "hold";
+  }
+  EXPECT_GT(judged, 50);
+  EXPECT_GT(off_moves, 50);
+}
+
+// turn_deep_explore_trained 1 in a run (VDN, L0's own coin, every coin at 0.9).
+// No net: every deep level holds at every turn, each deep try drawn is
+// dropped ("explore_dropped", never "explored"), and L0 explores exactly as
+// without the flag. A net with only L1 trained: L1 explores, L2-L4 hold.
+// Every level trained: the run is the run without the flag.
+TEST_F(TurnTest, UntrainedDeepLevelsHoldUntilTheirOwnNetTrains) {
+  const auto run = [&](const char* flag, const TurnNet* net) {
+    std::remove((dir_ + "/decisions.jsonl").c_str());
+    std::remove(weights().c_str());
+    if (net != nullptr) WriteNet(weights(), *net);
+    FakeHost host;
+    Tree(&host);
+    std::map<std::string, std::string> changes = {
+        {"turn_decay", "0"},
+        {"turn_arch", "\"vdn\""},
+        {"turn_l0_explore_own", "1"},
+        {"turn_explore_start", "0.9"},
+        {"turn_explore_end", "0.9"}};
+    if (flag != nullptr) changes["turn_deep_explore_trained"] = flag;
+    {
+      Controller controller(&host, Config(changes), [this] { return clock_us_; });
+      Run(&controller, &host, 400, /*writes=*/true);
+      EXPECT_FALSE(controller.fallback());
+    }
+    return std::make_pair(Lines("turn_start"), Lines("turn"));
+  };
+  const auto moves = [](const std::string& line, int level) {
+    return Names(line, "action")[level] != "hold";
+  };
+
+  const auto cold = run("1", nullptr);
+  const auto cold_off = run(nullptr, nullptr);
+  ASSERT_EQ(cold.first.size(), 1u);
+  EXPECT_EQ(Number(cold.first[0], "deep_explore_trained"), 1);
+  EXPECT_EQ(Number(cold_off.first[0], "deep_explore_trained"), 0);
+  ASSERT_EQ(cold.second.size(), cold_off.second.size());
+  ASSERT_GE(cold.second.size(), 90u);
+  int dropped = 0, off_deep = 0, l0_n = 0;
+  for (size_t i = 0; i < cold.second.size(); ++i) {
+    const std::string& on = cold.second[i];
+    const std::string& off = cold_off.second[i];
+    EXPECT_FALSE(Has(off, "net_trained")) << off;
+    EXPECT_FALSE(Has(off, "explore_dropped")) << off;
+    if (Number(on, "final") == 1) continue;
+    for (int j = 1; j < kActing; ++j) {
+      EXPECT_FALSE(moves(on, j)) << i << " " << on;
+      dropped += Array(on, "explore_dropped")[j] == 1;
+      off_deep += moves(off, j);
+    }
+    for (double t : Array(on, "net_trained")) EXPECT_EQ(t, 0) << on;
+    EXPECT_EQ(Array(on, "explore_dropped")[0], 0) << on;
+    EXPECT_LE(Number(on, "explored"), 0) << on;
+    EXPECT_EQ(Number(on, "explored_l0"), Number(off, "explored_l0")) << i;
+    EXPECT_EQ(Names(on, "action")[0], Names(off, "action")[0]) << i;
+    l0_n += Number(on, "explored_l0") == 1;
+  }
+  EXPECT_GT(dropped, 25);
+  EXPECT_GT(off_deep, 25);
+  EXPECT_GT(l0_n, 50);
+
+  const TurnNet l1 = BiasNet(1, /*arch=*/1, 1, Action::kHold);
+  const auto one = run("1", &l1);
+  int l1_moves = 0;
+  for (const std::string& on : one.second) {
+    if (Number(on, "final") == 1) continue;
+    std::vector<double> trained = Array(on, "net_trained");
+    ASSERT_GE(trained.size(), static_cast<size_t>(kActing)) << on;
+    trained.resize(kActing);
+    EXPECT_EQ(trained, (std::vector<double>{0, 1, 0, 0, 0})) << on;
+    for (int j = 2; j < kActing; ++j) EXPECT_FALSE(moves(on, j)) << on;
+    if (moves(on, 1)) {
+      ++l1_moves;
+      EXPECT_EQ(Number(on, "explored"), 1) << on;
+    }
+  }
+  EXPECT_GT(l1_moves, 5);
+
+  // Every level trained (hold preferred by a hair): the flag changes nothing.
+  TurnNet all = BiasNet(2, /*arch=*/1, -1, Action::kHold);
+  for (TurnNet::Net& n : all.nets) n.layers.back().b[0] = 1e-9;
+  const auto on = run("1", &all);
+  const auto off = run(nullptr, &all);
+  ASSERT_EQ(on.second.size(), off.second.size());
+  int deep_n = 0;
+  for (size_t i = 0; i < on.second.size(); ++i) {
+    if (Number(on.second[i], "final") == 1) continue;
+    ASSERT_TRUE(Has(on.second[i], "explore_dropped")) << on.second[i];
+    for (double d : Array(on.second[i], "explore_dropped")) EXPECT_EQ(d, 0);
+    std::vector<double> trained = Array(on.second[i], "net_trained");
+    trained.resize(kActing);
+    EXPECT_EQ(trained, std::vector<double>(kActing, 1)) << on.second[i];
+    for (const char* key : {"action", "explored_slow"}) {
+      EXPECT_EQ(Body(on.second[i], key), Body(off.second[i], key)) << i;
+    }
+    EXPECT_EQ(Number(on.second[i], "explored"), Number(off.second[i], "explored"));
+    EXPECT_EQ(Number(on.second[i], "explored_l0"),
+              Number(off.second[i], "explored_l0"));
+    deep_n += Number(on.second[i], "explored") > 0;
+  }
+  EXPECT_GT(deep_n, 50);
+}
+
 // turn_periods (the level clock): optional; one whole period per acting
 // level, L0's 1; needs turn_decay 0 and turn_slow_explore_decisions.
 TEST_F(TurnTest, TurnPeriodsAreParsedAndChecked) {

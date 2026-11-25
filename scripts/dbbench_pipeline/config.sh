@@ -235,6 +235,14 @@ COMPACTION_PRIORITY="${COMPACTION_PRIORITY:-3}"  # RocksDB kMinOverlappingRatio
 SOFT_PENDING_BYTES="${SOFT_PENDING_BYTES:-68719476736}"  # 64 GiB
 HARD_PENDING_BYTES="${HARD_PENDING_BYTES:-137438953472}" # 128 GiB
 OPEN_FILES="${OPEN_FILES:-1000}"
+# RocksDB's options.ttl (db_bench --ttl_seconds), off by default (owner, 2026-11-22). RocksDB's own default, 30 days,
+# keys two leveled rules to a file's oldest ancestor time, which a preloaded tree's files carry from its load: past
+# ttl/2 a merge's output is cut around old files of the level it writes (FillFilesToCutForTtl) and old files are
+# boosted in the pick (FileTtlBooster). The 11-04 trees crossed 15 days on 2026-11-19 ~20:02 UTC and every run after
+# merged differently with nothing else changed (~/node_ops/diag/2026-11-22-ck4/NOTES.md). While a tree's files are
+# younger than ttl/2 both rules do nothing, so 0 reproduces the runs made before then. An integer (seconds), or
+# empty: no flag, RocksDB's default (every run before 2026-11-22). The fingerprint carries ttl<N> when set.
+DBBENCH_TTL_SECONDS="${DBBENCH_TTL_SECONDS-0}"
 
 # Reproducibility and execution.
 DBBENCH_SEED="${DBBENCH_SEED:-1}"
@@ -561,6 +569,7 @@ dbbench_shared_flags() {
     --perf_level=1
     --stats_dump_period_sec="$STATS_DUMP_PERIOD_SECONDS"
   )
+  [[ -z "$DBBENCH_TTL_SECONDS" ]] || DBBENCH_COMMON+=(--ttl_seconds="$DBBENCH_TTL_SECONDS")
   DBBENCH_WORKLOAD=(
     --mix_get_ratio="$MIX_GET_RATIO"
     --mix_put_ratio="$MIX_PUT_RATIO"

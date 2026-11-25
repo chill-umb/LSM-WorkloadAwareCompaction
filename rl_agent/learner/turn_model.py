@@ -5,7 +5,12 @@ controller/turn.h TurnScores runs the exported weights):
   acting level, Q(s, a) = V + sum_i (A_i(a_i) - mean of A_i over the allowed
   actions);
 * vdn, one agent per acting level: each a small net on its own view
-  (turn_weights.vdn_view), Q_tot(s, a) = sum_i Q_i(o_i, a_i).
+  (turn_weights.vdn_view), Q_tot(s, a) = sum_i Q_i(o_i, a_i). With hold_ref
+  (the plugin's turn_hold_ref) an agent's output 0 is hold's value and each
+  other output that move's difference from hold: Q_i(hold) = out_0,
+  Q_i(a) = out_0 + out_a. A move no gradient step has reached then scores
+  exactly hold's value (not 0), so the greedy tie and the target's best next
+  move go to hold.
 
 The output layers start at zero, so every action ties and the plugin holds
 (cold start). Inputs reach the nets already scaled and clipped
@@ -71,9 +76,11 @@ class FactoredNet(torch.nn.Module):
 class VdnNet(torch.nn.Module):
     arch = "vdn"
 
-    def __init__(self, acting: int, hidden: int = 32, layers: int = 2):
+    def __init__(self, acting: int, hidden: int = 32, layers: int = 2,
+                 hold_ref: bool = False):
         super().__init__()
         self.acting = acting
+        self.hold_ref = bool(hold_ref)
         self.n_in = len(TW.feature_names(acting))
         self.views = [TW.vdn_view(level, acting) for level in range(acting)]
         # -1 (a zero pad) reads an appended column of zeros.
@@ -87,8 +94,11 @@ class VdnNet(torch.nn.Module):
     def scores(self, xs: torch.Tensor) -> torch.Tensor:
         """Each agent's values from its own view, [B, acting, 4]."""
         padded = torch.cat([xs, torch.zeros(xs.shape[0], 1, dtype=xs.dtype)], 1)
-        return torch.stack([net(padded[:, getattr(self, f"idx{level}")])
-                            for level, net in enumerate(self.nets)], 1)
+        out = torch.stack([net(padded[:, getattr(self, f"idx{level}")])
+                           for level, net in enumerate(self.nets)], 1)
+        if self.hold_ref:
+            out = torch.cat([out[..., :1], out[..., :1] + out[..., 1:]], -1)
+        return out
 
     def joint(self, xs: torch.Tensor, actions: torch.Tensor,
               masks: torch.Tensor) -> torch.Tensor:
@@ -103,11 +113,13 @@ class VdnNet(torch.nn.Module):
 
 
 def make(arch: str, acting: int, hidden_factored: int = 64, hidden_vdn: int = 32,
-         layers: int = 2) -> torch.nn.Module:
+         layers: int = 2, hold_ref: bool = False) -> torch.nn.Module:
     if arch == "factored":
+        if hold_ref:
+            raise ValueError("hold_ref (turn_hold_ref) needs turn_arch vdn")
         return FactoredNet(acting, hidden_factored, layers)
     if arch == "vdn":
-        return VdnNet(acting, hidden_vdn, layers)
+        return VdnNet(acting, hidden_vdn, layers, hold_ref)
     raise ValueError(f"turn_arch must be factored or vdn, not {arch!r}")
 
 

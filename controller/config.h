@@ -74,6 +74,32 @@ struct TurnConfig {
   // the new rungs. The other guards (L0 near its slowdown, a glide still
   // running, below L0) and the decay's guard are unchanged.
   bool guard_added = false;
+  // L0's own exploration (turn_l0_explore_own; optional, 0 or 1; absent: 0,
+  // as before). On, L0 flips its own coin every turn at the turn's rate and
+  // the deeper fast levels share one draw among themselves (ExploreL0Own):
+  // L0's draws come from the plugin's random stream alone, in the order a run
+  // with L0 as the only acting level makes them, so on the same seed L0
+  // explores on the same turns, with the same draws, as such a run; the deep
+  // draw and the slow levels' coins come from a second stream. Off, one draw
+  // over every fast level, L0 among them (Explore). Needs turn_acting >= 2.
+  bool l0_explore_own = false;
+  // No random tries for an untrained deep level (turn_deep_explore_trained;
+  // optional, 0 or 1; absent: 0, as before). On, every exploration draw is
+  // made as before (the same draws from the same streams, the slow levels'
+  // decision counts as before), but a level from 1 on whose own net has not
+  // trained yet (TurnLevelTrained: no net, or its output layer still all 0,
+  // as the trainer starts it) keeps its greedy action instead of the random
+  // one. Before its first gradient step every score of its net is 0, so it
+  // holds. L0 is never touched. Needs turn_acting >= 2 and turn_arch vdn (one
+  // net per level).
+  bool deep_explore_trained = false;
+  // Moves scored against hold (turn_hold_ref; optional, 0 or 1; absent: 0,
+  // as before). On, each level's net reads output 0 as hold's value and each
+  // other output as that move's difference from hold (TurnScores), at every
+  // level, L0 included. A move the trainer has never stepped then scores
+  // exactly hold's value instead of 0, so greedy holds until the move's own
+  // tries say otherwise. The trainer reads the same key. Needs turn_arch vdn.
+  bool hold_ref = false;
   // The level clock (turn_periods; optional, ":"-separated, one whole number
   // per acting level; absent: empty, every level decides every turn, as
   // before). Level i decides only at the turns t with t % periods[i] ==

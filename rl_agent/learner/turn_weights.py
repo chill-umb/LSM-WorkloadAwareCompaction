@@ -186,10 +186,11 @@ def write_atomic(w: TurnWeights, path: str) -> None:
     os.replace(tmp, path)
 
 
-def forward(w: TurnWeights, x: list) -> list:
+def forward(w: TurnWeights, x: list, hold_ref: bool = False) -> list:
     """TurnScores: per acting level, the four scores (the factored arm's
     advantages, or each VDN agent's values), in turn.cc's order of
-    operations."""
+    operations. hold_ref (turn_hold_ref, VDN only): move a scores
+    out_0 + out_a, hold out_0."""
     xs = []
     for i in range(w.n_in):
         v = x[i] if i < len(x) else 0.0
@@ -211,4 +212,7 @@ def forward(w: TurnWeights, x: list) -> list:
     if w.arch == 0:
         o = run(w.nets[0])
         return [o[1 + N_ACTIONS * i:1 + N_ACTIONS * (i + 1)] for i in range(w.acting)]
-    return [run(net) for net in w.nets[:w.acting]]
+    outs = [run(net) for net in w.nets[:w.acting]]
+    if hold_ref:
+        return [[o[0]] + [o[0] + v for v in o[1:]] for o in outs]
+    return outs

@@ -167,6 +167,36 @@ class EndToEndTest(unittest.TestCase):
                 self.assertEqual(summary["transitions"], TURNS - 2)
                 self.assertEqual(summary["arch"], arch)
 
+    def test_hold_ref_builds_the_net_and_must_match_the_plugin(self):
+        """turn_hold_ref (moves scored against hold): the trainer's net reads
+        its outputs as the plugin does, and a plugin whose start line says
+        otherwise is refused; absent on both sides, as before."""
+        names = TW.feature_names(ACTING)
+        for flag, logged, refused in ((1, 1, False), (1, 0, True), (0, 1, True),
+                                      (None, None, False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                args = type("A", (), {})()
+                for name in ("decisions", "host_log", "log", "summary", "weights"):
+                    setattr(args, name, str(Path(tmp) / f"{name}.out"))
+                cfg = plugin_config("vdn")
+                if flag is not None:
+                    cfg["turn_hold_ref"] = flag
+                tr = TT.TurnTrainer(args, settings(), cfg)
+                self.assertEqual(tr.model.hold_ref, flag == 1)
+                self.assertEqual(tr.target.hold_ref, flag == 1)
+                start = {"type": "turn_start", "arch": "vdn", "acting": ACTING,
+                         "features": names}
+                if logged is not None:
+                    start["hold_ref"] = logged
+                write(tr.args.decisions, [start])
+                if refused:
+                    with self.assertRaisesRegex(SystemExit, "turn_hold_ref differs"):
+                        tr.step()
+                else:
+                    tr.step()
+                    self.assertTrue(tr.started)
+                tr.log.close()
+
     def test_a_plugin_with_other_inputs_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             tr = make(tmp)

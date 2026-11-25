@@ -391,6 +391,88 @@ class ComposeTest(unittest.TestCase):
             self.assertEqual((both["turn_l0_bill"], both["turn_compact_step"],
                               both["turn_guard_added"]), (1, 1, 1))
 
+    def test_the_l0_explore_own_flag(self):
+        """turn_l0_explore_own (L0's own exploration): optional, 0 or 1,
+        copied from the turn settings' "plugin" part; 1 needs more than one
+        acting level. Without it the config is as before."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = {**pc.learner_values(shipped, "training"), "turn_acting": 4}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        for arm in pc.TURN_ARMS:
+            plain, _ = compose(arm, diagnostic=True, learner=learner, decay=0, **turn)
+            self.assertNotIn("turn_l0_explore_own", plain)
+            for value in (0, 1):
+                on, _ = compose(arm, diagnostic=True, decay=0,
+                                learner={**learner, "turn_l0_explore_own": value}, **turn)
+                self.assertEqual(on["turn_l0_explore_own"], value)
+                self.assertEqual({k: v for k, v in on.items() if k != "turn_l0_explore_own"},
+                                 plain)
+            for bad in (2, -1, True, 0.5, "1"):
+                with self.assertRaisesRegex(ValueError, "turn_l0_explore_own must be 0 or 1"):
+                    compose(arm, diagnostic=True, decay=0,
+                            learner={**learner, "turn_l0_explore_own": bad}, **turn)
+            alone = {**learner, "turn_acting": 1}
+            off, _ = compose(arm, diagnostic=True, decay=0,
+                             learner={**alone, "turn_l0_explore_own": 0}, **turn)
+            self.assertEqual(off["turn_l0_explore_own"], 0)
+            with self.assertRaisesRegex(ValueError, "turn_l0_explore_own 1 .* needs turn_acting >= 2"):
+                compose(arm, diagnostic=True, decay=0,
+                        learner={**alone, "turn_l0_explore_own": 1}, **turn)
+
+    def test_the_deep_explore_trained_flag(self):
+        """turn_deep_explore_trained (no random tries for an untrained deep
+        level): optional, 0 or 1, copied from the turn settings' "plugin"
+        part; 1 needs more than one acting level and the turn_vdn arm.
+        Without it the config is as before."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = {**pc.learner_values(shipped, "training"), "turn_acting": 4}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        key = "turn_deep_explore_trained"
+        for arm in pc.TURN_ARMS:
+            plain, _ = compose(arm, diagnostic=True, learner=learner, decay=0, **turn)
+            self.assertNotIn(key, plain)
+            off, _ = compose(arm, diagnostic=True, decay=0, learner={**learner, key: 0}, **turn)
+            self.assertEqual(off[key], 0)
+            self.assertEqual({k: v for k, v in off.items() if k != key}, plain)
+            for bad in (2, -1, True, 0.5, "1"):
+                with self.assertRaisesRegex(ValueError, f"{key} must be 0 or 1"):
+                    compose(arm, diagnostic=True, decay=0, learner={**learner, key: bad}, **turn)
+            if arm == "turn_vdn":
+                on, _ = compose(arm, diagnostic=True, decay=0, learner={**learner, key: 1}, **turn)
+                self.assertEqual(on[key], 1)
+                self.assertEqual({k: v for k, v in on.items() if k != key}, plain)
+                alone = {**learner, "turn_acting": 1, key: 1}
+                with self.assertRaisesRegex(ValueError, f"{key} 1 .* needs turn_acting >= 2 and the turn_vdn arm"):
+                    compose(arm, diagnostic=True, decay=0, learner=alone, **turn)
+            else:
+                with self.assertRaisesRegex(ValueError, f"{key} 1 .* needs turn_acting >= 2 and the turn_vdn arm"):
+                    compose(arm, diagnostic=True, decay=0, learner={**learner, key: 1}, **turn)
+
+    def test_the_hold_ref_flag(self):
+        """turn_hold_ref (moves scored against hold): optional, 0 or 1,
+        copied from the turn settings' "plugin" part; 1 needs the turn_vdn
+        arm. Without it the config is as before."""
+        shipped = json.loads((ROOT / "config" / "turn_settings.json").read_text())
+        learner = {**pc.learner_values(shipped, "training"), "turn_acting": 4}
+        turn = dict(prices=PRICES6, weights_path="/w.bin", seed=4, q_bar_standin=50000.0)
+        key = "turn_hold_ref"
+        for arm in pc.TURN_ARMS:
+            plain, _ = compose(arm, diagnostic=True, learner=learner, decay=0, **turn)
+            self.assertNotIn(key, plain)
+            off, _ = compose(arm, diagnostic=True, decay=0, learner={**learner, key: 0}, **turn)
+            self.assertEqual(off[key], 0)
+            self.assertEqual({k: v for k, v in off.items() if k != key}, plain)
+            for bad in (2, -1, True, 0.5, "1"):
+                with self.assertRaisesRegex(ValueError, f"{key} must be 0 or 1"):
+                    compose(arm, diagnostic=True, decay=0, learner={**learner, key: bad}, **turn)
+            if arm == "turn_vdn":
+                on, _ = compose(arm, diagnostic=True, decay=0, learner={**learner, key: 1}, **turn)
+                self.assertEqual(on[key], 1)
+                self.assertEqual({k: v for k, v in on.items() if k != key}, plain)
+            else:
+                with self.assertRaisesRegex(ValueError, f"{key} 1 .* needs the turn_vdn arm"):
+                    compose(arm, diagnostic=True, decay=0, learner={**learner, key: 1}, **turn)
+
     def test_the_level_reads_flag(self):
         """LEVEL_READS: every arm's level_reads, 0 by default; 1 only for the
         hold and turn arms, in any run (logging only); the hold arm's window,

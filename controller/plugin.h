@@ -341,6 +341,9 @@ class Controller {
   std::deque<TurnActivity> turn_ring_;  // the last turn_forecast_turns
   std::vector<TurnDefer> turn_defer_;
   std::vector<uint64_t> turn_slow_decisions_;  // per level (turn_periods)
+  // The deep levels' own stream (turn_l0_explore_own): their shared draw and
+  // the slow levels' coins, so that rng_ draws for L0 alone.
+  std::mt19937_64 turn_deep_rng_;
   TurnNet turn_net_;
   bool turn_have_net_ = false;
   bool turn_weights_checked_ = false;

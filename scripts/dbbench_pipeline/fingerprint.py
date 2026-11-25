@@ -6,7 +6,8 @@ in lockstep: a new segment needs both sides changed, and
 tests/test_fingerprint.py checks the pair (CLAUDE.md gotcha). Moved here from
 the retired 06_select_baseline_slo.py on 2026-10-02, unchanged; PREREGISTRATION
 D-29's generator options and D-27's preloaded tree added on 2026-10-16, each
-segment present only when used.
+segment present only when used. options.ttl (ttl<N>, absent = RocksDB's
+default) added on 2026-11-22.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         r"(?::dec([01])([01]))?(?::ins([0-9.]+))?(?::ph([0-9._~]+))?"
         r"(?::tree(\d+)-(\d+)-([0-9a-f]{64}))?:"
         r"cache(\d+):bloom(\d+):bg(\d+):threads(\d+):wal([01]):"
-        r"dio([01])(?::cap([0-9.x]+))?(?::ltm([0-9.x]+))?"
+        r"dio([01])(?::cap([0-9.x]+))?(?::ltm([0-9.x]+))?(?::ttl(\d+))?"
         r"(?::settle(\d+))?(?::qbar([0-9.]+))?(?::prices([0-9a-f]{64}))?"
         r"(?::plugin([0-9a-f]{64}):pcfg([0-9a-f]{64}))?:"
         r"dynamic([01]):soft(\d+):hard(\d+):"
@@ -48,7 +49,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
         "tree_keys", "tree_seed", "tree_sha256",
         "block_cache_size", "bloom_bits",
         "max_background_jobs", "threads", "disable_wal", "use_direct_io",
-        "static_capacity_scales", "level_target_multipliers",
+        "static_capacity_scales", "level_target_multipliers", "ttl_seconds",
         "settle_hold_seconds", "reference_rate", "prices_sha256",
         "plugin_sha256", "plugin_config_sha256",
         "level_compaction_dynamic_level_bytes",
@@ -68,7 +69,7 @@ def parse_fingerprint_options(fingerprint: str) -> dict[str, object]:
                 "settle_hold_seconds": int, "reference_rate": float,
                 "prices_sha256": str, "plugin_sha256": str,
                 "plugin_config_sha256": str, "tree_keys": int,
-                "tree_seed": int, "tree_sha256": str}
+                "tree_seed": int, "tree_sha256": str, "ttl_seconds": int}
     # D-29 §1's generator options; absent is db_bench's released behaviour:
     # coupled draws, no inserts, no phases. W5's phases are written with "_"
     # for ":" and "~" for ";", and read back as db_bench's --mix_phases.

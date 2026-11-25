@@ -288,8 +288,14 @@ std::string SerializeTurnNet(const TurnNet& net);
 
 // Four scores per acting level: the factored arm's advantages, or each VDN
 // agent's values. Every score is 0 without a net (cold start: all tie).
+// hold_ref (turn_hold_ref, VDN only): a VDN agent's output 0 is hold's value
+// and each other output is that move's difference from hold, so move a
+// scores out[0] + out[a]. The trainer starts every output layer at 0, so a
+// move no gradient step has reached scores exactly hold's value and the
+// greedy tie goes to hold (rl_agent/learner/turn_model.py VdnNet).
 std::vector<std::array<double, kNumActions>> TurnScores(
-    const TurnNet* net, const std::vector<double>& inputs, int acting);
+    const TurnNet* net, const std::vector<double>& inputs, int acting,
+    bool hold_ref = false);
 
 // The greedy action per level among its allowed ones; a tie goes to the
 // lowest index, so hold (0) wins every tie it is in.
@@ -302,8 +308,33 @@ std::vector<Action> Greedy(
 // action drawn uniformly. Returns that level, or -1.
 int Explore(double eps, const std::vector<TurnMask>& masks,
             std::vector<Action>* actions, std::mt19937_64* rng);
+// L0's own exploration (turn_l0_explore_own): first Explore over L0 alone
+// (every other level holds only) from l0_rng, which draws exactly as Explore
+// does in a run where L0 is the only acting level; then Explore over the
+// deeper levels alone (L0 holds only) from deep_rng. Both at eps. *l0 says
+// whether L0 explored; returns the deep level drawn, or -1.
+int ExploreL0Own(double eps, const std::vector<TurnMask>& masks,
+                 std::vector<Action>* actions, std::mt19937_64* l0_rng,
+                 std::mt19937_64* deep_rng, bool* l0);
 // eps at turn t: linear from explore_start to explore_end over explore_turns.
 double ExploreRate(const TurnConfig& cfg, double turn);
+// Whether level `level`'s own net has trained (turn_deep_explore_trained): a
+// VDN net with that level's net, whose output layer has a weight or a bias
+// that is not 0. The trainer starts every output layer at 0
+// (rl_agent/learner/turn_model.py) and a level's net changes only at that
+// level's own gradient steps. No net, not VDN, or no such level: false.
+bool TurnLevelTrained(const TurnNet* net, int level);
+// turn_deep_explore_trained, after every exploration draw: each level from 1
+// on that has not trained (TurnLevelTrained) keeps its greedy action, and a
+// try drawn for it is dropped: *explored (the fast draw's level, or -1)
+// becomes -1 if it names such a level, and its *explored_slow entry (one per
+// level, or empty) false. Returns per level whether a try was dropped (drawn
+// for an untrained level, whatever action it drew). L0 is never touched.
+std::vector<bool> DropUntrainedTries(const TurnNet* net,
+                                     const std::vector<Action>& greedy,
+                                     std::vector<Action>* actions,
+                                     int* explored,
+                                     std::vector<bool>* explored_slow);
 
 // --- The level clock (turn_periods; config.h) --------------------------------
 

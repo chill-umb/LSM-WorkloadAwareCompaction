@@ -288,6 +288,9 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
   ring_.Reset({StepOps(steps), steps});
   decision_ops_.assign(n_, {});
   rng_.seed(static_cast<uint64_t>(cfg_.seed));
+  // A second stream from the same seed (turn_l0_explore_own); unused otherwise.
+  turn_deep_rng_.seed(static_cast<uint64_t>(cfg_.seed) * 0x9E3779B97F4A7C15ULL +
+                      0xD1B54A32D192ED03ULL);
   last_snapshot_ = host_->Snapshot();
   stats_.Reset(n_, ops, reads);
   clock_.Add(now_(), ops.total());
@@ -410,6 +413,10 @@ Controller::Controller(RLControllerHost* host, const std::string& config_path,
                               t.slow_explore_decisions)
                          .Num("compact_step", t.compact_step ? 1 : 0)
                          .Num("guard_added", t.guard_added ? 1 : 0)
+                         .Num("l0_explore_own", t.l0_explore_own ? 1 : 0)
+                         .Num("deep_explore_trained",
+                              t.deep_explore_trained ? 1 : 0)
+                         .Num("hold_ref", t.hold_ref ? 1 : 0)
                          .Raw("features", names + "]")
                          .str());
   }
@@ -1507,7 +1514,8 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   if (fallback_) return true;  // an invalid weights file: native from here
   const double eps = ExploreRate(tc, static_cast<double>(closed));
   const std::vector<std::array<double, kNumActions>> scores =
-      TurnScores(turn_have_net_ ? &turn_net_ : nullptr, x, tc.acting);
+      TurnScores(turn_have_net_ ? &turn_net_ : nullptr, x, tc.acting,
+                 tc.hold_ref);
   // The L0 prior (turn_prior): L0's greedy choice is the net's score minus
   // the October L0 formula's change of one turn's cost over the forecast
   // window, in the reward's units (the weights' spread; 1 before the first
@@ -1525,14 +1533,40 @@ bool Controller::TurnBoundary(const RLTreeSnapshot& snapshot,
   const std::vector<Action> greedy = Greedy(acted, masks);
   std::vector<Action> actions = greedy;
   // The fast levels' exploration never draws a slow level; each slow level
-  // explores by itself at its own decision turns (ExploreSlow).
-  const int explored =
-      Explore(eps, clocked ? FastMasks(tc, masks) : masks, &actions, &rng_);
+  // explores by itself at its own decision turns (ExploreSlow). With
+  // turn_l0_explore_own L0 has its own coin on rng_ and the deeper fast
+  // levels share one draw on the second stream ("explored" is then that
+  // draw's level, never 0; "explored_l0" is L0's coin).
+  const std::vector<TurnMask> fast = clocked ? FastMasks(tc, masks) : masks;
+  bool explored_l0 = false;
+  int explored =
+      tc.l0_explore_own
+          ? ExploreL0Own(eps, fast, &actions, &rng_, &turn_deep_rng_,
+                         &explored_l0)
+          : Explore(eps, fast, &actions, &rng_);
+  if (tc.l0_explore_own) line.Uint("explored_l0", explored_l0 ? 1 : 0);
+  std::vector<bool> explored_slow;
   if (clocked) {
-    line.Raw("explored_slow",
-             JsonBools(ExploreSlow(tc, masks, decided, &turn_slow_decisions_,
-                                   &actions, &rng_)));
+    explored_slow =
+        ExploreSlow(tc, masks, decided, &turn_slow_decisions_, &actions,
+                    tc.l0_explore_own ? &turn_deep_rng_ : &rng_);
   }
+  // turn_deep_explore_trained: the draws above are made as ever; a deep level
+  // whose own net has not trained keeps its greedy action (hold), and a try
+  // drawn for it is dropped, not logged as explored. "net_trained" is each
+  // level's state.
+  if (tc.deep_explore_trained) {
+    const TurnNet* net = turn_have_net_ ? &turn_net_ : nullptr;
+    const std::vector<bool> dropped =
+        DropUntrainedTries(net, greedy, &actions, &explored, &explored_slow);
+    std::vector<bool> trained(dropped.size(), false);
+    for (size_t i = 0; i < trained.size(); ++i) {
+      trained[i] = TurnLevelTrained(net, static_cast<int>(i));
+    }
+    line.Raw("net_trained", JsonBools(trained))
+        .Raw("explore_dropped", JsonBools(dropped));
+  }
+  if (clocked) line.Raw("explored_slow", JsonBools(explored_slow));
 
   // 5. Encode, the defers' top-up state, and one Apply if the vector changed.
   std::vector<TurnNote> notes;

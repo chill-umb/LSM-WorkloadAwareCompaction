@@ -158,6 +158,13 @@ if [[ -f "$BUILD_PROVENANCE" ]]; then
 fi
 RESEARCH_OBJECTIVE_SHA256="$(sha256sum config/research_objective_contract.json | awk '{print $1}')"
 
+# options.ttl (config.sh DBBENCH_TTL_SECONDS; 0 = off, the default since 2026-11-22; empty = RocksDB's default).
+if [[ -n "$DBBENCH_TTL_SECONDS" && ! "$DBBENCH_TTL_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "DBBENCH_TTL_SECONDS is seconds (an integer, 0 = off) or empty, not '$DBBENCH_TTL_SECONDS'" >&2
+  exit 1
+fi
+TTL_FINGERPRINT="${DBBENCH_TTL_SECONDS:+:ttl$DBBENCH_TTL_SECONDS}"
+
 # The C++ no longer reads RL_STATIC_CAPACITY_SCALES (WP1), so a leftover
 # setting would be silently ignored. Refuse it instead.
 if [[ -n "${STATIC_CAPACITY_SCALES:-}${RL_STATIC_CAPACITY_SCALES:-}" ]]; then
@@ -1611,7 +1618,7 @@ PY
     echo "Invalid selected L0 trigger ordering in $manifest_path" >&2
     exit 1
   fi
-  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}${SUITE_FINGERPRINT}${TREE_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}${PLUGIN_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
+  fingerprint="${WORKLOAD_PROFILE}:${size_label}:T${ratio}:k${KEY_SIZE}:v${VALUE_SIZE}:wb${WRITE_BUFFER_SIZE}:sst${TARGET_FILE_SIZE}:block${BLOCK_SIZE}:l1${MAX_BYTES_FOR_LEVEL_BASE}:levels${NUM_LEVELS}:l0-${effective_l0_compaction}-${effective_l0_slowdown}-${effective_l0_stop}:pri${effective_priority}:load${LOAD_PERCENT}:mix${MIX_GET_RATIO}-${MIX_PUT_RATIO}-${MIX_SEEK_RATIO}:scan${SCAN_LENGTH}-${MIX_MAX_SCAN_LENGTH}${SKEW_FINGERPRINT}${POWER_FINGERPRINT}${SUITE_FINGERPRINT}${TREE_FINGERPRINT}:cache${BLOCK_CACHE_SIZE}:bloom${BLOOM_BITS}:bg${MAX_BACKGROUND_JOBS}:threads${THREADS}:wal${DISABLE_WAL}:dio${USE_DIRECT_IO}${MULTIPLIER_FINGERPRINT}${TTL_FINGERPRINT}${SETTLE_FINGERPRINT}${QBAR_FINGERPRINT}${PRICES_FINGERPRINT}${PLUGIN_FINGERPRINT}:dynamic0:soft${SOFT_PENDING_BYTES}:hard${HARD_PENDING_BYTES}:binary${DBBENCH_SHA256}:objective${RESEARCH_OBJECTIVE_SHA256}"
   if [[ -n "$manifest_fingerprint" && "$fingerprint" != "$manifest_fingerprint" ]]; then
     echo "Current geometry does not match $manifest_path" >&2
     echo "expected: $manifest_fingerprint" >&2
@@ -1765,6 +1772,7 @@ PY
     printf 'mix_max_value_size=%s\n' "$MIX_MAX_VALUE_SIZE"
     printf 'iter_pareto=%s,%s,%s\n' "$SCAN_LENGTH" "$ITER_K" "$ITER_SIGMA"
     printf 'level_target_multipliers=%s\n' "${multipliers:-none}"
+    printf 'ttl_seconds=%s\n' "${DBBENCH_TTL_SECONDS:-rocksdb_default}"
     printf 'workload_family=%s\n' "$WORKLOAD_FAMILY"
     # D-29: the suite workload and its generator options.
     printf 'suite_workload=%s\n' "${SUITE_WORKLOAD:-none}"

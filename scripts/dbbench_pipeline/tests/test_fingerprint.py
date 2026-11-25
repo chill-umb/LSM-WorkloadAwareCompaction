@@ -25,7 +25,7 @@ SAMPLE = {
     "MIX_MAX_SCAN_LENGTH": "10000", "SKEW_FINGERPRINT": ":skew30-925.5",
     "BLOCK_CACHE_SIZE": "8388608", "BLOOM_BITS": "10",
     "MAX_BACKGROUND_JOBS": "2", "THREADS": "1", "DISABLE_WAL": "0",
-    "USE_DIRECT_IO": "0", "MULTIPLIER_FINGERPRINT": "",
+    "USE_DIRECT_IO": "0", "MULTIPLIER_FINGERPRINT": "", "TTL_FINGERPRINT": "",
     "POWER_FINGERPRINT": "", "SUITE_FINGERPRINT": "", "TREE_FINGERPRINT": "",
     "SETTLE_FINGERPRINT": "", "QBAR_FINGERPRINT": "",
     "PRICES_FINGERPRINT": "", "PLUGIN_FINGERPRINT": "",
@@ -50,6 +50,15 @@ class FingerprintTest(unittest.TestCase):
         self.assertEqual(options["level_target_multipliers"], "off")
         self.assertEqual(options["size_ratio"], 2)
         self.assertEqual(options["keyrange_num"], 30)
+
+    def test_ttl_reaches_the_fingerprint_and_parses(self):
+        """2026-11-22: options.ttl as ttl<N>; absent on runs with RocksDB's default ttl."""
+        options = select.parse_fingerprint_options(fingerprint_from_03(TTL_FINGERPRINT=":ttl0"))
+        self.assertEqual(options["ttl_seconds"], 0)
+        options = select.parse_fingerprint_options(
+            fingerprint_from_03(TTL_FINGERPRINT=":ttl0", MULTIPLIER_FINGERPRINT=":ltm1x2"))
+        self.assertEqual((options["ttl_seconds"], options["level_target_multipliers"]), (0, "1x2"))
+        self.assertIsNone(select.parse_fingerprint_options(fingerprint_from_03())["ttl_seconds"])
 
     def test_multipliers_reach_the_fingerprint_and_parse(self):
         fingerprint = fingerprint_from_03(

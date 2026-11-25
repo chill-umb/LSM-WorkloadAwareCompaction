@@ -215,6 +215,41 @@ class CheckTurnRunTest(unittest.TestCase):
             self.assertEqual(report["failed_checks"], ["pushes"])
 
 
+    def test_the_scores_are_recomputed_with_the_runs_hold_ref(self):
+        """turn_hold_ref 1 (VDN): the plugin's logged scores are move a =
+        out_0 + out_a; ARCH-6 recomputes them so, and the plain reading of
+        the same weights fails it."""
+        acting = 2
+        n_in = len(TW.feature_names(acting))
+
+        def v(i, j):
+            return round(math.sin(0.7 * (3 * i + 7 * j + 1)) * 0.3, 6)
+        agents = [TW.Net(list(range(n_in)),
+                         [([[v(r + k, c) for c in range(n_in)] for r in range(3)],
+                           [v(r, 99 + k) for r in range(3)]),
+                          ([[v(r + 50 + k, c) for c in range(3)] for r in range(4)],
+                           [v(r, 77 + k) for r in range(4)])]) for k in range(acting)]
+        w = TW.TurnWeights(version=1, arch=1, acting=acting, clip=5.0, mean=[0.0] * n_in,
+                           scale=[1.0] * n_in, nets=agents, spread=1.0)
+        names = TW.feature_names(acting)
+        masks = [[1, 1, 1, 1], [1, 1, 0, 1]]
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            (archive / "turn.v1.bin").write_bytes(TW.encode(w))
+            lines = []
+            for t in range(4):
+                x = [0.1 * ((i * 5 + t) % 9) - 0.3 for i in range(n_in)]
+                scores = TW.forward(w, x, hold_ref=True)
+                lines.append({"type": "turn", "t": t, "final": 0, "weights": 1,
+                              "x": dict(zip(names, x)), "masks": masks, "scores": scores,
+                              "greedy": check37.greedy(scores, masks)})
+            on = check37.arch6(lines, archive, acting, True)
+            self.assertTrue(on["passed"], on)
+            self.assertEqual(on["judged"], 4)
+            off = check37.arch6(lines, archive, acting)
+            self.assertFalse(off["passed"])
+            self.assertIn("scores differ", " ".join(off["problems"]))
+
     def test_the_l0_prior_enters_the_greedy_check(self):
         """turn_prior 1: L0's greedy choice is its scores less the logged
         prior over the weights' spread; ignoring the prior, or a logged

@@ -2,6 +2,7 @@
 // ~/latex/2026-11-07-rl-design/rl-design.tex, stage 1's test list).
 #include "turn.h"
 
+#include <algorithm>
 #include <cmath>
 #include <unistd.h>
 
@@ -1069,6 +1070,52 @@ TEST(TurnNetTest, RoundTripScoresAndRefusals) {
   for (const auto& level : TurnScores(nullptr, std::vector<double>(35, 1.0), 5)) {
     for (double v : level) EXPECT_EQ(v, 0);
   }
+  for (const auto& level :
+       TurnScores(nullptr, std::vector<double>(35, 1.0), 5, true)) {
+    for (double v : level) EXPECT_EQ(v, 0);
+  }
+}
+
+// turn_hold_ref: a VDN agent's output 0 is hold's value and each other output
+// that move's difference from hold (move a scores out[0] + out[a]), so a
+// move whose output row is still all 0 scores exactly hold's value and the
+// greedy tie goes to hold. Without it the same net's untried moves score 0
+// and beat a hold below 0, compact first (the tie it removes).
+TEST(TurnNetTest, HoldRefScoresMovesAgainstHold) {
+  TurnNet net = LinearNet(1, 5);
+  std::vector<double> x(35, 0.0);
+  x[0] = 2.0;
+  const auto plain = TurnScores(&net, x, 5);
+  const auto ref = TurnScores(&net, x, 5, true);
+  ASSERT_EQ(ref.size(), 5u);
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_DOUBLE_EQ(ref[i][0], plain[i][0]) << i;
+    for (int a = 1; a < kNumActions; ++a) {
+      EXPECT_DOUBLE_EQ(ref[i][a], plain[i][0] + plain[i][a]) << i << " " << a;
+    }
+  }
+  // Hold trained below 0, every other move's output row still all 0.
+  for (TurnNet::Net& n : net.nets) {
+    TurnNet::Layer& o = n.layers.back();
+    std::fill(o.w.begin(), o.w.end(), 0.0);
+    std::fill(o.b.begin(), o.b.end(), 0.0);
+    o.b[0] = -0.004;
+  }
+  const std::vector<TurnMask> masks(5, TurnMask{true, true, true, true});
+  const auto cold = TurnScores(&net, x, 5, true);
+  for (int i = 0; i < 5; ++i) {
+    for (int a = 1; a < kNumActions; ++a) EXPECT_EQ(cold[i][a], cold[i][0]);
+  }
+  for (Action a : Greedy(cold, masks)) EXPECT_EQ(a, Action::kHold);
+  for (Action a : Greedy(TurnScores(&net, x, 5), masks)) {
+    EXPECT_EQ(static_cast<int>(a), 1);
+  }
+  // One move's difference above 0 at L3: only that level and move change.
+  net.nets[3].layers.back().b[3] = 0.001;
+  const std::vector<Action> g = Greedy(TurnScores(&net, x, 5, true), masks);
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_EQ(static_cast<int>(g[i]), i == 3 ? 3 : 0) << i;
+  }
 }
 
 TEST(TurnChoice, GreedyRespectsMasksAndTiesGoToHold) {
@@ -1111,6 +1158,133 @@ TEST(TurnChoice, ExploreOneLevelOnly) {
   EXPECT_NEAR(ExploreRate(c, 100), 0.275, 1e-12);
   EXPECT_DOUBLE_EQ(ExploreRate(c, 200), 0.05);
   EXPECT_DOUBLE_EQ(ExploreRate(c, 5000), 0.05);
+}
+
+// turn_l0_explore_own: L0's coin, on its own stream, draws exactly as Explore
+// does in a run where L0 is the only acting level (same seed, same mask);
+// the deeper levels share one draw on the other stream and never touch L0.
+TEST(TurnChoice, L0ExploresByItselfAndTheDeepLevelsShareADraw) {
+  const TurnMask all{true, true, true, true};
+  const TurnMask l0{true, true, false, true};
+  const TurnMask hold{true, false, false, false};
+  const std::vector<TurnMask> masks = {l0, all, hold, all};
+  std::mt19937_64 own(11), alone(11), deep(12);
+  int l0_n = 0, deep_n = 0, both = 0, seen1 = 0, seen3 = 0;
+  for (int i = 0; i < 4000; ++i) {
+    std::vector<Action> acts(4, Action::kHold);
+    bool l0x = true;
+    const int level = ExploreL0Own(0.3, masks, &acts, &own, &deep, &l0x);
+    std::vector<Action> ref(1, Action::kHold);  // the L0-only run
+    const int ref_level = Explore(0.3, {l0}, &ref, &alone);
+    ASSERT_EQ(l0x, ref_level == 0) << i;
+    ASSERT_EQ(acts[0], ref[0]) << i;
+    ASSERT_TRUE(level == -1 || level == 1 || level == 3) << level;
+    for (int j = 0; j < 4; ++j) {
+      EXPECT_TRUE(masks[j][static_cast<int>(acts[j])]);
+      if (j > 0 && j != level) {
+        EXPECT_EQ(acts[j], Action::kHold);
+      }
+    }
+    if (!l0x) {
+      EXPECT_EQ(acts[0], Action::kHold);
+    }
+    l0_n += l0x;
+    deep_n += level >= 0;
+    both += l0x && level >= 0;
+    seen1 += level == 1;
+    seen3 += level == 3;
+  }
+  // Each coin at 0.3: about 1200 of 4000; both on the same turn about 360.
+  EXPECT_GT(l0_n, 1080);
+  EXPECT_LT(l0_n, 1320);
+  EXPECT_GT(deep_n, 1080);
+  EXPECT_LT(deep_n, 1320);
+  EXPECT_GT(both, 280);
+  EXPECT_LT(both, 440);
+  EXPECT_GT(seen1, 450);
+  EXPECT_GT(seen3, 450);
+  // L0 holding only never explores, and its coin still matches the L0-only
+  // run's; the deep draw goes on. eps 0: nothing.
+  std::mt19937_64 own2(5), alone2(5), deep2(6);
+  int deep2_n = 0;
+  for (int i = 0; i < 200; ++i) {
+    std::vector<Action> acts(4, Action::kHold);
+    bool l0x = true;
+    deep2_n += ExploreL0Own(0.5, {hold, all, hold, all}, &acts, &own2, &deep2,
+                            &l0x) >= 0;
+    EXPECT_FALSE(l0x);
+    EXPECT_EQ(acts[0], Action::kHold);
+    std::vector<Action> ref(1, Action::kHold);
+    EXPECT_EQ(Explore(0.5, {hold}, &ref, &alone2), -1);
+  }
+  EXPECT_EQ(own2(), alone2());  // the same number of draws taken
+  EXPECT_GT(deep2_n, 60);
+  std::vector<Action> acts(4, Action::kHold);
+  bool l0x = true;
+  EXPECT_EQ(ExploreL0Own(0.0, masks, &acts, &own, &deep, &l0x), -1);
+  EXPECT_FALSE(l0x);
+  // One level only: no deep level to draw.
+  std::vector<Action> one(1, Action::kHold);
+  EXPECT_EQ(ExploreL0Own(1.0, {l0}, &one, &own, &deep, &l0x), -1);
+  EXPECT_TRUE(l0x);
+  EXPECT_NE(one[0], Action::kDefer);  // L0's mask has no defer
+}
+
+// turn_deep_explore_trained: a level's net has trained once its output layer
+// has a weight or a bias that is not 0 (the trainer starts it at 0; hidden
+// layers do not count); VDN only. An untrained deep level keeps its greedy
+// action and a try drawn for it is dropped, whatever it drew; a trained level
+// and L0 keep theirs.
+TEST(TurnChoice, AnUntrainedDeepLevelKeepsItsGreedyAction) {
+  TurnNet net = LinearNet(/*arch=*/1, 4);
+  for (int k : {2, 3}) {
+    TurnNet::Layer& o = net.nets[k].layers.back();
+    std::fill(o.w.begin(), o.w.end(), 0.0);
+    std::fill(o.b.begin(), o.b.end(), 0.0);
+  }
+  net.nets[3].layers.back().w[5] = -1e-12;  // one step moved a weight
+  EXPECT_TRUE(TurnLevelTrained(&net, 0));
+  EXPECT_TRUE(TurnLevelTrained(&net, 1));
+  EXPECT_FALSE(TurnLevelTrained(&net, 2));  // hidden layer only
+  EXPECT_TRUE(TurnLevelTrained(&net, 3));
+  EXPECT_FALSE(TurnLevelTrained(&net, 4));
+  EXPECT_FALSE(TurnLevelTrained(&net, -1));
+  EXPECT_FALSE(TurnLevelTrained(nullptr, 1));
+  const TurnNet factored = LinearNet(/*arch=*/0, 4);
+  EXPECT_FALSE(TurnLevelTrained(&factored, 0));
+
+  const std::vector<Action> greedy(4, Action::kHold);
+  // The fast draw at L2 (untrained): dropped; L1 (trained) keeps its try.
+  std::vector<Action> acts = {Action::kExpand, Action::kCompact,
+                              Action::kExpand, Action::kHold};
+  int explored = 2;
+  std::vector<bool> slow = {false, true, false, true};
+  std::vector<bool> dropped =
+      DropUntrainedTries(&net, greedy, &acts, &explored, &slow);
+  EXPECT_EQ(acts, (std::vector<Action>{Action::kExpand, Action::kCompact,
+                                       Action::kHold, Action::kHold}));
+  EXPECT_EQ(explored, -1);
+  EXPECT_EQ(slow, (std::vector<bool>{false, true, false, true}));
+  EXPECT_EQ(dropped, (std::vector<bool>{false, false, true, false}));
+  // No net: every deep try is dropped, one that drew hold too (L3's slow
+  // coin); L0's action and the fast draw at L0 stay.
+  acts = {Action::kCompact, Action::kHold, Action::kExpand, Action::kHold};
+  explored = 0;
+  slow = {false, false, true, true};
+  dropped = DropUntrainedTries(nullptr, greedy, &acts, &explored, &slow);
+  EXPECT_EQ(acts, (std::vector<Action>{Action::kCompact, Action::kHold,
+                                       Action::kHold, Action::kHold}));
+  EXPECT_EQ(explored, 0);
+  EXPECT_EQ(slow, (std::vector<bool>(4, false)));
+  EXPECT_EQ(dropped, (std::vector<bool>{false, false, true, true}));
+  // No slow coins (an unclocked run): the fast draw only.
+  std::vector<bool> none;
+  explored = 1;
+  acts = {Action::kHold, Action::kExpand, Action::kHold, Action::kHold};
+  dropped = DropUntrainedTries(nullptr, greedy, &acts, &explored, &none);
+  EXPECT_EQ(explored, -1);
+  EXPECT_EQ(acts, greedy);
+  EXPECT_EQ(dropped, (std::vector<bool>{false, true, false, false}));
 }
 
 // The level clock (turn_periods): phases, who decides, the masks, and the

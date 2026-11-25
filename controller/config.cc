@@ -337,6 +337,9 @@ const std::set<std::string>& KnownKeys() {
                                                "turn_compact_floor",
                                                "turn_compact_step",
                                                "turn_guard_added",
+                                               "turn_l0_explore_own",
+                                               "turn_deep_explore_trained",
+                                               "turn_hold_ref",
                                                "turn_periods",
                                                "turn_slow_explore_decisions",
                                                "turn_margin",
@@ -720,6 +723,37 @@ static bool ParseTurn(Reader* r, const Bounds& b, TurnConfig* t) {
     return false;
   }
   t->guard_added = guard_added == 1;
+  // L0's own exploration (turn_l0_explore_own): optional; absent means off.
+  // With L0 alone there is no deep draw to keep it apart from.
+  int l0_explore_own = 0;
+  if (r->Has("turn_l0_explore_own") &&
+      (!integer("turn_l0_explore_own", &l0_explore_own, 0, 1) ||
+       !r->Check(l0_explore_own == 0 || t->acting >= 2,
+                 "turn_l0_explore_own 1 needs turn_acting >= 2"))) {
+    return false;
+  }
+  t->l0_explore_own = l0_explore_own == 1;
+  // No random tries for an untrained deep level (turn_deep_explore_trained):
+  // optional; absent means off. Only the VDN arm has one net per level.
+  int deep_explore_trained = 0;
+  if (r->Has("turn_deep_explore_trained") &&
+      (!integer("turn_deep_explore_trained", &deep_explore_trained, 0, 1) ||
+       !r->Check(deep_explore_trained == 0 || (t->acting >= 2 && t->arch == 1),
+                 "turn_deep_explore_trained 1 needs turn_acting >= 2 and "
+                 "turn_arch vdn"))) {
+    return false;
+  }
+  t->deep_explore_trained = deep_explore_trained == 1;
+  // Moves scored against hold (turn_hold_ref): optional; absent means off.
+  // Only the VDN arm's per-level outputs are read that way.
+  int hold_ref = 0;
+  if (r->Has("turn_hold_ref") &&
+      (!integer("turn_hold_ref", &hold_ref, 0, 1) ||
+       !r->Check(hold_ref == 0 || t->arch == 1,
+                 "turn_hold_ref 1 needs turn_arch vdn"))) {
+    return false;
+  }
+  t->hold_ref = hold_ref == 1;
   t->periods.clear();
   t->slow_explore_decisions = 0;
   if (r->Has("turn_periods")) {
@@ -877,7 +911,9 @@ bool ParseConfig(const std::string& text, Config* c, std::string* error) {
       if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
     }
     for (const char* key : {"turn_periods", "turn_slow_explore_decisions",
-                            "turn_compact_step", "turn_guard_added"}) {
+                            "turn_compact_step", "turn_guard_added",
+                            "turn_l0_explore_own",
+                            "turn_deep_explore_trained", "turn_hold_ref"}) {
       if (r.Has(key)) return r.Fail(std::string("\"") + key + "\" is for turn");
     }
   }

@@ -208,6 +208,116 @@ class VdnTest(unittest.TestCase):
             self.assertTrue(moved, level)
 
 
+def train_hold_only(model, target=-0.5, steps=20, seed=6):
+    """Gradient steps on every level's hold alone toward a value below 0, as
+    a level whose tries are all dropped trains (turn_deep_explore_trained)."""
+    g = torch.Generator().manual_seed(seed)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+    for _ in range(steps):
+        x = torch.randn(4, N_IN, generator=g, dtype=torch.float64)
+        q = model.joint(x, torch.zeros(4, ACTING, dtype=torch.long), all_allowed(4))
+        loss = torch.nn.functional.huber_loss(
+            q, torch.full((4,), target * ACTING, dtype=torch.float64))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    return torch.randn(3, N_IN, generator=g, dtype=torch.float64)
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class HoldRefTest(unittest.TestCase):
+    """hold_ref (the plugin's turn_hold_ref): each agent's output 0 is hold's
+    value and each other output that move's difference from hold, so a move
+    no gradient step has reached scores exactly hold's value."""
+
+    def test_without_it_an_untried_move_beats_a_hold_below_0(self):
+        """The tie it removes: hold trained below 0, every other move still at
+        exactly 0, so greedy takes the first allowed one, compact."""
+        model = TM.make("vdn", ACTING)
+        x = train_hold_only(model)
+        with torch.no_grad():
+            s = model.scores(x)
+            self.assertTrue(bool((s[..., 0] < 0).all()))
+            self.assertEqual(float(s[..., 1:].abs().max()), 0.0)
+            self.assertEqual(TM.greedy(model, x, all_allowed(3)).tolist(), [[1] * ACTING] * 3)
+
+    def test_an_untried_move_scores_holds_value_and_greedy_holds(self):
+        model = TM.make("vdn", ACTING, hold_ref=True)
+        with torch.no_grad():
+            cold = torch.randn(2, N_IN, dtype=torch.float64)
+            self.assertEqual(float(model.scores(cold).abs().max()), 0.0)
+        x = train_hold_only(model)
+        with torch.no_grad():
+            s = model.scores(x)
+            self.assertTrue(bool((s[..., 0] < 0).all()))
+            for a in range(1, 4):
+                self.assertTrue(torch.equal(s[..., a], s[..., 0]), a)
+            self.assertEqual(TM.greedy(model, x, all_allowed(3)).tolist(), [[0] * ACTING] * 3)
+            # The target's best next move is hold too, valued at hold's value.
+            a_star = TM.greedy(model, x, all_allowed(3))
+            self.assertTrue(torch.equal(model.joint(x, a_star, all_allowed(3)),
+                                        s[..., 0].sum(-1)))
+
+    def test_a_try_moves_only_that_moves_difference(self):
+        """A step on one level's move changes that move's difference and
+        hold's value; the moves still untried keep scoring hold's value."""
+        model = TM.make("vdn", ACTING, hold_ref=True)
+        x = train_hold_only(model)
+        opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+        tried = torch.zeros(1, ACTING, dtype=torch.long)
+        tried[0, 3] = 3  # L3 tries up (expand); every other level holds
+        q = model.joint(x[:1], tried, all_allowed())
+        loss = torch.nn.functional.huber_loss(q, q.detach() + 1.0)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        with torch.no_grad():
+            s = model.scores(x)
+            self.assertFalse(torch.equal(s[:, 3, 3], s[:, 3, 0]))
+            for a in (1, 2):
+                self.assertTrue(torch.equal(s[:, 3, a], s[:, 3, 0]), a)
+            for level in (0, 1, 2, 4):
+                for a in range(1, 4):
+                    self.assertTrue(torch.equal(s[:, level, a], s[:, level, 0]), (level, a))
+
+    @no_grad
+    def test_it_reads_the_same_outputs_differently(self):
+        """Same weights: hold's score unchanged, move a = out_0 + out_a."""
+        plain, ref = TM.make("vdn", ACTING), TM.make("vdn", ACTING, hold_ref=True)
+        randomise(plain, 8)
+        ref.load_state_dict(plain.state_dict())
+        x = torch.randn(2, N_IN, dtype=torch.float64)
+        out, s = plain.scores(x), ref.scores(x)
+        self.assertTrue(torch.equal(s[..., 0], out[..., 0]))
+        self.assertTrue(torch.allclose(s[..., 1:], out[..., :1] + out[..., 1:]))
+
+    def test_only_the_vdn_arm(self):
+        with self.assertRaisesRegex(ValueError, "needs turn_arch vdn"):
+            TM.make("factored", ACTING, hold_ref=True)
+
+    @no_grad
+    def test_export_computes_what_torch_computes(self):
+        rng = random.Random(9)
+        model = TM.make("vdn", ACTING, hold_ref=True)
+        randomise(model, 10)
+        mean = [rng.uniform(-1, 1) for _ in range(N_IN)]
+        scale = [rng.uniform(0.5, 2) for _ in range(N_IN)]
+        w = TW.decode(TW.encode(TM.export(model, 7, mean, scale, 5.0)))
+        for _ in range(5):
+            x = [rng.uniform(-12, 12) for _ in range(N_IN)]
+            xs = TM.scale_inputs(torch.tensor([x], dtype=torch.float64),
+                                 torch.tensor(mean, dtype=torch.float64),
+                                 torch.tensor(scale, dtype=torch.float64), 5.0)
+            ours = TW.forward(w, x, hold_ref=True)
+            plain = TW.forward(w, x)
+            theirs = model.scores(xs)[0]
+            for i in range(ACTING):
+                self.assertEqual(ours[i][0], plain[i][0])
+                for k in range(4):
+                    self.assertTrue(math.isclose(ours[i][k], float(theirs[i, k]),
+                                                 rel_tol=1e-9, abs_tol=1e-12), (i, k))
+
+
 @unittest.skipIf(torch is None, "needs torch")
 class ExportTest(unittest.TestCase):
     def test_export_carries_the_spread(self):

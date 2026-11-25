@@ -271,8 +271,12 @@ class TurnTrainer:
         self.log = open(args.log, "a", encoding="ascii")
         torch.manual_seed(int(settings["seed"]))
         self.rng = random.Random(int(settings["seed"]))
+        # Moves scored against hold (turn_hold_ref): the plugin reads the
+        # exported outputs the same way (controller/turn.h TurnScores).
+        self.hold_ref = int(plugin_cfg.get("turn_hold_ref", 0)) == 1
         self.model = TM.make(self.arch, self.acting, int(settings["hidden_factored"]),
-                             int(settings["hidden_vdn"]), int(settings["layers"]))
+                             int(settings["hidden_vdn"]), int(settings["layers"]),
+                             hold_ref=self.hold_ref)
         self.target = copy.deepcopy(self.model)
         for param in self.target.parameters():
             param.requires_grad_(False)
@@ -390,6 +394,8 @@ class TurnTrainer:
                     raise SystemExit("the plugin's turn inputs differ from the trainer's")
                 if r.get("arch") != self.arch or int(r.get("acting", -1)) != self.acting:
                     raise SystemExit("the plugin's arch or acting levels differ")
+                if (int(r.get("hold_ref", 0)) == 1) != self.hold_ref:
+                    raise SystemExit("the plugin's turn_hold_ref differs from the trainer's")
                 self.started = True
             elif t == "turn":
                 self.pending.append(parse_turn(r, self.names, self.acting))
